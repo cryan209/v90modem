@@ -553,6 +553,72 @@ static void dc_block(int16_t *s, long n)
     }
 }
 
+/*
+ * Near-end echo cancellation (near_echo.h), in the device domain.
+ *
+ * In the analogue V.90 role this modem transmits CPt/CP for the whole of
+ * Phase 4 (§9.4.2) while it receives the digital modem's Ri/TRN2d/MP, and its
+ * own transmit returns through the hybrid ~118 ms later (the USB round trip;
+ * 1133/1142/1165 device samples on three calls) at -16.7 dB against the
+ * downstream.  The same receiver fits TRN1d at 59.7 dB while we are silent
+ * and Phase 4's MP at 20 dB while we transmit (docs/apple_usb_modem_sm56.md).  Here both directions are
+ * device samples on one clock, in the order they crossed the codec -- the
+ * order the taps record -- so the echo path is LTI and the fit is exact.
+ *
+ * On by default in the PCM analogue role only (ME_V90_ROLE=analogue), where
+ * full-duplex PCM training needs it; APPLE_MODEM_ECHO_CANCEL=1/0 forces it
+ * either way.  In --rx-replay the reference must be the live call's transmit
+ * tap (APPLE_MODEM_EC_REF), since the replay's own output never crossed a
+ * device and has none of the delay.
+ */
+#include "../near_echo.h"
+static near_echo_t *g_ec;
+static FILE *g_ec_ref;
+static int g_ec_reported_fits;
+static long g_ec_last_report, g_ec_rx_n;
+
+static void ec_setup(void)
+{
+    const char *force = getenv("APPLE_MODEM_ECHO_CANCEL");
+    const char *role = getenv("ME_V90_ROLE");
+    int on = (role && !strcmp(role, "analogue"));
+
+    if (force && *force) on = strcmp(force, "0") != 0;
+    if (!on || g_ec || g_rate != 9600.0) return;
+    /* Delays 900..1667 samples (94-174 ms): the measured onsets are 1121-1165
+     * and the response needs ~384 taps to reach the line's floor.  A live
+     * call solves on a worker (a 768-tap solve is ~75 M operations, far too
+     * long for this callback); a replay solves inline so it stays
+     * deterministic. */
+    g_ec = near_echo_init(900, 768, 4800);
+    if (g_ec && !g_replay_path) near_echo_set_threaded(g_ec, 1);
+    fprintf(stderr, "[APPLE] near-end echo canceller: %s (delays 94-174 ms, 768 taps, echo-only blocks)\n",
+            g_ec ? "on" : "FAILED to allocate");
+}
+
+static void ec_rx(int16_t *s, long n)
+{
+    if (!g_ec) return;
+    near_echo_rx(g_ec, s, (int) n);
+    g_ec_rx_n += n;
+    /* APPLE_MODEM_EC_DUMP=<path>: the receive stream after cancellation, at
+     * the device rate -- what is left of our own echo is measured here. */
+    {
+        static FILE *d; static int tried;
+        if (!tried) { const char *p = getenv("APPLE_MODEM_EC_DUMP"); tried = 1; if (p && *p) d = fopen(p, "wb"); }
+        if (d) fwrite(s, 2, (size_t) n, d);
+    }
+    if (near_echo_active(g_ec)
+        && (g_ec_reported_fits == 0 || g_ec_rx_n - g_ec_last_report >= 10 * 9600)) {
+        g_ec_reported_fits = near_echo_solved(g_ec);
+        g_ec_last_report = g_ec_rx_n;
+        fprintf(stderr, "[APPLE] echo canceller: "
+                "echo rms %.0f of rx %.0f, fit %d on %ld echo-only blocks\n",
+                near_echo_rms_echo(g_ec), near_echo_rms_in(g_ec),
+                near_echo_solved(g_ec), near_echo_blocks_used(g_ec));
+    }
+}
+
 /* 2100 Hz answer detection over 20 ms blocks, as a ratio so it is not a level
  * test.  ANSam's phase reversals do not disturb this: the block is 20 ms and
  * the reversals are 450 ms apart, so at most one block in 22 straddles one. */
@@ -801,6 +867,7 @@ static void loop_timing_feed(const int16_t *s, long n)
 static void engine_feed(int16_t *s, long n)
 {
     dc_block(s, n);
+    ec_rx(s, n);
     loop_timing_feed(s, n);
 
     if (g_rate == 8000.0) {                      /* no receive resampler at all */
@@ -953,6 +1020,7 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
             tx_out_count += nframes;
             gui_raw_feed(1, out, nframes);
             if (tx_tap) fwrite(out, 2, nframes, tx_tap);
+            if (g_ec && !g_ec_ref) near_echo_tx(g_ec, out, (int) nframes);
             return noErr;
         }
         tx_preroll = 0;
@@ -997,6 +1065,8 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
     gui_raw_feed(1,out,nframes);
     if (tx_tap)
         fwrite(out, 2, nframes, tx_tap);
+    if (g_ec && !g_ec_ref)
+        near_echo_tx(g_ec, out, (int) nframes);
     return noErr;
 }
 
@@ -1213,6 +1283,14 @@ static int replay(const char *path)
     long total = 0;
 
     if (!fp) { perror(path); return 1; }
+    {
+        const char *ref = getenv("APPLE_MODEM_EC_REF");
+        if (ref && *ref && g_ec && !(g_ec_ref = fopen(ref, "rb")))
+            perror(ref);
+        if (g_ec && !g_ec_ref)
+            fprintf(stderr, "[APPLE] echo canceller has no reference in replay "
+                            "(set APPLE_MODEM_EC_REF to the call's tx-tap.s16); it will not fit\n");
+    }
     /* Goes through engine_feed() exactly as the live path does -- the DC
      * blocker, both resamplers, the answer detector and the 80-sample blocking.
      * An earlier version duplicated a shortened version of that here and fed
@@ -1224,6 +1302,12 @@ static int replay(const char *path)
         size_t n = fread(buf, 2, chunk, fp);
         if (n == 0) break;
         gui_raw_feed(0,buf,(unsigned)n);
+        if (g_ec && g_ec_ref) {
+            int16_t ref[4096];
+            size_t m = fread(ref, 2, n, g_ec_ref);
+            for (size_t k = m; k < n; k++) ref[k] = 0;
+            near_echo_tx(g_ec, ref, (int) n);
+        }
         engine_feed(buf, (long)n);
         if (g_gui_control) { gui_status = "Offline replay · no USB line"; gui_publish(); CFRunLoopRunInMode(kCFRunLoopDefaultMode,(double)n/g_rate,false); }
         /* No line to transmit into, but drain the ring as a device whose input
@@ -1277,6 +1361,7 @@ static void rs_setup(void)
     rs_init(&rs_8k,  5, 6);
     rs_init(&rs_16k, 5, 3);
     rs_init(&rs_tx,  6, 5);
+    ec_setup();
 
     const char *lt = getenv("APPLE_MODEM_LOOP_TIMING");
     const char *forced = getenv("APPLE_MODEM_CLOCK_PPM");

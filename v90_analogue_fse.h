@@ -46,6 +46,7 @@ typedef enum {
     V90A_FSE_CMA = 0,   /* blind, constant modulus (TRN1d) */
     V90A_FSE_DD,        /* decision-directed; the caller supplies decisions */
     V90A_FSE_FROZEN,
+    V90A_FSE_LS,        /* least-squares training on decisions (v90a_fse_train_ls) */
 } v90a_fse_mode_t;
 
 typedef struct v90a_fse_s v90a_fse_t;
@@ -118,13 +119,53 @@ void v90a_fse_set_mu(v90a_fse_t *s, double mu);
 v90a_fse_mode_t v90a_fse_mode(const v90a_fse_t *s);
 
 /*
- * The decision for the symbol most recently emitted, for V90A_FSE_DD, and the
+ * The decision for the symbol most recently emitted -- V90A_FSE_DD adapts on
+ * it, and decision feedback (below) needs it in every mode -- and the
  * half-width of the region that decision was taken inside
  * (v90a_linear_last_tolerance()).  Call it once per symbol, before the next
  * v90a_fse_put(); a symbol left without one is simply not adapted on, and one
  * whose sample fell in the outer half of its region is refused as unreliable.
  */
 void v90a_fse_decide(v90a_fse_t *s, double decision, double tolerance);
+
+/*
+ * Decision feedback: nb symbol-spaced taps on the caller's past decisions,
+ * subtracted from the output (y = h.x - b.d).  0 (the default) is the plain
+ * FSE.
+ *
+ * Why: a two-wire loop has a null at 4000 Hz, and a linear equaliser inverting
+ * a null amplifies whatever noise is there -- measured on the Apple modem's
+ * Phase 4 (artifacts/apple-pve-20261015/v90-lt6, echo cancelled), the best
+ * linear T/2 equaliser reaches 13.8 dB at 64 taps and 16.9 at 256, while
+ * adding 16 feedback taps reaches 45 dB.  Feedback cancels the postcursor ISI
+ * from decisions instead of inverting it.  The decisions must be given for
+ * every symbol (v90a_fse_decide(), in every mode -- only DD adapts on them);
+ * a symbol left undecided feeds back as its own output.  The feedback taps
+ * adapt with the forward ones, in DD only.
+ */
+int v90a_fse_set_feedback(v90a_fse_t *s, int nb);
+int v90a_fse_feedback(const v90a_fse_t *s);
+
+/*
+ * Train forward and feedback taps together by least squares: `passes` passes
+ * of `symbols` decisions each, solving and installing after every pass, then
+ * continue in `then` (V90A_FSE_DD at the current step, or V90A_FSE_FROZEN).
+ *
+ * Why not just DD: the 4000 Hz null that makes feedback necessary also makes
+ * the problem badly conditioned, and a gradient loop crawls along exactly the
+ * directions the feedback is for -- measured on the Apple modem's TRN1d
+ * (v90-lt6), NLMS-DD from the CMA solution stayed at the CMA's ~8 dB for
+ * 16000 symbols.  Why passes: the first pass learns from the CMA's decisions,
+ * 2.8% of which are wrong, and the errors it is taught cap it at 22.5 dB; the
+ * second pass decides with the first's taps (34.1 dB) and the third reaches
+ * 48.9 dB, where least squares on the TRUE symbols reaches 49.7.  The input
+ * AGC is frozen for the duration, as for any non-CMA mode.
+ */
+int v90a_fse_train_ls(v90a_fse_t *s, int symbols, int passes, v90a_fse_mode_t then);
+/* Least-squares solves installed so far. */
+int v90a_fse_ls_solved(const v90a_fse_t *s);
+/* Times the feedback history was cleared because the output ran away. */
+int v90a_fse_fb_resets(const v90a_fse_t *s);
 
 /*
  * Diagnostics.

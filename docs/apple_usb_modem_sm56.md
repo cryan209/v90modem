@@ -2014,3 +2014,122 @@ the CPt mapping, all state zeroed at its first frame, which now lands on the
 right symbol).  So the obvious next step is data-aided training and gain
 calibration of the analogue equaliser over TRN2d, under the 4000 Hz null this
 section and the Sd section both describe.
+
+### TRN2d: our own echo, then the 4000 Hz null, then error propagation (2026-10-15)
+
+The follow-up to the Ri fix: once TRN2d started on the right symbol, only 5%
+of its codewords came out exact.  Four findings, in the order they were peeled
+off.  Offline throughout, graded against the digital side's own tap
+(`server/live-tx.g711`) with least-squares fits on the equaliser's T/2 input
+(`V90A_T2_DUMP`, new) as the bound on what the samples support.
+
+**1. The line is clean; our own transmit was the noise.**  The same fit that
+reaches only 20 dB in Phase 4 reaches **59.7 dB on TRN1d**, where the Apple
+side is silent.  The line's floor (pre-answer silence) is RMS 2-3 against 1020
+for TRN2d.  The impairment is our own upstream coming back through the hybrid
+~118 ms later (the USB round trip: 1133, 1142 and 1165 device samples on three
+calls), at **-16.7 dB against the downstream** in Phase 4.  Nothing cancelled
+it.  The echo is linear but long: on a window where only the echo is present
+(V.34 Phase 2's L1/L2, 38.65 s of v90-lt6), 64 taps remove 14 dB and 384 taps
+remove **31 dB**, down to the line floor.  The same fit holds 30 dB on the next
+attempt's probing 20 s later.
+
+Fitting it under Phase 4's double talk does not work.  An LS fit's excess
+error is taps/samples times the interference, so a 7 dB reduction was all a
+double-talk fit managed.  **`near_echo.c`** (new, wired into the coupler in the
+device domain, where both directions share one clock) therefore accumulates
+only echo-only 50 ms blocks: received at least 20 dB below transmitted.  That
+passes the -27 dB echo and rejects a downstream.  It fits an exact
+covariance-method LS of 768 taps (delays 94-174 ms).  The solve
+(~75 M operations) runs on a worker in a live call, and every fit is installed
+at a fixed sample count, so a live call and its `--rx-replay` cancel
+identically.  The unit test (`near_echo_test`) reaches 47.9 dB ERLE under
+continuous double talk after a 2 s echo-only stretch, and checks the worker and
+inline paths are bit-identical.  In replay
+(`APPLE_MODEM_EC_REF=<call>/tx-tap.s16`) the decision-feedback bound on Phase
+4's MP goes from **20.0 dB to 47.6 dB**, and slot-constellation SER from 10%
+to 0.  On by default in the analogue PCM role (`APPLE_MODEM_ECHO_CANCEL=0/1`
+overrides).
+
+**2. A two-wire loop needs decision feedback.**  With the echo gone, the best
+linear T/2 equaliser still reads 13.8 dB (16.9 at 256 taps): the 4000 Hz null
+again (see the Sd and Ri sections), which a linear filter can only invert by
+amplifying noise.  32 T/2 + 16 feedback taps reach 49.7 dB on TRN1d and 41-45
+dB on TRN2d/MP.  `v90_analogue_fse` gained feedback taps
+(`v90a_fse_set_feedback`, 16 in the engine, `ME_V90A_DFE_TAPS`).  Getting
+there took three corrections, each found with a harness running the real FSE
+on the dumped T/2 stream:
+
+- NLMS-DD from the CMA solution never moved off the CMA's ~8 dB: the null
+  makes the problem ill-conditioned exactly where feedback is needed.  So
+  TRN1d is solved by least squares instead (`v90a_fse_train_ls`), from TRN1d
+  4000T.
+- One pass learns the CMA's 2.8% wrong decisions and stops at 22.5 dB.  Three
+  passes of 3000, each deciding with the last pass's taps, reach 48.9 dB.
+- The solve's diagonal loading was relative to the mean diagonal.  The forward
+  regressors are raw counts (the Sd fit freezes the AGC at 1) and the feedback
+  ones are near 1, so the loading pinned every feedback tap to zero.  The
+  engine read 12.6 dB, exactly a forward-only equaliser.  It is now relative to
+  each element.
+
+**3. Feedback needs coarse decisions, so the DIL and Ri need care.**  A
+feedback loop fed decisions that merely track its output is a linear inverse
+of the null, and that is unstable.  The DIL's 121-Ucode ladder is that fine
+near zero: its quiet opening grew a Nyquist oscillation x1.35 a symbol to the
+top of the ladder within 30 symbols, and the DIL never completed.  Three
+changes in the engine:
+
+- In the DIL the decision fed back is the codeword this side asked for.  We
+  authored the descriptor (§8.4.1), `v90_analogue_rx` pins its first symbol,
+  and the polarity is the one resolved on TRN1d.
+- Ri/R̄i are sliced onto U_INFO alone (§8.6.4).
+- Phase 4 slices onto the CPt/CP points for the next frame slot, through the
+  previously unused `v90_analogue_phase4_slicer_ucodes()`.
+
+There is also a runaway guard in the FSE: an output beyond any G.711 level
+clears the feedback history.  With these the DIL measures properly for the
+first time.  Constellation selection reports real noise-limited choices
+(Mi 12-17 per slot, 36-41 kbit/s at a 3-sigma margin) instead of "none at a
+3-sigma margin" and a 0-sigma fallback.
+
+The taps are then **held** after the TRN1d solve.  Tracking at MU_TRACK left
+Ri at 36.9 dB and no attempt decoded; holding gives 43.7-46.6 dB.  Ri is
+periodic, and decision-directed feedback on a periodic sequence learns to
+PREDICT it (d[k-6] = d[k]) instead of the channel; ME_V90A_TRACK_MU=<step>
+restores tracking for experiments.
+
+Replay needs the call's own constellation now.  Every change upstream of the
+DIL changes the CPt this side sends, so a replay's Phase 4 no longer matches
+the recording.  `V90A_CP_DUMP` (live) / `V90A_CP_LOAD` (replay) pin it.  Replay
+with `APPLE_REPLAY_CHUNK=512`: 80-sample chunks change the outcome against the
+live call, and 512 reproduces it exactly.
+
+**Result.**  Live (v90-dfe1..3) the digital side now accepts our CPt and CP,
+sends TRN2d and MP, and goes on to **B1d** (and upstream data mode) on most
+attempts: the first complete Phase 4 from the server's side on this rig.
+v90-dfe3 replayed with its live CP:
+
+| | Ri | TRN2d 0-224 | TRN2d after |
+|---|---|---|---|
+| attempt 2 | 46.6 dB, exact 100% | 37 dB, **exact 100% for 1319 symbols** | one error, then a cascade (41% exact); MP 86% |
+
+The receiver demaps **TRN2d 4572T to 5923 ones and finds an MP frame**,
+logging `MP/Ed`, the furthest the analogue role has got on a real line.
+
+**And live, v90-dfe4 (this build):** on attempts 1 and 2 of 3, the Apple
+side logs `MP/Ed (TRN2d 4014T/19997 ones, MP 1 frames, 0 demap failures)`.
+That is TRN2d demapped and an MP frame received live, while the server
+accepted our CP and went on to B1d.  Both attempts then reached the §9.4.2
+deadline before B1d decoded, and retrained.
+
+**Next blocker: decision-feedback error propagation.**  The trained feedback
+filter's dominant tap is b2 = 1.93 (|root| ~ 1.39, which is the x1.35/symbol
+growth seen in the DIL), at every feedback length tried.  The null leaves a
+lag-2 postcursor twice the main cursor.  So one wrong decision perturbs symbol
+k+2 by about twice the decision distance and forces the next one wrong: no DFE
+on this channel survives a single error.  Attempt 1 of the same replay fails
+at TRN2d symbol 12, on a sign decision between Ucodes ±5 (0.022 apart).  The
+remedies are transmitter-side shaping of the 4000 Hz energy (§5.4.5 spectral
+shaping, requested in CP) or a reduced-state sequence detector over the
+postcursor.  Excluding the smallest Ucodes from CP would make the first error
+rarer, but not survivable.

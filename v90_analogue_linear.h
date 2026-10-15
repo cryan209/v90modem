@@ -89,6 +89,10 @@ double v90a_linear_last_tolerance(const v90a_linear_t *s);
 void v90a_linear_set_constellation(v90a_linear_t *s,
                                    const uint8_t *ucodes, int n);
 
+/* The level a Ucode is decided at, in the same units as the input (0 before a
+ * level is known): what a decision for that Ucode would report. */
+double v90a_linear_ucode_level(const v90a_linear_t *s, int ucode);
+
 /* Freeze the gain.  Call once the receiver has acquired Sd: everything after
  * that point is identified by its level *relative* to Sd. */
 void v90a_linear_lock(v90a_linear_t *s);

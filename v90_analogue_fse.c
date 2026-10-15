@@ -49,6 +49,8 @@
  * frozen taps recovered 14% of codewords down to 0.7%.
  */
 #define DD_TRUST        0.5
+/* Output magnitude no G.711 level reaches, in TRN1d units (see put()). */
+#define FB_RUNAWAY      16.0
 
 struct v90a_fse_s {
     int      taps;
@@ -65,6 +67,18 @@ struct v90a_fse_s {
     v90a_fse_mode_t mode;
     double   last_y;
     bool     have_y;
+
+    /* Decision feedback (v90a_fse_set_feedback()): b[] on the last nb
+     * decisions, d[0] the most recent. */
+    int      nb;
+    double  *b;
+    double  *d;
+
+    /* v90a_fse_train_ls(): normal equations over [x ; -d]. */
+    double  *ls_A, *ls_y;
+    int      ls_n, ls_target, ls_solved, ls_passes;
+    v90a_fse_mode_t ls_then;
+    int      fb_resets;
 
     int      dd_used;
     int      dd_rejected;
@@ -127,8 +141,157 @@ void v90a_fse_free(v90a_fse_t *s)
     if (s) {
         free(s->h);
         free(s->x);
+        free(s->b);
+        free(s->d);
+        free(s->ls_A);
+        free(s->ls_y);
         free(s);
     }
+}
+
+int v90a_fse_set_feedback(v90a_fse_t *s, int nb)
+{
+    if (s == NULL  ||  nb < 0  ||  nb > 256)
+        return 0;
+    free(s->b);
+    free(s->d);
+    s->b = s->d = NULL;
+    s->nb = 0;
+    if (nb == 0)
+        return 1;
+    s->b = calloc((size_t) nb, sizeof(double));
+    s->d = calloc((size_t) nb, sizeof(double));
+    if (s->b == NULL  ||  s->d == NULL) {
+        free(s->b);
+        free(s->d);
+        s->b = s->d = NULL;
+        return 0;
+    }
+    s->nb = nb;
+    return 1;
+}
+
+int v90a_fse_feedback(const v90a_fse_t *s)
+{
+    return s ? s->nb : 0;
+}
+
+int v90a_fse_train_ls(v90a_fse_t *s, int symbols, int passes, v90a_fse_mode_t then)
+{
+    int n;
+
+    if (s == NULL  ||  symbols <= 0  ||  passes <= 0
+        ||  (then != V90A_FSE_DD  &&  then != V90A_FSE_FROZEN))
+        return 0;
+    s->ls_passes = passes;
+    s->ls_then = then;
+    n = s->taps + s->nb;
+    free(s->ls_A);
+    free(s->ls_y);
+    s->ls_A = calloc((size_t) n*n, sizeof(double));
+    s->ls_y = calloc((size_t) n, sizeof(double));
+    if (s->ls_A == NULL  ||  s->ls_y == NULL)
+        return 0;
+    s->ls_n = 0;
+    s->ls_target = symbols;
+    v90a_fse_set_mode(s, V90A_FSE_LS);
+    return 1;
+}
+
+int v90a_fse_ls_solved(const v90a_fse_t *s)
+{
+    return s ? s->ls_solved : 0;
+}
+
+int v90a_fse_fb_resets(const v90a_fse_t *s)
+{
+    return s ? s->fb_resets : 0;
+}
+
+static void ls_accumulate(v90a_fse_t *s, double target)
+{
+    int n = s->taps + s->nb;
+    double u[512 + 256];
+
+    for (int j = 0; j < s->taps; j++)
+        u[j] = s->x[j];
+    for (int j = 0; j < s->nb; j++)
+        u[s->taps + j] = -s->d[j];
+    for (int i = 0; i < n; i++) {
+        double *row = s->ls_A + (size_t) i*n;
+
+        for (int j = 0; j <= i; j++)
+            row[j] += u[i]*u[j];
+        s->ls_y[i] += u[i]*target;
+    }
+    s->ls_n++;
+}
+
+/* Cholesky on the accumulated (lower-triangle) system, lightly loaded. */
+static int ls_solve(v90a_fse_t *s)
+{
+    int n = s->taps + s->nb;
+    double *A = s->ls_A, *w;
+
+    w = calloc((size_t) n, sizeof(double));
+    if (w == NULL)
+        return 0;
+    /* Load each diagonal element relative to ITSELF.  The forward regressors
+     * are input samples -- raw counts, thousands, once a fit has frozen the
+     * AGC at 1 -- and the feedback ones are decisions near unity, so loading
+     * relative to the mean diagonal was ~7x the feedback block's own energy
+     * on the Apple modem and pinned every feedback tap to zero: the trained
+     * equaliser read 12.6 dB, exactly a forward-only one. */
+    for (int i = 0; i < n; i++)
+        A[(size_t) i*n + i] *= 1.0 + 1e-6;
+    for (int i = 0; i < n; i++)
+        A[(size_t) i*n + i] += 1e-12;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j <= i; j++) {
+            double v = A[(size_t) i*n + j];
+
+            for (int k = 0; k < j; k++)
+                v -= A[(size_t) i*n + k]*A[(size_t) j*n + k];
+            if (i == j) {
+                if (v <= 0.0) {
+                    free(w);
+                    return 0;
+                }
+                A[(size_t) i*n + i] = sqrt(v);
+            } else {
+                A[(size_t) i*n + j] = v/A[(size_t) j*n + j];
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        double v = s->ls_y[i];
+
+        for (int k = 0; k < i; k++)
+            v -= A[(size_t) i*n + k]*w[k];
+        w[i] = v/A[(size_t) i*n + i];
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        double v = w[i];
+
+        for (int k = i + 1; k < n; k++)
+            v -= A[(size_t) k*n + i]*w[k];
+        w[i] = v/A[(size_t) i*n + i];
+    }
+    for (int j = 0; j < s->taps; j++)
+        s->h[j] = w[j];
+    for (int j = 0; j < s->nb; j++)
+        s->b[j] = w[s->taps + j];
+    free(w);
+    return 1;
+}
+
+/* The decision for the symbol just emitted joins the feedback history. */
+static void push_decision(v90a_fse_t *s, double decision)
+{
+    if (s->nb == 0)
+        return;
+    memmove(s->d + 1, s->d, sizeof(double)*(size_t) (s->nb - 1));
+    s->d[0] = decision;
 }
 
 int v90a_fse_tap_count(const v90a_fse_t *s)
@@ -241,25 +404,57 @@ static void adapt(v90a_fse_t *s, double err)
 
     for (int j = 0; j < s->taps; j++)
         energy += s->x[j]*s->x[j];
+    for (int j = 0; j < s->nb; j++)
+        energy += s->d[j]*s->d[j];
     for (int j = 0; j < s->taps; j++)
         s->h[j] += s->mu*err*s->x[j]/energy;
+    /* y = h.x - b.d, so raising y by the error lowers b along d. */
+    for (int j = 0; j < s->nb; j++)
+        s->b[j] -= s->mu*err*s->d[j]/energy;
 }
 
 void v90a_fse_decide(v90a_fse_t *s, double decision, double tolerance)
 {
     double err;
 
-    if (s == NULL  ||  !s->have_y  ||  s->mode != V90A_FSE_DD)
+    if (s == NULL  ||  !s->have_y)
         return;
     s->have_y = false;
-    err = decision - s->last_y;
-    s->dd_total++;
-    if (tolerance > 0.0  &&  fabs(err) > DD_TRUST*tolerance) {
-        s->dd_rejected++;
-        return;
+    /* Adapt first: the regressor that made last_y is the delay line AND the
+     * feedback history as they stood, before this decision joins it. */
+    if (s->mode == V90A_FSE_LS) {
+        /* Every decision, ungated: on TRN1d they are all but certain, and a
+         * least-squares fit is not a ratchet the way a gradient loop is. */
+        ls_accumulate(s, decision);
+        if (s->ls_n >= s->ls_target) {
+            int n = s->taps + s->nb;
+
+            if (ls_solve(s))
+                s->ls_solved++;
+            if (--s->ls_passes > 0) {
+                /* Next pass: decide with the taps just installed. */
+                memset(s->ls_A, 0, sizeof(double)*(size_t) n*n);
+                memset(s->ls_y, 0, sizeof(double)*(size_t) n);
+                s->ls_n = 0;
+            } else {
+                free(s->ls_A);
+                free(s->ls_y);
+                s->ls_A = s->ls_y = NULL;
+                s->mode = s->ls_then;
+            }
+        }
+    } else if (s->mode == V90A_FSE_DD) {
+        err = decision - s->last_y;
+        s->dd_total++;
+        if (tolerance > 0.0  &&  fabs(err) > DD_TRUST*tolerance) {
+            s->dd_rejected++;
+        } else {
+            s->dd_used++;
+            adapt(s, err);
+        }
     }
-    s->dd_used++;
-    adapt(s, err);
+    /* In every mode: feedback needs every decision, adapting or not. */
+    push_decision(s, decision);
 }
 
 int v90a_fse_dd_used(const v90a_fse_t *s)
@@ -311,15 +506,42 @@ int v90a_fse_put(v90a_fse_t *s, const int16_t *amp, int len,
         s->half ^= 1;
         if (s->half != 0  ||  s->filled < s->taps  ||  s->agc_primed > 0)
             continue;
+        /* A symbol the caller never decided feeds back as itself. */
+        if (s->have_y) {
+            push_decision(s, s->last_y);
+            s->have_y = false;
+        }
         for (int j = 0; j < s->taps; j++)
             y += s->h[j]*s->x[j];
+        for (int j = 0; j < s->nb; j++)
+            y -= s->b[j]*s->d[j];
+        /*
+         * A feedback loop fed decisions that merely track its output is a
+         * linear IIR inverse of the channel, and inverting a 4000 Hz null is
+         * unstable: measured, a fine ladder near zero grew a Nyquist
+         * oscillation x1.35 a symbol until it pinned at the top of the G.711
+         * range and stayed there.  No G.711 level is anywhere near
+         * FB_RUNAWAY in these units (the ladder's top is ~8.5x TRN1d's), so
+         * an output beyond it is the loop, not the line: clear the history
+         * that is driving it and start again from the forward taps.
+         */
+        if (s->nb > 0  &&  fabs(y) > FB_RUNAWAY) {
+            for (int j = 0; j < s->nb; j++)
+                y += s->b[j]*s->d[j];
+            memset(s->d, 0, sizeof(double)*(size_t) s->nb);
+            s->fb_resets++;
+        }
 
         if (s->mode == V90A_FSE_CMA) {
             /* Gradient of (y^2 - R2)^2, sign folded in: the update drives the
              * modulus to R2 and says nothing about the sign, which is the whole
              * reason this works on a scrambler output whose signs are unknown. */
             adapt(s, s->mu > 0.0 ? y*(R2 - y*y) : 0.0);
-        } else if (s->mode == V90A_FSE_DD) {
+        }
+        /*endif*/
+        /* Every mode keeps the symbol for v90a_fse_decide(): DD adapts on it,
+         * and feedback needs its decision whatever the mode. */
+        if (s->mode != V90A_FSE_CMA  ||  s->nb > 0) {
             s->last_y = y;
             s->have_y = true;
         }

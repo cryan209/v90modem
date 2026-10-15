@@ -6,6 +6,7 @@
  */
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -273,6 +274,44 @@ static void start_phase4(v90_analogue_phase3_t *s)
                    s->law, s->shaping_redundancy, ld, &s->cpt, &s->cp)) {
         s->phase4_failed = true;
         return;
+    }
+    /*
+     * V90A_CP_DUMP=<path> appends each attempt's CPt and CP as built;
+     * V90A_CP_LOAD=<path> replaces them, attempt by attempt, with a dump's.
+     *
+     * A diagnostic, for --rx-replay.  The CP is built from the DIL
+     * measurement, so any change to the receiver upstream of it changes the
+     * CPt a replay transmits -- and the recorded far end mapped its TRN2d and
+     * MP through the CPt the LIVE call sent, so from then on nothing in Phase
+     * 4 can be judged.  Loading the live call's pair decouples the two.  The
+     * files persist for the process and are read in order, which is right for
+     * a replay of one call and wrong for a server taking many.
+     */
+    {
+        static FILE *dump, *load;
+        static int tried;
+
+        if (!tried) {
+            const char *d = getenv("V90A_CP_DUMP"), *l = getenv("V90A_CP_LOAD");
+
+            tried = 1;
+            if (d && *d) dump = fopen(d, "wb");
+            if (l && *l) load = fopen(l, "rb");
+        }
+        if (load) {
+            vpcm_cp_frame_t cpt, cp;
+
+            if (fread(&cpt, sizeof(cpt), 1, load) == 1
+                &&  fread(&cp, sizeof(cp), 1, load) == 1) {
+                s->cpt = cpt;
+                s->cp = cp;
+            }
+        }
+        if (dump) {
+            fwrite(&s->cpt, sizeof(s->cpt), 1, dump);
+            fwrite(&s->cp, sizeof(s->cp), 1, dump);
+            fflush(dump);
+        }
     }
     /* §9.4.2.4 has both modems take the highest rate enabled in both, so a
      * local cap only holds if CP stops advertising the rates above it. */

@@ -322,3 +322,10 @@ int v90a_linear_put(v90a_linear_t *s,
     }
     return n;
 }
+
+double v90a_linear_ucode_level(const v90a_linear_t *s, int ucode)
+{
+    if (s == NULL  ||  ucode < 0  ||  ucode > 127  ||  !s->have_level  ||  s->gain <= 0.0)
+        return 0.0;
+    return s->lvl[ucode]/s->gain;
+}

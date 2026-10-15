@@ -3107,6 +3107,16 @@ static int g_v90a_sd_line_stage = 0;
 static int      g_v90a_sd_score_logged = 0;
 static v90a_sd_t *g_v90a_sd = NULL;
 static bool     g_v90a_dil_tracking = false;
+/* The Phase 4 slicer set is installed (me_v90a_phase4_slicer_locked()). */
+static bool     g_v90a_p4_slicer = false;
+/* §8.4.1's DIL as this side requested it, regenerated for data-aided
+ * feedback (me_v90a_dil_decision_locked()); 0 until DIL is entered. */
+#define V90A_DIL_SEQ_MAX 65536
+static uint8_t  g_v90a_dil_seq[V90A_DIL_SEQ_MAX];
+static int      g_v90a_dil_seq_len = 0;
+/* The equaliser is held FROZEN over a periodic or untrustworthy stretch
+ * (me_v90a_adapt_policy_locked()); false once it is adapting again. */
+static bool     g_v90a_fse_held = false;
 /*
  * The equaliser's unit modulus, in the slicer's input units.  Arbitrary -- it
  * cancels out of the calibration -- so it is chosen for headroom: §8.4.4's Sd
@@ -3114,6 +3124,12 @@ static bool     g_v90a_dil_tracking = false;
  * reach higher still.
  */
 #define V90A_FSE_SCALE  3000.0
+/* Decision-feedback taps on the analogue equaliser, and when TRN1d hands from
+ * CMA to decision-directed training (see me_v90a_equalised_locked()). */
+#define V90A_DFE_TAPS        16
+#define V90A_DD_AFTER_TRN1D  4000
+#define V90A_LS_SYMBOLS      3000
+#define V90A_LS_PASSES       3
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
@@ -6426,6 +6442,9 @@ static void cleanup_v34_v90_training_locked(void)
             g_v90a_sd = NULL;
         }
         g_v90a_dil_tracking = false;
+        g_v90a_p4_slicer = false;
+        g_v90a_dil_seq_len = 0;
+        g_v90a_fse_held = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -6778,6 +6797,9 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
             g_v90a_sd = NULL;
         }
         g_v90a_dil_tracking = false;
+        g_v90a_p4_slicer = false;
+        g_v90a_dil_seq_len = 0;
+        g_v90a_fse_held = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -15986,7 +16008,11 @@ static void me_v90a_calibrate_locked(void)
                                                          : V90_LAW_ULAW,
                                   &g_v90a_dil, set, (int) sizeof(set));
         v90a_linear_set_constellation(g_v90a_linear, n > 0 ? set : NULL, n);
-        v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRACK);
+        /* The least-squares path chose its tracking step at the handover
+         * (me_v90a_trn1d_handover_locked()); only the plain FSE drops to
+         * MU_TRACK here. */
+        if (v90a_fse_ls_solved(g_v90a_fse) == 0)
+            v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRACK);
         if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_CMA) {
             /* TRN1d never gave us a Ucode, so nothing is calibrated and a
              * decision-directed loop would be adapting on levels that mean
@@ -15996,14 +16022,213 @@ static void me_v90a_calibrate_locked(void)
         /*endif*/
         ME_LOG("[ME] V.90 analogue: DIL over %d requested Ucodes; equaliser %s, "
                "dispersion %.4f, tap centre %.2f symbols, "
-               "%d decisions used and %d refused\n",
+               "%d decisions used and %d refused, %d least-squares solves\n",
                n,
                v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD ? "tracking"
                                                         : "frozen",
                v90a_fse_dispersion(g_v90a_fse),
                v90a_fse_centre(g_v90a_fse),
                v90a_fse_dd_used(g_v90a_fse),
-               v90a_fse_dd_rejected(g_v90a_fse));
+               v90a_fse_dd_rejected(g_v90a_fse),
+               v90a_fse_ls_solved(g_v90a_fse));
+    }
+}
+
+/*
+ * TRN1d's second half trains the equaliser decision-directed, with its
+ * feedback taps.
+ *
+ * CMA opens the eye on §8.4.5's TRN1d (its sign is unknown and CMA does not
+ * need it), but CMA has no use for decision feedback, and the feedback is what
+ * a two-wire loop needs (v90_analogue_fse.h).  TRN1d is the one stretch where
+ * a decision is certain to be right -- two points, ±U_INFO, a long way
+ * apart -- and it runs 20000T, so once CMA has had V90A_DD_AFTER_TRN1D
+ * symbols (twice §9.3.2.5's 2040T training interval) the next
+ * V90A_LS_PASSES passes of V90A_LS_SYMBOLS decisions train the forward and
+ * feedback taps together by least squares (v90a_fse_train_ls() says why not
+ * by gradient, and why in passes) -- done by TRN1d 13000T of the ~20000T
+ * sent.  Measured offline on artifacts/apple-pve-20261015/v90-lt6: a 32+16
+ * equaliser fitted on TRN1d alone reaches 49.7 dB there and holds 40 dB on
+ * Phase 4's MP.  The taps are then held for the rest of the attempt.
+ */
+static void me_v90a_trn1d_handover_locked(void)
+{
+    const v90_analogue_rx_t *rx;
+
+    if (g_v90a_fse == NULL  ||  v90a_fse_feedback(g_v90a_fse) == 0
+        ||  v90a_fse_mode(g_v90a_fse) != V90A_FSE_CMA  ||  !g_v90a_ladder_set
+        ||  v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_TRN1D)
+        return;
+    rx = v90_analogue_phase3_rx_state(g_v90a);
+    if (rx == NULL  ||  v90_analogue_rx_trn1d_symbols(rx) < V90A_DD_AFTER_TRN1D)
+        return;
+    {
+        /*
+         * And then hold the taps.  The line is static within a call and the
+         * solve is at the TRN1d optimum (49-51 dB measured); decision-directed
+         * tracking afterwards only adds its own misadjustment.  Measured on
+         * artifacts/apple-pve-20261015/v90-dfe3 replayed with its live CP:
+         * tracking at MU_TRACK left Ri at 36.9 dB and no attempt demapped
+         * TRN2d; holding left Ri at 43.7 dB and attempt 2 demapped TRN2d into
+         * MP.  ME_V90A_TRACK_MU=<step> tracks instead, for experiments.
+         */
+        const char *mu = getenv("ME_V90A_TRACK_MU");
+
+        if (mu != NULL)
+            v90a_fse_set_mu(g_v90a_fse, atof(mu));
+        v90a_fse_train_ls(g_v90a_fse, V90A_LS_SYMBOLS, V90A_LS_PASSES,
+                          mu != NULL ? V90A_FSE_DD : V90A_FSE_FROZEN);
+    }
+    ME_LOG("[ME] V.90 analogue: TRN1d %dT, equaliser CMA -> least-squares "
+           "training with %d feedback taps (dispersion %.4f)\n",
+           v90_analogue_rx_trn1d_symbols(rx), v90a_fse_feedback(g_v90a_fse),
+           v90a_fse_dispersion(g_v90a_fse));
+}
+
+/*
+ * In §8.4.1's DIL the decision fed back is the codeword this side asked for.
+ *
+ * The DIL is a measurement ladder, not a constellation: it runs down to
+ * Ucodes a few linear units apart, so near zero the slicer's decision is the
+ * output itself and the feedback loop becomes a linear inverse of the line's
+ * 4000 Hz null -- unstable.  Measured on v90-lt6, the DIL's quiet opening grew
+ * a Nyquist oscillation x1.35 a symbol to the top of the ladder within 30
+ * symbols and the DIL never completed.  But this side authored the descriptor
+ * (§8.4.1, sent in Ja) and the DIL starts at the first symbol off Jd, which
+ * v90_analogue_rx pins exactly, so every symbol is known: feed THAT back.
+ * Returns false outside the DIL.
+ */
+static bool me_v90a_dil_decision_locked(double *decision)
+{
+    const v90_analogue_rx_t *rx;
+    int pos, ucode, sign;
+    double level;
+
+    if (g_v90a == NULL  ||  !g_v90a_dil_valid
+        ||  v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_DIL)
+        return false;
+    rx = v90_analogue_phase3_rx_state(g_v90a);
+    if (rx == NULL)
+        return false;
+    if (g_v90a_dil_seq_len == 0) {
+        int cycle = v90_dil_cycle_len(&g_v90a_dil);
+
+        if (cycle <= 0  ||  cycle > V90A_DIL_SEQ_MAX)
+            return false;
+        g_v90a_dil_seq_len = v90_dil_generate_codewords(
+            (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
+            &g_v90a_dil, g_v90a_dil_seq, cycle);
+        if (g_v90a_dil_seq_len <= 0)
+            return false;
+    }
+    /* The symbol just consumed is DIL symbol dil_symbols - 1. */
+    pos = v90_analogue_rx_dil_symbols(rx) - 1;
+    if (pos < 0)
+        return false;
+    v90_codeword_decompose((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
+                           g_v90a_dil_seq[pos % g_v90a_dil_seq_len], &ucode, &sign);
+    level = v90a_linear_ucode_level(g_v90a_linear, ucode)/V90A_FSE_SCALE;
+    if (level <= 0.0)
+        return false;
+    /* The equaliser's output carries CMA's arbitrary polarity, which the
+     * receiver resolved on §8.4.5's plaintext; the line's sign is the
+     * codeword's. */
+    if (v90_analogue_rx_inverted(rx))
+        sign = !sign;
+    *decision = sign ? level : -level;
+    return true;
+}
+
+/*
+ * Adapt only where a decision can be trusted AND the signal is not periodic.
+ *
+ * §8.6.4's Ri is + + + − − − on one level, period six, for as long as the
+ * digital modem waits for CPt -- 11000 symbols and more on the Apple modem.
+ * On a periodic sequence the feedback taps can PREDICT the next symbol from
+ * the past decisions (d[k-6] = d[k], d[k-3] = -d[k]), and decision-directed
+ * adaptation duly learns that rather than the channel: measured on
+ * artifacts/apple-pve-20261015/v90-dfe2, Ri was received at 45 dB and the
+ * random TRN2d straight after it at 26 dB, three times the error from its
+ * first symbol, where a fit on TRN2d itself reaches 41.  The stretch between
+ * the end of the DIL measurement and Ri is worse: the far end is still
+ * sending the DIL while the slicer decides against Ri's one level.
+ *
+ * So the taps are held -- feedback still runs on every decision -- from the
+ * DIL's end until Phase 4's TRN2d, and over §9.6's Rd/R̄d.  Decision-directed
+ * adaptation resumes on TRN2d's scrambled data (§8.6.5).
+ */
+static void me_v90a_adapt_policy_locked(void)
+{
+    const v90_analogue_phase4_t *p4;
+    bool hold = false;
+
+    if (g_v90a == NULL  ||  g_v90a_fse == NULL)
+        return;
+    p4 = v90_analogue_phase3_phase4_state(g_v90a);
+    if (p4 != NULL) {
+        switch (v90_analogue_phase4_stage(p4)) {
+        case V90A4_RX_TRN2D:
+        case V90A4_RX_MP:
+        case V90A4_RX_B1D:
+        case V90A4_RX_DATA:
+            break;
+        default:
+            hold = true;
+            break;
+        }
+    } else if (v90_analogue_phase3_rx_stage(g_v90a) == V90A_RX_DONE) {
+        hold = true;
+    }
+    if (hold  &&  !g_v90a_fse_held  &&  v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD) {
+        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
+        g_v90a_fse_held = true;
+    } else if (!hold  &&  g_v90a_fse_held) {
+        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
+        g_v90a_fse_held = false;
+    }
+}
+
+/*
+ * In Phase 4 the slicer decides among the Ucodes the far end is mapping
+ * through -- CPt for TRN2d/MP, CP from B1d on (§5.4, §8.6) -- for the frame
+ * slot the next codeword falls in.  Until Ri has fixed the frame grid the
+ * receiver cannot say, and the DIL's set stays.
+ */
+static void me_v90a_phase4_slicer_locked(void)
+{
+    const v90_analogue_phase4_t *p4;
+    uint8_t set[128];
+    int n = 0;
+
+    p4 = (g_v90a != NULL) ? v90_analogue_phase3_phase4_state(g_v90a) : NULL;
+    if (p4 != NULL)
+        n = v90_analogue_phase4_slicer_ucodes(p4, set, (int) sizeof(set));
+    if (n > 0) {
+        v90a_linear_set_constellation(g_v90a_linear, set, n);
+        g_v90a_p4_slicer = true;
+    } else if (p4 != NULL) {
+        /*
+         * Before the grid is fixed the far end is sending §8.6.4's Ri and R̄i,
+         * one Ucode (U_INFO) with signs on it -- so slice onto that, not the
+         * DIL's ladder.  It matters for the feedback taps: on a ladder that
+         * fine the decision is the output, and that loop is unstable (see
+         * me_v90a_dil_decision_locked()).
+         */
+        uint8_t one = (uint8_t) g_v90a_u_info;
+
+        v90a_linear_set_constellation(g_v90a_linear, &one, 1);
+        g_v90a_p4_slicer = true;
+    } else if (g_v90a_p4_slicer) {
+        /* Back to what Phase 3 left: the DIL's ladder when it was known. */
+        uint8_t dil[128];
+        int m = 0;
+
+        if (g_v90a_dil_valid)
+            m = v90_dil_ucode_set((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+                                                         : V90_LAW_ULAW,
+                                  &g_v90a_dil, dil, (int) sizeof(dil));
+        v90a_linear_set_constellation(g_v90a_linear, m > 0 ? dil : NULL, m);
+        g_v90a_p4_slicer = false;
     }
 }
 
@@ -16052,6 +16277,22 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                 me_v90a_calibrate_locked();
             }
         }
+        /* V90A_T2_DUMP=<path>: the T/2 samples exactly as the equaliser takes
+         * them (int16, 16 kHz), so an equaliser can be designed offline
+         * against a known downstream -- §8.6.5's TRN2d -- rather than judged
+         * only through the requantised codewords. */
+        {
+            static FILE *t2 = NULL;
+            static int tried = 0;
+            if (!tried) {
+                const char *p = getenv("V90A_T2_DUMP");
+                tried = 1;
+                if (p && *p)
+                    t2 = fopen(p, "wb");
+            }
+            if (t2)
+                fwrite(amp + offset, sizeof(amp[0]), 1, t2);
+        }
         if (v90a_fse_put(g_v90a_fse, amp + offset, 1, syms, 2) < 1)
             continue;
         sym = syms[0];
@@ -16099,15 +16340,21 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                    v90a_sd_next_slot(g_v90a_sd), v90a_sd_level(g_v90a_sd),
                    v90a_sd_score(g_v90a_sd));
         }
+        me_v90a_phase4_slicer_locked();
+        me_v90a_adapt_policy_locked();
         if (v90a_linear_put(g_v90a_linear, &scaled, 1, &codeword, 1) == 1) {
+            double dec = v90a_linear_last_decision(g_v90a_linear)/V90A_FSE_SCALE;
+            double tol = v90a_linear_last_tolerance(g_v90a_linear)/V90A_FSE_SCALE;
+
             me_v90_analogue_rx_codewords_locked(&codeword, 1);
-            if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD)
-                v90a_fse_decide(g_v90a_fse,
-                                v90a_linear_last_decision(g_v90a_linear)
-                                    /V90A_FSE_SCALE,
-                                v90a_linear_last_tolerance(g_v90a_linear)
-                                    /V90A_FSE_SCALE);
+            /* Every symbol's decision goes back: DD adapts on it, and the
+             * feedback taps need it in every mode.  In the DIL it is the
+             * symbol this side asked for, not a decision. */
+            if (me_v90a_dil_decision_locked(&dec))
+                tol = 0.0;
+            v90a_fse_decide(g_v90a_fse, dec, tol);
         }
+        me_v90a_trn1d_handover_locked();
         /*endif*/
         if (!v90a_linear_locked(g_v90a_linear)
             &&  v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_HUNT_SD)
@@ -16148,6 +16395,15 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
             pthread_mutex_unlock(&g_state_mtx);
             return;
         }
+        /*
+         * Decision feedback, trained decision-directed on TRN1d (see
+         * me_v90a_equalised_locked()).  A two-wire loop's 4000 Hz null caps a
+         * linear equaliser at ~14 dB on the Apple modem's Phase 4; 16 feedback
+         * taps reach 42-45 dB (v90_analogue_fse.h).  ME_V90A_DFE_TAPS=0 is the
+         * plain FSE.
+         */
+        v90a_fse_set_feedback(g_v90a_fse,
+                              parse_env_int("ME_V90A_DFE_TAPS", V90A_DFE_TAPS));
         /*
          * FROZEN, not CMA.  The first thing on the line is §8.4.4's Sd, which
          * is not constant modulus -- four slots at W and two at zero -- so the
