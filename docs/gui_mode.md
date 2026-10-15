@@ -123,7 +123,17 @@ Recordings consume disk space until deleted; ordinary GUI telemetry stays bounde
 
 The Apple diagnostics show raw DC, RMS after removing the mean, near-rail sample
 count (absolute amplitude at least 32760), CoreAudio render errors, empty TX
-samples and TX ring overruns. These measurements do not change samples, gains,
+samples and TX ring overruns. Both GUIs also show the recent window's minimum/maximum, AC RMS in dBFS
+(peak full scale reference), and a literal sample classification: no samples,
+digital silence, constant input, constant rail, near rail or varying signal.
+The bounded window is at most 1600 samples per direction; zero and near-rail
+window counts and total sample counts are available in `hardware_audio.metrics`.
+`clipped` remains a cumulative near-rail count, not proof of analogue clipping.
+A constant rail can accompany an unpowered path or off-hook operation without a
+pair; these labels do not diagnose a bearer or estimate SNR. Zero AC RMS has
+JSON `null` dBFS and displays as −∞. Engine TX gap runs/samples count only
+underruns while the engine runs, separating them from expected idle empty TX.
+These measurements do not change samples, gains,
 resamplers or the SIP G.711 path (V.90 §5; V.34 §10.1).
 
 `make gui-apple-test` uses deliberately invalid USB address `0:0` and a synthetic

@@ -620,9 +620,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lineHealth.stringValue = "USB \((health["usb_open"] as? Bool ?? false) ? "open" : "not opened") · Hook \(hookText) · Line sense \(senseText) · \(health["rings"] as? Int ?? 0) ring bursts"
         let raw = s["hardware_audio"] as? [String:Any] ?? [:], metrics = raw["metrics"] as? [[String:Any]] ?? []
         let levels = metrics.enumerated().map { dir,m -> String in
-            String(format:"%@ DC %.0f · RMS %.0f · clipped %d",dir == 0 ? "RX" : "TX",m["dc"] as? Double ?? 0,m["rms"] as? Double ?? 0,m["clipped"] as? Int ?? 0)
+            let dbfs = (m["ac_dbfs"] as? Double).map { String(format:"%.1f",$0) } ?? "−∞"
+            return String(format:"%@ \(m["status"] as? String ?? "") · DC %.0f · RMS %.0f (\(dbfs) dBFS) · range \(m["min"] as? Int ?? 0)…\(m["max"] as? Int ?? 0) · clipped %d",dir == 0 ? "RX" : "TX",m["dc"] as? Double ?? 0,m["rms"] as? Double ?? 0,m["clipped"] as? Int ?? 0)
         }.joined(separator:" | ")
-        audioHealth.stringValue = "\(levels) · Render errors \(raw["render_errors"] as? Int ?? 0) · TX empty \(raw["tx_empty_samples"] as? Int ?? 0) · Ring overruns \(raw["tx_ring_overruns"] as? Int ?? 0)"
+        audioHealth.stringValue = "\(levels) · Render errors \(raw["render_errors"] as? Int ?? 0) · TX empty \(raw["tx_empty_samples"] as? Int ?? 0) · Ring overruns \(raw["tx_ring_overruns"] as? Int ?? 0) · Engine TX gaps \(raw["engine_tx_underrun_runs"] as? Int ?? 0) (\(raw["engine_tx_underrun_samples"] as? Int ?? 0) samples)"
         capturePath.stringValue = (hardware["replay"] as? Bool ?? false) ? "Offline RX replay · no USB line" : (hardware["capture_path"] as? String ?? "").isEmpty ? "Recording off · Device audio changes waveform, spectrum and listening; eye stays on the engine tap" : "Recording: \(hardware["capture_path"] as? String ?? "")"
     }
     @objc func answer() { send("at",Data("ATA\r".utf8)) }

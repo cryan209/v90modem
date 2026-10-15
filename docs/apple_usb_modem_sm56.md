@@ -2362,3 +2362,15 @@ could still pay.  Below 0.05 at 26400 needs both the level and that
 receiver gap closed; 31200 is not reachable over μ-law on this loop.
 Scripts: the session scratchpad's `symbound.py`, `adapt.py`, `resid.py`
 and `echo.py`; they have not been moved into `tools/`.
+
+## Passive diagnostic visibility (2026-10-16)
+
+The Apple GUI now distinguishes constant rail, digital silence, constant input
+and varying audio directly from its bounded raw sample window. Both GUIs show
+AC RMS in dBFS and min/max alongside DC and cumulative near-rail counts;
+telemetry also includes window zero/rail counts and total samples. Engine-only
+TX underrun runs and samples are now visible separately from idle empty TX.
+These observations use the existing passive taps (V.90 §5 analogue role); they
+do not alter transport or training (V.34 §10.1). Synthetic selftests cover
+rail, zero and constant-DC input across history wraparound. See `docs/gui_mode.md`
+for units and limitations. Hardware interop remains untested by these checks.

@@ -958,19 +958,36 @@ static NSString *gui_raw_json(void)
         NSMutableArray *samples = [NSMutableArray array];
         NSMutableString *hex = [NSMutableString string];
         double sum = 0, square = 0;
+        int low = n ? copy[dir][0] : 0, high = low;
+        unsigned zeros = 0, rails = 0;
         for (unsigned i = 0; i < n; i++) {
             uint16_t v = (uint16_t)copy[dir][i];
             [hex appendFormat:@"%02x%02x",v&255,v>>8];
             sum += copy[dir][i]; square += (double)copy[dir][i]*copy[dir][i];
+            if (copy[dir][i] < low) low = copy[dir][i];
+            if (copy[dir][i] > high) high = copy[dir][i];
+            zeros += copy[dir][i] == 0;
+            rails += abs(copy[dir][i]) >= 32760;
             if (i+512 >= n) [samples addObject:@(copy[dir][i])];
         }
         double mean = n ? sum/n : 0;
         [audio addObject:samples];
         [listen addObject:@{@"count":@(counts[dir]),@"hex":hex}];
-        [metrics addObject:@{@"dc":@(mean),@"rms":@(n ? sqrt(fmax(0,square/n-mean*mean)) : 0),@"clipped":@(clipped[dir])}];
+        double rms = n ? sqrt(fmax(0,square/n-mean*mean)) : 0;
+        /* A constant rail is the documented unpowered/open-loop ADC symptom.
+         * These are observations, not a diagnosis of the telephone bearer.
+         * dBFS uses peak full scale, AC RMS excludes DC (V.90 §5 analogue side). */
+        NSString *status = !n ? @"no samples" : low == high ?
+            (rails ? @"constant rail" : zeros == n ? @"digital silence" : @"constant input") :
+            rails ? @"near rail" : @"varying signal";
+        [metrics addObject:@{@"dc":@(mean),@"rms":@(rms),@"clipped":@(clipped[dir]),
+            @"samples":@(counts[dir]),@"window_samples":@(n),@"min":@(low),@"max":@(high),
+            @"zero_samples":@(zeros),@"rail_samples":@(rails),@"status":status,
+            @"ac_dbfs":rms > 0 ? @(20*log10(rms/32768.0)) : (id)[NSNull null]}];
     }
     NSDictionary *value = @{@"rate":@(g_rate),@"audio":audio,@"listen":listen,@"metrics":metrics,
-        @"render_errors":@(render_errors),@"tx_empty_samples":@(empty),@"tx_ring_overruns":@(overruns)};
+        @"render_errors":@(render_errors),@"tx_empty_samples":@(empty),@"tx_ring_overruns":@(overruns),
+        @"engine_tx_underrun_samples":@(tx_underrun_samples),@"engine_tx_underrun_runs":@(tx_underrun_runs)};
     NSData *json = [NSJSONSerialization dataWithJSONObject:value options:0 error:NULL];
     return [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
 }
@@ -1549,7 +1566,25 @@ static int gui_diagnostic_selftest(void)
             [metrics[0][@"clipped"] unsignedLongLongValue] != 2048 ||
             fabs([metrics[0][@"dc"] doubleValue]+0.25) > 1e-9 ||
             fabs([metrics[0][@"rms"] doubleValue]-expected) > 1e-9 ||
+            fabs([metrics[0][@"ac_dbfs"] doubleValue]-20*log10(expected/32768.0)) > 1e-9 ||
+            ![metrics[0][@"status"] isEqual:@"near rail"] ||
+            ![metrics[1][@"status"] isEqual:@"no samples"] ||
+            [metrics[0][@"rail_samples"] intValue] != GUI_RAW_N/2 ||
             [json length] > 25000) return 1;
+        /* Cross the circular-buffer boundary with each failure signature. */
+        const int16_t constants[] = {-32768, 0, 657};
+        NSArray *statuses = @[@"constant rail", @"digital silence", @"constant input"];
+        for (unsigned k = 0; k < 3; k++) {
+            for (unsigned i = 0; i < 4096; i++) signal[i] = constants[k];
+            gui_raw_feed(0,signal,4096);
+            NSDictionary *snapshot = [NSJSONSerialization JSONObjectWithData:[gui_raw_json() dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+            NSDictionary *m = snapshot[@"metrics"][0];
+            if (![m[@"status"] isEqual:statuses[k]] || [m[@"min"] intValue] != constants[k] ||
+                [m[@"max"] intValue] != constants[k] || [m[@"rms"] doubleValue] != 0 ||
+                m[@"ac_dbfs"] != [NSNull null] || [m[@"window_samples"] intValue] != GUI_RAW_N ||
+                [m[@"zero_samples"] intValue] != (k == 1 ? GUI_RAW_N : 0) ||
+                [m[@"rail_samples"] intValue] != (k == 0 ? GUI_RAW_N : 0)) return 1;
+        }
         uint64_t last = 0;
         if (!gui_ring_burst(100,&last) || gui_ring_burst(1000,&last) ||
             gui_ring_burst(2000,&last) || !gui_ring_burst(4000,&last)) return 1;
