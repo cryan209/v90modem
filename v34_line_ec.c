@@ -123,41 +123,67 @@ static bool chol_solve(double *a, const double *b, double *x, int n)
 
 static void track_reset(v34_line_ec_t *ec);
 
+/* Bulk-delay search block: how many lags one pass over the received samples
+   correlates at once.  Each lag keeps its own accumulator, summed in the same
+   order as one lag at a time, so the block only changes the speed. */
+#define LAG_BLOCK 16
+#define LIN_LEN (V34_LEC_MAX_LAG + V34_LEC_TAPS + LAG_BLOCK + V34_LEC_TRAIN_MAX)
+
 static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
 {
     static double r[V34_LEC_TAPS*V34_LEC_TAPS];
+    /* Our transmission over the window and the MAX_LAG + TAPS before it, as
+       one array (tx_at's zero for anything not held included), so the loops
+       below index it directly.  Scratch, rewritten in full by every fit. */
+    static double lin[LIN_LEN];
     double p[V34_LEC_TAPS];
     double x[V34_LEC_TAPS];
-    double xv[V34_LEC_TAPS];
     double trace;
     int first;
     const int n_train = ec->train_len;
     const int half = V34_LEC_TAPS/2;
     const int s0 = n_train - V34_LEC_SEARCH_LEN;
+    const int64_t lin0 = (int64_t) ec->train_start - V34_LEC_MAX_LAG - V34_LEC_TAPS - LAG_BLOCK;
     double best = -1.0;
     int lag = -1;
     double rx_pow = 0.0;
     double res_pow = 0.0;
     int64_t base;
+    int boff;
 
     ec->fits++;
+    for (int i = 0;  i < LIN_LEN;  i++)
+        lin[i] = tx_at(ec, lin0 + i);
     /* Bulk delay: the lag of the largest cross-correlation between the last
-       V34_LEC_SEARCH_LEN received samples and our transmission before them. */
-    for (int d = half;  d <= V34_LEC_MAX_LAG;  d++)
+       V34_LEC_SEARCH_LEN received samples and our transmission before them.
+       This runs inside the media callback, which also sends our RTP, at the
+       moment a V.90 digital modem starts DIL.  Done one lag at a time
+       through tx_at() it made that callback 23-28 ms on the wired rig host;
+       the RasFinder's AudioCodes re-centred its playout on the hole, the
+       analogue modem's DIL analysis (V.90 8.3.4, 9.3.1.x) came out wrong,
+       and it sent a CPt we could not use and retrained
+       (docs/v90_rasfinder_phase4.md, 2026-10-16). */
+    for (int d0 = half;  d0 <= V34_LEC_MAX_LAG;  d0 += LAG_BLOCK)
     {
-        double c = 0.0;
+        double c[LAG_BLOCK] = {0.0};
+        const double *t = lin + ((int64_t) ec->train_start + s0 - d0 - lin0);
 
         for (int n = 0;  n < V34_LEC_SEARCH_LEN;  n++)
         {
-            int64_t rn = (int64_t) ec->train_start + s0 + n;
+            const double y = ec->train_rx[s0 + n];
 
-            c += (double) ec->train_rx[s0 + n]*tx_at(ec, rn - d);
+            for (int j = 0;  j < LAG_BLOCK;  j++)
+                c[j] += y*t[n - j];
         }
-        c = fabs(c);
-        if (c > best)
+        for (int j = 0;  j < LAG_BLOCK  &&  d0 + j <= V34_LEC_MAX_LAG;  j++)
         {
-            best = c;
-            lag = d;
+            const double cj = fabs(c[j]);
+
+            if (cj > best)
+            {
+                best = cj;
+                lag = d0 + j;
+            }
         }
     }
     if (lag < 0)
@@ -185,19 +211,20 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
     if (first < 0)
         first = 0;
     base = (int64_t) ec->train_start - lag + half;
+    boff = (int) (base - lin0);
     memset(r, 0, sizeof(r));
     memset(p, 0, sizeof(p));
     /* First row and the cross-correlation directly, O(N*L)... */
     for (int n = first;  n < n_train;  n++)
     {
         const double y = ec->train_rx[n];
-        const double x0 = tx_at(ec, base + n);
+        const double *xn = lin + boff + n;
+        const double x0 = xn[0];
 
         for (int k = 0;  k < V34_LEC_TAPS;  k++)
         {
-            xv[k] = tx_at(ec, base + n - k);
-            p[k] += y*xv[k];
-            r[k] += x0*xv[k];
+            p[k] += y*xn[-k];
+            r[k] += x0*xn[-k];
         }
     }
     /* ...and the rest by the exact shift recursion, O(L^2):
@@ -207,13 +234,15 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
        a stall of several frames. */
     for (int j = 0;  j < V34_LEC_TAPS - 1;  j++)
     {
-        const double a = tx_at(ec, base + first - 1 - j);
-        const double b = tx_at(ec, base + n_train - 1 - j);
+        const double *xa = lin + boff + first - 1;
+        const double *xb = lin + boff + n_train - 1;
+        const double a = xa[-j];
+        const double b = xb[-j];
 
         for (int k = j;  k < V34_LEC_TAPS - 1;  k++)
             r[(j + 1)*V34_LEC_TAPS + k + 1] = r[j*V34_LEC_TAPS + k]
-                                            + a*tx_at(ec, base + first - 1 - k)
-                                            - b*tx_at(ec, base + n_train - 1 - k);
+                                            + a*xa[-k]
+                                            - b*xb[-k];
     }
     trace = 0.0;
     for (int j = 0;  j < V34_LEC_TAPS;  j++)
@@ -232,10 +261,11 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
     }
     for (int n = first;  n < n_train;  n++)
     {
+        const double *xn = lin + boff + n;
         double e = ec->train_rx[n];
 
         for (int k = 0;  k < V34_LEC_TAPS;  k++)
-            e -= x[k]*tx_at(ec, base + n - k);
+            e -= x[k]*xn[-k];
         rx_pow += (double) ec->train_rx[n]*ec->train_rx[n];
         res_pow += e*e;
     }
