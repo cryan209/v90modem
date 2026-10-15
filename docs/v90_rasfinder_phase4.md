@@ -67,13 +67,28 @@ same time.
    move on a 60 s stationary echo, and no alias move with a periodic
    transmission.  `ME_LEC_NO_TRACK=1` holds the fitted delay.
 
-**Not yet verified live**: vmhost and tower were unreachable from this Mac for
-the rest of the session, so neither part has been on a call.  The replay
+**Verified live** below (wired LAN host); vmhost and tower were down.  The replay
 cannot test part 2: once in data mode our transmit depends on what we decode,
 so the replay's transmit no longer matches the one the recorded echo came
 from.  Next call: check `slow media callback` stays under ~20 ms in data
 mode, `tools/echo_lag_track.py` shows no step (or the log shows `echo moved`
 and the eye recovering), and whether LAPM comes up.
+
+**Live, from a wired LAN host (Mac mini 10.69.70.168, `rf-mini-20261016`;
+vmhost was down).** Accounts 2901 → 6311/6312/6313, upstream capped at 21600:
+
+| build | V.90 data mode | echo moved | outcome |
+| --- | --- | --- | --- |
+| f654ad3e (search spread, tracker) | 2 of 3 | +15 ms on both (29 ms callbacks) | 6312: tracker followed after ~1 s, then **LAPM + RasFinder login prompt**, upstream 0.025 for 14 s; 6311: discontinuity detector asked for a 9.6 resync before the tracker moved |
+| 857af503 (one step per packet) | 3 of 4 | +10 ms on 2 (4-point training 21-25 ms on this host) | 6311 no move: **LAPM + login**, 31 s; the two that moved resynced ~12 s in |
+| d99f144d (training split, cheap builds) | 1 of 4 | none (no callback over 20 ms) | 6313: **LAPM + login**, upstream 0.024-0.029 for the whole 47 s until our hangup |
+
+The calls that never reached data mode retrained in Phase 3/4 or got an
+INFO1a that declined V.90, the usual per-call lottery on this rig, before
+any of this code runs.  The mini is about 2.5x slower than the dev Mac, and
+the playout moved by about (callback - 13 ms), so callbacks need to stay well
+under one packet on the slowest host that runs calls.  Plain V.34 fallbacks on
+the same rig reached LAPM and the login prompt too (16800).
 
 Two calls from this Mac over the VPN (vmhost down, `artifacts/rf-mac-20261016/`)
 could not test it.  The far end reports 0.3-0.4% of OUR packets lost, in
