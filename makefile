@@ -405,7 +405,7 @@ apple_usb_modem_coupler: $(APPLE_USB_MODEM_COUPLER_OBJS) spandsp $(PJ_BUILD_PRER
 
 tools/apple_usb_modem_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 tools/apple_usb_modem_coupler.o: tools/apple_usb_modem_coupler.m \
-    modem_engine.h data_interface.h line_monitor.h tools/apple_modem_line.h
+    modem_engine.h data_interface.h line_monitor.h tools/apple_modem_line.h tools/apple_modem_loopback.h
 	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)

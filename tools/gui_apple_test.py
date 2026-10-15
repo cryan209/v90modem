@@ -87,6 +87,13 @@ def main():
                 except urllib.error.HTTPError as error: assert error.code == 400
                 action('probe')
                 wait_for(lambda: state().get('hardware_status') == 'No selected USB modem')
+                action('loopback')
+                wait_for(lambda: state().get('hardware_status') == 'No selected USB modem')
+                assert not state().get('loopback_test',{}).get('passed',False)
+                events_path = Path(temp)/'settings/line-events.jsonl'
+                wait_for(lambda: events_path.exists() and events_path.stat().st_size > 0)
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                assert all('utc' in event and 'elapsed_ms' in event and 'process_id' in event for event in events)
                 action('monitor',enabled=True)
                 time.sleep(.2)
                 assert not state()['line_health']['monitoring']
@@ -97,6 +104,10 @@ def main():
                 action('capture',enabled=True)
                 capture_state = idle_after(previous)
                 assert capture_state['hardware']['capture']
+                try:
+                    action('loopback')
+                    raise AssertionError('Self-test was accepted during raw recording')
+                except urllib.error.HTTPError as error: assert error.code == 400
                 metadata = Path(capture_state['hardware']['capture_path'])/'session.json'
                 assert json.loads(metadata.read_text())['rate'] == 9600
                 previous = capture_state['epoch']

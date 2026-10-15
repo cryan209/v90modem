@@ -381,6 +381,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let rawSource = NSButton(checkboxWithTitle:"Device audio",target:nil,action:nil)
     let captureAudio = NSButton(checkboxWithTitle:"Record RX/TX",target:nil,action:nil)
     let electricalHealth = NSTextField(labelWithString:"Line measurements: unchecked")
+    let selftestResult = NSTextField(labelWithString:"")
+    let lineEventSummary = NSTextField(labelWithString:"")
     let callerID = NSTextField(labelWithString:"Caller ID: inactive")
     let lineHealth = NSTextField(labelWithString:"Line: unchecked"), audioHealth = NSTextField(labelWithString:"Audio: waiting")
     let capturePath = NSTextField(labelWithString:"")
@@ -504,12 +506,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             control.target = self; control.action = action
         }
         rawSource.state = .on
-        for field in [lineHealth,electricalHealth,callerID,audioHealth,capturePath] { field.font = .systemFont(ofSize:10); field.lineBreakMode = .byTruncatingMiddle }
+        for field in [lineHealth,electricalHealth,callerID,audioHealth,capturePath,selftestResult,lineEventSummary] { field.font = .systemFont(ofSize:10); field.lineBreakMode = .byTruncatingMiddle }
         appleTab = tab("Apple hardware",panel("Codec / line controls · raw audio and saved AT settings",[
             row([label("USB"),usbPicker,label("Audio"),audioPicker,button("Refresh",#selector(refreshApple)),button("Apply",#selector(applyApple))]),
-            row([button("Check line",#selector(probeApple)),onHookMonitor,rawSource,watchRings,autoAnswer,button("Save AT settings",#selector(saveAppleSettings))]),
+            row([button("Check line",#selector(probeApple)),button("Hardware self-test",#selector(testAppleHardware)),onHookMonitor,rawSource,watchRings,autoAnswer,button("Save AT settings",#selector(saveAppleSettings))]),
             row([captureAudio,capturePicker,button("Replay RX",#selector(replayApple)),button("Stop replay",#selector(stopAppleReplay))]),
-            lineHealth,electricalHealth,callerID,audioHealth,capturePath]))
+            lineHealth,electricalHealth,callerID,audioHealth,capturePath,selftestResult,lineEventSummary]))
         diagnostics.removeTabViewItem(appleTab!)
         for field in [ataIP,ataUser,ataPassword] { field.widthAnchor.constraint(equalToConstant:170).isActive = true }
         for field in [ataSIP,ataRTP,ataRings] { field.widthAnchor.constraint(equalToConstant:65).isActive = true }
@@ -558,6 +560,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func applyApple() {
         post("apple",["action":"configure","usb_address":appleUSBIDs[max(0,usbPicker.indexOfSelectedItem)],"audio_uid":appleAudioIDs[max(0,audioPicker.indexOfSelectedItem)]])
     }
+    @objc func testAppleHardware() { post("apple",["action":"loopback"]) }
     @objc func probeApple() { post("apple",["action":"probe"]) }
     @objc func setOnHookMonitor() { post("apple",["action":"monitor","enabled":onHookMonitor.state == .on]) }
     @objc func setWatchRings() { post("apple",["action":"watch","enabled":watchRings.state == .on]) }
@@ -588,10 +591,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ataStatus.stringValue = "Listener \(running ? (s["exit"] is Int ? "failed" : "running") : "stopped") · \(expiry > 0 ? "Registered \(r["peer"] as? String ?? "") · \(expiry)s" : "No active registration") · Accepted \(r["accepted"] as? Int ?? 0) · Auth challenges \(r["challenges"] as? Int ?? 0) · \(media["state"] as? String ?? "idle") \(media["peer"] as? String ?? "")\n\(media["codec"] as? String ?? "No media") · RTP RX/TX \(media["rx_packets"] as? Int ?? 0)/\(media["tx_packets"] as? Int ?? 0) · RX loss \(media["rx_loss"] as? Int ?? 0) · jitter \(String(format:"%.1f",media["rx_jitter_ms"] as? Double ?? 0))ms"
     }
     func renderApple(_ s:[String:Any], _ hardware:[String:Any]) {
-        diagnosticsHeight.constant = 245
+        diagnosticsHeight.constant = 285
         if let tab = appleTab, !diagnostics.tabViewItems.contains(where: { $0 === tab }) {
             diagnostics.addTabViewItem(tab); diagnostics.selectTabViewItem(tab)
         }
+        let test = s["loopback_test"] as? [String:Any] ?? [:]
+        selftestResult.stringValue = (test["status"] as? String).map { "Self-test \($0): \(test["reason"] as? String ?? "") · \(test["sample_errors"] as? Int ?? 0) sample errors · registers \((test["restored"] as? Bool ?? false) ? "restored" : "see result")" } ?? ""
+        let events = s["line_events"] as? [[String:Any]] ?? []
+        let lines = events.map { "\($0["utc"] as? String ?? "") +\($0["elapsed_ms"] as? Int ?? 0) ms · \($0["event"] as? String ?? "")" }
+        lineEventSummary.stringValue = lines.last ?? "Line events: waiting"
+        lineEventSummary.toolTip = lines.joined(separator:"\n")
+        selftestResult.toolTip = selftestResult.stringValue
         let devices = hardware["devices"] as? [String:[[String:String]]] ?? [:]
         let usb = devices["usb"] ?? [], audio = devices["audio"] ?? []
         let selectedUSB = hardware["usb_address"] as? String ?? "Automatic", selectedAudio = hardware["audio_uid"] as? String ?? "Automatic"

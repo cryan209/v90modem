@@ -484,6 +484,7 @@ the tools' command lines; listed here so nothing reads an environment silently.
 |---|---|---|
 | `APPLE_MODEM_ADDR` | apple_usb_modem_probe.c | sdh |
 | `APPLE_MODEM_INDEX` | apple_usb_modem_probe.c | - |
+| `APPLE_MODEM_LINE_EVENTS` | tools/apple_usb_modem_coupler.m | Diagnostic: append timestamped line events as JSONL; 2 MiB rotation plus one backup. |
 | `BELL212A_TRACE` | bell212a_test.c | t |
 | `CHAIN_DMODEM_UP` | v92_slm_chain_test.c | td |
 | `DM_HYBRID_HEADROOM` | d-modem.c | - |

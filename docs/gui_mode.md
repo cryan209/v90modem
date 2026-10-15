@@ -442,3 +442,22 @@ snapshot window still lose listening audio.
 `make gui-audio-test` on macOS runs an offline AVAudioEngine check for
 partial-buffer occupancy, continuous PCM across scheduled buffers and the
 sample-clock origin after a stop/restart. It plays no sound and saves no audio.
+
+
+### Apple line events and hardware self-test
+
+The Apple panel offers **Hardware self-test** while idle and on-hook. It pauses
+watching for a roughly three-second internal digital loopback, reports sample
+and bit errors, verifies register restoration, and resumes monitoring. Stop raw
+recording before using it. A pass tests the USB/digital sample path; it does not
+test the telephone line or establish hardware modem interoperability.
+
+The web panel's **Line event log** shows the latest 16 events; the native panel
+shows the latest event with recent history in its tooltip. Persistent JSONL
+includes UTC and monotonic timestamps, process ID, hook, ring/CID, line readings,
+protection events and engine transitions. It includes received caller fields.
+The launcher writes `line-events.jsonl` under its Apple GUI home (default `artifacts/gui-apple/`); raw recordings
+keep it beside their RX/TX captures. The file rotates at 2 MiB with one `.1`
+backup. For direct coupler use, choose `--line-events FILE` or the diagnostic
+`APPLE_MODEM_LINE_EVENTS` environment variable. These observations do not alter
+DSP samples or the SIP audio path.

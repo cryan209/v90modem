@@ -107,6 +107,7 @@ def main():
             for key in ('APPLE_MODEM_ADDR','APPLE_MODEM_AUDIO_UID'):
                 if key not in env and config.get(key): env[key] = config[key]
         env['APPLE_GUI_PROFILE'] = str(apple_home/'profile.at')
+        env.setdefault('APPLE_MODEM_LINE_EVENTS',str(apple_home/'line-events.jsonl'))
 
     def discover_apple():
         result = subprocess.run([args[0],'--devices'],env=env,capture_output=True,timeout=5,check=True)
@@ -140,7 +141,7 @@ def main():
             metadata = {'created':datetime.datetime.now(datetime.timezone.utc).isoformat(), 'rate':rate,
                 'usb_address':env.get('APPLE_MODEM_ADDR','Automatic'),'audio_uid':env.get('APPLE_MODEM_AUDIO_UID','Automatic')}
             (capture/'session.json').write_text(json.dumps(metadata,indent=2)+'\n')
-            call_env.update(APPLE_MODEM_RX_TAP=str(capture/'rx.s16'),APPLE_MODEM_TX_TAP=str(capture/'tx.s16'))
+            call_env.update(APPLE_MODEM_RX_TAP=str(capture/'rx.s16'),APPLE_MODEM_TX_TAP=str(capture/'tx.s16'),APPLE_MODEM_LINE_EVENTS=str(capture/'line-events.jsonl'))
             with lock: apple_options['capture_path'] = str(capture)
         with lock: apple_options['replay'] = replay is not None
         process = subprocess.Popen(call_args,env=call_env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -226,10 +227,14 @@ def main():
                         raw = destination.get('hardware_audio')
                         cid = destination.get('caller_id')
                         line = destination.get('line_diagnostics')
+                        events = destination.get('line_events')
+                        loop = destination.get('loopback_test')
                         destination.clear()
                         if raw is not None: destination['hardware_audio'] = raw
                         if cid is not None: destination['caller_id'] = cid
                         if line is not None: destination['line_diagnostics'] = line
+                        if events is not None: destination['line_events'] = events
+                        if loop is not None: destination['loopback_test'] = loop
                         value["epoch"] = value.get("epoch", 0)+generation*1000000
                         destination.update(value, received=time.monotonic())
             except socket.timeout:
@@ -559,9 +564,10 @@ def main():
         if action == 'save_settings':
             at_transaction('at','AT&W0')
             return
-        if action in ('probe','monitor','watch'):
-            if action != 'probe' and type(req.get('enabled')) is not bool: raise ValueError('Monitoring requires a boolean')
-            command = 'probe' if action == 'probe' else action+('1' if req.get('enabled') is True else '0')
+        if action in ('probe','monitor','watch','loopback'):
+            if action == 'loopback' and apple_options['capture']: raise ValueError('Stop raw recording before the hardware self-test')
+            if action not in ('probe','loopback') and type(req.get('enabled')) is not bool: raise ValueError('Monitoring requires a boolean')
+            command = action if action in ('probe','loopback') else action+('1' if req.get('enabled') is True else '0')
             with lifecycle:
                 if child.poll() is not None or child.stdin is None: raise ValueError('Backend is starting')
                 child.stdin.write((command+'\n').encode()); child.stdin.flush()

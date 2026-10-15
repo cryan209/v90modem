@@ -2498,3 +2498,56 @@ message formats, privacy, bad checksums, malformed TLVs and DC silence, plus
 the existing GUI lifecycle checks. `console_test` covers received date/time,
 pre-ring/inter-ring delivery, disabled reporting, no fabricated CID and S0/S1
 ring-count preservation. Logs use the normal isolated test runner.
+
+
+## Timestamped events and internal loopback (2026-10-16)
+
+The coupler now records ring/CID, hook requests and readbacks, voltage/current
+changes, polarity changes, line flags and protection, overload trips, monitor
+ownership, engine phase/signal changes, render errors and TX gaps as structured
+events. Each has UTC milliseconds, monotonic time, process ID, sequence and
+elapsed milliseconds. `--line-events FILE` / `APPLE_MODEM_LINE_EVENTS` appends
+JSONL; normal GUI launches choose a persistent file automatically. Rotation
+keeps a 2 MiB current file and one backup. Memory retains 128 events and GUI
+telemetry carries the last 16. CID events contain the received caller fields.
+
+The GUI **Hardware self-test** and CLI `--loopback-test digital` exercise
+Si3056 §5.30 digital loopback (DDL, register 10 bit 0), on-hook. They pause
+monitoring, save and verify the affected registers, send a known integer sample
+pattern, compare returned samples, restore and verify registers, and resume
+monitoring. GUI raw recording must be stopped first. This checks the host USB /
+digital sample path; it does not establish analogue line performance or modem
+interoperability (V.90 §5). The former interpretation of register 0x0a as a
+mute was incomplete: DDL returns the transmitted pattern, including silence.
+
+Initial immediate-start tests had 2–16 mismatching samples, with some data
+repeated from 250 ms earlier during audio startup. The test now allows one
+second of silence before the pattern and compares a full steady-state second;
+it still requires exact equality, rather than relaxing an error threshold.
+Both `0:13` and `0:14` passed at 9600 Hz: 9600 samples, zero sample/bit errors,
+correlation 1, gain 1 and RMSE 0. Observed round-trip delay was about 115–121 ms.
+The 8000 Hz test on `0:13` also passed exactly over 8000 samples (145.5 ms).
+All tests verified register restoration. Evidence is under
+`artifacts/apple-loopback-20261016/`, including a real GUI action which resumed
+ring watching afterwards. The optional `startup` mode is unsupported on this
+firmware: register 6's PDL bit did not latch; the test stopped and restored the
+registers without claiming a pass.
+
+### Pulse dialling
+
+The compatible DAA supports host-controlled pulse dialling at nominal 10 pulses
+per second (Si3056 §5.17), using hook switching and the prescribed calibration
+handling. The current coupler generates DTMF. The AT parser accepts P/T dial
+modifiers but does not convey that choice to this backend, so `ATDP` does not
+yet generate pulse dialling. No live pulse-dial interoperability is claimed;
+the attached exchange/ATA must also accept pulses.
+
+Manufacturer reference: [Si3056 data sheet, §§5.17 and 5.30](https://www.skyworksinc.com/-/media/Skyworks/SL/documents/public/data-sheets/si3056.pdf).
+
+A bounded incoming call to `6004` with caller `6002 / Apple Event Test` verified
+both ring-burst events, checksum-valid CID before second-ring answer, hook
+readbacks, voltage/current transitions and engine startup. The call ran the
+engine for one second and returned on-hook; no overload event occurred.
+Evidence and a reproduction script are in
+`artifacts/apple-events-answer-20261016/`. This remains a monitoring/answer
+transition check rather than a trained modem connection.

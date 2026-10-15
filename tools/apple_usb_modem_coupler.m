@@ -113,6 +113,8 @@
 #include "line_monitor.h"
 #include <spandsp.h>
 #include "apple_modem_line.h"
+#include "apple_modem_loopback.h"
+#include "test_tmp.h"
 
 #define VID 0x05ac
 #define PID 0x1401
@@ -137,12 +139,62 @@ static int line_protection_register = -1;
 static uint64_t line_checked_ms;
 static uint64_t apple_now_ms(void);
 static unsigned long ring_notifications;
+static void line_event(const char *kind, NSDictionary *details);
+static void line_observe(void);
+static FILE *line_event_file;
+static const char *line_event_path;
+static NSMutableArray *line_events;
+static uint64_t line_event_start, line_event_seq;
+
+/* All event formatting and disk I/O run on the control thread. */
+static void line_event(const char *kind, NSDictionary *details)
+{
+    @autoreleasepool {
+        uint64_t now = apple_now_ms();
+        if (!line_event_start) line_event_start = now;
+        struct timespec wall; clock_gettime(CLOCK_REALTIME,&wall);
+        struct tm utc; gmtime_r(&wall.tv_sec,&utc); char stamp[48], date[32];
+        strftime(date,sizeof date,"%Y-%m-%dT%H:%M:%S",&utc);
+        snprintf(stamp,sizeof stamp,"%s.%03ldZ",date,wall.tv_nsec/1000000);
+        NSDictionary *event = @{@"seq":@(++line_event_seq),@"utc":@(stamp),
+            @"elapsed_ms":@(now-line_event_start),@"monotonic_ms":@(now),
+            @"process_id":@(getpid()),@"event":@(kind),@"details":details ?: @{}};
+        if (!line_events) line_events = [[NSMutableArray alloc] init];
+        [line_events addObject:event];
+        if (line_events.count > 128) [line_events removeObjectAtIndex:0];
+        NSData *json = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
+        fprintf(stderr,"[APPLE +%llums] %s %.*s\n",(unsigned long long)(now-line_event_start),kind,
+            (int)json.length,(const char *)json.bytes);
+        if (line_event_file) {
+            if (ftell(line_event_file) >= 2*1024*1024) {
+                fclose(line_event_file); line_event_file = NULL;
+                char *backup = malloc(strlen(line_event_path)+3);
+                int rotated = 0;
+                if (backup) { sprintf(backup,"%s.1",line_event_path); rotated = rename(line_event_path,backup) == 0; free(backup); }
+                line_event_file = fopen(line_event_path,rotated ? "w" : "a");
+                if (!rotated) fprintf(stderr,"[APPLE] event log rotation failed; preserving current log\n");
+            }
+            if (line_event_file) { fwrite(json.bytes,1,json.length,line_event_file); fputc('\n',line_event_file); fflush(line_event_file); }
+        }
+    }
+}
+static void line_events_close(void)
+{
+    if (line_event_file) { fclose(line_event_file); line_event_file = NULL; }
+}
+static NSArray *line_events_json(void)
+{
+    if (!line_events) return @[];
+    NSUInteger n = line_events.count;
+    return [line_events subarrayWithRange:NSMakeRange(n > 16 ? n-16 : 0,n > 16 ? 16 : n)];
+}
+
 static void line_notification(const unsigned char *b, int n)
 {
     /* USmSerial.sys 6.12.08 @0x181xx: a1/29 with wValue=9 calls
      * the on-hook routine and reports 0x8002 (LINE OVERLOAD DETECTED). */
     if (n >= 4 && b[0] == 0xa1 && b[1] == 0x29 && b[2] == 9 && b[3] == 0)
-        line_overload_notice = 1;
+        { line_overload_notice = 1; line_event("overload_notification",@{}); }
     if (g_gui_control && gui_watch && n >= 2 && b[0] == 0xa1 && b[1] == 0x09)
         gui_ring_notice();
 }
@@ -219,6 +271,7 @@ static int usb_open_line(void)
         fprintf(stderr, "could not claim the command interface\n");
         libusb_close(usb); usb = NULL; libusb_exit(NULL); return -1;
     }
+    line_event("usb_open",@{@"selection":@(getenv("APPLE_MODEM_ADDR") ?: "automatic")});
     return 0;
 }
 
@@ -227,6 +280,7 @@ static int line_hook(int off_hook)
     int v = reg_read(REG_HOOK), sense;
 
     if (v < 0) { fprintf(stderr, "cannot read register 5\n"); return -1; }
+    line_event("hook_request",@{@"off_hook":@(off_hook),@"register_before":@(v)});
     v = off_hook ? (v | REG_HOOK_BIT) : (v & ~REG_HOOK_BIT);
     /* The monitor bit is left set either way: on-hook it is what makes a
      * capture possible at all, and off-hook it costs nothing. */
@@ -243,6 +297,7 @@ static int line_hook(int off_hook)
             apple_modem_line_t check = {v,status,-1,-1,reg_read(0x13)};
             if (apple_line_overcurrent(&check) || line_overload_notice) {
                 line_guard_tripped = 1;
+                line_event("overload_trip",@{@"status_register":@(status),@"aux_register":@(check.auxiliary)});
                 reg_write(REG_HOOK,(unsigned char)(v & ~REG_HOOK_BIT));
                 fprintf(stderr,"[APPLE] LINE OVERLOAD DETECTED during seizure; releasing line\n");
                 return -1;
@@ -254,6 +309,7 @@ static int line_hook(int off_hook)
     fprintf(stderr, "[APPLE] %s: register 5 = 0x%02x, line sense 0x%02x%s\n",
             off_hook ? "off-hook" : "on-hook", gui_hook & 0xff,
             sense & 0xff, sense == 0 ? "   <- NO PAIR CONNECTED" : "");
+    line_event("hook_readback",@{@"hook_register":@(gui_hook),@"sense_raw":@(sense)});
     return sense <= 0 ? -1 : 0;
 }
 
@@ -606,6 +662,7 @@ static void cid_deliver(void)
         !strcmp(info.date,cid_current.date) && !strcmp(info.time,cid_current.time)) return;
     cid_current = info; cid_messages++; cid_received_ms = now;
     di_receive_caller_id(info.number,info.name,info.date,info.time);
+    line_event("caller_id",@{@"number":@(info.number),@"name":@(info.name),@"date":@(info.date),@"time":@(info.time)});
     fprintf(stderr,"[APPLE] CID %s: DATE=%s TIME=%s NMBR=%s NAME=%s\n",
         info.standard,info.date,info.time,info.number,info.name);
 }
@@ -623,8 +680,10 @@ static int line_poll(int force)
     if (force || line_status.revision < 0) line_status.revision = reg_read(0x0b);
     gui_hook = line_status.hook; gui_sense = line_status.sense;
     line_checked_ms = apple_now_ms();
+    line_observe();
     if (apple_line_overcurrent(&line_status) || line_overload_notice) {
         line_guard_tripped = 1;
+        line_event("overload_trip",@{@"status_register":@(line_status.status),@"aux_register":@(line_status.auxiliary)});
         /* Use the known hook bit, without resetting country/gain registers.
          * If readback failed, zero is the safe on-hook/monitor-off value. */
         int hook = line_status.hook < 0 ? 0 : line_status.hook & ~REG_HOOK_BIT;
@@ -656,6 +715,50 @@ static NSDictionary *line_json(void)
         @"receive_overload":valid && line_status.auxiliary >= 0 ? @((line_status.auxiliary & 4) != 0) : (id)[NSNull null],
         @"dropout":valid && offhook && line_status.auxiliary >= 0 ? @((line_status.auxiliary & 2) != 0) : (id)[NSNull null]};
 }
+
+static void line_observe(void)
+{
+    static apple_modem_line_t last = {-1,-1,-1,-1,-1};
+    static int seen, last_protection = -1;
+    if (!seen) line_event("line_baseline",line_json());
+    else {
+        int valid = apple_line_valid(&line_status), before = apple_line_valid(&last);
+        if (valid != before) line_event(valid ? "link_restored" : "link_lost",line_json());
+        if (line_status.hook != last.hook &&
+            (line_status.hook < 0 || last.hook < 0 || ((line_status.hook ^ last.hook) & 9)))
+            line_event("hook_changed",line_json());
+        if (valid && before) {
+            if (line_status.sense >= 0 && last.sense >= 0 && line_status.sense != last.sense) {
+                int v = apple_line_signed_sense(line_status.sense), old = apple_line_signed_sense(last.sense);
+                line_event(v && old && ((v < 0) != (old < 0)) ? "polarity_reversed" : "voltage_changed",line_json());
+            }
+            if ((line_status.hook & 1) && ((last.status ^ line_status.status) & 31)) line_event("current_changed",line_json());
+            if (line_status.auxiliary >= 0 && last.auxiliary >= 0 &&
+                ((last.auxiliary ^ line_status.auxiliary) & ((line_status.hook & 1) ? 7 : 4)))
+                line_event("line_flags_changed",line_json());
+        }
+        if (line_protection_register != last_protection) line_event("protection_changed",line_json());
+    }
+    last = line_status; last_protection = line_protection_register; seen = 1;
+}
+static void engine_events(const me_diag_snapshot_t *d)
+{
+    static int seen, ready;
+    static me_state_t state;
+    static char rx[128], tx[128];
+    if (!seen || state != d->state || ready != d->data_ready || strcmp(rx,d->rx_signal) || strcmp(tx,d->tx_signal)) {
+        line_event("engine_phase",@{@"state":@(d->state),@"data_ready":@(d->data_ready),
+            @"rx_signal":@(d->rx_signal),@"tx_signal":@(d->tx_signal),@"phase_elapsed_ms":@(d->phase_elapsed_ms)});
+        state = d->state; ready = d->data_ready;
+        snprintf(rx,sizeof rx,"%s",d->rx_signal); snprintf(tx,sizeof tx,"%s",d->tx_signal); seen = 1;
+    }
+    static unsigned long errors, gaps;
+    if (errors != (unsigned long)render_errors || gaps != tx_underrun_samples) {
+        errors = render_errors; gaps = tx_underrun_samples;
+        line_event("audio_transport",@{@"render_errors":@(errors),@"engine_tx_gap_samples":@(gaps),@"engine_tx_gap_runs":@(tx_underrun_runs)});
+    }
+}
+static NSDictionary *loopback_last;
 static NSDictionary *cid_json(void)
 {
     pthread_mutex_lock(&cid_lock); unsigned bad = cid_malformed; pthread_mutex_unlock(&cid_lock);
@@ -706,10 +809,12 @@ static void gui_publish(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now = (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000;
-    if (gui_socket < 0 || now-last < 100) return;
+    if (now-last < 100) return;
     last = now;
     me_diag_snapshot_t d;
     me_get_diag_snapshot(&d);
+    engine_events(&d);
+    if (gui_socket < 0) return;
     char buf[65500];
     int n = snprintf(buf, sizeof buf,
         "{\"state\":%d,\"modulation\":%d,\"v92\":%d,\"law\":%d,"
@@ -735,7 +840,7 @@ static void gui_publish(void)
     n += added;
     sendto(gui_socket,buf,n,0,(struct sockaddr *)&gui_destination,sizeof gui_destination);
     NSDictionary *audio = [NSJSONSerialization JSONObjectWithData:[gui_raw_json() dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
-    NSData *packet = [NSJSONSerialization dataWithJSONObject:@{@"kind":@"apple_device",@"hardware_audio":audio,@"caller_id":cid_json(),@"line_diagnostics":line_json()} options:0 error:NULL];
+    NSData *packet = [NSJSONSerialization dataWithJSONObject:@{@"kind":@"apple_device",@"hardware_audio":audio,@"caller_id":cid_json(),@"line_diagnostics":line_json(),@"line_events":line_events_json(),@"loopback_test":loopback_last ?: @{}} options:0 error:NULL];
     sendto(gui_socket,packet.bytes,packet.length,0,(struct sockaddr *)&gui_destination,sizeof gui_destination);
     }
 }
@@ -1196,6 +1301,10 @@ static NSString *gui_raw_json(void)
     return [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
 }
 
+static int loopback_audio_active;
+static int16_t *loopback_samples[2];
+static unsigned loopback_count[2], loopback_capacity;
+
 static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
                          AudioBufferList *unused)
@@ -1216,7 +1325,13 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
     if (rx_tap)
         fwrite(in_abl->mBuffers[0].mData, 2, nframes, rx_tap);
     gui_raw_feed(0,in_abl->mBuffers[0].mData,nframes);
-    if (gui_monitor_only) cid_feed(in_abl->mBuffers[0].mData,nframes);
+    if (loopback_audio_active) {
+        unsigned n = nframes;
+        if (n > loopback_capacity-loopback_count[0]) n = loopback_capacity-loopback_count[0];
+        memcpy(loopback_samples[0]+loopback_count[0],in_abl->mBuffers[0].mData,n*sizeof(int16_t));
+        loopback_count[0] += n;
+    }
+    else if (gui_monitor_only) cid_feed(in_abl->mBuffers[0].mData,nframes);
     else engine_feed(in_abl->mBuffers[0].mData,nframes);
     return noErr;
 }
@@ -1235,6 +1350,16 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
         if (bin < FILL_BINS && (fill_min[bin] < 0 || fill < fill_min[bin])) fill_min[bin] = fill;
     }
     dev_out_frames += nframes;
+    if (loopback_audio_active) {
+        unsigned n = nframes;
+        if (n > loopback_capacity-loopback_count[1]) n = loopback_capacity-loopback_count[1];
+        memcpy(out,loopback_samples[1]+loopback_count[1],n*sizeof(int16_t));
+        memset(out+n,0,(nframes-n)*sizeof(int16_t));
+        loopback_count[1] += n;
+        gui_raw_feed(1,out,nframes);
+        if (tx_tap) fwrite(out,2,nframes,tx_tap);
+        return noErr;
+    }
     if (tx_preroll && g_engine_running && !gui_monitor_only && tx_seg >= tx_nseg) {
         unsigned fill = (ring_w + RING_N - ring_r) % RING_N;
         if (fill < nframes + TX_CUSHION) {
@@ -1420,6 +1545,7 @@ static int audio_start(void)
 /* ------------------------------------------------------------------ */
 static void gui_audio_stop(void)
 {
+    if (gui_audio_active && gui_monitor_only) line_event("monitor_stopped",@{});
     if (au) {
         AudioOutputUnitStop(au); AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
         au = NULL;
@@ -1448,6 +1574,7 @@ static int gui_onhook_start(void)
         }
         gui_audio_active = 1;
     }
+    line_event("monitor_started",@{});
     gui_status = "On-hook audio · listening for caller ID";
     return 0;
 }
@@ -1460,6 +1587,109 @@ static void gui_onhook_stop(void)
     gui_status = "Idle · line on-hook";
 }
 
+
+static void loopback_save(NSDictionary *value)
+{
+    [loopback_last release]; loopback_last = [value retain];
+    line_event("loopback_result",value);
+}
+/* Si3056 §5.30: mutually exclusive digital/filter loopbacks require no
+ * off-hook sequence. Save and restore every touched register on every exit.
+ * No analogue/line-side loopback is attempted by this on-hook test. */
+static int hardware_loopback(const char *mode)
+{
+    @autoreleasepool {
+        int hook = reg_read(REG_HOOK);
+        if (hook < 0 || (hook & 1) || g_engine_running || (g_gui_control &&
+            ((getenv("APPLE_MODEM_RX_TAP") && *getenv("APPLE_MODEM_RX_TAP")) ||
+             (getenv("APPLE_MODEM_TX_TAP") && *getenv("APPLE_MODEM_TX_TAP"))))) {
+            loopback_save(@{@"mode":@(mode),@"passed":@NO,@"status":@"refused",
+                @"reason":@"Requires an idle on-hook modem; stop raw recording first"});
+            return 1;
+        }
+        if (g_rate != 8000 && g_rate != 9600) {
+            loopback_save(@{@"mode":@(mode),@"passed":@NO,@"status":@"refused",@"reason":@"Use 8000 or 9600 Hz"}); return 1;
+        }
+        int watch = gui_watch, monitored = gui_audio_active;
+        gui_watch = 0;
+        if (gui_audio_active) gui_audio_stop();
+        gui_monitor_only = 0;
+        const unsigned char regs[] = {1,2,6,10};
+        int saved[4], target[4], changed = 0, restored = 1, ready = 1;
+        for (int i = 0; i < 4; i++) { saved[i] = reg_read(regs[i]); target[i] = saved[i]; if (saved[i] < 0) ready = 0; }
+        const char *reason = "No correlated return";
+        struct apple_loop_result result = {0};
+        if (ready) {
+            target[0] &= ~2; target[1] |= 2;
+            target[2] = !strcmp(mode,"startup") ? target[2] | 16 : target[2] & ~16;
+            target[3] = !strcmp(mode,"digital") ? target[3] | 1 : target[3] & ~1;
+            line_event("loopback_started",@{@"mode":@(mode),@"hook_register":@(hook)});
+            for (int i = 0; i < 4; i++) {
+                changed = i+1;
+                int written = reg_write(regs[i],(unsigned char)target[i]);
+                int actual = reg_read(regs[i]);
+                if (written < 0 || actual != target[i]) {
+                    ready = 0; reason = "Test register did not read back";
+                    line_event("loopback_register_rejected",@{@"register":@(regs[i]),@"requested":@(target[i]),@"readback":@(actual)});
+                    break;
+                }
+            }
+            if (ready && reg_write(REG_HOOK,(unsigned char)(hook|8)) < 0) { ready = 0; reason = "Cannot enable on-hook receive path"; }
+        } else reason = "Cannot read test registers";
+        if (ready) {
+            loopback_capacity = (unsigned)(g_rate*4);
+            loopback_samples[0] = calloc(loopback_capacity,sizeof(int16_t));
+            loopback_samples[1] = calloc(loopback_capacity,sizeof(int16_t));
+            if (!loopback_samples[0] || !loopback_samples[1]) { ready = 0; reason = "Cannot allocate test buffers"; }
+        }
+        if (ready) {
+            loopback_count[0] = loopback_count[1] = 0;
+            apple_loop_pattern(loopback_samples[1],loopback_capacity,(unsigned)g_rate);
+            loopback_audio_active = 1;
+            gui_status = "On-hook hardware loopback test";
+            if (audio_start() < 0) { ready = 0; reason = "CoreAudio test could not start"; }
+            else {
+                uint64_t end = apple_now_ms()+3000;
+                while (!g_stop && apple_now_ms() < end) {
+                    if (g_gui_control) gui_publish();
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,false);
+                }
+            }
+            gui_audio_stop(); /* joins the callbacks before inspecting buffers */
+            loopback_audio_active = 0;
+            if (ready && !g_stop) result = apple_loop_analyze(loopback_samples[1],loopback_count[1],
+                loopback_samples[0],loopback_count[0],(unsigned)g_rate);
+            if (g_stop) reason = "Test interrupted";
+        }
+        free(loopback_samples[0]); free(loopback_samples[1]);
+        loopback_samples[0] = loopback_samples[1] = NULL;
+        /* Restore even the register whose write/readback failed. */
+        for (int i = changed-1; i >= 0; i--) {
+            if (reg_write(regs[i],(unsigned char)saved[i]) < 0 || reg_read(regs[i]) != saved[i]) restored = 0;
+        }
+        if (reg_write(REG_HOOK,(unsigned char)hook) < 0 || (reg_read(REG_HOOK)&9) != (hook&9)) restored = 0;
+        line_poll(1);
+        int passed = ready && !g_stop && restored && result.found &&
+            (!strcmp(mode,"digital") ? result.mismatches == 0 :
+                result.correlation > 0.8 && result.gain > 0.5 && result.gain < 1.2);
+        if (!restored) reason = "Register restoration failed";
+        else if (result.found) reason = passed ? "Known pattern returned" : "Return differs from the test pattern";
+        loopback_save(@{@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
+            @"reason":@(reason),@"restored":@(restored),@"frames_compared":@(result.frames),
+            @"lag_samples":@(result.lag),@"lag_ms":@(result.lag*1000.0/g_rate),
+            @"correlation":@(result.correlation),@"gain":@(result.gain),@"dc":@(result.dc),
+            @"rmse":@(result.rmse),@"sample_errors":@(result.mismatches),@"bit_errors":@(result.bit_errors)});
+        gui_status = passed ? "Hardware loopback passed" : "Hardware loopback failed · see result";
+        if (!restored) g_stop = 1;
+        if (!g_stop && monitored && gui_onhook_start() < 0) {
+            loopback_save(@{@"mode":@(mode),@"passed":@NO,@"status":@"failed",@"reason":@"Test completed but on-hook monitoring could not resume",@"restored":@(restored)});
+            return 1;
+        }
+        gui_watch = !g_stop && (monitored ? gui_audio_active : 1) ? watch : 0;
+        return passed ? 0 : 1;
+    }
+}
+
 /* Commands arrive over launcher-owned stdin. Only the control loop executes
  * USB/CoreAudio operations; malformed commands have no device side effects. */
 static void gui_commands(void)
@@ -1470,16 +1700,18 @@ static void gui_commands(void)
     while (read(gui_control_fd,&c,1) == 1) {
         if (c != '\n') { if (used+1 < sizeof pending) pending[used++] = c; continue; }
         pending[used] = 0; used = 0;
-        if (strcmp(pending,"probe") && strcmp(pending,"monitor1") && strcmp(pending,"monitor0") && strcmp(pending,"watch1") && strcmp(pending,"watch0")) continue;
+        if (strcmp(pending,"probe") && strcmp(pending,"monitor1") && strcmp(pending,"monitor0") && strcmp(pending,"watch1") && strcmp(pending,"watch0") && strcmp(pending,"loopback")) continue;
         if (!strcmp(pending,"monitor0")) { gui_manual_monitor = 0; if (!gui_watch) gui_onhook_stop(); continue; }
-        if (!strcmp(pending,"watch0")) { gui_watch = 0; if (!gui_manual_monitor) gui_onhook_stop(); continue; }
+        if (!strcmp(pending,"watch0")) { gui_watch = 0; line_event("ring_watch",@{@"enabled":@NO}); if (!gui_manual_monitor) gui_onhook_stop(); continue; }
         if (usb_open_line() < 0) { gui_status = "No selected USB modem"; continue; }
-        if (!strcmp(pending,"probe")) {
+        if (!strcmp(pending,"loopback")) {
+            hardware_loopback("digital");
+        } else if (!strcmp(pending,"probe")) {
             line_poll(1);
             if (!line_guard_tripped) gui_status = "Idle · line checked";
         } else if (!strcmp(pending,"watch1")) {
             if (gui_onhook_start() < 0) continue;
-            gui_watch = 1; gui_rings = 0; gui_last_ring = 0;
+            gui_watch = 1; line_event("ring_watch",@{@"enabled":@YES}); gui_rings = 0; gui_last_ring = 0;
             memset(&cid_current,0,sizeof cid_current); cid_received_ms = 0;
             di_clear_caller_id();
         } else if (!strcmp(pending,"monitor1")) {
@@ -1514,7 +1746,7 @@ static void gui_ring_notice(void)
             di_clear_caller_id();
         }
     }
-    if (gui_ring_burst(now,&gui_last_ring)) { gui_rings++; di_on_ring(); }
+    if (gui_ring_burst(now,&gui_last_ring)) { gui_rings++; line_event("ring",@{@"burst":@(gui_rings),@"notifications":@(ring_notifications)}); di_on_ring(); }
 }
 static void gui_ring_poll(void)
 {
@@ -1727,6 +1959,7 @@ static int wait_for_ring(double secs)
     libusb_claim_interface(usb, 0);
     fprintf(stderr, "[APPLE] waiting up to %.0f s for a ring\n", secs);
     while (apple_now_ms() < deadline && !g_stop) {
+        if (line_poll(0) < 0) break;
         gui_publish();
         if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) != 0)
             continue;
@@ -1734,7 +1967,9 @@ static int wait_for_ring(double secs)
         if (line_overload_notice) { line_poll(1); break; }
         if (n >= 2 && b[0] == 0xa1 && b[1] == 0x09) {
             if (gui_ring_burst(apple_now_ms(),&last_ring)) {
-                rings++; if (!g_gui_control) di_on_ring();
+                rings++;
+                line_event("ring",@{@"burst":@(rings),@"notifications":@(ring_notifications)});
+                if (!g_gui_control) di_on_ring();
                 fprintf(stderr,"[APPLE] RING %d/%u\n",rings,answer_rings);
             }
             if ((unsigned)rings >= answer_rings) return 0;
@@ -1755,6 +1990,8 @@ static void usage(const char *a0)
         "       %s --hook on|off\n"
         "       %s --selftest\n"
         "\n"
+        "  --line-events FILE  append timestamped line/engine events as JSONL\n"
+        "  --loopback-test digital|startup  on-hook hardware transport self-test\n"
         "  --devices    read-only USB/CoreAudio device inventory as JSON\n"
         "  --diagnostic-selftest  check passive raw taps without hardware\n"
         "  --gui-replay PATH  offline raw RX replay with GUI split consoles\n"
@@ -1845,6 +2082,49 @@ static int gui_diagnostic_selftest(void)
         uint64_t last = 0;
         if (!gui_ring_burst(100,&last) || gui_ring_burst(1000,&last) ||
             gui_ring_burst(2000,&last) || !gui_ring_burst(4000,&last)) return 1;
+
+        /* Independent transport faults must not pass the PRBS comparison. */
+        const unsigned test_rate = 8000, test_n = 24000, delay = 123;
+        int16_t *reference = calloc(test_n,sizeof(int16_t));
+        int16_t *received = calloc(test_n+delay,sizeof(int16_t));
+        if (!reference || !received) { free(reference); free(received); return 1; }
+        apple_loop_pattern(reference,test_n,test_rate);
+        memcpy(received+delay,reference,test_n*sizeof(int16_t));
+        struct apple_loop_result result = apple_loop_analyze(reference,test_n,received,test_n+delay,test_rate);
+        if (!result.found || result.lag != (int)delay || result.mismatches || result.bit_errors || result.frames < 8000) return 1;
+        received[test_rate*3/2+delay] ^= 1;
+        result = apple_loop_analyze(reference,test_n,received,test_n+delay,test_rate);
+        if (!result.found || result.mismatches != 1 || result.bit_errors != 1) return 1;
+        memset(received,0,(test_n+delay)*sizeof(int16_t));
+        result = apple_loop_analyze(reference,test_n,received,test_n+delay,test_rate);
+        if (result.found) return 1;
+        result = apple_loop_analyze(reference,test_n,received,100,test_rate);
+        if (result.found) return 1;
+        for (unsigned i = 0; i < test_n; i++) received[i+delay] = (int16_t)lrint(reference[i]*0.9);
+        result = apple_loop_analyze(reference,test_n,received,test_n+delay,test_rate);
+        if (!result.found || result.correlation < 0.999 || fabs(result.gain-0.9) > 0.001 || !result.mismatches) return 1;
+        free(reference); free(received);
+        line_status = (apple_modem_line_t){0,0x40,50,0x14,2}; line_protection_register = 12;
+        line_observe(); uint64_t seq = line_event_seq;
+        line_observe(); if (line_event_seq != seq) return 1;
+        line_status.sense = 0; line_observe();
+        if (![line_events.lastObject[@"event"] isEqual:@"voltage_changed"]) return 1;
+        line_status.status = -1; line_observe();
+        if (![line_events.lastObject[@"event"] isEqual:@"link_lost"]) return 1;
+        line_status.status = 0x40; line_status.sense = 206; line_observe();
+        line_status.sense = 50; line_observe();
+        if (![line_events.lastObject[@"event"] isEqual:@"polarity_reversed"]) return 1;
+        for (unsigned i = 0; i < 140; i++) line_event("test_event",@{@"index":@(i)});
+        if (line_events.count != 128 || [line_events.lastObject[@"seq"] unsignedLongLongValue]-[line_events.firstObject[@"seq"] unsignedLongLongValue] != 127 || [line_events_json() count] != 16) return 1;
+        line_event_path = test_tmp("apple-line-events.jsonl");
+        line_event_file = fopen(line_event_path,"w"); if (!line_event_file) return 1;
+        for (unsigned i = 0; i < 2*1024*1024; i++) fputc(' ',line_event_file);
+        fflush(line_event_file);
+        line_event("rotation_test",@{}); line_events_close();
+        NSData *event_data = [NSData dataWithContentsOfFile:@(line_event_path)];
+        NSDictionary *saved_event = [NSJSONSerialization JSONObjectWithData:event_data options:0 error:NULL];
+        if (![saved_event[@"event"] isEqual:@"rotation_test"] || !saved_event[@"utc"] || !saved_event[@"monotonic_ms"] || !saved_event[@"process_id"]) return 1;
+        puts("Apple loopback analyzer: exact transport, single-bit corruption, silence and filtered return checks passed; event transitions, bounded history and rotation passed");
         puts("Apple passive raw tap: bounded history, immutable input, endian order, DC/RMS/clipping and ring-burst checks passed");
         return 0;
     }
@@ -1910,13 +2190,15 @@ static int gui_devices(void)
 
 int main(int argc, char **argv)
 {
-    const char *hook_arg = NULL, *cid_replay_path = NULL;
+    const char *hook_arg = NULL, *cid_replay_path = NULL, *loopback_mode = NULL;
     double hold = 60.0, on_ms = 100.0, off_ms = 120.0, ring_wait = 60.0;
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--diagnostic-selftest")) return gui_diagnostic_selftest();
         else if (!strcmp(argv[i], "--cid-replay") && i+1 < argc) cid_replay_path = argv[++i];
+        else if (!strcmp(argv[i], "--loopback-test") && i+1 < argc) loopback_mode = argv[++i];
+        else if (!strcmp(argv[i], "--line-events") && i+1 < argc) line_event_path = argv[++i];
         else if (!strcmp(argv[i], "--devices")) return gui_devices();
         else if (!strcmp(argv[i], "--gui-control"))                     g_gui_control = 1;
         else if (!strcmp(argv[i], "--gui-replay") && i+1 < argc) g_replay_path = argv[++i];
@@ -1938,7 +2220,25 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--selftest"))                    return selftest();
         else { usage(argv[0]); return 2; }
     }
+    if (!line_event_path) line_event_path = getenv("APPLE_MODEM_LINE_EVENTS");
+    if (line_event_path && *line_event_path) {
+        line_event_file = fopen(line_event_path,"a");
+        if (!line_event_file) { perror(line_event_path); return 1; }
+        atexit(line_events_close);
+    }
     if (cid_replay_path) return cid_replay_file(cid_replay_path);
+    if (loopback_mode) {
+        signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
+        if (strcmp(loopback_mode,"digital") && strcmp(loopback_mode,"startup")) { fprintf(stderr,"loopback must be digital or startup\n"); return 2; }
+        if (g_gui_control || g_dial || g_answer_mode || g_replay_path || hook_arg) { fprintf(stderr,"loopback excludes calls and replay\n"); return 2; }
+        if (usb_open_line() < 0) return 1;
+        int result = hardware_loopback(loopback_mode);
+        @autoreleasepool {
+            NSData *json = [NSJSONSerialization dataWithJSONObject:loopback_last ?: @{} options:0 error:NULL];
+            fwrite(json.bytes,1,json.length,stdout); putchar('\n');
+        }
+        libusb_close(usb); libusb_exit(NULL); return result;
+    }
     if (getenv("APPLE_MODEM_TX_AMP"))  tx_amp = atof(getenv("APPLE_MODEM_TX_AMP"));
     if (getenv("APPLE_MODEM_TX_GAIN")) g_tx_gain = atof(getenv("APPLE_MODEM_TX_GAIN"));
     if (getenv("APPLE_MODEM_DTMF_MS")) {
@@ -2084,6 +2384,7 @@ int main(int argc, char **argv)
     }
     if (g_stop) { line_hook(0); gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
     if (line_poll(1) < 0) { gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 1; }
+    if (gui_monitor_only) line_event("monitor_stopped",@{@"reason":@"Call active"});
     gui_monitor_only = 0;
     if (!gui_audio_active && audio_start() < 0) {
         line_hook(0);
