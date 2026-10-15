@@ -12,8 +12,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
 
 #include <spandsp.h>
+
+/* Optional real sample channel. Only this direction crosses the socket;
+ * the opposite waveform retains the ordinary harness bearer. No INFO/MP or
+ * decoder state crosses this seam (V.34 §§10.1/11). */
+static int hardware_fd = -1;
+static bool hardware_answer_direction;
+static int hardware_exchange(int16_t *samples)
+{
+    char *bytes = (char *)samples;
+    for (int direction = 0; direction < 2; direction++) {
+        size_t done = 0;
+        while (done < 160*sizeof(int16_t)) {
+            ssize_t n = direction ? read(hardware_fd,bytes+done,320-done) : write(hardware_fd,bytes+done,320-done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { fprintf(stderr,"Hardware sample channel ended\n"); return -1; }
+            done += (size_t)n;
+        }
+    }
+    return 0;
+}
 
 static bool test_eye_enabled;
 static unsigned eye_phases[2][2];
@@ -613,6 +636,9 @@ static int run_case(int baud, int bps, bool alaw)
                                msg, sizeof(msg)) && msg[0])
                 fprintf(stderr, "[LEC caller] t=%.2f %s\n", block*0.020, msg);
         }
+        if (hardware_fd >= 0 && hardware_exchange(hardware_answer_direction ? call_rx : answer_rx) < 0) {
+            caller.failed = answer.failed = true; break;
+        }
         (void)v34_rx(answer_modem, answer_rx, BLOCK_SAMPLES);
         (void)v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
         span_log_bump_samples(v34_get_logging_state(call_modem), BLOCK_SAMPLES);
@@ -792,6 +818,17 @@ int main(int argc, char *argv[])
     if (argc > 1) baud = atoi(argv[1]);
     if (argc > 2) bps = atoi(argv[2]);
     if (argc > 3) alaw = strcmp(argv[3], "alaw") == 0;
+    const char *fd = getenv("V34_DUPLEX_HARDWARE_FD");
+    if (fd) {
+        char *end; long value = strtol(fd,&end,10);
+        if (!*fd || *end || value < 3 || value > 100000) return 2;
+        hardware_fd = (int)value;
+        hardware_answer_direction = getenv("V34_DUPLEX_HARDWARE_DIRECTION") &&
+            strcmp(getenv("V34_DUPLEX_HARDWARE_DIRECTION"),"answer") == 0;
+        signal(SIGPIPE,SIG_IGN);
+        fprintf(stderr,"Hardware waveform leg: %s; opposite leg is software bearer\n",
+            hardware_answer_direction ? "answer-to-caller" : "caller-to-answer");
+    }
     test_eye_enabled = argc > 4 && strcmp(argv[4], "eye") == 0;
     return run_case(baud, bps, alaw);
 }

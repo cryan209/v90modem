@@ -2646,3 +2646,77 @@ under `artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw/`; all four digit
 law/device combinations passed on the repeat. The intermittent fault remains
 unresolved; an exact self-test failure must not be hidden by an equalizer or
 by dropping/splicing samples.
+
+
+## V.34 through the real loopback (2026-10-16)
+
+`tools/apple_v34_loopback.py` now joins two independent vendored V.34 instances
+through a live Apple waveform leg. It runs full V.34 §§10.1/11 startup,
+negotiation, training and independent PRBS payload comparison, not seeded
+mapper symbols. The harness adds no shared INFO/MP, equalizer or bit state.
+The selected direction crosses CoreAudio TX → DAA loopback → CoreAudio RX;
+the opposite direction remains the ordinary software G.711 bearer. This is a
+one-leg hardware experiment, not two-line/foreign-modem interoperability.
+
+The inherited socket carries only 8000 Hz s16le samples. A fixed 1536-sample
+silent prefix reserves HAL burst headroom and is explicit channel delay.
+Captured device samples pace both software endpoints. Atomic publication
+keeps complete samples visible across callback/control threads, even if the
+socket splits a sample's bytes. The audio callbacks do not wait on sockets.
+The host fails on a TX gap instead of repeating/dropping samples to repair it;
+stream buffers and runtime are bounded. Line-side modes retain the quarter
+TX scale and full register/hook restoration. Analog uses a quiet incoming PBX
+Wait call so the ATA's dial tone does not swamp the waveform.
+
+Initial results, caller-to-answer through hardware unless marked reverse:
+
+| device/path | baud / bit/s | recovered bits caller / answer | errors | result |
+|---|---|---|---|---|
+| 0:13 digital | 2400 / 9600 | 18240 / 16032 | 0 / 0 | pass |
+| 0:14 digital | 2400 / 19200 | 20736 / 16320 | 0 / 0 | pass |
+| 0:13 isolation | 2400 / 9600 | 18240 / 16128 | 0 / 0 | pass |
+| 0:14 isolation | 2400 / 9600 | 18432 / 16160 | 0 / 0 | pass |
+| 0:14 isolation | 2400 / 19200 | 970752 / 0 | 0 / unscorable | fail, 60 s |
+| same, repeat | 2400 / 19200 | 971136 / 0 | 0 / unscorable | fail, 60 s |
+| 0:13 analog | 2400 / 19200 | 20736 / 16256 | 0 / 0 | pass |
+| 0:14 analog, reverse | 2400 / 19200 | 16192 / 18112 | 0 / 0 | pass |
+| 0:13 analog | 3200 / 28800 | 26568 / 16200 | 0 / 0 | pass |
+| 0:13 analog | 3429 / 31200 | 27227 / 16088 | 0 / 0 | pass |
+| 0:13 analog | 3429 / 33600 | 28772 / 16464 | 0 / 158 | fail |
+
+Both endpoints reported training in every row, but training alone is
+insufficient: the two isolation failures never found the receiving payload
+sequence. Their zero error counters must **not** be read as zero BER. At
+33600 the hardware leg synchronized but had 158 bit errors (about 0.96% of
+reported recovered bits). The highest clean analog row observed here is
+31200. These short single-run passes are not long-duration reliability results
+or a proven capacity ceiling. The isolation failure remains unexplained.
+
+All rows had zero host stream gap samples, restored registers and returned
+on-hook. Software controls passed at each tested rate; the 9600 control also
+passed with 1536 samples of delay in both directions. Raw taps, line events,
+modem logs, JSON summaries and control logs live in
+`artifacts/apple-v34-loopback-20261016/`. The failed rows are retained beside
+the passes. This demonstrates why the preceding full-alphabet 64 kbit/s PCM
+probe does not establish V.34 performance: a trained bandlimited modem can
+recover data through that same analog path.
+
+Reproduction (use a fresh output directory):
+
+```sh
+make apple_usb_modem_coupler v34_duplex_test
+python3 tools/apple_v34_loopback.py --address 0:13 --uid 145430 \
+  --mode digital --out artifacts/v34-digital-check
+python3 tools/apple_v34_loopback.py --address 0:13 --uid 145430 \
+  --mode analog --baud 3429 --bps 31200 \
+  --quiet-pbx root@asterisk.net.cryan.nz --extension 6004 \
+  --out artifacts/v34-analog-check
+```
+
+`--direction answer` routes the answerer's waveform through hardware instead.
+The wrapper passes only when the peer succeeds, both receivers recover at
+least 16000 bits with zero errors, transport succeeds, and hook/restoration
+checks pass. Stream transport completion alone is not a modem pass.
+`make gui-apple-test` now includes hardware-free fragmented socket exchanges
+in both directions, a deliberately truncated channel which must fail, and
+invalid descriptor rejection before opening USB.

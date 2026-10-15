@@ -104,6 +104,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <time.h>
@@ -1327,7 +1329,10 @@ static NSString *gui_raw_json(void)
 
 static int loopback_audio_active;
 static int16_t *loopback_samples[2];
-static unsigned loopback_count[2], loopback_capacity;
+static _Atomic unsigned loopback_count[2], loopback_tx_available;
+static unsigned loopback_capacity;
+static int loopback_peer_fd = -1;
+static _Atomic unsigned loopback_stream_gaps;
 
 static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
@@ -1377,7 +1382,9 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
     dev_out_frames += nframes;
     if (loopback_audio_active) {
         unsigned n = nframes;
-        if (n > loopback_capacity-loopback_count[1]) n = loopback_capacity-loopback_count[1];
+        unsigned available = loopback_peer_fd >= 0 ? atomic_load(&loopback_tx_available) : loopback_capacity;
+        if (n > available-loopback_count[1]) n = available-loopback_count[1];
+        if (loopback_peer_fd >= 0 && n < nframes) { loopback_stream_gaps += nframes-n; g_stop = 1; }
         memcpy(out,loopback_samples[1]+loopback_count[1],n*sizeof(int16_t));
         memset(out+n,0,(nframes-n)*sizeof(int16_t));
         loopback_count[1] += n;
@@ -1634,6 +1641,44 @@ static void loopback_save(NSDictionary *value)
     [loopback_last release]; loopback_last = [value retain];
     line_event("loopback_result",value);
 }
+/* A bounded raw s16le stream for the independent V.34 duplex harness.
+ * Prefix silence is an explicit channel delay. Never splice/repeat samples
+ * to repair a gap: count it and fail the transport instead. */
+static int loopback_stream_run(int powered)
+{
+    size_t received = 1536*sizeof(int16_t), sent = 0;
+    int flags = fcntl(loopback_peer_fd,F_GETFL,0);
+    if (flags < 0 || fcntl(loopback_peer_fd,F_SETFL,flags|O_NONBLOCK) < 0) return -1;
+    uint64_t deadline = apple_now_ms()+65000;
+    while (!g_stop && apple_now_ms() < deadline) {
+        size_t room = loopback_capacity*sizeof(int16_t)-received;
+        if (!room) return -1;
+        /* Read into a temporary byte buffer so complete sample publication is
+         * independent of socket fragmentation and quarter-scale TX happens
+         * before the callback can observe those samples. */
+        unsigned char bytes[4096];
+        unsigned want = room < sizeof bytes ? (unsigned)room : (unsigned)sizeof bytes;
+        ssize_t n = recv(loopback_peer_fd,bytes,want,0);
+        if (!n) return received%2 ? -1 : 0;
+        if (n > 0) {
+            memcpy((char *)loopback_samples[1]+received,bytes,(size_t)n);
+            unsigned old = atomic_load(&loopback_tx_available);
+            received += (size_t)n;
+            unsigned complete = (unsigned)(received/2);
+            if (powered) for (unsigned i = old; i < complete; i++) loopback_samples[1][i] /= 4;
+            atomic_store(&loopback_tx_available,complete);
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
+        size_t captured = atomic_load(&loopback_count[0])*sizeof(int16_t);
+        if (captured > sent) {
+            ssize_t written = send(loopback_peer_fd,(char *)loopback_samples[0]+sent,captured-sent,0);
+            if (written > 0) sent += (size_t)written;
+            else if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
+        }
+        if (powered && line_poll(0) < 0) return -1;
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.001,false);
+    }
+    return -1;
+}
 /* Si3056 §5.30: loopbacks are mutually exclusive. Digital/startup stay
  * on-hook; CLI isolation/analog modes seize and calibrate the line-side.
  * Release the line and restore every touched register on every exit. */
@@ -1692,14 +1737,14 @@ static int hardware_loopback(const char *mode)
             }
         } else reason = "Cannot read test registers";
         if (ready) {
-            loopback_capacity = (unsigned)(g_rate*4);
+            loopback_capacity = (unsigned)(g_rate*(loopback_peer_fd >= 0 ? 70 : 4));
             loopback_samples[0] = calloc(loopback_capacity,sizeof(int16_t));
             loopback_samples[1] = calloc(loopback_capacity,sizeof(int16_t));
             if (!loopback_samples[0] || !loopback_samples[1]) { ready = 0; reason = "Cannot allocate test buffers"; }
         }
         if (ready) {
             loopback_count[0] = loopback_count[1] = 0;
-            apple_loop_pattern(loopback_samples[1],loopback_capacity,(unsigned)g_rate);
+            if (loopback_peer_fd < 0) apple_loop_pattern(loopback_samples[1],loopback_capacity,(unsigned)g_rate);
             if (strcmp(loopback_pattern,"prbs")) {
                 uint32_t state = 0x6d56a108u;
                 for (unsigned i = 0; i < loopback_capacity; i++) {
@@ -1711,10 +1756,13 @@ static int hardware_loopback(const char *mode)
             /* §5.30: analog HBE-off needs 12 dB TX headroom. Also leave
              * this margin in IDL to distinguish filter loss from saturation. */
             if (powered) for (unsigned i = 0; i < loopback_capacity; i++) loopback_samples[1][i] /= 4;
+            if (loopback_peer_fd >= 0) { atomic_store(&loopback_tx_available,1536); atomic_store(&loopback_stream_gaps,0); }
             loopback_audio_active = 1;
             gui_status = "On-hook hardware loopback test";
             if (audio_start() < 0) { ready = 0; reason = "CoreAudio test could not start"; }
-            else {
+            else if (loopback_peer_fd >= 0) {
+                if (loopback_stream_run(powered) < 0) { ready = 0; reason = "Sample stream interrupted, timed out or transport failed"; }
+            } else {
                 uint64_t end = apple_now_ms()+3000;
                 while (!g_stop && apple_now_ms() < end) {
                     if (powered && line_poll(0) < 0) break;
@@ -1724,7 +1772,7 @@ static int hardware_loopback(const char *mode)
             }
             gui_audio_stop(); /* joins the callbacks before inspecting buffers */
             loopback_audio_active = 0;
-            if (ready && !g_stop) result = apple_loop_analyze(loopback_samples[1],loopback_count[1],
+            if (ready && !g_stop && loopback_peer_fd < 0) result = apple_loop_analyze(loopback_samples[1],loopback_count[1],
                 loopback_samples[0],loopback_count[0],(unsigned)g_rate);
             if (g_stop) reason = "Test interrupted";
         }
@@ -1737,13 +1785,16 @@ static int hardware_loopback(const char *mode)
         }
         if (reg_write(REG_HOOK,(unsigned char)hook) < 0 || (reg_read(REG_HOOK)&9) != (hook&9)) restored = 0;
         line_poll(1);
-        int passed = ready && !g_stop && restored && result.found &&
+        int stream_pass = loopback_peer_fd >= 0 && ready && !g_stop && restored && !loopback_stream_gaps;
+        int passed = stream_pass || (ready && !g_stop && restored && result.found &&
             (!strcmp(mode,"digital") ? result.mismatches == 0 :
                 powered ? fabs(result.correlation) > 0.5 :
-                result.correlation > 0.8 && result.gain > 0.5 && result.gain < 1.2);
+                result.correlation > 0.8 && result.gain > 0.5 && result.gain < 1.2));
+        if (stream_pass) reason = "Sample stream completed; modem result is reported by peer";
         if (!restored) reason = "Register restoration failed";
         else if (result.found) reason = powered ? "Line-side return measured; sample errors are not a PCM BER" : passed ? "Known pattern returned" : "Return differs from the test pattern";
         loopback_save(@{@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
+            @"stream":@(loopback_peer_fd >= 0),@"stream_tx_samples":@(loopback_count[1]),@"stream_rx_samples":@(loopback_count[0]),@"stream_gap_samples":@(loopback_stream_gaps),
             @"pattern":@(loopback_pattern),@"line_side":@(powered),@"tx_scale":@(powered ? 0.25 : 1.0),
             @"reason":@(reason),@"restored":@(restored),@"frames_compared":@(result.frames),
             @"lag_samples":@(result.lag),@"lag_ms":@(result.lag*1000.0/g_rate),
@@ -2128,6 +2179,7 @@ static void usage(const char *a0)
         "  --loopback-test digital|startup|isolation|analog  hardware loopback\n"
         "               isolation/analog seize the line briefly, then restore it\n"
         "  --loopback-pattern prbs|ulaw|alaw  G.711 requires --rate 8000\n"
+        "  --loopback-peer-fd N  stream s16le to a test peer socket (8000 Hz)\n"
         "  --devices    read-only USB/CoreAudio device inventory as JSON\n"
         "  --diagnostic-selftest  check passive raw taps without hardware\n"
         "  --gui-replay PATH  offline raw RX replay with GUI split consoles\n"
@@ -2357,6 +2409,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pty-link") && i + 1 < argc)   g_pty_link = argv[++i];
         else if (!strcmp(argv[i], "--rx-replay") && i + 1 < argc)   g_replay_path = argv[++i];
         else if (!strcmp(argv[i], "--hook") && i + 1 < argc)        hook_arg = argv[++i];
+        else if (!strcmp(argv[i], "--loopback-peer-fd") && i+1 < argc) {
+            char *end; const char *value = argv[++i]; long fd = strtol(value,&end,10);
+            if (!*value || *end || fd < 3 || fd > INT_MAX) { fprintf(stderr,"Invalid loopback peer descriptor\n"); return 2; }
+            loopback_peer_fd = (int)fd;
+        }
         else if (!strcmp(argv[i], "--loopback-pattern") && i + 1 < argc) loopback_pattern = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc)        g_rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)        hold = atof(argv[++i]);
@@ -2370,18 +2427,27 @@ int main(int argc, char **argv)
         atexit(line_events_close);
     }
     if (cid_replay_path) return cid_replay_file(cid_replay_path);
+    if (loopback_peer_fd >= 0 && !loopback_mode) { fprintf(stderr,"Peer descriptor requires --loopback-test\n"); return 2; }
     if (loopback_mode) {
         signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
         if (strcmp(loopback_mode,"digital") && strcmp(loopback_mode,"startup") && strcmp(loopback_mode,"isolation") && strcmp(loopback_mode,"analog")) { fprintf(stderr,"loopback must be digital, startup, isolation or analog\n"); return 2; }
         if (strcmp(loopback_pattern,"prbs") && strcmp(loopback_pattern,"ulaw") && strcmp(loopback_pattern,"alaw")) { fprintf(stderr,"loopback pattern must be prbs, ulaw or alaw\n"); return 2; }
         if (strcmp(loopback_pattern,"prbs") && g_rate != 8000) { fprintf(stderr,"G.711 symbol testing requires --rate 8000\n"); return 2; }
         if (g_gui_control || g_dial || g_answer_mode || g_replay_path || hook_arg) { fprintf(stderr,"loopback excludes calls and replay\n"); return 2; }
+        if (loopback_peer_fd >= 0) {
+            int type; socklen_t size = sizeof type;
+            if (g_rate != 8000 || loopback_peer_fd < 3 || getsockopt(loopback_peer_fd,SOL_SOCKET,SO_TYPE,&type,&size) < 0 || type != SOCK_STREAM) return 2;
+#ifdef SO_NOSIGPIPE
+            int one = 1; setsockopt(loopback_peer_fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one);
+#endif
+        }
         if (usb_open_line() < 0) return 1;
         int result = hardware_loopback(loopback_mode);
         @autoreleasepool {
             NSData *json = [NSJSONSerialization dataWithJSONObject:loopback_last ?: @{} options:0 error:NULL];
             fwrite(json.bytes,1,json.length,stdout); putchar('\n');
         }
+        if (loopback_peer_fd >= 0) close(loopback_peer_fd);
         libusb_close(usb); libusb_exit(NULL); return result;
     }
     if (getenv("APPLE_MODEM_TX_AMP"))  tx_amp = atof(getenv("APPLE_MODEM_TX_AMP"));

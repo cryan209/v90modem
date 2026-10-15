@@ -477,3 +477,15 @@ not selected by the GUI button. Score saved raw taps with
 `tools/apple_pcm_loopback_report.py <capture-directory>` (NumPy required).
 See `docs/apple_usb_modem_sm56.md` for measured results and the intermittent
 digital packet-mixing failure retained from this test series.
+
+
+For a real V.34 training/payload loopback, use
+`tools/apple_v34_loopback.py --address <USB> --uid <audio UID> --mode digital --out <new directory>`.
+It tests one direction through the hardware and leaves the reverse direction
+in software. Analog tests additionally need a quiet established call; the
+helper's explicit `--quiet-pbx` / `--extension` options can create the bounded
+lab call. Results include both receivers' training, recovered bits and error
+counts, plus transport gaps and restoration status. The current analog tests
+were clean through 31200 bit/s; 33600 trained with errors. Details and retained
+failures are in `docs/apple_usb_modem_sm56.md`. The GUI button remains the
+short on-hook sample self-test.

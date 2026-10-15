@@ -335,7 +335,7 @@ v32bis-test: v32bis_spandsp_test v32bis_duplex_test v32bis-ref-test v32bis-datap
 gui-smoke-test: $(TARGET)
 	python3 tools/gui_smoke_test.py
 
-gui-apple-test: apple_usb_modem_coupler
+gui-apple-test: apple_usb_modem_coupler v34_duplex_test
 	python3 tools/run_tests.py --logdir test-logs/apple tests/apple.list
 
 gui-spectrum-test:

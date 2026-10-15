@@ -3,3 +3,4 @@
 ./apple_usb_modem_coupler --diagnostic-selftest
 python3 tools/apple_cid_test.py
 python3 tools/gui_apple_test.py
+python3 tools/apple_v34_stream_test.py

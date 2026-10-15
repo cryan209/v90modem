@@ -485,6 +485,8 @@ the tools' command lines; listed here so nothing reads an environment silently.
 | `APPLE_MODEM_ADDR` | apple_usb_modem_probe.c | sdh |
 | `APPLE_MODEM_INDEX` | apple_usb_modem_probe.c | - |
 | `APPLE_MODEM_LINE_EVENTS` | tools/apple_usb_modem_coupler.m | Diagnostic: append timestamped line events as JSONL; 2 MiB rotation plus one backup. |
+| `V34_DUPLEX_HARDWARE_FD` | v34_duplex_test.c | Diagnostic: inherited raw sample socket for one hardware waveform leg; set by apple_v34_loopback.py. |
+| `V34_DUPLEX_HARDWARE_DIRECTION` | v34_duplex_test.c | Diagnostic: caller (default) or answer transmitter crosses the hardware leg. |
 | `BELL212A_TRACE` | bell212a_test.c | t |
 | `CHAIN_DMODEM_UP` | v92_slm_chain_test.c | td |
 | `DM_HYBRID_HEADROOM` | d-modem.c | - |
