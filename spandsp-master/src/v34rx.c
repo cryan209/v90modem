@@ -13210,22 +13210,22 @@ static int64_t v90_t3_4point_end(const v34_rx_state_t *s,
    decisions are unambiguous.  So train the same filter on that, find where
    the 4-point signal stops, and start data there.  Returns the raw index of
    the first B1 symbol, or -1. */
-static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
-                                    complexf_t coeff[V34_V90_T3_FSE_TAPS])
+enum { V90_T3_BLIND_TRAIN = 600, V90_T3_BLIND_LOOKAHEAD = 96 };
+
+/* First half of v90_t3_blind_acquire(), in a packet of its own: train well
+   clear of E and find roughly where the 4-point signal ends.  Returns that
+   raw index, or -1. */
+static int64_t v90_t3_blind_locate(v34_rx_state_t *s)
 {
-    enum { TRAIN = 600, LOOKAHEAD = 96 };
+    enum { TRAIN = V90_T3_BLIND_TRAIN, LOOKAHEAD = V90_T3_BLIND_LOOKAHEAD };
     int pre = V34_V90_T3_FSE_TAPS/2;
     int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
     int64_t limit = s->v90_t3_e_anchor + 3*LOOKAHEAD;
     int64_t base;
     int64_t end;
-    int64_t qend;
-    int64_t first = -1;
     complexf_t w[V34_V90_T3_FSE_TAPS];
     int phase = 0;
     float err;
-    double target_power = 0.0;
-    float scale;
 
     if (oldest < pre + 4)
         oldest = pre + 4;
@@ -13237,7 +13237,30 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     err = v90_t3_train_4point(s, base, end, w, &phase);
     if (err > 0.05f)
         return -1;
-    qend = v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
+    return v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
+}
+/*- End of function --------------------------------------------------------*/
+
+static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
+                                    int64_t qend,
+                                    complexf_t coeff[V34_V90_T3_FSE_TAPS])
+{
+    enum { TRAIN = V90_T3_BLIND_TRAIN, LOOKAHEAD = V90_T3_BLIND_LOOKAHEAD };
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
+    int64_t limit = s->v90_t3_e_anchor + 3*LOOKAHEAD;
+    int64_t base;
+    int64_t end;
+    int64_t first = -1;
+    complexf_t w[V34_V90_T3_FSE_TAPS];
+    int phase = 0;
+    float err;
+    double target_power = 0.0;
+    float scale;
+
+    if (oldest < pre + 4)
+        oldest = pre + 4;
+    /* qend is v90_t3_blind_locate()'s, from the packet before. */
     if (qend < 0)
         return -1;
     end = qend - 3*4;
@@ -13333,6 +13356,8 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     return first;
 }
 /*- End of function --------------------------------------------------------*/
+
+static bool b1_template_skip_cma;
 
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
@@ -13449,9 +13474,11 @@ search:
     /* The 4-point training goes FIRST, though it is only used if no template
        fits: it trains on the CP'/E just before E, and the raw ring holds
        only 0.85 s, so after the template steps below that signal would be
-       gone.  It needs the MP template built (for the constellation's power),
-       and each takes a packet. */
-    if (s->v90_t3_srch_blind_stage < 2)
+       gone.  It needs the MP template built (for the constellation's power);
+       that, locating the end of the 4-point signal and the training proper
+       take a packet each (8 ms together here, 21-25 ms on the slower live
+       host, which still moved the far end's playout 10 ms). */
+    if (s->v90_t3_srch_blind_stage != 2)
     {
         if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
             return;
@@ -13464,17 +13491,30 @@ search:
             return;
         }
         /*endif*/
+        if (s->v90_t3_srch_blind_stage == 1)
+        {
+            s->v90_t3_srch_blind_first = v90_t3_blind_locate(s);
+            s->v90_t3_srch_blind_stage = (s->v90_t3_srch_blind_first >= 0)  ?  3  :  2;
+            if (s->v90_t3_srch_blind_stage == 2)
+                s->v90_t3_blind_tried = true;
+            /*endif*/
+            return;
+        }
+        /*endif*/
         s->v90_t3_blind_tried = true;
-        s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_coeff);
+        s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_first,
+                                                          s->v90_t3_srch_blind_coeff);
         s->v90_t3_srch_blind_stage = 2;
         return;
     }
     /*endif*/
-    /* One step per packet: building a template is about 5 ms and fitting it
-       about 6, and six of each back to back plus the commit below were a
-       single 120 ms media callback (see V34_V90_T3_ACQ_STEP_GAP).  Even a
-       29 ms one moved the far end's playout 15 ms live (rf-mini-20261016),
-       so the build and the pass take a packet each. */
+    /* One template per packet: six of them back to back plus the commit
+       below were a single 120 ms media callback (see
+       V34_V90_T3_ACQ_STEP_GAP), and even a 29 ms one moved the far end's
+       playout 15 ms live (rf-mini-20261016).  But no more packets than
+       needed: B1 itself must still be in the raw ring at the commit, and the
+       search only starts some 5200 samples after it, which leaves about
+       fifteen packets of 192. */
     {
         int trellis_count = s->v90_mode ? 3 : 1;
         /* Courier B1A1 -> A71B retains the MP expanded-shaping bit;
@@ -13494,22 +13534,10 @@ search:
                 return;
             /*endif*/
             s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
-            if (!s->v90_t3_srch_built)
-            {
-                if (s->x2_mode)
-                    v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
-                /*endif*/
-                if (v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
-                                                      s->v90_mode ? tr : -1, 0))
-                    s->v90_t3_srch_built = true;
-                else
-                    s->v90_t3_srch_step++;
-                /*endif*/
-                continue;
-            }
-            /*endif*/
-            s->v90_t3_srch_built = false;
             s->v90_t3_srch_step++;
+            if (s->x2_mode)
+                v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
+            /*endif*/
             {
                 complexf_t coeff[V34_V90_T3_FSE_TAPS];
                 int64_t first = 0;
@@ -13517,7 +13545,17 @@ search:
                 float coarse = 0.0f;
                 float match;
                 int trellis = s->v90_mode ? tr : -1;
+                bool built;
 
+                /* Without the constellation's power: that is a 32000-symbol
+                   run of the mapper, nearly all of a build's 5 ms, and only
+                   the template finally loaded below needs it. */
+                b1_template_skip_cma = true;
+                built = v34_build_expected_b1_tap_trellis(s, candidate_tap[t], trellis, 0);
+                b1_template_skip_cma = false;
+                if (!built)
+                    continue;
+                /*endif*/
                 match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
                                             &first, &conjugate, &coarse);
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,

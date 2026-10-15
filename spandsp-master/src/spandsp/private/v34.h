@@ -1634,12 +1634,14 @@ typedef struct
         for, the window it searches, and the best fit so far. */
     bool v90_t3_srch_running;
     int v90_t3_srch_step;
-    /*! The template for this step (or, after the search, the MP template the
-        4-point training needs) was built in an earlier packet. */
+    /*! After the search: the template the data decoder will reuse (the
+        winner's, or the MP one for a 4-point-trained acquisition) has been
+        loaded, in a packet of its own. */
     bool v90_t3_srch_built;
     /*! The 4-point-trained acquisition, run before the templates while its
         training signal is still in the raw ring: 0 = MP template not built,
-        1 = built, 2 = done or not wanted; its B1 start (-1 = none) and taps. */
+        1 = built, 3 = end of the 4-point signal located (held in _first),
+        2 = done or not wanted; its B1 start (-1 = none) and taps. */
     int v90_t3_srch_blind_stage;
     int64_t v90_t3_srch_blind_first;
     complexf_t v90_t3_srch_blind_coeff[V34_V90_T3_FSE_TAPS];
