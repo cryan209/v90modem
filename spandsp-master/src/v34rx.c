@@ -13359,6 +13359,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     int best_trellis = -1;
     bool best_expanded = s->parms.expanded_shaping;
     bool blind = false;
+    bool want_blind;
     int mp_tap = v34_expected_b1_default_tap(s);
     int mp_trellis = s->v90_t3_trellis_size;
     /* 6.5/V.90 puts GPA on the analogue modem's upstream, but slmodemd
@@ -13414,6 +13415,11 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_acquisition_attempted = true;
     s->v90_t3_srch_running = true;
     s->v90_t3_srch_step = 0;
+    s->v90_t3_srch_built = false;
+    s->v90_t3_srch_blind_first = -1;
+    s->v90_t3_srch_blind_stage =
+        (!s->v90_t3_blind_tried  &&  !s->x2_mode
+         &&  !V34_DIAG_GETENV("ME_V90_T3_NO_BLIND"))  ?  0  :  2;
     s->v90_t3_srch_step_at = s->v90_t3_raw_count;
     s->v90_t3_srch_start = search_start;
     s->v90_t3_srch_end = search_end;
@@ -13440,9 +13446,35 @@ search:
     /* The upstream trellis is the other thing this template has to guess:
        nothing the peer sends states it, and a wrong convolutional code makes
        B1 as uncorrelated as a wrong scrambler does. */
-    /* One template per call, at most one call per packet: each pass is about
-       6 ms, and six of them back to back plus the commit below were a single
-       120 ms media callback (see V34_V90_T3_ACQ_STEP_GAP). */
+    /* The 4-point training goes FIRST, though it is only used if no template
+       fits: it trains on the CP'/E just before E, and the raw ring holds
+       only 0.85 s, so after the template steps below that signal would be
+       gone.  It needs the MP template built (for the constellation's power),
+       and each takes a packet. */
+    if (s->v90_t3_srch_blind_stage < 2)
+    {
+        if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
+            return;
+        /*endif*/
+        s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+        if (s->v90_t3_srch_blind_stage == 0)
+        {
+            (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+            s->v90_t3_srch_blind_stage = 1;
+            return;
+        }
+        /*endif*/
+        s->v90_t3_blind_tried = true;
+        s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_coeff);
+        s->v90_t3_srch_blind_stage = 2;
+        return;
+    }
+    /*endif*/
+    /* One step per packet: building a template is about 5 ms and fitting it
+       about 6, and six of each back to back plus the commit below were a
+       single 120 ms media callback (see V34_V90_T3_ACQ_STEP_GAP).  Even a
+       29 ms one moved the far end's playout 15 ms live (rf-mini-20261016),
+       so the build and the pass take a packet each. */
     {
         int trellis_count = s->v90_mode ? 3 : 1;
         /* Courier B1A1 -> A71B retains the MP expanded-shaping bit;
@@ -13461,11 +13493,23 @@ search:
             if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
                 return;
             /*endif*/
-            s->v90_t3_srch_step++;
             s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
-            if (s->x2_mode)
-                v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
+            if (!s->v90_t3_srch_built)
+            {
+                if (s->x2_mode)
+                    v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
+                /*endif*/
+                if (v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
+                                                      s->v90_mode ? tr : -1, 0))
+                    s->v90_t3_srch_built = true;
+                else
+                    s->v90_t3_srch_step++;
+                /*endif*/
+                continue;
+            }
             /*endif*/
+            s->v90_t3_srch_built = false;
+            s->v90_t3_srch_step++;
             {
                 complexf_t coeff[V34_V90_T3_FSE_TAPS];
                 int64_t first = 0;
@@ -13474,10 +13518,6 @@ search:
                 float match;
                 int trellis = s->v90_mode ? tr : -1;
 
-                if (!v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
-                                                       trellis, 0))
-                    continue;
-                /*endif*/
                 match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
                                             &first, &conjugate, &coarse);
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -13500,12 +13540,12 @@ search:
             }
         }
     }
-    /* What follows -- the 4-point training, the out-of-sample check and the
-       commit -- gets a packet of its own too. */
+    /* What follows gets packets of its own too: loading the template the
+       decoder will use (a build), then the 4-point training, the
+       out-of-sample check and the commit. */
     if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
         return;
     /*endif*/
-    s->v90_t3_srch_running = false;
     best_match = s->v90_t3_srch_match;
     best_coarse = s->v90_t3_srch_coarse;
     best_first = s->v90_t3_srch_first;
@@ -13514,18 +13554,39 @@ search:
     best_trellis = s->v90_t3_srch_trellis;
     best_expanded = s->v90_t3_srch_expanded;
     memcpy(best_coeff, s->v90_t3_srch_coeff, sizeof(best_coeff));
-    /* Leave the winning template loaded; the data decoder reuses its state. */
-    if (best_tap)
+    /* No template fits a peer that does not reset its scrambler before B1
+       (10.1.3.1/V.34); it is then trained on the 4-point signal before B1
+       instead -- done above, before the templates.  See
+       v90_t3_blind_acquire(). */
+    want_blind = best_match < 0.95f  &&  s->v90_t3_srch_blind_first >= 0;
+    /* Load the template the data decoder will reuse: the winner's, or with
+       none winning, 6.5/V.90's GPA tap and the trellis our MP selected. */
+    if (!s->v90_t3_srch_built  &&  (want_blind  ||  best_tap))
     {
-        if (s->x2_mode)
-            v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, best_expanded);
-        (void)v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
-        s->v90_far_tap_measured = best_tap;
-        if (best_trellis >= 0)
-            s->v90_t3_trellis_size = best_trellis;
+        if (want_blind)
+        {
+            s->v90_far_tap_measured = mp_tap;
+            s->v90_t3_trellis_size = mp_trellis;
+            (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+        }
+        else
+        {
+            if (s->x2_mode)
+                v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, best_expanded);
+            /*endif*/
+            (void) v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
+            s->v90_far_tap_measured = best_tap;
+            if (best_trellis >= 0)
+                s->v90_t3_trellis_size = best_trellis;
+            /*endif*/
+        }
         /*endif*/
+        s->v90_t3_srch_built = true;
+        s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+        return;
     }
     /*endif*/
+    s->v90_t3_srch_running = false;
 
     /* Dense high-rate B1 can produce a superficially plausible least-squares
        solution which does not generalise into DATA.  Require a near-exact
@@ -13538,25 +13599,13 @@ search:
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
                  100.0f*best_match, best_tap, best_trellis);
-        /* No template fits a peer that does not reset its scrambler before
-           B1 (10.1.3.1/V.34); train on the 4-point signal before it
-           instead.  See v90_t3_blind_acquire(). */
-        if (!s->v90_t3_blind_tried  &&  !s->x2_mode
-            &&  !V34_DIAG_GETENV("ME_V90_T3_NO_BLIND"))
+        if (want_blind)
         {
-            int64_t first;
-
-            s->v90_t3_blind_tried = true;
-            /* The template search above left its best guesses behind; with
-               no template matching, the tap is 6.5/V.90's GPA and the
-               trellis is the one our MP selected. */
-            s->v90_far_tap_measured = mp_tap;
-            s->v90_t3_trellis_size = mp_trellis;
-            (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
-            first = v90_t3_blind_acquire(s, best_coeff);
-            if (first >= 0)
+            /* Trained before the templates, and the MP template reloaded a
+               packet ago, above. */
             {
-                best_first = first;
+                memcpy(best_coeff, s->v90_t3_srch_blind_coeff, sizeof(best_coeff));
+                best_first = s->v90_t3_srch_blind_first;
                 best_conjugate = false;
                 best_match = 0.0f;
                 best_tap = mp_tap;
