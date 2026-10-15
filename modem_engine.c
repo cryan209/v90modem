@@ -39,6 +39,7 @@
 #include "v92_analogue_phase3.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
+#include "v90_analogue_pr4.h"
 #include "v90_analogue_sd.h"
 #include "v90_sounder.h"
 #include "v90_dil_presets.h"
@@ -3042,6 +3043,8 @@ static v90a_linear_t *g_v90a_linear = NULL;
  * digital bearer, where there is nothing to equalise.
  */
 static v90a_fse_t *g_v90a_fse = NULL;
+/* Phase 4's detector: 1 - D^2 equaliser and Viterbi (v90_analogue_pr4.h). */
+static v90a_pr4_t *g_v90a_pr4 = NULL;
 /* Set by the first me_rx_v90a_16k() of a call.  The 8 kHz path then stops
  * slicing: the two would otherwise feed the same receiver twice, once well and
  * once badly. */
@@ -3117,6 +3120,9 @@ static int      g_v90a_dil_seq_len = 0;
 /* The equaliser is held FROZEN over a periodic or untrustworthy stretch
  * (me_v90a_adapt_policy_locked()); false once it is adapting again. */
 static bool     g_v90a_fse_held = false;
+/* The Phase 4 detector has been told to train (me_v90a_pr4_locked()). */
+static bool     g_v90a_pr4_training = false;
+static int      g_v90a_pr4_stage = -1;
 /*
  * The equaliser's unit modulus, in the slicer's input units.  Arbitrary -- it
  * cancels out of the calibration -- so it is chosen for headroom: §8.4.4's Sd
@@ -3130,6 +3136,12 @@ static bool     g_v90a_fse_held = false;
 #define V90A_DD_AFTER_TRN1D  4000
 #define V90A_LS_SYMBOLS      3000
 #define V90A_LS_PASSES       3
+/* The Phase 4 detector (me_v90a_pr4_locked()): T/2 taps, decision delays
+ * tried, traceback per interleave, and TRN1d symbols it trains on. */
+#define V90A_PR4_TAPS        64
+#define V90A_PR4_DMAX        24
+#define V90A_PR4_DEPTH       24
+#define V90A_PR4_TRAIN       5000
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
@@ -6429,6 +6441,8 @@ static void cleanup_v34_v90_training_locked(void)
         g_v90a_linear = NULL;
         v90a_fse_free(g_v90a_fse);
         g_v90a_fse = NULL;
+        v90a_pr4_free(g_v90a_pr4);
+        g_v90a_pr4 = NULL;
         g_v90a_16k = false;
         g_v90a_ladder_set = false;
         g_v90a_sd_fill = 0;
@@ -6445,6 +6459,8 @@ static void cleanup_v34_v90_training_locked(void)
         g_v90a_p4_slicer = false;
         g_v90a_dil_seq_len = 0;
         g_v90a_fse_held = false;
+        g_v90a_pr4_training = false;
+        g_v90a_pr4_stage = -1;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -6784,6 +6800,8 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         g_v90a_linear = NULL;
         v90a_fse_free(g_v90a_fse);
         g_v90a_fse = NULL;
+        v90a_pr4_free(g_v90a_pr4);
+        g_v90a_pr4 = NULL;
         g_v90a_16k = false;
         g_v90a_ladder_set = false;
         g_v90a_sd_fill = 0;
@@ -6800,6 +6818,8 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         g_v90a_p4_slicer = false;
         g_v90a_dil_seq_len = 0;
         g_v90a_fse_held = false;
+        g_v90a_pr4_training = false;
+        g_v90a_pr4_stage = -1;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -16140,6 +16160,110 @@ static bool me_v90a_dil_decision_locked(double *decision)
 }
 
 /*
+ * The Phase 4 detector's candidate set for absolute symbol `index`: what the
+ * Phase 4 receiver says can arrive that many codewords after the next one it
+ * consumes, both signs, in the equaliser's units.
+ */
+static int me_v90a_pr4_set(void *user, int64_t index, double *levels,
+                           uint8_t *codewords, int max)
+{
+    const v90_analogue_phase4_t *p4;
+    uint8_t ucodes[128];
+    v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    int64_t ahead;
+    int n, m = 0;
+
+    (void) user;
+    p4 = (g_v90a != NULL) ? v90_analogue_phase3_phase4_state(g_v90a) : NULL;
+    if (p4 == NULL)
+        return 0;
+    ahead = index - v90a_pr4_next_index(g_v90a_pr4);
+    if (ahead < 0)
+        ahead = 0;
+    n = v90_analogue_phase4_ucodes_ahead(p4, (int) ahead, ucodes, 128);
+    for (int i = 0; i < n  &&  m + 2 <= max; i++) {
+        double lvl = v90a_linear_ucode_level(g_v90a_linear, ucodes[i])/V90A_FSE_SCALE;
+
+        levels[m] = lvl;
+        codewords[m++] = v90_codeword_compose(law, ucodes[i], 1);
+        if (ucodes[i] != 0) {
+            levels[m] = -lvl;
+            codewords[m++] = v90_codeword_compose(law, ucodes[i], 0);
+        }
+    }
+    return m;
+}
+
+/*
+ * Partial-response detection for Phase 4 (v90_analogue_pr4.h), once per
+ * symbol with this symbol's slicer decision.  Returns true when the
+ * codewords are the detector's -- the caller then must not deliver its own.
+ *
+ * The loop's nulls at DC and 4000 Hz are what decision feedback could only
+ * cross by regenerating the lost energy from past decisions, and on this line
+ * its dominant feedback tap is ~1.9: one wrong decision cascades (v90-dfe3:
+ * exact for 1319 symbols of TRN2d, then 41%).  Equalising to s[k] - s[k-2]
+ * crosses neither null, and the Viterbi carries the memory instead of
+ * feeding decisions back.  Offline on v90-dfe2, trained on TRN1d: no errors in
+ * 8000 symbols of TRN2d/MP.
+ *
+ * Trained on TRN1d once the main equaliser's least-squares passes have made
+ * its decisions certain (two of them is enough: 34 dB on two points far apart);
+ * started at Phase 4's first symbol.  Phase 3 never sees it.
+ */
+static bool me_v90a_pr4_locked(double decision)
+{
+    if (g_v90a_pr4 == NULL  ||  g_v90a == NULL)
+        return false;
+    if (!v90a_pr4_trained(g_v90a_pr4)) {
+        if (!g_v90a_pr4_training
+            &&  v90a_fse_ls_solved(g_v90a_fse) >= 2
+            &&  v90_analogue_phase3_rx_stage(g_v90a) == V90A_RX_TRN1D) {
+            v90a_pr4_train(g_v90a_pr4, V90A_PR4_TRAIN);
+            g_v90a_pr4_training = true;
+        }
+        v90a_pr4_symbol(g_v90a_pr4, decision);
+        if (g_v90a_pr4_training  &&  v90a_pr4_trained(g_v90a_pr4))
+            ME_LOG("[ME] V.90 analogue: 1 - D^2 detector trained on TRN1d: "
+                   "decision delay %d, fit %.1f dB\n",
+                   v90a_pr4_delay(g_v90a_pr4), v90a_pr4_train_snr_db(g_v90a_pr4));
+        return false;
+    }
+    if (!v90a_pr4_running(g_v90a_pr4)) {
+        if (v90_analogue_phase3_phase4_state(g_v90a) == NULL) {
+            v90a_pr4_symbol(g_v90a_pr4, decision);
+            return false;
+        }
+        v90a_pr4_start(g_v90a_pr4, v90a_pr4_symbols(g_v90a_pr4),
+                       me_v90a_pr4_set, NULL);
+        ME_LOG("[ME] V.90 analogue: Phase 4 codewords from the 1 - D^2 "
+               "detector from symbol %lld\n",
+               (long long) v90a_pr4_symbols(g_v90a_pr4));
+    }
+    v90a_pr4_symbol(g_v90a_pr4, decision);
+    {
+        uint8_t cw;
+
+        /* One at a time: a codeword can change what the Phase 4 receiver
+         * knows about the symbols after it, and the detector's undecided
+         * ones are then re-decided before the next is taken. */
+        while (v90a_pr4_take(g_v90a_pr4, &cw, 1) == 1) {
+            const v90_analogue_phase4_t *p4;
+            int stage;
+
+            me_v90_analogue_rx_codewords_locked(&cw, 1);
+            p4 = (g_v90a != NULL) ? v90_analogue_phase3_phase4_state(g_v90a) : NULL;
+            stage = (p4 != NULL) ? (int) v90_analogue_phase4_stage(p4) : -1;
+            if (stage != g_v90a_pr4_stage) {
+                g_v90a_pr4_stage = stage;
+                v90a_pr4_resync(g_v90a_pr4);
+            }
+        }
+    }
+    return true;
+}
+
+/*
  * Adapt only where a decision can be trusted AND the signal is not periodic.
  *
  * §8.6.4's Ri is + + + − − − on one level, period six, for as long as the
@@ -16293,6 +16417,7 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
             if (t2)
                 fwrite(amp + offset, sizeof(amp[0]), 1, t2);
         }
+        v90a_pr4_sample(g_v90a_pr4, amp[offset]);
         if (v90a_fse_put(g_v90a_fse, amp + offset, 1, syms, 2) < 1)
             continue;
         sym = syms[0];
@@ -16346,7 +16471,10 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
             double dec = v90a_linear_last_decision(g_v90a_linear)/V90A_FSE_SCALE;
             double tol = v90a_linear_last_tolerance(g_v90a_linear)/V90A_FSE_SCALE;
 
-            me_v90_analogue_rx_codewords_locked(&codeword, 1);
+            /* From Phase 4 on the codewords come from the 1 - D^2 detector,
+             * not from this slicer (me_v90a_pr4_locked()). */
+            if (!me_v90a_pr4_locked(dec))
+                me_v90_analogue_rx_codewords_locked(&codeword, 1);
             /* Every symbol's decision goes back: DD adapts on it, and the
              * feedback taps need it in every mode.  In the DIL it is the
              * symbol this side asked for, not a decision. */
@@ -16404,6 +16532,9 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
          */
         v90a_fse_set_feedback(g_v90a_fse,
                               parse_env_int("ME_V90A_DFE_TAPS", V90A_DFE_TAPS));
+        /* ME_V90A_PR4=0 leaves Phase 4 on the equaliser's own slicer. */
+        if (parse_env_int("ME_V90A_PR4", 1) != 0)
+            g_v90a_pr4 = v90a_pr4_init(V90A_PR4_TAPS, V90A_PR4_DMAX, V90A_PR4_DEPTH);
         /*
          * FROZEN, not CMA.  The first thing on the line is §8.4.4's Sd, which
          * is not constant modulus -- four slots at W and two at zero -- so the

@@ -158,6 +158,83 @@ int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
     return n;
 }
 
+/* OR the receive mask of `cp` at frame slot `slot` into `on`. */
+static void or_slot_mask(const vpcm_cp_frame_t *cp, int slot, bool on[128])
+{
+    int c = cp->dfi[slot];
+    const uint8_t *mask;
+
+    if (c >= cp->constellation_count)
+        return;
+    mask = cp->codec_constellations_differ ? cp->codec_masks[c] : cp->masks[c];
+    for (int u = 0; u < 128; u++)
+        if (vpcm_cp_mask_get(mask, u))
+            on[u] = true;
+}
+
+int v90_analogue_phase4_ucodes_ahead(const v90_analogue_phase4_t *s, int ahead,
+                                     uint8_t *out, int capacity)
+{
+    bool on[128] = {false};
+    const vpcm_cp_frame_t *training;
+    int n = 0;
+
+    if (!s || !out || capacity < 128 || ahead < 0)
+        return 0;
+    training = s->renegotiation_training ? &s->cfg.cp : &s->cfg.cpt;
+    switch (s->stage) {
+    case V90A4_RX_HUNT_R:
+    case V90A4_RX_R:
+        /* §8.6.4: Ri, and then R̄i, on U_INFO.  When R̄i is found the frame
+         * grid is known, and a delayed detector must be told (its symbols
+         * past R̄i were decided against this). */
+        on[s->cfg.u_info & 0x7F] = true;
+        break;
+    case V90A4_RX_R_BAR: {
+        int remaining = R_BAR_SYMBOLS - s->r_bar_symbols;
+
+        if (ahead < remaining)
+            on[s->cfg.u_info & 0x7F] = true;
+        else
+            or_slot_mask(training, (ahead - remaining)%6, on);
+        break;
+    }
+    case V90A4_RX_TRN2D:
+        /* §8.6.5: TRN2d is mapped through CPt, and MP follows on CPt. */
+        or_slot_mask(training, (s->frame_fill + ahead)%6, on);
+        break;
+    case V90A4_RX_MP:
+        /*
+         * MP and Ed are CPt (§8.6.2, §8.6.3), but B1d is CP (§8.6.1) and
+         * starts 12 symbols after Ed -- which a delayed detector reaches long
+         * before this receiver has seen Ed.  Offering only CPt there was a
+         * deadlock: B1d's CP-only points had no candidate, the 1 - D^2 path
+         * through them corrupted Ed behind them, Ed was never recognised and
+         * CP never came in (v90-dfe4 attempt 1, replayed).  So both here; the
+         * stage change at Ed narrows it to CP.
+         */
+        or_slot_mask(training, (s->frame_fill + ahead)%6, on);
+        or_slot_mask(&s->cfg.cp, (s->frame_fill + ahead)%6, on);
+        break;
+    case V90A4_RX_B1D:
+    case V90A4_RX_DATA:
+        or_slot_mask(&s->cfg.cp, (s->frame_fill + ahead)%6, on);
+        break;
+    default:
+        /* §9.6's Rd/R̄d and their training: everything that can arrive. */
+        on[s->cfg.u_info & 0x7F] = true;
+        for (int slot = 0; slot < 6; slot++) {
+            or_slot_mask(&s->cfg.cpt, slot, on);
+            or_slot_mask(&s->cfg.cp, slot, on);
+        }
+        break;
+    }
+    for (int u = 0; u < 128; u++)
+        if (on[u])
+            out[n++] = (uint8_t) u;
+    return n;
+}
+
 static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
 {
     int sign;

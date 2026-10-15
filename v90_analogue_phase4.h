@@ -133,6 +133,17 @@ int v90_analogue_phase4_trn2d_symbols(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
                                       uint8_t *out, int capacity);
 
+/*
+ * Every Ucode that can arrive `ahead` codewords after the next one this
+ * receiver will consume, as far as it knows now -- for a detector that decides
+ * with delay (v90_analogue_pr4.h) and so must name a symbol's candidates
+ * before this receiver has seen the codewords in between.  The answer changes
+ * when the stage does (R̄i found fixes TRN2d's grid; Ed passed brings in CP),
+ * and the detector re-decides its pending symbols then.  capacity must be 128.
+ */
+int v90_analogue_phase4_ucodes_ahead(const v90_analogue_phase4_t *s, int ahead,
+                                     uint8_t *out, int capacity);
+
 int v90_analogue_phase4_mp_frames(const v90_analogue_phase4_t *s);
 /* The most recent MP that passed Table 16's structure and CRC, or NULL. */
 const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s);

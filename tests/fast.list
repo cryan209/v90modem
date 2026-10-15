@@ -56,6 +56,7 @@
 ./line_monitor_test
 ./v250_ctl_test
 ./near_echo_test
+./v90_analogue_pr4_test
 ./at_test_test
 ./clear_channel_test
 # The rows that recover payload without a single bit error.  Every rate that

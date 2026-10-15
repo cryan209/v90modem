@@ -2133,3 +2133,79 @@ remedies are transmitter-side shaping of the 4000 Hz energy (§5.4.5 spectral
 shaping, requested in CP) or a reduced-state sequence detector over the
 postcursor.  Excluding the smallest Ucodes from CP would make the first error
 rarer, but not survivable.
+
+### Phase 4 to data mode: a 1 - D^2 detector instead of decision feedback (2026-10-15)
+
+The previous section ended on decision feedback that cascades on one error
+(b2 = 1.93).  Three findings and a different receiver.
+
+**The cascade is the channel, not a bad decision delay.**  Every decision delay
+gives an unstable feedback filter (b max 1.4-2.3, all unstable); the best SNRs
+have the largest lag-2 tap.  Fitting the line's T/2 response from TRN1d against
+the server's tap (residual sigma 11.9, the floor) shows why.  It is **flat from
+300 to 3400 Hz with a null at DC (-33 dB, -9 dB at 100 Hz) and another at
+4000 Hz (-61 dB)**.  Feedback has to regenerate both missing bands from past
+decisions.
+
+**§5.4.5 spectral shaping is not enough on its own.**  The shaper (implemented
+on our digital side in v90.c and validated live against SmartLink) can be
+pointed at both nulls by requesting a1 = -1, a2 = +1 in CP.  The analogue side
+never set these; with all four zero, F = 1 and the metric Σx² does not depend
+on the signs.  Simulated through the measured channel with the server's real
+TRN2d constellations: at Sr = 3 the 4000 Hz share falls from 1.5% to 0.06%,
+but a forward-only equaliser only rises from 11.8 to 20.8 dB, and a DFE still
+cascades.
+
+**But "flat with nulls at DC and Nyquist" is partial response class IV, 1 - D².**
+Equalise to z[k] = s[k] - s[k-2] instead of to the symbols, and no null has to
+be inverted.  Forward-only taps reach 36.5 dB at 64 taps and 41.9 dB at 128,
+against 12-16 dB to the symbols, 1 - D or 1 + D.  Then detect with a Viterbi
+over the known memory instead of feeding decisions back.  1 - D² is two
+interleaved 1 - D channels, each a trellis whose state is the previous symbol
+on that interleave.  Offline, trained on TRN1d, run over 8000 symbols of
+TRN2d/MP: **zero symbol errors** at a traceback of 16 per interleave (25
+errors at 8: a 1 - D trellis has near-invisible constant-offset error events).
+
+**`v90_analogue_pr4.c`** (new; `v90_analogue_pr4_test`): a 64-tap T/2 equaliser
+to 1 - D², trained by least squares on 5000 symbols of TRN1d against the main
+path's decisions.  It picks the best decision delay (one Cholesky, a solve per
+delay), then runs a two-interleave Viterbi with traceback 24.  The engine uses
+it from Phase 4's first symbol; Phase 3 and the DIL are untouched.  The engine
+asks for each symbol's candidates through `v90_analogue_phase4_ucodes_ahead()`:
+U_INFO in Ri, the R̄i count then CPt, CPt ∪ CP in MP, CP from B1d.  Two
+details carried the rest:
+
+- The detector decides ~60 symbols after the Phase 4 receiver would need to
+  know them.  So on every receiver stage change it **re-decides its whole
+  undecided window** with fresh sets, from the last decided symbol as a known
+  state (`v90a_pr4_resync`).  Before this, TRN2d's first ~45 symbols were
+  decided against "Ri or anything".
+- In MP the set must include CP.  Ed (CPt, §8.6.2) is followed 12 symbols
+  later by B1d (CP, §8.6.1), which the detector reaches before the receiver
+  sees Ed.  With CPt only, B1d's CP-only points had no candidate.  The 1 - D²
+  path through them corrupted Ed behind them, so Ed was never recognised and CP
+  never came in: a deadlock (v90-dfe4 attempt 1, replayed).
+
+**Replayed (v90-dfe4 with its live CP):** both attempts go TRN2d → MP → Ed →
+**B1d 48/48 frames with 0 bit errors → data**.  Codewords are 100% exact
+through MP, Ed and B1d on attempt 2.
+
+**Live (v90-pr4-1, this build):** attempt 2 reaches **data mode on both ends**.
+- The Apple side logs `B1d 48/48 frames with 0 bit errors` and `data`.
+- The server logs `startup complete (upstream V.34 31200 bps, downstream PCM
+  40000 bps)` and decodes upstream data (idle ones).
+- Attempt 3 also reached B1d.  Attempt 1 hit the deadline after a poor TRN2d
+  (10 ones).
+
+v90-pr4-2 repeated it: `B1d 48/48 frames with 0 bit errors` and `data` on the
+Apple side, while the server reported `startup complete (upstream V.34 31200
+bps, downstream PCM 41333 bps)`.  `ME_V90_ANALOGUE_UPSTREAM_MAX_N=10` was set
+to try a 24000 upstream but did not take effect: the server still negotiated
+31200, so that call says nothing about a lower upstream rate.
+
+**What ended both calls is the upstream.**  The server's V.90 upstream receiver at
+31200 ran ~35% symbol errors, lost frame phase and then carrier.  It tried a
+§9.6 rate renegotiation, got no answer from us, and retrained.  V.42 never
+formed: the Apple side fell back to V.14, because our LAPM frames did not
+survive the upstream.  That is the upstream workstream (see the V.90 upstream
+notes), and the analogue side does not yet answer a §9.6 Rd while in data mode.

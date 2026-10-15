@@ -223,6 +223,7 @@ v92_tone_a_test
 /build_version.h
 /line_monitor_test
 /near_echo_test
+/v90_analogue_pr4_test
 
 /x2_sym_test
 v8bis_test
