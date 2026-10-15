@@ -23,6 +23,15 @@
 #define V34_LEC_SEARCH_LEN  1024    /* samples correlated in the lag search */
 #define V34_LEC_TAIL_MAX    2400    /* most samples a window may discard at its end */
 
+/* Bulk-delay tracking (v34_line_ec.c): how far either way a moved echo is
+   looked for, the correlation sub-window and how many of them one decision
+   spans, the order of the whitening predictor, and the predicted-echo ring. */
+#define V34_LEC_TRACK_RANGE 1200    /* 150 ms */
+#define V34_LEC_TRACK_SUB   2000    /* 250 ms */
+#define V34_LEC_TRACK_NSUB  4       /* decide over the last second */
+#define V34_LEC_TRACK_LPC   16
+#define V34_LEC_TRACK_RING  4096    /* > 2*RANGE + SUB; power of two */
+
 typedef struct
 {
     int16_t tx[V34_LEC_RING];
@@ -50,6 +59,24 @@ typedef struct
     float h[V34_LEC_TAPS];
     float erle_db;
     int fits;
+
+    /* Bulk-delay tracking.  `track` is the caller's to set, and only while
+       its transmission is aperiodic data (see track_rx()); the rest is the
+       tracker's state, reset whenever a fit is put in force or tracking is
+       re-armed. */
+    bool track;
+    bool trk_armed;                         /* tracking since the last reset */
+    int shifts;
+    uint64_t trk_next;                      /* next rx index to predict */
+    float trk_p[V34_LEC_TRACK_RING];        /* predicted echo, by rx index */
+    float trk_pw[V34_LEC_TRACK_RING];       /* the same, whitened */
+    float trk_rx[V34_LEC_TRACK_LPC + 1];    /* recent raw rx, newest first */
+    float trk_lpc[V34_LEC_TRACK_LPC + 1];   /* whitening filter, [0] = 1 */
+    double trk_rac[V34_LEC_TRACK_LPC + 1];  /* rx autocorrelation, this sub-window */
+    float trk_acc[V34_LEC_TRACK_NSUB][2*V34_LEC_TRACK_RANGE + 1];
+    int trk_sub;                            /* sub-window being accumulated */
+    int trk_pos;                            /* samples into it */
+    int trk_filled;                         /* complete sub-windows held */
 } v34_line_ec_t;
 
 void v34_line_ec_reset(v34_line_ec_t *ec);

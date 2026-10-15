@@ -1,5 +1,80 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-16 (later): the eye closes because our echo moved and our canceller did not
+
+**What changes on the wire 0.8 s after B1 is the delay of our own echo.**
+The far end's line carries our downstream back to us at about -23 dB, and the
+V.90 line echo canceller (`v34_line_ec.c`) is fitted to it once, in Phase 3.
+Measured from the taps with `tools/echo_lag_track.py`, the echo delay is
+constant through training and then steps later in the middle of data mode:
+
+| call | data-mode stall | echo delay (tap samples) before -> after |
+| --- | --- | --- |
+| v90-6313-cap9600 | ~85 ms | 1928 -> 2288 -> 2328 |
+| diag-6313-21600 | 107 ms | 2006 -> 2686 |
+| final-6311-21600 | 110 ms | 1928 -> 2648 |
+| v14-6313-21600 | 107 ms | 1848 -> 2528 |
+| blind-6312-21600 | 101 ms | 1848 -> 2529 |
+| bf-6312-21600 | 43.5 ms | 1848 -> 2089 |
+
+The cause is ours.  Our transmit is sent from the same pjmedia callback that
+runs the receiver, so a long receive callback is a hole in our RTP.  At
+acquisition the T/3 receiver ran its six B1 templates (6 ms each), the
+4-point training (8 ms) and then caught up on every symbol since B1 (about
+1750 of them, 75 ms) in one callback: 107-120 ms, about 0.55 s after B1.  The
+AudioCodes' playout buffer underran on it and re-centred, so everything we
+sent afterwards plays out (and echoes) 30-85 ms later; one echo round trip
+(~240 ms) after the hole, the canceller is subtracting the echo at the old
+delay, i.e. adding a second copy.  The peer also hears a gap in our
+downstream.
+
+**The proof is offline on the calls' own taps:** with the Phase-3 echo filter
+simply moved to the measured delays, the 9600 call's post-event error goes
+from 0.065 back to 0.0016 (0.0012 before the event), and the 21600 call's
+lattice distance over data symbols 2700-5000 from 0.62 to 0.046.  The
+alignment has to be exact: one sample either side of 2683 and the 21600 eye
+stays shut, which is why nothing earlier (gain, rotation, timing, precoding)
+fitted.  The added error was white, data-independent and uncorrelated with the
+peer's symbols, as an echo of our transmit is; regressing it on our TX tap
+found nothing only because the first attempt used the wrong tap alignment.
+The line residual barely moves across the event (23.0 -> 22.5 dB, the ~180 rms
+of echo every call has); it is the receiver's view of it that changes.
+
+Why the earlier tests missed it: a 43 ms hole "did not move the event"
+because the event is fixed by when the hole happens, not by its length; the
+replay reproduces it because the recording already contains the moved echo;
+and V.14 framing coincides because the peer's DTE data starts at about the
+same time.
+
+**Fix, two parts:**
+
+1. No long callbacks at acquisition (`v34rx.c`).  The B1 template search runs
+   one template per 20 ms packet (`V34_V90_T3_ACQ_STEP_GAP`), the 4-point
+   training and commit get a packet of their own, and the emitter produces at
+   most one symbol per T/3 sample (`V34_V90_T3_EMIT_BUDGET`), so the post-B1
+   backlog drains at three times real time over about a quarter of a second.
+   Replays: the data-mode callback goes from 115-120 ms to 20 ms; the decoded
+   bits and errors are unchanged (6311-1, 6312-1, 6313-1, the cap9600 fixture).
+2. The canceller follows a moved echo (`v34_line_ec.c`, data mode only).  It
+   correlates what it receives against its own prediction of the echo at
+   +/-150 ms of shift, both whitened by a 16th-order predictor of the received
+   signal (the echo is -25 dB in band but -5 to -9 dB at 3.6-3.9 kHz), over a
+   sliding second, and moves the bulk delay when a shifted peak is 6 sigma
+   above the floor, 3 times the present alignment and 1.5 times the next peak
+   (a periodic training transmission has an alias at every period; that is
+   why it is off outside `ME_DATA`).  Offline on the 9600 call it finds the
+   +400 about 1.3 s after it happens; `v34_line_ec_test` checks the move, no
+   move on a 60 s stationary echo, and no alias move with a periodic
+   transmission.  `ME_LEC_NO_TRACK=1` holds the fitted delay.
+
+**Not yet verified live**: vmhost and tower were unreachable from this Mac for
+the rest of the session, so neither part has been on a call.  The replay
+cannot test part 2: once in data mode our transmit depends on what we decode,
+so the replay's transmit no longer matches the one the recorded echo came
+from.  Next call: check `slow media callback` stays under ~20 ms in data
+mode, `tools/echo_lag_track.py` shows no step (or the log shows `echo moved`
+and the eye recovering), and whether LAPM comes up.
+
 ## 2026-10-16: B1 is acquired without a template; the upstream now dies ~0.8 s later
 
 **Why B1 never matched: the MT5634 does not reset its scrambler before B1.**

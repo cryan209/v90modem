@@ -12045,8 +12045,19 @@ static float v90_t3_slip_trigger_err(v34_rx_state_t *s)
 static void v90_t3_emit_ready(v34_rx_state_t *s)
 {
     int pre = V34_V90_T3_FSE_TAPS/2;
+    /* At most one symbol per call, and this is called once per T/3 sample, so
+       the emitter runs at up to three times real time.  At acquisition B1 lies
+       0.5-1 s back (the search needs that much wire after it), and draining
+       the whole backlog in the one callback that acquired took 75 ms -- a
+       75 ms hole in our transmit, which the far end's gateway answered by
+       playing everything after it later, so the line echo canceller fitted in
+       Phase 3 was no longer at the echo's delay and the upstream eye shut
+       0.8 s after B1 on every call (docs/v90_rasfinder_phase4.md).  Spread,
+       the same backlog drains in about a quarter of a second. */
+    int budget = V34_V90_T3_EMIT_BUDGET;
 
     while (s->v90_t3_acquired
+           && budget-- > 0
            && s->v90_t3_next_symbol - pre + V34_V90_T3_FSE_TAPS
                 <= s->v90_t3_raw_count)
     {
@@ -13363,6 +13374,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        CP bit stream and lags the wire by a variable amount, so B1 can lie
        either side of it; only a window that reaches back before E can see
        the common case. */
+    /* A search already under way carries on where the last packet left it. */
+    if (s->v90_t3_srch_running)
+        goto search;
+    /*endif*/
     search_start = s->v90_t3_e_anchor - SEARCH_BACK;
     if (search_start < V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2)
         search_start = V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2;
@@ -13397,7 +13412,22 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     }
     /*endif*/
     s->v90_t3_acquisition_attempted = true;
+    s->v90_t3_srch_running = true;
+    s->v90_t3_srch_step = 0;
+    s->v90_t3_srch_step_at = s->v90_t3_raw_count;
+    s->v90_t3_srch_start = search_start;
+    s->v90_t3_srch_end = search_end;
+    s->v90_t3_srch_match = 0.0f;
+    s->v90_t3_srch_coarse = 0.0f;
+    s->v90_t3_srch_first = 0;
+    s->v90_t3_srch_conjugate = false;
+    s->v90_t3_srch_tap = 0;
+    s->v90_t3_srch_trellis = -1;
+    s->v90_t3_srch_expanded = s->parms.expanded_shaping;
 
+search:
+    search_start = s->v90_t3_srch_start;
+    search_end = s->v90_t3_srch_end;
     candidate_tap[candidate_count++] = v34_expected_b1_default_tap(s);
     if (s->v90_mode)
     {
@@ -13410,18 +13440,32 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     /* The upstream trellis is the other thing this template has to guess:
        nothing the peer sends states it, and a wrong convolutional code makes
        B1 as uncorrelated as a wrong scrambler does. */
-    for (int t = 0;  t < candidate_count  &&  best_match < 0.95f;  t++)
+    /* One template per call, at most one call per packet: each pass is about
+       6 ms, and six of them back to back plus the commit below were a single
+       120 ms media callback (see V34_V90_T3_ACQ_STEP_GAP). */
     {
         int trellis_count = s->v90_mode ? 3 : 1;
-
         /* Courier B1A1 -> A71B retains the MP expanded-shaping bit;
            unlike V.90 section 8.5.1, x2 does not force minimum shaping.
            Search both choices until the x2 MP field is decoded. */
-        for (int sh = 0; sh < (s->x2_mode ? 2 : 1) && best_match < 0.95f; sh++)
+        int shaping_count = s->x2_mode ? 2 : 1;
+        int steps = candidate_count*shaping_count*trellis_count;
+
+        while (s->v90_t3_srch_step < steps  &&  s->v90_t3_srch_match < 0.95f)
         {
+            int step = s->v90_t3_srch_step;
+            int t = step/(shaping_count*trellis_count);
+            int sh = (step/trellis_count) % shaping_count;
+            int tr = step % trellis_count;
+
+            if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
+                return;
+            /*endif*/
+            s->v90_t3_srch_step++;
+            s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
             if (s->x2_mode)
                 v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
-            for (int tr = 0;  tr < trellis_count  &&  best_match < 0.95f;  tr++)
+            /*endif*/
             {
                 complexf_t coeff[V34_V90_T3_FSE_TAPS];
                 int64_t first = 0;
@@ -13441,21 +13485,35 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                          "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
                          candidate_tap[t], trellis, s->parms.expanded_shaping ? 1 : 0,
                          100.0f*coarse, 100.0f*match, conjugate ? 1 : 0);
-                if (match > best_match)
+                if (match > s->v90_t3_srch_match)
                 {
-                    best_match = match;
-                    best_coarse = coarse;
-                    best_first = first;
-                    best_conjugate = conjugate;
-                    best_tap = candidate_tap[t];
-                    best_trellis = trellis;
-                    best_expanded = s->parms.expanded_shaping;
-                    memcpy(best_coeff, coeff, sizeof(best_coeff));
+                    s->v90_t3_srch_match = match;
+                    s->v90_t3_srch_coarse = coarse;
+                    s->v90_t3_srch_first = first;
+                    s->v90_t3_srch_conjugate = conjugate;
+                    s->v90_t3_srch_tap = candidate_tap[t];
+                    s->v90_t3_srch_trellis = trellis;
+                    s->v90_t3_srch_expanded = s->parms.expanded_shaping;
+                    memcpy(s->v90_t3_srch_coeff, coeff, sizeof(coeff));
                 }
                 /*endif*/
             }
         }
     }
+    /* What follows -- the 4-point training, the out-of-sample check and the
+       commit -- gets a packet of its own too. */
+    if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
+        return;
+    /*endif*/
+    s->v90_t3_srch_running = false;
+    best_match = s->v90_t3_srch_match;
+    best_coarse = s->v90_t3_srch_coarse;
+    best_first = s->v90_t3_srch_first;
+    best_conjugate = s->v90_t3_srch_conjugate;
+    best_tap = s->v90_t3_srch_tap;
+    best_trellis = s->v90_t3_srch_trellis;
+    best_expanded = s->v90_t3_srch_expanded;
+    memcpy(best_coeff, s->v90_t3_srch_coeff, sizeof(best_coeff));
     /* Leave the winning template loaded; the data decoder reuses its state. */
     if (best_tap)
     {
@@ -17423,6 +17481,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
     rx->v90_t3_blind_tried = false;
+    rx->v90_t3_srch_running = false;
     rx->v90_t3_acq_abandoned = false;
     rx->v90_t3_acq_best_valid = false;
     rx->v90_t3_acq_best_rel = 0.0f;

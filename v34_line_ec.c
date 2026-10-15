@@ -25,6 +25,19 @@
  *
  * A fit that does not remove at least 6 dB is not put in force, so a path
  * with no echo (a digital loopback, the SmartLink rig) is left untouched.
+ *
+ * "Stable" holds for the echo's shape but not for its delay.  The bulk delay
+ * includes the far-end gateway's playout buffer, and that moves whenever our
+ * packets arrive late: against the RasFinder's AudioCodes a 107 ms stall in
+ * our media callback put the echo 80 ms later, mid-call, and a canceller still
+ * subtracting at the old delay doubles the echo instead of removing it -- the
+ * V.90 upstream at 21600 went from 0.02 to 0.62 from the lattice in twenty
+ * symbols, and back to 0.05 offline with the same filter moved to the new
+ * delay (docs/v90_rasfinder_phase4.md, 2026-10-16).  So with `track` set the
+ * canceller keeps measuring where its own prediction of the echo sits in what
+ * is received, and follows it when it moves.  It does not adapt the filter:
+ * the far end's signal is twenty-odd dB above the echo, and it is only a
+ * delay that changes.  See track_rx().
  */
 #include <math.h>
 #include <stdio.h>
@@ -107,6 +120,8 @@ static bool chol_solve(double *a, const double *b, double *x, int n)
     }
     return true;
 }
+
+static void track_reset(v34_line_ec_t *ec);
 
 static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
 {
@@ -232,6 +247,7 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
         for (int k = 0;  k < V34_LEC_TAPS;  k++)
             ec->h[k] = (float) x[k];
         ec->fitted = true;
+        track_reset(ec);
     }
     if (log)
     {
@@ -242,6 +258,193 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
                  sqrt(rx_pow/(n_train - first)), sqrt(res_pow/(n_train - first)), ec->erle_db,
                  (ec->erle_db >= 6.0f)  ?  ", in force"  :  ", too little echo to cancel; not applied");
     }
+}
+
+#define TRK_MASK (V34_LEC_TRACK_RING - 1)
+#define TRK_R V34_LEC_TRACK_RANGE
+
+/* The fitted filter's prediction of the echo in received sample m, or 0 for
+   any part of it not yet transmitted. */
+static float echo_at(const v34_line_ec_t *ec, int64_t m)
+{
+    const int64_t base = m - ec->lag + V34_LEC_TAPS/2;
+    float est = 0.0f;
+
+    for (int k = 0;  k < V34_LEC_TAPS;  k++)
+        est += ec->h[k]*tx_at(ec, base - k);
+    return est;
+}
+
+/* Predict (and whiten) the echo up to received index `upto`, starting afresh
+   TRK_R + LPC samples before `from` if the tracker has just been (re)armed. */
+static void track_predict(v34_line_ec_t *ec, uint64_t from, uint64_t upto)
+{
+    if (ec->trk_next == 0)
+    {
+        int64_t start = (int64_t) from - TRK_R - V34_LEC_TRACK_LPC;
+
+        ec->trk_next = (start > 1)  ?  (uint64_t) start  :  1;
+        for (int i = 0;  i < V34_LEC_TRACK_LPC;  i++)
+            ec->trk_p[(ec->trk_next - 1 - (uint64_t) i) & TRK_MASK] = 0.0f;
+    }
+    for (  ;  ec->trk_next <= upto;  ec->trk_next++)
+    {
+        const uint64_t m = ec->trk_next;
+        float w;
+
+        ec->trk_p[m & TRK_MASK] = echo_at(ec, (int64_t) m);
+        w = 0.0f;
+        for (int j = 0;  j <= V34_LEC_TRACK_LPC;  j++)
+            w += ec->trk_lpc[j]*ec->trk_p[(m - (uint64_t) j) & TRK_MASK];
+        ec->trk_pw[m & TRK_MASK] = w;
+    }
+}
+
+static void track_reset(v34_line_ec_t *ec)
+{
+    if (ec->trk_lpc[0] == 0.0f)
+        ec->trk_lpc[0] = 1.0f;
+    ec->trk_next = 0;
+    ec->trk_sub = 0;
+    ec->trk_pos = 0;
+    ec->trk_filled = 0;
+    memset(ec->trk_acc, 0, sizeof(ec->trk_acc));
+    memset(ec->trk_rac, 0, sizeof(ec->trk_rac));
+}
+
+/* Levinson-Durbin on the sub-window's autocorrelation: the prediction-error
+   filter that whitens what is received.  The far end's signal is what fills
+   the band, and the echo stands out of it only at the edges (the RasFinder
+   through the AudioCodes: -25 dB in band, -5 to -9 dB at 3.6-3.9 kHz), so
+   weighting by the inverse of the received spectrum is what makes the echo's
+   correlation peak visible in a second rather than several (offline, 9 sigma
+   against 6 with no filter, and the first difference was worse than none). */
+static void track_whiten(v34_line_ec_t *ec)
+{
+    double r[V34_LEC_TRACK_LPC + 1];
+    double a[V34_LEC_TRACK_LPC + 1];
+    double tmp[V34_LEC_TRACK_LPC + 1];
+    double err;
+
+    if (ec->trk_rac[0] <= 0.0)
+        return;
+    for (int k = 0;  k <= V34_LEC_TRACK_LPC;  k++)
+        r[k] = ec->trk_rac[k];
+    r[0] *= 1.0001;
+    memset(a, 0, sizeof(a));
+    a[0] = 1.0;
+    err = r[0];
+    for (int i = 1;  i <= V34_LEC_TRACK_LPC;  i++)
+    {
+        double acc = r[i];
+        double kref;
+
+        for (int j = 1;  j < i;  j++)
+            acc += a[j]*r[i - j];
+        kref = -acc/err;
+        memcpy(tmp, a, sizeof(a));
+        for (int j = 1;  j < i;  j++)
+            a[j] = tmp[j] + kref*tmp[i - j];
+        a[i] = kref;
+        err *= (1.0 - kref*kref);
+        if (err <= 0.0)
+            return;
+    }
+    for (int j = 0;  j <= V34_LEC_TRACK_LPC;  j++)
+        ec->trk_lpc[j] = (float) a[j];
+}
+
+/* One raw (not yet cancelled) received sample with absolute index n.
+   Correlates the whitened sample against the whitened predicted echo at every
+   shift D in [-TRK_R, TRK_R]: echo that has moved by D samples correlates at
+   D.  Every sub-window the last second's sum is examined, and the bulk delay
+   moves when a shifted peak stands six times the correlation's spread clear of
+   the floor and three times above the peak where the canceller is now.
+   Returns the shift made, or 0. */
+static int track_rx(v34_line_ec_t *ec, uint64_t n, float raw)
+{
+    float y;
+    float *acc;
+    int best_d = 0;
+    float best = 0.0f;
+    float at0;
+    float second = 0.0f;
+    double floor_sum = 0.0;
+    int floor_n = 0;
+    double sigma;
+
+    track_predict(ec, n, n + TRK_R);
+    memmove(&ec->trk_rx[1], &ec->trk_rx[0], V34_LEC_TRACK_LPC*sizeof(ec->trk_rx[0]));
+    ec->trk_rx[0] = raw;
+    y = 0.0f;
+    for (int j = 0;  j <= V34_LEC_TRACK_LPC;  j++)
+    {
+        y += ec->trk_lpc[j]*ec->trk_rx[j];
+        ec->trk_rac[j] += (double) ec->trk_rx[0]*ec->trk_rx[j];
+    }
+    acc = ec->trk_acc[ec->trk_sub];
+    for (int d = -TRK_R;  d <= TRK_R;  d++)
+        acc[d + TRK_R] += y*ec->trk_pw[(n - (uint64_t) (int64_t) d) & TRK_MASK];
+    if (++ec->trk_pos < V34_LEC_TRACK_SUB)
+        return 0;
+    /* A sub-window is complete: refresh the whitening filter for the next. */
+    track_whiten(ec);
+    memset(ec->trk_rac, 0, sizeof(ec->trk_rac));
+    ec->trk_pos = 0;
+    ec->trk_sub = (ec->trk_sub + 1) % V34_LEC_TRACK_NSUB;
+    if (ec->trk_filled < V34_LEC_TRACK_NSUB)
+        ec->trk_filled++;
+    if (ec->trk_filled < V34_LEC_TRACK_NSUB)
+    {
+        memset(ec->trk_acc[ec->trk_sub], 0, sizeof(ec->trk_acc[0]));
+        return 0;
+    }
+    {
+        float sum[2*TRK_R + 1];
+
+        for (int i = 0;  i <= 2*TRK_R;  i++)
+        {
+            float v = 0.0f;
+
+            for (int s = 0;  s < V34_LEC_TRACK_NSUB;  s++)
+                v += ec->trk_acc[s][i];
+            sum[i] = v;
+            if (fabsf(v) > best)
+            {
+                best = fabsf(v);
+                best_d = i - TRK_R;
+            }
+        }
+        at0 = fabsf(sum[TRK_R]);
+        /* The spread, away from the peak and from the present alignment:
+           the echo's own autocorrelation is a filter's width either side. */
+        for (int i = 0;  i <= 2*TRK_R;  i++)
+        {
+            int d = i - TRK_R;
+
+            if (abs(d - best_d) <= V34_LEC_TAPS  ||  abs(d) <= V34_LEC_TAPS)
+                continue;
+            floor_sum += (double) sum[i]*sum[i];
+            floor_n++;
+            if (fabsf(sum[i]) > second)
+                second = fabsf(sum[i]);
+        }
+    }
+    /* The oldest sub-window is the one accumulated next. */
+    memset(ec->trk_acc[ec->trk_sub], 0, sizeof(ec->trk_acc[0]));
+    sigma = (floor_n > 0)  ?  sqrt(floor_sum/floor_n)  :  0.0;
+    /* A periodic transmission (Phase 3's S, a retrain's TRN) correlates
+       equally at every multiple of its period, and which alias wins is
+       noise: insist that the peak stands well clear of the next one too.
+       Offline on the RasFinder's 9600 call the true peak is 9-12 sigma and
+       the floor's largest about 3.5. */
+    if (best_d == 0  ||  sigma <= 0.0  ||  best < 6.0*sigma  ||  best < 3.0f*at0
+        ||  best < 1.5f*second)
+        return 0;
+    ec->lag += best_d;
+    ec->shifts++;
+    track_reset(ec);
+    return best_d;
 }
 
 bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
@@ -293,6 +496,31 @@ bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
 
         for (int i = 0;  i < len;  i++)
         {
+            /* Follow the echo if it has moved; never while a training window
+               is open, which will refit it anyway. */
+            if (!ec->track  ||  ec->training)
+                ec->trk_armed = false;
+            else
+            {
+                int old_lag = ec->lag;
+                int moved;
+
+                if (!ec->trk_armed)
+                {
+                    track_reset(ec);
+                    ec->trk_armed = true;
+                }
+                moved = track_rx(ec, ec->rx_count + (uint64_t) i, (float) amp[i]);
+
+                if (moved  &&  log  &&  log_len)
+                {
+                    snprintf(log, log_len,
+                             "line echo canceller: echo moved %+d samples (%+.1f ms), "
+                             "bulk delay %d -> %d samples (shift %d)",
+                             moved, moved/8.0, old_lag, ec->lag, ec->shifts);
+                    fitted_now = true;
+                }
+            }
             int64_t base = (int64_t) (ec->rx_count + (uint64_t) i) - ec->lag + half;
             float est = 0.0f;
             float y;

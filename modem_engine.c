@@ -12965,6 +12965,14 @@ skip_8k_codewords:
                     if (g_lec_armed && g_mod == ME_MOD_V34) {
                         char lec_msg[256];
 
+                        /* ME_LEC_NO_TRACK=1 holds the line echo canceller's
+                           delay where the fit put it; otherwise it follows the
+                           echo when the far end's playout moves it
+                           (v34_line_ec.c), in data mode only: training
+                           transmissions are periodic, and the delay search
+                           sees an alias at every period. */
+                        g_lec.track = g_state == ME_DATA && !getenv("ME_LEC_NO_TRACK");
+
                         if (v34_line_ec_rx(&g_lec, filtered, len,
                                            v34_rx_line_ec_window(g_v34),
                                            lec_msg, sizeof(lec_msg))
@@ -12982,6 +12990,10 @@ skip_8k_codewords:
                     } else if (g_lec_armed && g_mod == ME_MOD_V90) {
                         char lec_msg[256];
                         bool window = v90_line_ec_window_locked();
+
+                        /* As for plain V.34 above: follow a moved echo in
+                           data mode. */
+                        g_lec.track = g_state == ME_DATA && !getenv("ME_LEC_NO_TRACK");
 
                         /* Only a window that ended in DIL -- i.e. on the
                            peer's S -- is known to have held nothing but our

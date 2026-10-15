@@ -256,6 +256,14 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
 #define V34_V90_T3_ACQ_RETRY_GAP            4800
+/*! T/3 samples (20 ms at 9600 Hz, one RTP packet) between two passes of the
+    B1 template search, and the most data symbols one call of the emitter may
+    produce.  pjmedia sends our next packet only when the receive callback
+    returns, so work done in one callback is a hole in our transmit; against
+    the RasFinder's AudioCodes a 107 ms one moved its playout -- and so our
+    echo -- 80 ms later, mid-call (docs/v90_rasfinder_phase4.md, 2026-10-16). */
+#define V34_V90_T3_ACQ_STEP_GAP             192
+#define V34_V90_T3_EMIT_BUDGET              1
 /*! Few, because the fallback has to be REACHABLE.  Holding out for a good
     acquisition is only safe if settling for the best one seen costs a couple
     of seconds rather than the call: measured live on 2026-08-21, a first
@@ -1620,6 +1628,23 @@ typedef struct
         tried on this call. */
     bool v90_t3_blind_tried;
     int64_t v90_t3_acq_retry_at;
+    /*! The B1 template search, one template per media packet rather than all
+        of them in one callback (see v90_t3_try_acquire()): whether a search
+        is under way, the next template to try and the raw count it waits
+        for, the window it searches, and the best fit so far. */
+    bool v90_t3_srch_running;
+    int v90_t3_srch_step;
+    int64_t v90_t3_srch_step_at;
+    int64_t v90_t3_srch_start;
+    int64_t v90_t3_srch_end;
+    complexf_t v90_t3_srch_coeff[V34_V90_T3_FSE_TAPS];
+    float v90_t3_srch_match;
+    float v90_t3_srch_coarse;
+    int64_t v90_t3_srch_first;
+    bool v90_t3_srch_conjugate;
+    int v90_t3_srch_tap;
+    int v90_t3_srch_trellis;
+    bool v90_t3_srch_expanded;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
     FILE *v90_t3_sym_dump;
     bool v90_t3_sym_dump_tried;
