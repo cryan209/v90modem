@@ -16,7 +16,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   const bytes=frame(text);let replies=null;
   const pa=a._malloc(bytes.length),pb=b._malloc(1026);
   a.HEAPU8.set(bytes,pa);
-  a._browser_init(Number(mode),1,startupFlags);b._browser_init(Number(mode),0,startupFlags);
+  a._browser_init(Number(mode),1,startupFlags,startup.v34MaxRate||0);b._browser_init(Number(mode),0,startupFlags,startup.v34MaxRate||0);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
   const callerCodewords=new Uint8Array(480000),answererCodewords=new Uint8Array(480000);

@@ -49,3 +49,10 @@ for(const [mode,startup] of [[34,{v8:true,v8bis:false}],[34,{v8:true,v8bis:true}
  console.log(`PASS: V.${mode}, startup ${JSON.stringify(startup)}, payload, LAPM, rates ${r.txRate}/${r.rxRate}`);
 }
 await assert.rejects(runPair(90,'bad',()=>{},()=>false,{v8:false,v8bis:false}),/require V.8/);
+
+for(const v8bis of [false,true]){
+ const r=await runPair(34,'Stable V.34 — '+('0123456789'.repeat(22)),()=>{},()=>false,{v8:true,v8bis,v34MaxRate:21600});
+ assert.ok(r.passed);assert.equal(r.txRate,21600);assert.equal(r.rxRate,21600);
+ assert.ok(!r.protocol.some(e=>/V\.34.*(?:asking for .*retraining|training failed|restarting Phase 2)/.test(e.line)),'Stable V.34 retrained');
+ console.log(`PASS: V.34 21600 ceiling, V.8bis=${v8bis}, long payload, no retrains`);
+}

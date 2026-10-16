@@ -4609,7 +4609,7 @@ function assignWasmExports(wasmExports) {
   _malloc = Module['_malloc'] = createExportWrapper('malloc', 1);
   _fflush = createExportWrapper('fflush', 1);
   _strerror = createExportWrapper('strerror', 1);
-  _browser_init = Module['_browser_init'] = createExportWrapper('browser_init', 3);
+  _browser_init = Module['_browser_init'] = createExportWrapper('browser_init', 4);
   _browser_step = Module['_browser_step'] = createExportWrapper('browser_step', 0);
   _browser_input = Module['_browser_input'] = createExportWrapper('browser_input', 0);
   _browser_output = Module['_browser_output'] = createExportWrapper('browser_output', 0);

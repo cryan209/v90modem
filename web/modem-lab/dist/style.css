@@ -9,3 +9,5 @@ footer a{color:var(--muted)}.license{margin:20px 0;color:var(--muted);font-size:
 .inspect-scrub{display:flex;align-items:center;gap:12px;margin-top:15px;font:11px ui-monospace,monospace;color:var(--muted)}.inspect-scrub input[type=range]{width:auto;flex:1;min-width:60px;margin:0}.inspect-scrub label{white-space:nowrap}.inspect-scrub output{min-width:55px;color:var(--green)}.inspect-scrub input[type=checkbox]{accent-color:var(--green)}@media(max-width:650px){.inspect-scrub{flex-wrap:wrap}.inspect-scrub input[type=range]{min-width:100px}}
 
 .startup-controls{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;padding:14px 28px;border-top:1px solid var(--line);font-size:12px}.startup-controls input{accent-color:var(--green)}.startup-controls>span:last-child{font-size:11px;color:var(--muted)}@media(max-width:650px){.startup-controls{padding:14px 18px}}
+
+.startup-controls select{background:var(--bg);border:1px solid var(--line);border-radius:4px;color:var(--cream);padding:5px 7px;font:12px system-ui;margin-left:6px}

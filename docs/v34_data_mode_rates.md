@@ -609,3 +609,32 @@ there arrives with scattered bit errors under all four conditioning modes, and
 the TRN ones-lock fades 81% -> 53% where `rf-bbs-5`'s first holds 68%.  Not
 understood.  Why the RasFinder renegotiates every ~22 s at all is also not
 known (its choice; it continues after successful ones).
+
+## Browser loopback: TRN / B1 estimates disagree (2026-10-16)
+
+The WASM full-engine pair on a byte-exact µ-law bearer, starting at 3200 baud,
+exposes two real restarts with the unrestricted V.34 offer. In the first
+training the caller's Phase-4 TRN estimate is 32.3 dB and requests 24000 bit/s;
+B1 then measures 31.7 dB, assesses 21600, and requests the existing §11.5
+retrain. The answerer initially requests 21600. The next training reaches a
+caller TRN timeout (63% lock versus the existing 65% threshold), followed by
+another §11.5 restart. It eventually establishes 21600/21600 and passes the
+bidirectional LAPM payload. No threshold was modified for these experiments.
+
+Completed one-variable offer-ceiling comparisons, same ASCII `rate test`
+payload, V.8, no V.8bis, same engine/bearer (times include the one-second
+post-verification hold):
+
+| ME_V34_BPS ceiling | Final TX/RX | Call duration | Payload |
+| --- | --- | --- | --- |
+| Unrestricted | 21600/21600 | 28.08 s | pass |
+| 24000 | 21600/21600 | 21.86 s | pass |
+| 21600 | 21600/21600 | 14.16 s | pass |
+| 19200 | 19200/19200 | 15.68 s | pass |
+
+At 21600 and 19200 there are no retrain requests in the captured protocol
+logs. The browser showcase defaults to 21600 and exposes Automatic/24000/19200
+as alternatives. Additional long UTF-8 payload checks at 21600 pass without
+retrain requests with V.8bis both off and on. This contains the symptom for
+the showcase; it does not resolve TRN/B1 estimator consistency or the failed
+retrain acquisition. These are software-only results, not hardware evidence.

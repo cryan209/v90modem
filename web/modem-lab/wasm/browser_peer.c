@@ -16,7 +16,7 @@ static int received_n, connected_rate;
 static char monitor_json[65536];
 static di_connect_info_cb_t connect_info;
 static v250_connect_report_t report;
-EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup) {
+EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ceiling) {
     setenv("ME_MODE", mode == 90 ? "v90" : mode == 34 ? "v34" : "v32bis", 1);
     setenv("ME_V8", (startup & 1) ? "1" : "0", 1);
     setenv("ME_V8BIS", (startup & 2) ? "1" : "0", 1);
@@ -25,6 +25,7 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup) {
     setenv("ME_V90_JA_HEURISTIC_FALLBACK_MS", "0", 1);
     setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 1);
     if (mode == 90 && calling) setenv("ME_V90_ROLE", "analogue", 1);
+    if (mode == 34 && ceiling > 0) { char rate[16];snprintf(rate,sizeof rate,"%d",ceiling);setenv("ME_V34_BPS",rate,1); }
     if (mode == 32) setenv("ME_V32BIS_MAX_BPS", "9600", 1);
     setenv("ME_V34_SPAN_FLOW_LOG", "1", 1);
     setenv("DS_TX_BIT_DUMP", "/tx.bits", 1);

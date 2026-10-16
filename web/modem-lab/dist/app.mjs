@@ -6,7 +6,7 @@ const descriptions={
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
  bell103:['The sound of 300 bits a second.','Bell 103’s originating channel uses 1270 Hz for a 1 and 1070 Hz for a 0. A separate JavaScript receiver recovers your message from the waveform.'],
  '32':['A conversation before the conversation.','Two instances of the real modem engine negotiate V.32 at up to 9,600 bit/s, train their receivers, and exchange your message and an acknowledgement over G.711.'],
- '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions.'],
+ '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions. The default 21,600 bit/s ceiling avoids repeated training on this virtual line.'],
  '90':['A digital end. An analogue end.','V.90 sends PCM downstream and QAM upstream. The calling modem runs the analogue role; the answering modem runs the digital role. Both train and recover real payload bytes.'],
 };
 const isFsk=()=>mode==='v21'||mode==='bell103';
@@ -15,6 +15,7 @@ function updateStartup(){
  $('startupV8').disabled=fsk||mode!=='32'||playing;
  if(!$('startupV8').checked)$('startupBis').checked=false;
  $('startupBis').disabled=fsk||!$('startupV8').checked||playing;
+ $('v34RateControl').hidden=mode!=='34';$('v34Rate').disabled=mode!=='34'||playing;
  $('startupHint').textContent=fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
 }
 function updateCount(){const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;$('dial').disabled=n===0||n>240||playing;}
@@ -96,7 +97,7 @@ async function dial(){
    worker=new Worker('./worker.mjs',{type:'module'});
    worker.onerror=e=>fail(e.message||'Could not load the modem worker.');
    worker.onmessage=async({data})=>{if(data.type==='progress'){$('status').textContent=`Generating call · ${data.time.toFixed(1)} s simulated`;}else if(data.type==='error'){fail(data.message);}else if(data.type==='result'){worker.terminate();worker=null;result=data;await play();}};
-   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked}});
+   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked,v34MaxRate:mode==='34'?Number($('v34Rate').value):0}});
  }
  }catch(e){fail(e.message);}
 }

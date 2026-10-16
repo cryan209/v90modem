@@ -157,9 +157,10 @@ to exercise every browser's rendering or security policy.
 ## V.34 and startup selection
 
 V.34 uses the same real engine pair and clean G.711 bearer, rather than audio
-recordings. On this synthetic path the current engine retrains once before
-settling at 21600 bit/s in both directions; the actual transitions remain in
-the events and protocol inspector. Rates are negotiated, not preset in the UI.
+recordings. The default 21600 bit/s offer ceiling avoids retrains on this synthetic path.
+The V.34 ceiling selector also offers 19200, 24000, and Automatic; the higher
+offers can trigger real retrains, retained in the events and inspector. The
+ceiling limits the offer; the actual connection rate is still negotiated.
 
 The startup controls apply to both virtual modems. **V.8 negotiation** is on by
 default. It can be disabled for V.32, selecting the engine's V.25/legacy startup.
@@ -179,3 +180,17 @@ V.8bis, legacy V.32 without V.8, V.32 with V.8bis, and V.90 with V.8bis. It
 requires actual V.8bis completion at both ends and no CM/JM menus in legacy
 mode, and rejects unsupported V.8-off V.34/V.90 requests. The generated-file
 harness also runs V.34/V.8bis without constructing a Worker.
+
+### V.34 default offer ceiling (2026-10-16)
+
+With an unrestricted offer the Phase-4 TRN estimate requested 24000 bit/s in
+one direction, but the final B1 check measured 31.7 dB and assessed only 21600.
+The engine correctly requested a V.34 §11.5 retrain. That attempt then timed
+out in TRN (63% lock, below the existing 65% threshold), producing another
+retrain before payload transfer. The demo now defaults to an explicit 21600
+bit/s ceiling via the existing `ME_V34_BPS` setting; this avoids both restarts
+without changing a DSP constant or the G.711 bearer. Automatic remains available
+to reproduce the original behavior. Long UTF-8 messages pass without retrains
+at the default ceiling both with and without V.8bis, including direct-file runs.
+This is a demo profile choice, not a fix to the underlying rate-estimation or
+retraining-acquisition discrepancy. See `docs/v34_data_mode_rates.md`.
