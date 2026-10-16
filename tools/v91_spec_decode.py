@@ -297,6 +297,37 @@ def check_startup_dil(rep, syms, i, own_def, peer_def):
     return i + len(exp)
 
 
+def check_cleardown_tail(rep, syms, start, own_def, peer_def):
+    """8.4.1 + 8.6: a retrain start-up (Ez, INFO, DIL, SCR) whose first CP has
+    drn = 0.  Returns True when the tail is exactly that."""
+    ez, ez_end, infos, i = find_infos(syms[start:])
+    if ez is None or len(infos) < 1:
+        return False
+    base = start
+    sub = syms[base:]
+    end = check_startup_dil(rep, sub, i, own_def, peer_def)
+    if end is None:
+        return False
+    gpc, prev, bits, j = Gpc(), 0, [], end
+    while j < len(sub) and sub[j][0] == 66 and len(bits) < 4000:
+        bits.append(gpc.push(sub[j][1] ^ prev))
+        prev = sub[j][1]
+        j += 1
+    z = next((k for k, b in enumerate(bits) if b == 0), None)
+    cp, n = (None, 0)
+    if z is not None and z >= 17:
+        cp, n = parse_cp(bits[z - 17:], rep)
+    if cp is None:
+        # The peer clears down on the first CP it sees, so this end's own
+        # retrain may stop short of its CP; what was sent must still be a
+        # clean start-up (checked above).
+        rep.ok("retrain start-up after data (Ez, INFO, DIL checked), cut short by the peer's cleardown")
+        return True
+    rep.check(cp["drn"] == 0 and not cp["ack"],
+              "retrain start-up after data ends in CP with drn = 0 (cleardown, 8.4.1/8.6)")
+    return cp["drn"] == 0
+
+
 def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload, peer_default=True):
     rep = Report(name)
     raw = open(path, "rb").read()
@@ -482,7 +513,10 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload, pe
     # A stream may legitimately end in idle (the call was torn down); any
     # other undecodable frame is a defect.
     tail_idle = all(s == (0, 1) for s in syms[f:])
-    rep.check(not errs or tail_idle,
+    tail_cleardown = False
+    if errs and not tail_idle:
+        tail_cleardown = check_cleardown_tail(rep, syms, f, own_def, peer_default)
+    rep.check(not errs or tail_idle or tail_cleardown,
               "%d data frames decoded%s" % (good, "" if not errs else
                                            " (STOPPED at frame %d: %s; symbol %d; %d symbols of non-idle follow; next 12: %s)"
                                            % (errs[0][0], errs[0][1], errs[0][2],

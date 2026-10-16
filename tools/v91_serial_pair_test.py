@@ -322,9 +322,7 @@ def main() -> int:
                         raise RuntimeError("control channel was not negotiated on both directions")
                     if "peer cleardown (control channel)" not in alog:
                         raise RuntimeError("peer did not see the control-channel cleardown")
-            # (the CP drn = 0 cleardown appends a retrain start-up to the data the
-            # decoder expects to end in idle, so it is not run for that case)
-            if not (args.retrain or args.escape or args.no_control_channel):
+            if not (args.retrain or args.escape):
                 decode = subprocess.run(
                     [sys.executable, str(pathlib.Path(__file__).with_name("v91_spec_decode.py")),
                      str(temp / "caller-taps" / "live-tx.g711"),
