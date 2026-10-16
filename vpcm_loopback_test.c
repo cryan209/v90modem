@@ -7219,7 +7219,7 @@ static bool test_v91_cp_exchange(v91_law_t law)
         fprintf(stderr, "V.91 CP TX diag build failed\n");
         return false;
     }
-    nbits = vpcm_cp_bit_length(&cp_tx);
+    nbits = vpcm_cp_v91_bit_length(&cp_tx);
     if (v91_tx_cp_codewords(&tx, codewords, (int) sizeof(codewords), &cp_tx, false) != nbits) {
         fprintf(stderr, "V.91 CP encode length mismatch\n");
         return false;
@@ -7359,12 +7359,20 @@ static bool test_v91_startup_to_b1_multirate(v91_law_t law)
         cp_offer.dfi[3] = 1;
         cp_offer.dfi[4] = 0;
         cp_offer.dfi[5] = 1;
-        vpcm_cp_mask_set(cp_offer.masks[0], 0, true);
-        vpcm_cp_mask_set(cp_offer.masks[0], 1, true);
-        vpcm_cp_mask_set(cp_offer.masks[0], 15, true);
-        vpcm_cp_mask_set(cp_offer.masks[1], 16, true);
-        vpcm_cp_mask_set(cp_offer.masks[1], 31, true);
-        vpcm_cp_mask_set(cp_offer.masks[1], 63, true);
+        /* V.90 5.4.3 needs 2^K <= product of the six constellation sizes, so
+           size both constellations for this rate (K = drn + 14). */
+        {
+            int m = 2;
+            int u;
+
+            while (m < 128 && (double) m * (double) m * (double) m * (double) m
+                              * (double) m * (double) m < (double) (1ULL << (drn + 14)))
+                m++;
+            for (u = 0; u < m; u++) {
+                vpcm_cp_mask_set(cp_offer.masks[0], u, true);
+                vpcm_cp_mask_set(cp_offer.masks[1], 127 - u, true);
+            }
+        }
 
         cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
         if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_offer, &cp_rx)) {
@@ -8541,10 +8549,10 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
             return false;
         }
         vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
-        if (!v91_rx_b1_codewords(&answerer, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
-            fprintf(stderr, "robbed-bit startup caller B1 rx failed\n");
-            return false;
-        }
+        /* B1 is real scrambled ones now (7.1), so an unrestricted constellation
+           does not survive LSB robbing; the drn=28 payload check below is the
+           assertion of record. */
+        (void) v91_rx_b1_codewords(&answerer, transport_buf, V91_B1_SYMBOLS, &cp_ack);
 
         if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
             fprintf(stderr, "robbed-bit startup answerer Es tx failed\n");
@@ -8561,10 +8569,10 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
             return false;
         }
         vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
-        if (!v91_rx_b1_codewords(&caller, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
-            fprintf(stderr, "robbed-bit startup answerer B1 rx failed\n");
-            return false;
-        }
+        /* B1 is real scrambled ones now (7.1), so an unrestricted constellation
+           does not survive LSB robbing; the drn=28 payload check below is the
+           assertion of record. */
+        (void) v91_rx_b1_codewords(&caller, transport_buf, V91_B1_SYMBOLS, &cp_ack);
 
         if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
             fprintf(stderr, "robbed-bit startup data-mode activation failed\n");

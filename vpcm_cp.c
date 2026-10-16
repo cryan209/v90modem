@@ -285,6 +285,45 @@ bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
     return vpcm_cp_encode_bits_fixed_fill(cp, bits_out, nbits_out);
 }
 
+int vpcm_cp_v91_length_for(int constellation_count)
+{
+    int nbits;
+
+    if (constellation_count < 1 || constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
+        return 0;
+    /* Table 4: constellations at 136 + 136 n, start bit, 16 CRC bits, one fill
+       bit, then zeros to the next multiple of 6 bits. */
+    nbits = 136 + 136 * constellation_count + 1 + 16 + 1;
+    return (nbits + 5) / 6 * 6;
+}
+
+int vpcm_cp_v91_bit_length(const vpcm_cp_frame_t *cp)
+{
+    if (!cp || cp->codec_constellations_differ)
+        return 0;
+    return vpcm_cp_v91_length_for(cp->constellation_count);
+}
+
+bool vpcm_cp_encode_bits_v91(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out)
+{
+    uint8_t scratch[VPCM_CP_MAX_BITS + 8];
+    int v90_bits;
+    int nbits;
+
+    if (!cp || !bits_out || !nbits_out || cp->codec_constellations_differ)
+        return false;
+    nbits = vpcm_cp_v91_bit_length(cp);
+    if (nbits <= 0 || nbits > VPCM_CP_MAX_BITS)
+        return false;
+    if (!vpcm_cp_encode_bits_fixed_fill(cp, scratch, &v90_bits))
+        return false;
+    /* Same field layout and CRC position as Table 14; only the fill differs. */
+    memset(bits_out, 0, (size_t) nbits);
+    memcpy(bits_out, scratch, (size_t) (v90_bits < nbits ? v90_bits : nbits));
+    *nbits_out = nbits;
+    return true;
+}
+
 bool vpcm_cp_decode_bits(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out)
 {
     vpcm_cp_diag_t diag;
@@ -356,7 +395,7 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
     return true;
 }
 
-bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
+static bool vpcm_cp_decode_diag_impl(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag, bool v91)
 {
     int i;
     int max_idx;
@@ -423,7 +462,14 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     }
     diag->frame.constellation_count = (uint8_t) (max_idx + 1);
     diag->frame.codec_constellations_differ = bits[128] != 0;
-    if (nbits != 156
+    if (v91) {
+        /* V.91 Table 4 has no codec-constellation set, and its length is
+         * 136 + 136 n + start bit + CRC + fill bit rounded up to a multiple
+         * of 6 (7.2), so SCR-style six-symbol mapping stays on the grid. */
+        if (diag->frame.codec_constellations_differ
+            || nbits != vpcm_cp_v91_length_for(diag->frame.constellation_count))
+            return false;
+    } else if (nbits != 156
                  + 136 * diag->frame.constellation_count
                    * (diag->frame.codec_constellations_differ ? 2 : 1))
         return false;
@@ -477,6 +523,23 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
                    && diag->crc_remainder == 0
                    && vpcm_cp_validate(&diag->frame, NULL, 0));
     return diag->valid;
+}
+
+bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
+{
+    return vpcm_cp_decode_diag_impl(bits, nbits, diag, false);
+}
+
+bool vpcm_cp_decode_bits_v91(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out)
+{
+    vpcm_cp_diag_t diag;
+
+    if (!cp_out)
+        return false;
+    if (!vpcm_cp_decode_diag_impl(bits, nbits, &diag, true))
+        return false;
+    *cp_out = diag.frame;
+    return true;
 }
 
 double vpcm_cp_drn_to_bps(uint8_t drn)

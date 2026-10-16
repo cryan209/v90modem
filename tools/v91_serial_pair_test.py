@@ -116,14 +116,14 @@ def main() -> int:
         caller_log = caller_log_path.open("wb")
         answerer_log = answerer_log_path.open("wb")
         answerer = subprocess.Popen(
-            [binary, "--local-port", str(args.answerer_port),
+            [binary, "--mode", "v91", "--local-port", str(args.answerer_port),
              "--pty-link", str(answerer_pty), "--verbose"],
             stdout=answerer_log,
             stderr=subprocess.STDOUT,
             env=child_env,
         )
         caller = subprocess.Popen(
-            [binary, "--sip-server", f"127.0.0.1:{args.answerer_port}",
+            [binary, "--mode", "v91", "--sip-server", f"127.0.0.1:{args.answerer_port}",
              "--local-port", str(args.caller_port),
              "--pty-link", str(caller_pty), "--verbose"],
             stdout=caller_log,
@@ -138,6 +138,11 @@ def main() -> int:
             caller_fd = open_raw(caller_pty)
             answerer_fd = open_raw(answerer_pty)
             drain([caller_fd, answerer_fd])
+            # Raw transport check: V.42 detection racing on loopback made this
+            # test pass about half the time on the old and new encoders alike.
+            for fd in (caller_fd, answerer_fd):
+                os.write(fd, b"AT\\N0\r")
+            drain([caller_fd, answerer_fd], 1.0)
             os.write(caller_fd, f"ATD{args.answerer_port}\r".encode("ascii"))
             wait_connect([caller_fd, answerer_fd], args.timeout)
             drain([caller_fd, answerer_fd])

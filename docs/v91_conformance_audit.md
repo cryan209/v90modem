@@ -1,5 +1,7 @@
 # V.91 conformance audit (ITU-T V.91, 05/99)
 
+**Update 2026-10-16 (same day, later): the gaps marked DONE below were closed; see "Progress" at the end.**
+
 Audited 2026-10-16 by reading the whole Recommendation (`ITU Docs/T-REC-V.91-199905-I!!PDF-E.pdf`,
 ~870 lines of text, 14 pages) against `v91.c`, `vpcm_v91_session.c`,
 `vpcm_cp.c` and the live path in `modem_engine.c` (`v91_live_*`).  Code was
@@ -145,3 +147,50 @@ V.90's downstream applied in both directions over a 4-wire digital path
 is known to us; the only on-wire reference is the text, so the way to
 validate 6.3 without a peer is a spec-only decoder in the style of
 `tools/v90_trn2d_spec_decode.py`, run on our own transmit tap.
+
+## Progress (2026-10-16)
+
+Closed in the code, with the loopback suite (`vpcm_loopback_test --all-tests`),
+`make test-fast` (550 passed) and the live two-instance call
+(`tools/v91_serial_pair_test.py`, now `--mode v91` and `AT\N0`) all green:
+
+- **Data-mode encoder (6.3, DONE).**  `v90_map_sr0_frame()` (new, `v90.c`) is the
+  transmit twin of `v90_demap_mapped_frame()`: GPC scrambler, first six bits as
+  signs, the rest through the 5.4.3 modulus encoder, descending-label mapper,
+  differentially coded signs.  `v91_tx_codewords` / `v91_rx_codewords` use them;
+  the bring-up ordinal mapper is gone.  The capacity rule is now 5.4.3's
+  2^K <= prod(Mi) rather than "each interval carries K/6 bits".
+- **B1 (7.1, DONE).**  Two frames of binary ones through the encoder, with the
+  scrambler and differential state running on from Es.  Receive side demaps and
+  checks ones; it skips the first 23 bits only when it has no descrambler
+  history.
+- **CP length (7.2, DONE).**  `vpcm_cp_encode_bits_v91` / `vpcm_cp_decode_bits_v91`
+  pad to a multiple of 6 (`vpcm_cp_v91_length_for`).  The live receiver now reads
+  the length from the dfi field (variable gamma) instead of assuming the
+  template's.  Correction to the audit above: the reserved CP fields were
+  already zero (`vpcm_cp_init` zeroes them); the only stray bits were CP bit 35
+  (codec law, now 0 -- INFO bit 39 carries it) and the `upstream_rate_mask`
+  alignment hack, which is gone.
+- **Live CP exchange (8.2.1.8-8.2.1.10, DONE).**  CP repeats, CP' (ack bit) once
+  the peer's CP is in, Es+B1 after a CP' sent and a CP'/Es received.  The CP we
+  send names the constellation and rate for the PEER's transmitter (7.2), so it
+  carries the robbed intervals seen on our receive path
+  (`vpcm_cp_apply_robbed_bit_safe_slots`); our transmitter and B1 follow the
+  peer's CP, our receiver follows ours.  Each direction therefore runs its own
+  rate.  The old robbed-cadence "alignment" (TX padding to a cadence phase,
+  carried in a reserved CP field) is deleted: the spec's per-interval
+  constellations do the job.  Live robbed-trunk simulation passes at phases 1-5
+  (phase 0 still fails occasionally at the DIL stage, receive code unchanged by
+  this work).
+- The harness: `tools/v91_serial_pair_test.py` had silently stopped selecting
+  V.91 (the V.8 offer no longer advertises it by default) and passed only about
+  half the time at baseline because V.42 detection raced on loopback.  It now
+  forces `--mode v91` and `AT\N0`.  Remaining failures are V.8 timeouts on
+  loopback, before any V.91 code runs.
+
+Still open: control channel (6.3.9/6.4), 8.3 escape to V.34 and its 1.5 s / 10 s
+timers, 8.4/8.5 retrain and the recovery timer, J/PHIL/Em and the transparent
+request on the live path, V.54 loop 3, and a spec-only decoder run on our own
+tap (the only validation available without a peer).  Test-only note: the
+robbed-bit startup test no longer asserts that B1 survives an unrestricted
+constellation under robbing (it is real scrambled ones now and does not).

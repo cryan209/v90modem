@@ -282,121 +282,36 @@ static int v91_tx_zeros_mapped_as_scr(v91_state_t *s,
     return v91_tx_diff_bits_codewords(s, g711_out, g711_max, bits, nsymbols, false, true);
 }
 
-static int v91_select_b1_ucode(const vpcm_cp_frame_t *cp, int frame_interval, int k, int symbol_index)
-{
-    int constellation_idx;
-    int population;
-    int ordinal;
-    int direction;
-    int ucode;
-
-    if (!cp || frame_interval < 0 || frame_interval >= VPCM_CP_FRAME_INTERVALS)
-        return -1;
-    if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
-        return -1;
-    constellation_idx = cp->dfi[frame_interval];
-    if (constellation_idx >= cp->constellation_count)
-        return -1;
-
-    population = vpcm_cp_mask_population(cp->masks[constellation_idx]);
-    if (population <= 0)
-        return -1;
-
-    /* Bring-up mapper: choose a deterministic active codeword within the
-       negotiated constellation. The ordinal depends on K, frame interval,
-       and symbol position so different negotiated rates produce distinct B1
-       patterns while staying within the selected CP mask set. */
-    ordinal = (k - 15 + frame_interval * 5 + symbol_index * 7) % population;
-    if (ordinal < 0)
-        ordinal += population;
-    direction = ((k + frame_interval + symbol_index) & 1) ? -1 : 1;
-
-    if (direction > 0) {
-        for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
-            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode)) {
-                if (ordinal-- == 0)
-                    return ucode;
-            }
-        }
-    } else {
-        for (ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
-            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode)) {
-                if (ordinal-- == 0)
-                    return ucode;
-            }
-        }
-    }
-    return -1;
-}
-
-static void v91_bits_per_interval(int k, int bits_per_interval[VPCM_CP_FRAME_INTERVALS])
-{
-    int base;
-    int rem;
-    int i;
-
-    base = k / VPCM_CP_FRAME_INTERVALS;
-    rem = k % VPCM_CP_FRAME_INTERVALS;
-    for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
-        bits_per_interval[i] = base + ((i < rem) ? 1 : 0);
-}
-
-static int v91_select_active_ucode_by_ordinal(const uint8_t mask[VPCM_CP_MASK_BYTES], int ordinal)
-{
-    int ucode;
-
-    for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
-        if (vpcm_cp_mask_get(mask, ucode)) {
-            if (ordinal-- == 0)
-                return ucode;
-        }
-    }
-    return -1;
-}
-
-static int v91_ucode_ordinal_in_mask(const uint8_t mask[VPCM_CP_MASK_BYTES], int ucode)
-{
-    int ordinal;
-    int i;
-
-    ordinal = 0;
-    for (i = 0; i < VPCM_CP_MASK_BITS; i++) {
-        if (vpcm_cp_mask_get(mask, i)) {
-            if (i == ucode)
-                return ordinal;
-            ordinal++;
-        }
-    }
-    return -1;
-}
-
 static bool v91_data_mode_supported(const vpcm_cp_frame_t *cp, int k)
 {
-    int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
+    uint64_t product = 1;
     int i;
 
     if (!cp)
         return false;
     if (!vpcm_cp_validate(cp, NULL, 0))
         return false;
-    if (k <= 0)
+    if (k <= 0 || k > 56)
         return false;
 
-    v91_bits_per_interval(k, bits_per_interval);
+    /* V.90 5.4.3 (by reference from V.91 6.3.4): the K modulus-encoder bits
+       must fit in the product of the six constellation sizes, 2^K <= prod(Mi).
+       A single interval need not carry K/6 bits on its own. */
     for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
         int constellation_idx;
         int population;
-        int needed;
 
         constellation_idx = cp->dfi[i];
         if (constellation_idx >= cp->constellation_count)
             return false;
         population = vpcm_cp_mask_population(cp->masks[constellation_idx]);
-        needed = 1 << bits_per_interval[i];
-        if (population < needed)
+        if (population <= 0)
             return false;
+        product *= (uint64_t) population;
+        if (product >> k)
+            return true;
     }
-    return true;
+    return (product >> k) != 0;
 }
 
 static int v91_primary_bits_per_frame(const vpcm_cp_frame_t *cp, int k)
@@ -980,7 +895,7 @@ int v91_tx_cp_codewords(v91_state_t *s,
 
     if (!s || !cp)
         return 0;
-    if (!vpcm_cp_encode_bits(cp, bits, &nbits))
+    if (!vpcm_cp_encode_bits_v91(cp, bits, &nbits))
         return 0;
     if (nbits > g711_max)
         return 0;
@@ -1010,7 +925,7 @@ bool v91_rx_cp_codewords(v91_state_t *s,
 
     if (v91_rx_diff_bits_stateful(s, g711_in, g711_len, bits, !continue_from_scr, true) != g711_len)
         return false;
-    if (!vpcm_cp_decode_bits(bits, g711_len, &cp)) {
+    if (!vpcm_cp_decode_bits_v91(bits, g711_len, &cp)) {
         s->last_rx_cp_valid = false;
         return false;
     }
@@ -1025,26 +940,29 @@ int v91_tx_b1_codewords(v91_state_t *s,
                         int g711_max,
                         const vpcm_cp_frame_t *cp)
 {
-    int i;
-    int ucode;
-    int k;
+    uint8_t ones[64];
+    int d;
+    int frame;
 
     if (!s || !g711_out || !cp || g711_max < V91_B1_SYMBOLS)
         return 0;
 
-    /* Bring-up implementation: choose active PCM codewords from the
-       negotiated CP masks with a deterministic K-sensitive selector. */
-    k = vpcm_cp_drn_to_k(cp->drn);
-    if (k <= 0)
+    /* 7.1: B1 is 12 PCM codewords, the result of mapping binary ones using
+       the selected data mode.  Transparent mode passes the ones as octets. */
+    if (cp->transparent_mode_granted && cp->drn == 28) {
+        memset(g711_out, 0xFF, V91_B1_SYMBOLS);
+        return V91_B1_SYMBOLS;
+    }
+    if (cp->drn == 0 || cp->drn > 28)
         return 0;
-    for (i = 0; i < V91_B1_SYMBOLS; i++) {
-        int fi;
-
-        fi = i % VPCM_CP_FRAME_INTERVALS;
-        ucode = v91_select_b1_ucode(cp, fi, k, i);
-        if (ucode < 0)
+    d = (int) cp->drn + 20;
+    memset(ones, 1, sizeof(ones));
+    /* The scrambler and differential encoder run on from the end of Es. */
+    for (frame = 0; frame < V91_B1_SYMBOLS / VPCM_CP_FRAME_INTERVALS; frame++) {
+        if (v90_map_sr0_frame((v90_law_t) s->law, cp, d, &s->scramble_reg,
+                              &s->diff_sign, ones,
+                              g711_out + frame * VPCM_CP_FRAME_INTERVALS) == 0)
             return 0;
-        g711_out[i] = v91_ucode_to_codeword(s->law, ucode, true);
     }
     return V91_B1_SYMBOLS;
 }
@@ -1054,13 +972,44 @@ bool v91_rx_b1_codewords(v91_state_t *s,
                          int g711_len,
                          const vpcm_cp_frame_t *cp)
 {
-    uint8_t expected[V91_B1_SYMBOLS];
+    uint32_t reg;
+    int prev_sign;
+    int d;
+    int frame;
 
     if (!s || !g711_in || !cp || g711_len != V91_B1_SYMBOLS)
         return false;
-    if (v91_tx_b1_codewords(s, expected, V91_B1_SYMBOLS, cp) != V91_B1_SYMBOLS)
+    if (cp->transparent_mode_granted && cp->drn == 28) {
+        for (frame = 0; frame < V91_B1_SYMBOLS; frame++)
+            if (g711_in[frame] != 0xFF)
+                return false;
+        return true;
+    }
+    if (cp->drn == 0 || cp->drn > 28)
         return false;
-    return memcmp(expected, g711_in, V91_B1_SYMBOLS) == 0;
+    d = (int) cp->drn + 20;
+    reg = s->rx_scramble_reg;
+    prev_sign = s->rx_prev_sign;
+    for (frame = 0; frame < V91_B1_SYMBOLS / VPCM_CP_FRAME_INTERVALS; frame++) {
+        uint8_t bits[64];
+
+        if (v90_demap_mapped_frame((v90_law_t) s->law, cp, d, &reg, &prev_sign,
+                                   g711_in + frame * VPCM_CP_FRAME_INTERVALS,
+                                   bits) != d)
+            return false;
+        for (int i = 0; i < d; i++) {
+            /* The descrambler is self-synchronising: a receiver that did not
+               watch the preceding Es has wrong history for the first 23 bits
+               only, so those are not judged. */
+            if (frame == 0 && i < 23)
+                continue;
+            if (bits[i] != 1)
+                return false;
+        }
+    }
+    s->rx_scramble_reg = reg;
+    s->rx_prev_sign = prev_sign;
+    return true;
 }
 
 int v91_tx_info_codewords(v91_state_t *s,
@@ -1567,6 +1516,7 @@ int v91_tx_codewords(v91_state_t *s,
 {
     int data_pos;
     int out_pos;
+    int d;
 
     if (g711_max <= 0 || data_len <= 0)
         return 0;
@@ -1586,48 +1536,29 @@ int v91_tx_codewords(v91_state_t *s,
         return data_len;
     }
 
+    /* 6.3: the encoder is V.90 5.4 with Sr = 0, S = 6, so each six-symbol data
+       frame carries D = K + 6 = drn + 20 bits. */
     data_pos = 0;
     out_pos = 0;
+    d = s->active_k + 6;
     while (out_pos + VPCM_CP_FRAME_INTERVALS <= g711_max) {
-        int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
-        int frame_interval;
+        uint8_t bits[64];
 
-        while (s->tx_bit_count < s->active_k && data_pos < data_len) {
+        while (s->tx_bit_count < d && data_pos < data_len) {
             s->tx_bit_accum |= ((uint64_t) data_in[data_pos++]) << s->tx_bit_count;
             s->tx_bit_count += 8;
         }
-        if (s->tx_bit_count < s->active_k)
+        if (s->tx_bit_count < d)
             break;
-
-        v91_bits_per_interval(s->active_k, bits_per_interval);
-        for (frame_interval = 0; frame_interval < VPCM_CP_FRAME_INTERVALS; frame_interval++) {
-            int constellation_idx;
-            int nbits;
-            int ordinal;
-            int sign_bit;
-            int ucode;
-            uint64_t mask;
-
-            constellation_idx = s->active_cp.dfi[frame_interval];
-            nbits = bits_per_interval[frame_interval];
-            while (s->tx_bit_count < (nbits + 1) && data_pos < data_len) {
-                s->tx_bit_accum |= ((uint64_t) data_in[data_pos++]) << s->tx_bit_count;
-                s->tx_bit_count += 8;
-            }
-            if (s->tx_bit_count < (nbits + 1))
-                return out_pos;
-            mask = (((uint64_t) 1) << nbits) - 1U;
-            ordinal = (int) (s->tx_bit_accum & mask);
-            s->tx_bit_accum >>= nbits;
-            s->tx_bit_count -= nbits;
-            sign_bit = (int) (s->tx_bit_accum & 1U);
-            s->tx_bit_accum >>= 1;
-            s->tx_bit_count -= 1;
-            ucode = v91_select_active_ucode_by_ordinal(s->active_cp.masks[constellation_idx], ordinal);
-            if (ucode < 0)
-                return out_pos;
-            g711_out[out_pos++] = v91_ucode_to_codeword(s->law, ucode, sign_bit != 0);
-        }
+        for (int i = 0; i < d; i++)
+            bits[i] = (uint8_t) ((s->tx_bit_accum >> i) & 1U);
+        if (v90_map_sr0_frame((v90_law_t) s->law, &s->active_cp, d,
+                              &s->scramble_reg, &s->diff_sign, bits,
+                              g711_out + out_pos) == 0)
+            return out_pos;
+        s->tx_bit_accum >>= d;
+        s->tx_bit_count -= d;
+        out_pos += VPCM_CP_FRAME_INTERVALS;
     }
     return out_pos;
 }
@@ -1640,6 +1571,7 @@ int v91_rx_codewords(v91_state_t *s,
 {
     int in_pos;
     int out_pos;
+    int d;
 
     if (data_max <= 0 || g711_len <= 0)
         return 0;
@@ -1661,36 +1593,22 @@ int v91_rx_codewords(v91_state_t *s,
 
     in_pos = 0;
     out_pos = 0;
+    d = s->active_k + 6;
     while (in_pos + VPCM_CP_FRAME_INTERVALS <= g711_len) {
-        int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
-        int frame_interval;
+        uint8_t bits[64];
 
-        v91_bits_per_interval(s->active_k, bits_per_interval);
-        for (frame_interval = 0; frame_interval < VPCM_CP_FRAME_INTERVALS; frame_interval++) {
-            int constellation_idx;
-            int nbits;
-            int ucode;
-            int ordinal;
-            int sign_bit;
-
-            constellation_idx = s->active_cp.dfi[frame_interval];
-            nbits = bits_per_interval[frame_interval];
-            sign_bit = (g711_in[in_pos] & 0x80) ? 1 : 0;
-            ucode = v91_codeword_to_ucode(s->law, g711_in[in_pos++]);
-            if (ucode < 0)
-                return out_pos;
-            ordinal = v91_ucode_ordinal_in_mask(s->active_cp.masks[constellation_idx], ucode);
-            if (ordinal < 0 || ordinal >= (1 << nbits))
-                return out_pos;
-            s->rx_bit_accum |= ((uint64_t) ordinal) << s->rx_bit_count;
-            s->rx_bit_count += nbits;
-            s->rx_bit_accum |= ((uint64_t) sign_bit) << s->rx_bit_count;
-            s->rx_bit_count += 1;
-            while (s->rx_bit_count >= 8 && out_pos < data_max) {
-                data_out[out_pos++] = (uint8_t) (s->rx_bit_accum & 0xFFU);
-                s->rx_bit_accum >>= 8;
-                s->rx_bit_count -= 8;
-            }
+        if (v90_demap_mapped_frame((v90_law_t) s->law, &s->active_cp, d,
+                                   &s->rx_scramble_reg, &s->rx_prev_sign,
+                                   g711_in + in_pos, bits) != d)
+            return out_pos;
+        in_pos += VPCM_CP_FRAME_INTERVALS;
+        for (int i = 0; i < d; i++)
+            s->rx_bit_accum |= ((uint64_t) bits[i]) << (s->rx_bit_count + i);
+        s->rx_bit_count += d;
+        while (s->rx_bit_count >= 8 && out_pos < data_max) {
+            data_out[out_pos++] = (uint8_t) (s->rx_bit_accum & 0xFFU);
+            s->rx_bit_accum >>= 8;
+            s->rx_bit_count -= 8;
         }
     }
     return out_pos;

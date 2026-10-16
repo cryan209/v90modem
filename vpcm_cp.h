@@ -69,6 +69,12 @@ bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
                                    int constellation_points,
                                    uint8_t *bits_out,
                                    int *nbits_out);
+/* V.91 Table 4 framing of the same CP fields: length is rounded up to a
+ * multiple of 6 (7.2).  vpcm_cp_decode_bits_v91 requires that length. */
+int vpcm_cp_v91_length_for(int constellation_count);
+int vpcm_cp_v91_bit_length(const vpcm_cp_frame_t *cp);
+bool vpcm_cp_encode_bits_v91(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out);
+bool vpcm_cp_decode_bits_v91(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out);
 bool vpcm_cp_decode_bits(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out);
 bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag);
 bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag);

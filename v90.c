@@ -5269,6 +5269,69 @@ static int v90_codeword_to_ucode_law(v90_law_t law, uint8_t codeword)
     return -1;
 }
 
+/*
+ * Transmit counterpart of v90_demap_mapped_frame() for Sr = 0: scramble
+ * `bits_per_frame` input bits with GPC (5.3), take the first six as the sign
+ * bits (S = 6) and the remaining K through the 5.4.3 modulus encoder, map to
+ * Ucodes by descending label (5.4.4), and differentially encode the signs
+ * (5.4.5.1).  Used by V.91 (6.3: "as defined in 5.4/V.90", Sr = 0, S = 6).
+ * scramble_reg/prev_sign carry transmitter state across frames.
+ * Returns V90_FRAME_LEN, or 0 when the bits do not fit the CP constellations.
+ */
+int v90_map_sr0_frame(v90_law_t law,
+                      const vpcm_cp_frame_t *cp,
+                      int bits_per_frame,
+                      uint32_t *scramble_reg,
+                      int *prev_sign,
+                      const uint8_t *bits_in,
+                      uint8_t frame_out[V90_FRAME_LEN])
+{
+    uint8_t scrambled[64];
+    uint64_t r = 0;
+    v90_scrambler_t sc;
+    int sign;
+    int k;
+
+    if (!cp || !scramble_reg || !prev_sign || !bits_in || !frame_out
+        || cp->shaping_redundancy != 0
+        || bits_per_frame < V90_FRAME_LEN
+        || bits_per_frame > (int)sizeof(scrambled)
+        || bits_per_frame - V90_FRAME_LEN > 56)
+        return 0;
+    k = bits_per_frame - V90_FRAME_LEN;
+    sc.sr = *scramble_reg;
+    for (int i = 0; i < bits_per_frame; i++)
+        scrambled[i] = (uint8_t)v90_scramble_bit(&sc, bits_in[i] & 1);
+    for (int i = 0; i < k; i++)
+        r |= (uint64_t)scrambled[V90_FRAME_LEN + i] << i;
+
+    sign = *prev_sign;
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = cp->dfi[i];
+        int m;
+        int label;
+        int ucode;
+
+        if (constellation >= cp->constellation_count)
+            return 0;
+        m = vpcm_cp_mask_population(cp->masks[constellation]);
+        if (m <= 0)
+            return 0;
+        label = (int)(r % (uint64_t)m);
+        r /= (uint64_t)m;
+        ucode = v90_cp_constellation_ucode(cp, i, label);
+        if (ucode < 0)
+            return 0;
+        sign = (scrambled[i] & 1) ^ sign;
+        frame_out[i] = v90_pcm_signed_codeword(law, ucode, sign);
+    }
+    if (r != 0)
+        return 0;
+    *scramble_reg = sc.sr;
+    *prev_sign = sign;
+    return V90_FRAME_LEN;
+}
+
 int v90_demap_mapped_frame(v90_law_t law,
                            const vpcm_cp_frame_t *cp,
                            int bits_per_frame,

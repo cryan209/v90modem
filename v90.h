@@ -510,6 +510,15 @@ double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s);
  */
 bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out);
 
+/* Transmit counterpart of v90_demap_mapped_frame (Sr=0), see v90.c. */
+int v90_map_sr0_frame(v90_law_t law,
+                      const vpcm_cp_frame_t *cp,
+                      int bits_per_frame,
+                      uint32_t *scramble_reg,
+                      int *prev_sign,
+                      const uint8_t *bits_in,
+                      uint8_t frame_out[6]);
+
 /*
  * Demap one Sr=0 six-symbol mapped data frame (TRN2d/SUVd/CPd/Ed or B1d)
  * back into its descrambled input bits.  bits_per_frame is the mapper's d;
