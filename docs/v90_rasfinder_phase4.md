@@ -1,5 +1,80 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-16 (night): the post-B1 callbacks were unoptimised code; LAPM 4/20 -> 15/19
+
+**SpanDSP has been built at -O0 all along.**  The makefile configures it
+with `CFLAGS="$(TIFF_CFLAGS) $(JPEG_CFLAGS)"`, which replaces autoconf's
+default `-g -O2`, so every DSP loop in `libspandsp.a` is unoptimised.  The
+post-B1 acquisition steps (one template per packet since 857af503) each cost
+4.5-6.5 ms on the dev Mac free-running, and the mini is not slower at all
+(same M4, same 2.4 s for a `--fast` replay): what costs 3-4x live is
+real-time pacing, a thread that wakes every 20 ms for a few ms runs on a
+clocked-down core.  The real-time replay here showed it too (9-17 ms for the
+same steps).  A user-interactive QoS class and a Mach time-constraint
+policy on the media thread were both tried and changed nothing, so the work
+itself had to shrink.
+
+**What changed (1e3a4e0f, 254a3402):**
+
+- `v34rx.c` is built with `-O2` (clang only; `SPANDSP_V34RX_OPT_CFLAGS` in
+  the makefile, built before the main SpanDSP make so no automake is
+  needed) and makes every function optnone except the T/3 B1 acquisition:
+  template build, coarse scan and fit, 4-point training and locate, the
+  least-squares solve.  Optimising more is not bit-exact: all of SpanDSP at
+  -O2 changes 3 of 24 RasFinder replays (our Phase 2 transmit moves about 1%
+  and a Phase 3 S detection a frame), and `v34tx.c` at -O2, **even with every
+  function optnone**, stops `v56_loopback_test --ad 5 --edd 3` syncing.
+  That last one means its output depends on more than arithmetic
+  (uninitialised stack reads are the usual suspect); not chased here.
+- The MP template's constellation power (a 32000-symbol run of the V.34
+  mapper, which stays -O0 in `v34tx.c`) is split over the three packets
+  before its only consumer, `v90_t3_blind_acquire()`, in the same order into
+  the same sums; reloading that template after a failed search no longer
+  repeats it, and a search window that is going to fail (best fit under
+  0.95) no longer runs it at all.  That last case was opt-5 below: 21-22 ms
+  per retry window after its 4-point training failed.
+- Longest data-mode callback in the replays: 6.5 ms -> 2.4 ms on the dev
+  Mac; a real-time replay on the mini 3.4-7.9 ms (live it was 20-26 ms).
+
+**Proof of "no decoded bit changed":** `v90_engine_replay --sync` (new) runs
+the engine on the media clock and wakes and drains the strict CP worker
+between frames.  Before it, two runs of the same build differed: the worker
+was woken mid-callback and read state the callback was still changing, which
+moved batch CPt recoveries by a frame.  With `ME_RX_BIT_DUMP` (new: every bit
+the receiver hands up), all 30 taps (`lec-*`, `lec2-*`, `opt-*`) give
+identical bits, logs, and TX and RX PCM dumps against the -O0 build.  make
+test-fast 550/550.  `ME_SLOW_CALLBACK_US` lowers the slow-callback log
+threshold, to see the steps on a faster host.
+
+**Live, from the mini, 2901 -> 6311/6312/6313, upstream cap 21600, 90 s apart:**
+
+| build | calls | V.90 data mode | LAPM + login | echo moved at B1 | data-mode callback > 20 ms | held before first resync |
+| --- | --- | --- | --- | --- | --- | --- |
+| lec + lec2 (before) | 24 | 20 | 4 | 16 | every call | 12 s on 12 of 20 |
+| 1e3a4e0f, `opt-*` | 12 | 11 | **9** | none (opt-5 in its retry windows) | opt-5 only (fixed in 254a3402) | 15-45 s, median 29 |
+| 254a3402, `opt2-*` | 9 | 8 | **6** | none | none in V.90 (opt2-9 was a V.34 fallback) | 30-45 s; opt2-5, -6 1 s |
+
+Both batches together: 19 of 21 calls in V.90 data mode, **15 of 19 to LAPM
+and the login prompt** (was 4 of 20).
+
+The calls that missed: opt-5 (4-point training failed, retry windows of
+21-22 ms moved the echo, peer retrained; fixed since), opt-6 (B1 acquired
+cleanly, decision error 0.025, yet the data decodes white: 50% ones and
+3-12% bad shell frames, so the 4-point-end + 9 symbols B1 position is
+probably a symbol out on this call; open), opt-10 (the RasFinder answered
+with V.25 automode and we trained V.32bis; no V.8 at all).  In `opt2-*`,
+opt2-5 and opt2-6 decode cleanly for 1.3-1.6 s (decision error 0.025, V.42
+detection succeeds) and then the discontinuity detector fires with no echo
+move and no slow callback before it; opt2-9 fell back to plain V.34 19200,
+whose data-mode callbacks (22-24 ms) are the V.34 path, not this one.
+
+**What limits it now** is no longer the echo.  Calls hold LAPM 15-45 s and
+then the discontinuity detector asks for a 9.6 resync with no echo move
+before it (opt-1, -4, -7, -12, and only 1.5 s in on opt2-5, -6); the echo
+moves the logs do show (opt-3, opt-9, opt2-4, opt2-7) all come after a
+resync, from the retrain's own callbacks.  Next: what the upstream does
+in the seconds before those resyncs, on the `opt-*` taps.
+
 ## 2026-10-16 (evening): the Phase 3/4 "lottery" was our echo-canceller fit stalling DIL
 
 **The calls that never reached V.90 data mode were ours.**  Of the 11 V.90
