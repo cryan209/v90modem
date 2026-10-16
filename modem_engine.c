@@ -5839,7 +5839,20 @@ static bool v34_b1_rate_check_locked(void)
        modem: the caller on a plain V.34 call, and always on a V.90 call that
        fell back to V.34 (V.90 9.2.1.1.8), whichever end placed it. */
     ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
-    supported = v34_rx_training_rate(g_v34, snr)/2400;
+    /* TRN picked the rate we asked for; B1 re-reads the same SNR a moment
+       later and the two differ by a few tenths of a dB on an identical line
+       (engine_pair_test, 3200 baud: TRN 32.3 dB -> 24000, B1 31.7 dB -> 21600,
+       then 32.4 / 32.2 dB on the retrain).  With no tolerance a reading that
+       straddles a rate threshold cost a whole 11.5 retrain (~14 s) to move
+       one step.  The guard exists for the large deficits (the RasFinder's
+       23 dB at 31200), so allow ME_V34_B1_RATE_MARGIN_DB (default 1.0)
+       before calling the rate too high; 0 restores the strict comparison. */
+    {
+        const char *m = getenv("ME_V34_B1_RATE_MARGIN_DB");
+        float margin = (m && *m) ? (float) atof(m) : 1.0f;
+
+        supported = v34_rx_training_rate(g_v34, snr + margin)/2400;
+    }
     /* B1 only measures the line when it decodes.  At a rate the line cannot
        carry it does not correlate at all and reads far below any real
        channel -- -11.3 dB at 21600 on rf-tower-fb-7, where the same line

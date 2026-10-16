@@ -900,3 +900,21 @@ after the -O2 move alone); `V34_MP_RX_DUMP` and the filtered log are
 byte-identical before and after; `make test-fast` 576/576.  Not live-verified:
 the next RasFinder call should show no `slow media callback` at the first
 reneg's MP entry and a first reneg that completes.
+
+## B1 guard had no tolerance against the TRN estimate (2026-10-17)
+
+The browser pair's "TRN 32.3 dB asks 24000, B1 31.7 dB assesses 21600, then a
+§11.5 retrain" reproduces natively:
+`ENGINE_PAIR_KEEP_LOGS=1 VPCM_ME_VERBOSE=1 ./engine_pair_test --expect V34
+--both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200` (the sweep harness never
+runs the engine's B1 guard).  B1 read 31.7 dB, and on the retrain of the same
+line 32.4 and 32.2 dB: the two estimators agree to a few tenths of a dB and the
+spread straddles the 24000 threshold, so `v34_b1_rate_check_locked()` spent a
+whole retrain (CONNECT at 26.9 s instead of 12.9 s, one of the retrain's own
+Phase 2/3 attempts failing) to move one rate step on an unchanged line.  The
+guard is for large deficits (the RasFinder's 23 dB at 31200), so it now judges
+B1 at `SNR + ME_V34_B1_RATE_MARGIN_DB` (default 1.0; 0 = strict, the old
+behaviour).  3200 baud pair: 26.9 s / 21600 -> 12.9 s / 24000 and 21600;
+`make test-fast` 576/576.  This does not calibrate either estimator, and the
+rate that results is still the one TRN chose; a data mode that really cannot
+carry it is caught by the loss retrain.  No hardware evidence.
