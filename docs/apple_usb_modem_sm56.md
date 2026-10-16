@@ -2790,3 +2790,80 @@ The synthetic controls check a known FIR with DC and independent noise,
 held-out inverse/ideal feedback fits, and an unrelated-signal negative
 control. The retained plots, model files and JSON measurements are under
 `artifacts/apple-loopback-spectrum-20261016-verified/`.
+
+### Independent quiet noise and response shape (2026-10-16)
+
+`tools/apple_line_characterize.py` now measures quiet noise independently of
+any equalizer, in two RX windows (2000–7000 and 22000–23500). It checks the
+aligned TX is zero throughout both windows and an extra ±256 samples around
+each. The post-probe window begins more than 800 samples after the received
+probe ends. Welch power is integrated over nominal 300–3400 Hz, with 7.8125 Hz
+bins. Each segment has its mean removed; these are AC, in-band measurements.
+
+| quantity | analog 0:13 | analog 0:14 |
+|---|---|---|
+| quiet in-band RMS, before / after | 1.80 / 1.87 counts | 4.02 / 4.03 counts |
+| active in-band RMS | 1779 counts | 1826 counts |
+| quiet-referenced in-band SNR | **59.73 dB** | **53.13 dB** |
+| 513-tap forward active residual, in-band RMS | 2.17 counts | 4.63 counts |
+| active in-band signal / residual | **58.28 dB** | **51.92 dB** |
+
+The independent quiet measurement and active residual agree within 1.5 dB.
+This supports roughly 60 / 53 dB additive in-band SNR at this probe level on
+these local analog loopbacks. It does not establish noise independence at
+other transmit levels or the SNR of the remote SIP bearer. The active residual
+includes model error, so it remains a signal-to-residual measurement.
+
+**The earlier ~22 dB inverse-EQ score is not the line's noise SNR.** Increasing
+the forward FIR from 65 to 257 to 513 taps improves analog broadband
+prediction from about 24 to 34 to 43 dB. In-band, the 513-tap model reaches
+58 / 52 dB. Much of the remaining broadband error is below the modem band;
+short filters and a fixed DC estimate had included long-memory/low-frequency
+response in what looked like noise. There is no need to assume an ideal DFE
+to demonstrate the much lower in-band residual. Isolation controls show
+73 / 77 dB quiet-referenced SNR and about 72 dB active residual SNR.
+
+The training-only 513-tap FIR gives a response estimate without the Welch
+transfer ratio's window smoothing. Train uses 5800 samples, test 4944; even
+the longest input windows have a 188-sample gap. Response is normalized to
+1 kHz. Both devices and both line-side modes agree closely:
+
+| frequency | analog relative gain | ideal inverse magnitude boost |
+|---|---|---|
+| 1 kHz | 0 dB | 0 dB |
+| 2 kHz | -0.37 dB | +0.37 dB |
+| 3 kHz | -0.34 dB | +0.34 dB |
+| 3.2 kHz | -0.16 dB | +0.16 dB |
+| 3.4 kHz | -1.95 dB | +1.95 dB |
+| 3.5 kHz | -4.21 dB | +4.21 dB |
+| 3.6 kHz | -7.65 dB | +7.65 dB |
+| 3.8 kHz | -18.7 dB | +18.7 dB |
+| 3.9 kHz | -27.3 dB | +27.3 dB |
+
+The analog -3/-6/-10/-20 dB crossings are approximately
+3453/3558/3653/3817 Hz. Passband phase is close to linear: after removing a
+best-fit delay over 300–3400 Hz, its 5th–95th percentile departure is roughly
+-1.7 to +1.1 degrees. Delay relative to the chosen integer alignment is
+61 microseconds in analog and 34 microseconds in isolation; this is not the
+bulk USB latency.
+
+Here "ideal response" means a flat magnitude and linear phase over the
+chosen usable band. The CSV exports the measured complex-response summary
+and inverse magnitude required to approach that target. Through 3.2 kHz it
+needs little magnitude correction; 3.4 kHz needs about 2 dB. Attempting to
+flatten the last few hundred Hz toward Nyquist instead amplifies noise by
+19–27 dB. The inverse curve is a diagnostic, not a proposed live filter or
+an optimum modulation spectrum. The local loopback only identifies the
+combined TX/RX response; it cannot separate their individual filters.
+
+Reproduce with NumPy/SciPy/Matplotlib:
+
+```sh
+MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_line_characterize.py \
+  --self-check --out artifacts/apple-line-characterize-check
+```
+
+Synthetic checks verify integrated white-noise band power and the centered
+FIR's complex-response convention. Results, response/inverse CSVs and the
+visually inspected plot are in `artifacts/apple-line-characterize-20261016/`.
+No new hardware call or audio-path change was needed for this analysis.
