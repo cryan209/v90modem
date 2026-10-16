@@ -856,3 +856,32 @@ including 33600 both ways in 13/16 rows. At 20 dB the changed acquisition
 trajectory newly passes mu-law/A-law delay 1 but newly fails mu-law delay 7
 with 34 bit errors; the other failures remain. This is not reliable 20-dB
 operation and does not establish physical modem interoperability.
+
+## The first failed renegotiation is a callback stall, not MP decoding (2026-10-17)
+
+Re-replaying `artifacts/rf-bbs-7` (`ME_MODE=v34 v90_engine_replay ... --fast
+--dial --split`, current tree) does **not** reproduce the "scattered bit errors"
+in the first §11.6 MP.  `V34_MP_RX_DUMP` for that window (9488 symbols, 6 deg
+rms from the 4-point grid) decodes by `tools/v34_mp_offline.py` as 96 of 97
+CRC-valid Table-21 frames (diff-neg, I1/I2, x^-5 taps) starting at symbol 26,
+and the engine answers with its E 300 ms after entering the MP stage -- the
+same latency as a live success (220 ms).  The earlier note was written before
+the MP-decoding and conditioning fixes above and should not be relied on.
+
+What does separate the live failures from the live successes in
+`rf-bbs-7/server.log` is a **119-132 ms `slow media callback`** at the MP-stage
+entry (`v34_rx=16 v34_tx=50`): it appears in both failed renegotiations (41.3 s
+and 103.4 s) and in none of the nine that completed.  That is the same
+mechanism as the V.90 B1 stall (1e3a4e0f, f654ad3e): the callback holds up
+pjmedia's next RTP send, so a 130 ms hole reaches the peer's gateway while it
+is waiting for our MP.  The recording predates the -O2 work, and only the T/3
+B1 acquisition was moved to -O2; plain V.34 MP acquisition is still `-O0`/
+`optnone`.
+
+On the current tree at `ME_SLOW_CALLBACK_US=3000` the replayed first reneg shows
+no stall near the MP entry on this Mac, but a 105.7 ms rx callback still
+appears mid-MP-stage in a later retrain (replay, state=3, ~1 s period).  The
+tower was not reachable on 2026-10-17, so no live call has confirmed either
+way.  Next: one live RasFinder call on the current build and read
+`slow media callback` against the first reneg; if a stall remains, find the
+step with `ME_SLOW_CALLBACK_US` on the Mini rather than on a faster host.
