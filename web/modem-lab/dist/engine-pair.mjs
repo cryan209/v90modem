@@ -1,7 +1,7 @@
 import createModem from './modem-engine.mjs';
 import {negotiationRecords} from './negotiation.mjs';
 export function expand(code){const u=(~code)&255;const t=(((u&15)<<3)+132)<<((u>>4)&7);return ((u&128)?132-t:t-132)/32768;}
-export async function runPair(mode,text,onProgress=()=>{}){
+export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false){
   const logs=[],protocol=[],bitClock=[];let simTime=0,droppedProtocol=0;
   const options=(side)=>({print:line=>capture(side,line),printErr:line=>capture(side,line)});
   function capture(side,line){if(protocol.length<20000){protocol.push({time:simTime,side,line});logs.push(line);}else droppedProtocol++;}
@@ -19,6 +19,7 @@ export async function runPair(mode,text,onProgress=()=>{}){
   const left=[],right=[],events=[],constellations=[];let at=0,bt=0,doneAt=0,lastState='',lastRx='',lastReply='';
   try{
     for(let block=0;block<3000;block++){
+      if(shouldStop())throw new Error('Call cancelled');
       simTime=(block+1)*.02;
       const sa=a._browser_step(),sb=b._browser_step();
       const x=a.HEAPU8.slice(ao,ao+160),y=b.HEAPU8.slice(bo,bo+160);

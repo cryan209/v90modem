@@ -13,7 +13,7 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory web/modem-lab/dist
 ```
 
 Open http://127.0.0.1:8765/. Enter up to 240 UTF-8 bytes, select a mode, and
-press **Dial & send**. The call is generated first in a worker, then played
+press **Dial & send**. The call is generated first, then played
 back with sample-timed events and received text. **Stop** cancels generation
 or playback. Advanced playback and WAV exports put caller left, answerer right.
 FSK exports are mono. Speaker output can be resampled by the browser; it never
@@ -56,6 +56,7 @@ Install the official Emscripten SDK 4.0.16, then:
 EMCC=/path/to/emsdk/upstream/emscripten/emcc python3 tools/build_modem_wasm.py
 node web/modem-lab/test.mjs
 python3 tools/package_modem_demo.py
+node web/modem-lab/test-offline.mjs
 ```
 
 The builder uses only vendored sources, scalar WASM, and a separate portable
@@ -136,3 +137,19 @@ engine/DSP sources are unchanged by the inspector. Tests require real CRC-valid
 XID/SABME/UA frames in both advanced modes, check decoded XID parameters, flip
 a captured bit to prove CRC rejection, verify timeline filtering and exact
 DS0 capture lengths, and continue to verify payloads and constellation taps.
+
+## Direct-file execution
+
+Some browser/WebView implementations reject module workers created from a
+`file://` page's opaque origin. The standalone package therefore selects an
+inline runner for `file://`, using the identical embedded WASM and engine-pair
+code. It yields between simulated one-second batches; Stop cancels at the next
+yield and the engine instances are destroyed. HTTP(S) keeps the worker path.
+No server, external imports, or WASM fetch is required for the local-file path.
+
+`test-offline.mjs` extracts and executes the generated HTML's actual inline
+module with a minimal DOM harness and `location.protocol='file:'`. Worker
+construction deliberately throws. Both V.32 and V.90 must still exchange real
+UTF-8 payloads and acknowledgements, and cooperative cancellation is checked.
+This regression complements the normal DSP/inspector suite; it does not pretend
+to exercise every browser's rendering or security policy.

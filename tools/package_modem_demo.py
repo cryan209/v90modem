@@ -25,9 +25,29 @@ def main():
     fsk = (DIST/'fsk.mjs').read_text().replace('export const ', 'const ').replace('export function ', 'function ')
     app = (DIST/'app.mjs').read_text().replace("import {transmit,receive,wav,RATE} from './fsk.mjs';", '')
     app = app.replace("import {inspectorText} from './negotiation.mjs';", '')
-    app = app.replace("new Worker('./worker.mjs',{type:'module'})", "new Worker(offlineWorkerUrl,{type:'module'})")
+    app = app.replace("new Worker('./worker.mjs',{type:'module'})", "createOfflineModemRunner()")
     setup = "const offlineWorkerUrl=URL.createObjectURL(new Blob([new TextDecoder().decode(Uint8Array.from(atob(document.getElementById('modem-worker').textContent.trim()),c=>c.charCodeAt(0)))],{type:'text/javascript'}));\nwindow.addEventListener('pagehide',()=>URL.revokeObjectURL(offlineWorkerUrl));\n"
-    script = fsk+'\n'+negotiation+'\n'+setup+app
+    setup += """
+// file:// has an opaque origin in some browsers, which can reject blob workers.
+// The identical engine can run here, yielding between batches and honouring Stop.
+class InlineModemRunner {
+  constructor(){this.cancelled=false;}
+  terminate(){this.cancelled=true;}
+  postMessage(data){
+    runPair(data.mode,data.text,p=>{
+      if(!this.cancelled)this.onmessage?.({data:{type:'progress',...p}});
+    },()=>this.cancelled).then(result=>{
+      if(!this.cancelled)this.onmessage?.({data:{type:'result',...result}});
+    }).catch(error=>{
+      if(!this.cancelled)this.onmessage?.({data:{type:'error',message:error.message}});
+    });
+  }
+}
+function createOfflineModemRunner(){
+  return location.protocol==='file:' ? new InlineModemRunner() : new Worker(offlineWorkerUrl,{type:'module'});
+}
+"""
+    script = engine+'\n'+negotiation+'\n'+pair+'\n'+fsk+'\n'+setup+app
     assert '</script' not in script.lower()
     html = html.replace('<link rel="stylesheet" href="style.css">', '<style>'+(DIST/'style.css').read_text()+'</style>')
     license_text=html_escape.escape((DIST/'COPYING.spandsp').read_text())

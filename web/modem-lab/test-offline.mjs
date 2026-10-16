@@ -1,0 +1,29 @@
+// Exercise the generated HTML's actual file:// runner, without an HTTP server.
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+const html=await fs.readFile(new URL('../../artifacts/modem-lab.html',import.meta.url),'utf8');
+const embedded=html.match(/<script id="modem-worker" type="text\/plain">([\s\S]*?)<\/script>/)[1];
+const source=html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+const canvas=new Proxy({}, {get:()=>()=>{}}),elements=new Map();
+globalThis.document={getElementById(id){if(!elements.has(id))elements.set(id,{value:id==='message'?'Hello from the browser!':'0',textContent:id==='modem-worker'?embedded:'',open:false,disabled:false,checked:true,addEventListener(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}},getContext:()=>canvas});return elements.get(id);},querySelectorAll:()=>[]};
+globalThis.window={addEventListener(){}};
+globalThis.location={protocol:'file:'};
+globalThis.Worker=class{constructor(){throw new Error('file:// must not construct a Worker');}};
+const folder=await fs.mkdtemp(path.join(os.tmpdir(),'modem-offline-'));
+try{
+ const entry=path.join(folder,'offline.mjs');
+ await fs.writeFile(entry,source+'\nexport {createOfflineModemRunner,InlineModemRunner,runPair};\n');
+ const {createOfflineModemRunner,InlineModemRunner,runPair}=await import(pathToFileURL(entry));
+ for(const mode of [32,90]){
+  const runner=createOfflineModemRunner();assert.ok(runner instanceof InlineModemRunner);
+  const result=await new Promise((resolve,reject)=>{runner.onmessage=({data})=>{if(data.type==='error')reject(new Error(data.message));if(data.type==='result')resolve(data);};runner.postMessage({mode,text:'Offline file test — hello'});});
+  assert.ok(result.passed);assert.equal(result.received,'Offline file test — hello');assert.equal(result.reply,'ACK: Offline file test — hello');
+  runner.terminate();console.log(`PASS: packaged file:// V.${mode}, no Worker, real bidirectional payload`);
+ }
+ let cancelled=false;
+ await assert.rejects(runPair(32,'cancel',()=>{cancelled=true;},()=>cancelled),/Call cancelled/);
+ console.log('PASS: cooperative cancellation');
+}finally{await fs.rm(folder,{recursive:true,force:true});}
