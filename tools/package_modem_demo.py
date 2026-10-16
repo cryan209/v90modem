@@ -22,7 +22,7 @@ def main():
     pair = "const wasmBytes=Uint8Array.from(atob('"+binary+"'),c=>c.charCodeAt(0));\n"+pair
     pair = pair.replace('const options=(side)=>({', 'const options=(side)=>({wasmBinary:wasmBytes,locateFile:name=>name,')
     pair = pair.replace('createModem({print:', 'createModem({wasmBinary:wasmBytes,locateFile:name=>name,print:')
-    worker = (DIST/'worker.mjs').read_text().replace("import {runPair} from './engine-pair.mjs';", '')
+    worker = (DIST/'worker.mjs').read_text().replace("import {runPair,runReliability} from './engine-pair.mjs';", '')
     encoded = base64.b64encode((engine+'\n'+negotiation+'\n'+pair+'\n'+worker).encode()).decode()
     fsk = (DIST/'fsk.mjs').read_text().replace('export const ', 'const ').replace('export function ', 'function ')
     app = (DIST/'app.mjs').read_text().replace("import {transmit,receive,wav,RATE} from './fsk.mjs';", '')
@@ -36,10 +36,12 @@ class InlineModemRunner {
   constructor(){this.cancelled=false;}
   terminate(){this.cancelled=true;}
   postMessage(data){
-    runPair(data.mode,data.text,p=>{
-      if(!this.cancelled)this.onmessage?.({data:{type:'progress',...p}});
-    },()=>this.cancelled,data.startup).then(result=>{
-      if(!this.cancelled)this.onmessage?.({data:{type:'result',...result}});
+    const reliability=data.task==='reliability';
+    const progress=p=>{if(!this.cancelled)this.onmessage?.({data:{type:reliability?'reliability-progress':'progress',...p}});};
+    const promise=reliability?runReliability(data.settings,progress,()=>this.cancelled)
+      :runPair(data.mode,data.text,progress,()=>this.cancelled,data.startup);
+    promise.then(result=>{
+      if(!this.cancelled)this.onmessage?.({data:{type:reliability?'reliability-result':'result',...result}});
     }).catch(error=>{
       if(!this.cancelled)this.onmessage?.({data:{type:'error',message:error.message}});
     });

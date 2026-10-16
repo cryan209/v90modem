@@ -1,3 +1,4 @@
+let reliabilityResult=null,reliabilityRunning=false,reliabilityUrl=null,reliabilityToken=0;
 import {transmit,receive,wav,RATE} from './fsk.mjs';
 import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
@@ -15,6 +16,7 @@ const descriptions={
 const isPcm=()=>['x2','flex'].includes(mode);
 const isFsk=()=>mode==='v21'||mode==='bell103';
 function updateStartup(){
+ updateReliabilityControls();
  const fsk=isFsk();if(mode!=='32')$('startupV8').checked=true;
  if(isPcm()){$('startupV8').checked=false;$('startupBis').checked=false;}
  $('startupV8').disabled=isPcm()||fsk||mode!=='32'||playing;
@@ -45,7 +47,14 @@ function select(next){stop();mode=next;document.querySelectorAll('.mode').forEac
  elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;$('inspectOutput').textContent='No capture yet.';
  $('clock').textContent='00.00 s';$('duration').textContent='—';result=null;$('download').disabled=true;draw(0);
 }
-function stop(){worker?.terminate();worker=null;if(source){source.onended=null;try{source.stop();}catch{}source=null;}
+function stop(){
+ reliabilityToken++;
+ if(reliabilityRunning){
+  reliabilityRunning=false;$('status').textContent='Reliability test stopped';
+  if(reliabilityResult)reliabilityResult={...reliabilityResult,status:'stopped',activeCallUngraded:true};
+  $('reliabilityStatus').textContent=`Stopped · ${reliabilityResult?.completedCalls||0} calls completed. The active call was not graded.`;
+ }
+ worker?.terminate();worker=null;if(source){source.onended=null;try{source.stop();}catch{}source=null;}
  playing=false;cancelAnimationFrame(animation);$('stop').disabled=true;$('lamp').classList.remove('on');document.querySelectorAll('.mode').forEach(b=>b.disabled=false);$('message').disabled=false;updateCount();updateStartup();
  if(result){$('status').textContent='Stopped';}
 }
@@ -134,6 +143,61 @@ async function dial(){
  }
  }catch(e){fail(e.message);}
 }
+function updateReliabilityControls(){
+ const supported=['34','90','92'].includes(mode);
+ $('reliabilityPanel').hidden=!supported;
+ for(const id of ['reliabilityScope','reliabilityRepeats','reliabilityDuration','reliabilityV92'])$(id).disabled=playing;
+ const incompatible=$('reliabilityScope').value==='all'&&mode==='34'&&['lineNoise','lineLoss','lineClock'].some(id=>Number($(id).value)!==0);
+ $('reliabilityStart').disabled=!supported||playing||incompatible;
+ $('reliabilityHint').textContent=incompatible?'For a fair three-mode comparison, turn noise off, set attenuation to 0 dB and use synchronous clocks. Or test the current modem only.':'Uses the selected line settings, V.8bis and V.34 ceiling. Each call starts fresh; V.92 uses the startup selected here. Stop keeps completed results.';
+ $('reliabilityExport').disabled=!reliabilityResult?.completedCalls;
+}
+function renderReliability(summary){
+ reliabilityResult=summary;$('reliabilityTable').hidden=false;
+ const failures=summary.calls.filter(c=>!c.passed);$('reliabilityFailures').hidden=!failures.length;$('reliabilityFailures').textContent=failures.map(c=>`V.${c.mode} call ${c.attempt}: ${c.failureReason}`).join('\n');
+ for(const mode of [34,90,92]){
+  const row=summary.rows.find(r=>r.mode===mode);$('reliabilityRow'+mode).hidden=!row;if(!row)continue;
+  const values={Completed:`${row.completed}/${summary.repeats}`,Connected:`${row.connected}/${row.completed}`,Passed:`${row.passed}/${row.completed}`,
+   Bytes:row.verifiedBytes.toLocaleString(),Mismatches:row.mismatchBytes.toLocaleString(),Retrains:String(row.retrainRequests),Drops:String(row.disconnects),
+   Connect:row.meanConnectSeconds===null?'—':row.meanConnectSeconds.toFixed(2)+' s',Throughput:row.meanUsefulBitsPerSecond===null?'—':Math.round(row.meanUsefulBitsPerSecond).toLocaleString()+' bit/s',Rates:row.rates.join(', ')||'—'};
+  for(const [key,value] of Object.entries(values))$('reliability'+mode+key).textContent=value;
+ }
+ $('reliabilityExport').disabled=!summary.completedCalls;
+}
+async function startReliability(){
+ stop();result=null;$('transferStats').hidden=true;$('quickComparison').hidden=true;
+ const settings={modes:$('reliabilityScope').value==='all'?[34,90,92]:[Number(mode)],repeats:Number($('reliabilityRepeats').value),durationSeconds:Number($('reliabilityDuration').value),
+  startup:{v8:true,v8bis:$('startupBis').checked,v34MaxRate:Number($('v34Rate').value),v92Startup:$('reliabilityV92').value,
+   line:{noiseDb:mode==='34'?Number($('lineNoise').value):0,lossDb:mode==='34'?Number($('lineLoss').value):0,clockPpm:mode==='34'?Number($('lineClock').value):0,delayMs:Number($('lineDelay').value)}}};
+ reliabilityResult=null;reliabilityRunning=true;playing=true;updateStartup();updateCount();$('message').disabled=true;$('stop').disabled=false;
+ $('reliabilityTable').hidden=true;$('reliabilityFailures').hidden=true;$('reliabilityStatus').textContent='Starting fresh modem instances…';$('status').textContent='Reliability test running';
+ $('download').disabled=true;$('exportCapture').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
+ const token=reliabilityToken;
+ try{
+  worker=new Worker('./worker.mjs',{type:'module'});
+  worker.onerror=e=>{if(token===reliabilityToken){stop();$('reliabilityStatus').textContent='Test stopped: '+(e.message||'Worker failed');}};
+  worker.onmessage=({data})=>{
+   if(token!==reliabilityToken)return;
+   if(data.type==='reliability-progress'){
+    renderReliability(data.summary);
+    $('reliabilityStatus').textContent=`V.${data.mode} · call ${data.callNumber}/${data.totalCalls} · ${data.state} · ${data.time.toFixed(1)} s simulated`;
+   }else if(data.type==='reliability-result'){
+    reliabilityRunning=false;stop();renderReliability(data);
+    const passed=data.calls.filter(c=>c.passed).length;
+    $('reliabilityStatus').textContent=`Complete · ${data.completedCalls}/${data.totalCalls} calls finished · ${passed} passed`;
+    $('status').textContent='Reliability test complete';
+   }else if(data.type==='error'){stop();$('reliabilityStatus').textContent='Test stopped: '+data.message;}
+  };
+  worker.postMessage({task:'reliability',settings});
+ }catch(e){stop();$('reliabilityStatus').textContent='Test stopped: '+e.message;}
+}
+$('reliabilityStart').addEventListener('click',startReliability);
+for(const id of ['reliabilityScope','lineNoise','lineLoss','lineClock'])$(id).addEventListener('change',updateReliabilityControls);
+$('reliabilityExport').addEventListener('click',()=>{
+ if(!reliabilityResult?.completedCalls)return;if(reliabilityUrl)URL.revokeObjectURL(reliabilityUrl);
+ reliabilityUrl=URL.createObjectURL(new Blob([JSON.stringify(reliabilityResult,null,2)],{type:'application/json'}));
+ const a=document.createElement('a');a.href=reliabilityUrl;a.download='modem-reliability-results.json';a.click();
+});
 function fail(message){stop();$('status').textContent='Could not run: '+message;$('events').textContent='The run stopped before a verified result.\n'+message;}
 $('inspectTime').addEventListener('input',()=>{$('inspectFollow').checked=false;drawInspector(elapsed,true);});$('inspectFollow').addEventListener('change',()=>drawInspector(elapsed,true));
 $('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(const id of ['inspectView','inspectSide','inspectStage'])$(id).addEventListener('change',()=>drawInspector(elapsed,true));
@@ -144,5 +208,5 @@ $('dial').addEventListener('click',dial);$('stop').addEventListener('click',stop
 $('noise').addEventListener('input',()=>{$('noiseValue').textContent=['Clean','24 dB SNR','12 dB SNR','0 dB SNR'][$('noise').value];});
 document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>select(b.dataset.mode)));
 $('download').addEventListener('click',()=>{if(!result)return;if(downloadUrl)URL.revokeObjectURL(downloadUrl);downloadUrl=URL.createObjectURL(new Blob([wav(result.left,result.right)],{type:'audio/wav'}));const a=document.createElement('a');a.href=downloadUrl;a.download=`modem-${mode}.wav`;a.click();});
-window.addEventListener('pagehide',()=>{stop();context?.close();if(downloadUrl)URL.revokeObjectURL(downloadUrl);if(captureUrl)URL.revokeObjectURL(captureUrl);});
+window.addEventListener('pagehide',()=>{stop();if(reliabilityUrl)URL.revokeObjectURL(reliabilityUrl);context?.close();if(downloadUrl)URL.revokeObjectURL(downloadUrl);if(captureUrl)URL.revokeObjectURL(captureUrl);});
 updateCount();updateStartup();draw(0);

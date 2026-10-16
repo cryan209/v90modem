@@ -56,6 +56,7 @@ Install the official Emscripten SDK 4.0.16, then:
 ```
 EMCC=/path/to/emsdk/upstream/emscripten/emcc python3 tools/build_modem_wasm.py
 node web/modem-lab/test.mjs
+node web/modem-lab/test-reliability.mjs
 python3 tools/package_modem_demo.py
 node web/modem-lab/test-offline.mjs
 ```
@@ -405,3 +406,57 @@ with independently verified payloads and V.8bis both off and on. The packaged
 file runner checks the same delayed case and the displayed statistics labels.
 The existing 0/1/20/200-ms cases reproduced correct rates before this change;
 no training constants, negotiated offers or bearer samples changed for the fix.
+
+
+## Sustained reliability comparisons (2026-10-17)
+
+The Reliability test panel runs V.34, V.90 and V.92 together, or the currently
+selected modem alone. Choose 1–5 fresh calls per mode and 30 or 60 seconds of
+traffic after both endpoints report CONNECT. V.92 Full/Quick startup is
+selected separately from the ordinary demonstration's two-call comparison;
+every reliability call starts fresh and has no saved physical-line profile.
+Calls rotate their mode order between rounds, use identical line settings,
+and use the same repeatable binary payload seeds for each mode in a round.
+All-mode comparisons permit codeword-preserving delay; waveform noise, loss
+and clock drift are available for V.34-only runs because those experiments do
+not affect the PCM receivers. Unsupported combinations are rejected before
+starting, rather than silently changing the channel between modes.
+
+Each direction sends a separate varied binary stream. An independent
+receiver-side generator checks every decoded byte; the receiver never reads
+the transmitter's buffer. Received data is drained every 160-sample step so
+streams can exceed the adapter's fixed receive buffer. At most one second of
+bytes is outstanding per direction (bounded to 512–8192 bytes). After the
+chosen interval, up to 15 simulated seconds allow queued bytes to drain.
+Training times out at 60 seconds. A pass requires both streams to match in
+full, the entire traffic interval, no observed disconnect, and the requested
+modulation rather than a fallback.
+
+Only completed calls contribute to the table. Stop leaves completed results
+available for JSON export and does not grade the interrupted call. Export
+includes settings, per-call byte counts, directional negotiated rates,
+connection times, mismatch counts, retrain requests, disconnects and failure
+reasons. Connected counts include calls that later failed. Verified bytes
+are received bytes for calls with no byte mismatches, including valid partial
+transfers; they do not imply a passing call. Total goodput averages passing
+calls' upload plus download application bits received during the selected
+traffic interval, excluding the final drain. It is distinct from each
+negotiated physical line rate and from a BER. Retrain counts are observed
+engine request log entries, not proof that retraining completed.
+
+Long runs retain summaries, not audio, symbol or per-bit captures. A browser
+adapter flag disables those captures without changing modem negotiation or
+sample accounting. Clock-drift experiments use 256 samples (32 ms) of causal
+lookback for these runs, versus the ordinary demo's 128 samples (16 ms), to
+cover the maximum 135-second training/traffic/drain budget at ±100 ppm.
+The clean path bypasses the clock filter. G.711 codewords and the 160-sample
+callback cadence remain unchanged (V.90 §5).
+
+The reliability regression runs two 30-second calls per mode, verifies over
+50,000 bytes in each direction on every call, and checks round ordering,
+summary arithmetic and directional rates. A separate 60-second V.92 Full
+startup run at 80 ms delay verifies over 600,000 bytes. Additional cases
+exercise noisy V.34, failed training and cancellation after a completed call.
+The generated offline HTML is tested with the actual inline runner, all three
+modes, displayed table values, export availability and impairment gating.
+These are synthetic software checks, not hardware interoperability results.

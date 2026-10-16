@@ -130,7 +130,7 @@
     "spandsp-master/src/v8.c": "0fcd8339c02660094561770f52fa857702e361505b1f9d56c4c451ceb333d432",
     "spandsp-master/src/vector_float.c": "ef7b0399f3d253873bd4dbb7911010e6633591ea45586b8c1ccac6ab8c5d980a",
     "spandsp-master/src/vector_int.c": "3a104273edbc446d3fc9a6b21e91588feebc0b71086527eccf3cc888f0769c40",
-    "web/modem-lab/wasm/browser_peer.c": "56cfde93b0bd16865cf5b21993bf0269f942e7bbed6ca584806b624b95fd9c1a"
+    "web/modem-lab/wasm/browser_peer.c": "b3cf212ee1d440cbcbb955d986f69d51cea7125af6e568eee46620485305fde1"
   },
-  "headers_sha256": "d36bc87a74ec3bd38baf3db0555ee932bf9403a7d656fb8fcd026c067eaaf394"
+  "headers_sha256": "5fb54825e675a108ea0af89a057fc1b5c89e419ea0fe4c857f8f2f83ca55e012"
 }

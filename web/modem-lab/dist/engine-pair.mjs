@@ -156,3 +156,111 @@ export function checkPcmRates(carrier,caller,answerer){
     ||(carrier==='V90'&&(caller.tx>33600||caller.rx>56000)))
   throw new Error(`${carrier} directional rate report is inconsistent: caller TX/RX ${caller.tx}/${caller.rx}, answerer TX/RX ${answerer.tx}/${answerer.rx}`);
 }
+
+// Fresh calls with sustained, independently checked binary streams. Only
+// completed calls are scored; audio and per-bit captures are not retained.
+export async function runReliability(settings={},onProgress=()=>{},shouldStop=()=>false){
+ const modes=settings.modes||[34,90,92],repeats=settings.repeats??3,durationSeconds=settings.durationSeconds??30;
+ if(!Array.isArray(modes)||!modes.length||new Set(modes).size!==modes.length||modes.some(m=>![34,90,92].includes(m)))throw new Error('Reliability supports V.34, V.90 and V.92');
+ if(!Number.isInteger(repeats)||repeats<1||repeats>5||![30,60].includes(durationSeconds))throw new Error('Choose 1–5 calls and 30 or 60 seconds of traffic');
+ const startup={v8:true,v8bis:false,v34MaxRate:0,v92Startup:'quick',...settings.startup};
+ if(startup.v8===false||!['full','quick'].includes(startup.v92Startup))throw new Error('Reliability requires V.8 and Full or Quick Connect startup');
+ const line=validateLine(modes[0],startup.line);
+ for(const mode of modes)validateLine(mode,line); // No silent removal of unsupported impairments.
+ const calls=[],total=modes.length*repeats;
+ const snapshot=()=>({kind:'reliability',status:'running',modes:[...modes],repeats,durationSeconds,startup:{...startup,line},totalCalls:total,completedCalls:calls.length,calls:[...calls],rows:reliabilityRows(modes,calls)});
+ for(let attempt=0;attempt<repeats;attempt++)for(let offset=0;offset<modes.length;offset++){
+  if(shouldStop())throw new Error('Call cancelled');
+  const mode=modes[(offset+attempt)%modes.length];
+  const update=p=>onProgress({...p,mode,attempt:attempt+1,callNumber:calls.length+1,totalCalls:total,summary:snapshot()});
+  update({time:0,state:'Training'});
+  const call=await reliabilityCall(mode,attempt,durationSeconds,startup,line,update,shouldStop);
+  calls.push(call);onProgress({time:call.simulationSeconds,state:'Call completed',mode,attempt:attempt+1,callNumber:calls.length,totalCalls:total,summary:snapshot()});
+ }
+ return {...snapshot(),status:'complete'};
+}
+function reliabilityRows(modes,calls){
+ return modes.map(mode=>{
+  const group=calls.filter(c=>c.mode===mode),connected=group.filter(c=>c.connected),good=group.filter(c=>c.passed);
+  return {mode,completed:group.length,connected:connected.length,passed:good.length,failed:group.length-good.length,
+   verifiedBytes:group.reduce((n,c)=>n+c.verifiedBytes,0),mismatchBytes:group.reduce((n,c)=>n+c.mismatchBytes,0),
+   retrainRequests:group.reduce((n,c)=>n+c.retrainRequests,0),disconnects:group.filter(c=>c.disconnected).length,
+   meanConnectSeconds:connected.length?connected.reduce((n,c)=>n+c.connectSeconds,0)/connected.length:null,
+   meanUsefulBitsPerSecond:good.length?good.reduce((n,c)=>n+c.usefulBitsPerSecond,0)/good.length:null,
+   rates:[...new Set(connected.map(c=>`${c.txRate}/${c.rxRate}`))]};
+ });
+}
+function reliabilityPattern(seed){
+ let state=seed>>>0;
+ return ()=>{state=(Math.imul(state,1664525)+1013904223)>>>0;return state>>>24;};
+}
+async function reliabilityCall(mode,attempt,duration,startup,line,onProgress,shouldStop){
+ let retrainRequests=0;
+ const capture=text=>{if(/\[ME\].*(?:asking for.*retrain|retrain requested|requesting.*retrain)/i.test(text))retrainRequests++;};
+ const a=await createModem({print:capture,printErr:capture}),b=await createModem({print:capture,printErr:capture});
+ let pa=0,pb=0,initializedA=false,initializedB=false,time=0,connectedAt=null,sendUntil=null,trafficBytes=0,trafficCaptured=false,disconnected=false,error=null,txRate=0,rxRate=0,clippedSamples=0,modulation='';
+ const seed=(0x12345678+attempt)>>>0;
+ const streams=[{tx:a,rx:b,next:reliabilityPattern(seed),expected:reliabilityPattern(seed)},
+                {tx:b,rx:a,next:reliabilityPattern(seed^0x9e3779b9),expected:reliabilityPattern(seed^0x9e3779b9)}]
+  .map(s=>({...s,buffer:new Uint8Array(4096),offset:4096,accepted:0,received:0,mismatches:0}));
+ try{
+  if(a.HEAPU8.buffer===b.HEAPU8.buffer)throw new Error('Reliability endpoints share memory');
+  const flags=1|(startup.v8bis?2:0)|(startup.v92Startup==='quick'?4:0)|8;
+  a._browser_init(mode,1,flags,startup.v34MaxRate||0);initializedA=true;
+  b._browser_init(mode,0,flags,startup.v34MaxRate||0);initializedB=true;
+  for(const [m,seedValue] of [[a,line.seed],[b,(line.seed+1)>>>0]])if(m._browser_line_config(line.noiseDb,line.lossDb,line.clockPpm,seedValue))throw new Error('Invalid reliability channel');
+  pa=a._malloc(4096);pb=b._malloc(4096);streams[0].pointer=pa;streams[1].pointer=pb;
+  const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
+  const toCaller=delayLine(line.delayMs*8),toAnswerer=delayLine(line.delayMs*8);
+  a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
+  // 60 s to connect, selected sustained interval, then 15 s to drain the
+  // bounded in-flight window. A final partial interval never counts as a pass.
+  for(let block=0;block<(60+duration+15)*50;block++){
+   if(shouldStop())throw new Error('Call cancelled');
+   time=(block+1)/50;
+   const sa=a._browser_step(),sb=b._browser_step();
+   a.HEAPU8.set(toCaller(b.HEAPU8.slice(bo,bo+160)),ai);
+   b.HEAPU8.set(toAnswerer(a.HEAPU8.slice(ao,ao+160)),bi);
+   const ar=a._browser_rate(),br=b._browser_rate();
+   if(ar&&br){
+    const caller={tx:a._browser_tx_rate(),rx:a._browser_rx_rate()},answerer={tx:b._browser_tx_rate(),rx:b._browser_rx_rate()};
+    modulation=a.UTF8ToString(a._browser_modulation());checkPcmRates(modulation,caller,answerer);
+    txRate=caller.tx;rxRate=caller.rx;
+    if(connectedAt===null){connectedAt=time;sendUntil=(block+1+duration*50)/50;}
+   }
+   for(const s of streams){
+    const count=s.rx._browser_received_n(),data=s.rx.HEAPU8.subarray(s.rx._browser_received(),s.rx._browser_received()+count);
+    for(const byte of data){if(byte!==s.expected())s.mismatches++;s.received++;}
+    s.rx._browser_clear_received();
+   }
+   if(connectedAt!==null&&(sa===0||sb===0||sa===5||sb===5||!ar||!br)){disconnected=true;break;}
+   if(connectedAt===null&&time>=60)break;
+   if(connectedAt!==null&&time<sendUntil){
+    for(const [index,s] of streams.entries()){
+     if(s.offset===4096){for(let i=0;i<4096;i++)s.buffer[i]=s.next();s.tx.HEAPU8.set(s.buffer,s.pointer);s.offset=0;}
+     // Keep at most one second of data in flight, so a low-rate healthy
+     // connection can drain without mistaking queued bytes for corruption.
+     const window=Math.max(512,Math.min(8192,(index===0?txRate:rxRate)/8));
+     const available=Math.min(4096-s.offset,Math.max(0,Math.floor(window-(s.accepted-s.received))));
+     if(available){const n=s.tx._browser_send(s.pointer+s.offset,available);if(n<0||n>available)throw new Error('Invalid DTE acceptance count');s.offset+=n;s.accepted+=n;}
+    }
+   }
+   if(sendUntil!==null&&time>=sendUntil){
+    if(!trafficCaptured){trafficBytes=streams[0].received+streams[1].received;trafficCaptured=true;}
+    if(streams.every(s=>s.received===s.accepted))break;
+    if(time>=sendUntil+15){error='Payload did not drain within 15 seconds';break;}
+   }
+   if(block%50===0){onProgress({time,state:connectedAt===null?'Training':time<sendUntil?'Sustained transfer':'Draining queued data'});await new Promise(resolve=>setTimeout(resolve,0));}
+  }
+ }catch(e){if(shouldStop()||e.message==='Call cancelled')throw e;error=e.message;}
+ finally{clippedSamples=(initializedA?a._browser_line_clipped():0)+(initializedB?b._browser_line_clipped():0);if(pa)a._free(pa);if(pb)b._free(pb);if(initializedA)a._browser_destroy();if(initializedB)b._browser_destroy();}
+ const mismatchBytes=streams.reduce((n,s)=>n+s.mismatches,0),receivedBytes=streams.reduce((n,s)=>n+s.received,0);
+ const finishedInterval=sendUntil!==null&&time>=sendUntil;
+ const passed=connectedAt!==null&&finishedInterval&&!disconnected&&!error&&!mismatchBytes&&streams.every(s=>s.accepted>0&&s.received===s.accepted)&&modulation===`V${mode}`;
+ return {mode,attempt:attempt+1,connected:connectedAt!==null,connectSeconds:connectedAt,txRate,rxRate,modulation,passed,disconnected,error,
+  clippedSamples,requestedTrafficSeconds:duration,trafficSeconds:connectedAt===null?0:Math.min(duration,time-connectedAt),simulationSeconds:time,
+  verifiedBytes:!mismatchBytes?receivedBytes:0,receivedBytes,mismatchBytes,sentBytes:streams.reduce((n,s)=>n+s.accepted,0),
+  callerSentBytes:streams[0].accepted,answererSentBytes:streams[1].accepted,callerReceivedBytes:streams[1].received,answererReceivedBytes:streams[0].received,
+  bytesDuringTraffic:trafficBytes,usefulBitsPerSecond:finishedInterval?trafficBytes*8/duration:null,retrainRequests,
+  failureReason:passed?null:error||(!connectedAt?'No connection':disconnected?'Disconnected':mismatchBytes?'Decoded bytes did not match':!finishedInterval?'Incomplete traffic interval':modulation!==`V${mode}`?'Connected using a fallback modulation':'Incomplete payload')};
+}

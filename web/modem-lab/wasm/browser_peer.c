@@ -18,9 +18,9 @@ static char monitor_json[65536];
 static di_connect_info_cb_t connect_info;
 static v250_connect_report_t report;
 static v250_ctl_t browser_settings;
-static int browser_line_mode;
+static int browser_line_mode, browser_long_run;
 EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ceiling) {
-    browser_line_mode=(mode==32 || mode==34);
+    browser_line_mode=(mode==32 || mode==34);browser_long_run=(startup & 8)!=0;
     received_n=connected_rate=0;memset(&report,0,sizeof report);
     v250_ctl_reset(&browser_settings);
     if(mode==92){browser_settings.pig=0;browser_settings.pqc=(startup & 4)?0:3;}
@@ -28,7 +28,7 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ce
     setenv("ME_V8", (startup & 1) ? "1" : "0", 1);
     setenv("ME_V8BIS", (startup & 2) ? "1" : "0", 1);
     setenv("ME_DATA_FRAMING", "lapm", 1);
-    setenv("ME_GUI_PORT", "browser-passive-taps", 1);
+    if(!(startup & 8))setenv("ME_GUI_PORT", "browser-passive-taps", 1);
     setenv("ME_V90_JA_HEURISTIC_FALLBACK_MS", "0", 1);
     setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 1);
     if ((mode == 90 || mode == 92) && calling) setenv("ME_V90_ROLE", "analogue", 1);
@@ -37,9 +37,13 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ce
     if (mode == 34) setenv("ME_V34_BAUD", "3429", 1);
     if (mode == 34 && ceiling > 0) { char rate[16];snprintf(rate,sizeof rate,"%d",ceiling);setenv("ME_V34_BPS",rate,1); }
     if (mode == 32) setenv("ME_V32BIS_MAX_BPS", "9600", 1);
-    setenv("ME_V34_SPAN_FLOW_LOG", "1", 1);
-    setenv("DS_TX_BIT_DUMP", "/tx.bits", 1);
-    setenv("DS_RX_BIT_DUMP", "/rx.bits", 1);
+    /* Reliability runs measure application bytes and events, without retaining
+       minutes of per-bit/plot captures. The datapumps and LAPM are unchanged. */
+    setenv("ME_V34_SPAN_FLOW_LOG", (startup & 8)?"0":"1", 1);
+    if(!(startup & 8)){
+        setenv("DS_TX_BIT_DUMP", "/tx.bits", 1);
+        setenv("DS_RX_BIT_DUMP", "/rx.bits", 1);
+    }
     me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
     if (calling) me_dial("browser-peer");
     me_on_sip_connected();
@@ -199,7 +203,7 @@ EMSCRIPTEN_KEEPALIVE int browser_line_config(double noise_db, double loss_db, do
        ||loss_db<0 || loss_db>30 || fabs(ppm)>100) return -1;
     if(!browser_line_mode && (noise_db || loss_db || ppm)) return -1;
     line_gain=pow(10,-loss_db/20);line_noise=noise_db?2500*pow(10,-noise_db/20):0;
-    line_ratio=1+ppm*1e-6;line_position=-128;line_written=0;line_random=seed;
+    line_ratio=1+ppm*1e-6;line_position=browser_long_run?-256:-128;line_written=0;line_random=seed;
     line_clipped=0;memset(line_history,0,sizeof line_history);memset(line_last,0,sizeof line_last);
     if(ppm && !line_taps_ready){
         for(int p=0;p<1024;p++){
