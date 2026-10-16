@@ -18285,6 +18285,13 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
             chunk = (int)(sizeof(linear) / sizeof(linear[0]));
         for (int i = 0; i < chunk; i++)
             linear[i] = pcm_to_linear(codewords[offset + i]);
+#if defined(__EMSCRIPTEN__)
+        /* Browser-only analogue line experiment, after the network D/A.
+           V.90 §5: the DS0 codewords above remain byte-exact. The adapter
+           enables this only for V.32/V.34; native media is unaffected. */
+        extern void browser_receive_line(int16_t *samples, int count);
+        browser_receive_line(linear, chunk);
+#endif
         me_rx_audio(linear, chunk);
         offset += chunk;
     }

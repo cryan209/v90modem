@@ -3,6 +3,7 @@ import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
 let mode='v21',context,source,worker,result,started=0,animation=0,downloadUrl,playing=false,elapsed=0,lastInspect=-1,captureUrl,plotType='spectrum';
 const descriptions={
+ '92':['PCM in both directions.','Two real V.92 engines negotiate PCM upstream and downstream, then verify your text over LAPM. Compare full startup with the engine’s Quick Connect procedures on the same virtual line.'],
  x2:['The first wave of PCM modems.','The real x2 mapper sends your text as six-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
  flex:['Eight samples, fifty-six bits.','The real K56flex mapper sends your text as eight-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
@@ -19,6 +20,12 @@ function updateStartup(){
  $('startupV8').disabled=isPcm()||fsk||mode!=='32'||playing;
  if(!$('startupV8').checked)$('startupBis').checked=false;
  $('startupBis').disabled=isPcm()||fsk||!$('startupV8').checked||playing;
+ $('v92Control').hidden=mode!=='92';$('v92Startup').disabled=mode!=='92'||playing;
+ $('lineControls').hidden=fsk||isPcm();
+ const analogue=['32','34'].includes(mode);
+ for(const id of ['lineNoise','lineLoss','lineClock'])$(id).disabled=!analogue||playing;
+ $('lineDelay').disabled=fsk||isPcm()||playing;
+ $('lineHint').textContent=analogue?'Noise, attenuation and clock drift affect the analogue receive waveform. The G.711 bearer stays byte-exact.':'V.90/V.92 preserve PCM codewords. Only propagation delay is available here.';
  $('v34RateControl').hidden=mode!=='34';$('v34Rate').disabled=mode!=='34'||playing;
  $('startupHint').textContent=isPcm()?'Fixed downstream profile; V.8/V.8bis and line training are not run.':fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
 }
@@ -32,8 +39,9 @@ function select(next){stop();mode=next;document.querySelectorAll('.mode').forEac
  $('dial').textContent=isPcm()?'▶ Encode & send':'▶ Dial & send';
  $('trafficLabel').textContent=isPcm()?'SERVER → PCM RECEIVER':'CALLER → ANSWERER';
  $('scopeLabel').textContent=isPcm()?'SERVER PCM WAVEFORM · 8 kHz':'CALLER WAVEFORM · 8 kHz';
- $('noise').disabled=!isFsk();$('noiseHint').textContent=isFsk()?'Noise is added to the FSK signal before the receiver sees it.':'The advanced modes use a clean, byte-exact G.711 virtual line.';
+ $('noise').disabled=!isFsk();$('noiseHint').textContent=isFsk()?'Noise is added to the FSK signal before the receiver sees it.':isPcm()?'The payload demo uses exact codewords and a fixed shared profile.':'Open Line impairments to change the simulated channel.';
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('status').textContent='Ready to dial';$('events').textContent='The receiver listens to the generated samples.\nNo prerecorded audio. No text shortcut.';
+ $('transferStats').hidden=true;$('quickComparison').hidden=true;
  elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;$('inspectOutput').textContent='No capture yet.';
  $('clock').textContent='00.00 s';$('duration').textContent='—';result=null;$('download').disabled=true;draw(0);
 }
@@ -82,9 +90,24 @@ function drawInspector(t,force=false){
  $('inspectHint').textContent=isPcm()?'Downstream payload only. The fixed profile is shared with an independent receiver; no handshake or upstream is simulated.':`Endpoint names identify the observing modem; “peer” means the other modem. Times are sample-clock frame timestamps (20 ms resolution).${$('inspectStage').value==='pcm'?' Ja describes the requested learning sequence; DIL is the PCM learning waveform sent in response.':''}${result?.droppedProtocol?' Log limit reached: '+result.droppedProtocol+' lines omitted.':''}`;
  $('inspectOutput').scrollTop=$('inspectOutput').scrollHeight;
 }
-function draw(t){drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
+function drawStats(t){
+ const s=result?.stats;if(!s){$('transferStats').hidden=true;return;}
+ $('transferStats').hidden=false;
+ const connected=s.connectSeconds!==null&&t>=s.connectSeconds,verified=result.passed&&s.verifiedAtSeconds!==null&&t>=s.verifiedAtSeconds;
+ $('statConnect').textContent=connected?s.connectSeconds.toFixed(2)+' s':result.kind==='pcm'||isFsk()?'Not applicable':t>=(s.simulationSeconds||Infinity)-.02?'Not established':'Waiting';
+ $('statRates').textContent=connected?`${result.txRate.toLocaleString()} / ${result.rxRate.toLocaleString()} bit/s`:result.kind==='pcm'?'56,000 downstream':isFsk()?'300 bit/s':'—';
+ $('statBytes').textContent=verified?s.verifiedBytes.toLocaleString():'0';
+ $('statThroughput').textContent=verified&&s.usefulBitsPerSecond!==null?Math.round(s.usefulBitsPerSecond).toLocaleString()+' bit/s':'—';
+ $('statRetrains').textContent=String((result.protocol||[]).filter(e=>e.time<=t&&/\[ME\].*(?:asking for.*retrain|retrain requested|requesting.*retrain)/i.test(e.line)).length);
+ $('statCrc').textContent=s.invalidHdlcFrames===null?'Not applicable':String((result.negotiation?.frames||[]).filter(f=>f.time<=t&&!f.valid).length);
+ $('statHint').textContent=result.kind==='pcm'?'Downstream payload only. Throughput includes the two-byte length and final frame padding.':isFsk()?'Application bytes verified from audio. Throughput includes the idle carrier.':`Negotiated ${connected?(result.modulation||'carrier'):'carrier pending'}. Simulation clock; useful throughput combines both directions and includes application framing and acknowledgement time. Retrain requests and CRC failures count captured events, not inferred bit errors.`;
+ const c=result.comparison,comparisonReady=c&&t>=(s.verifiedAtSeconds??s.simulationSeconds);$('quickComparison').hidden=!comparisonReady;
+ if(comparisonReady)$('quickComparison').textContent=c.full.passed&&c.quick.passed?`Full startup ${c.full.connectSeconds.toFixed(2)} s · Quick Connect ${c.quick.connectSeconds.toFixed(2)} s · ${Math.abs(c.savedSeconds).toFixed(2)} s ${c.savedSeconds>=0?'saved':'longer'}. Two separate simulated calls; no stored real-line profile.`:'One comparison call did not verify its payload; no time saving is claimed.';
+}
+function draw(t){drawStats(t);drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
 function tick(){if(!playing)return;elapsed=Math.min(context.currentTime-started,result.left.length/RATE);draw(elapsed);showEvents(elapsed);animation=requestAnimationFrame(tick);}
 async function play(){
+ $('scopeLabel').textContent=result.waveform==='received'?'CALLER → ANSWERER · RECEIVED WAVEFORM · 8 kHz':isPcm()?'SERVER PCM WAVEFORM · 8 kHz':'CALLER WAVEFORM · 8 kHz';
  const buffer=context.createBuffer(result.right?2:1,result.left.length,RATE);buffer.copyToChannel(result.left,0);if(result.right)buffer.copyToChannel(result.right,1);
  source=context.createBufferSource();source.buffer=buffer;const gain=context.createGain();gain.gain.value=.65;source.connect(gain).connect(context.destination);
  source.onended=()=>{elapsed=result.left.length/RATE;draw(elapsed);showEvents(elapsed);stop();$('status').textContent=result.passed?'Complete · payload verified':result.error||'Run ended without a verified payload';};
@@ -93,20 +116,20 @@ async function play(){
 }
 async function dial(){
  stop();const text=$('message').value;if(!text||new TextEncoder().encode(text).length>240)return;
- try{context??=new AudioContext();await context.resume();result=null;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;updateStartup();elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
+ try{context??=new AudioContext();await context.resume();result=null;$('transferStats').hidden=true;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;updateStartup();elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('events').textContent='';$('download').disabled=true;
  if(isFsk()){
    const snrs=[99,24,12,0],tx=transmit(text,mode,snrs[Number($('noise').value)]),rx=receive(tx.samples,mode);
-   const passed=rx.text===text;const events=[{time:0,message:'Idle carrier · acquiring 300 bit/s FSK'}];
+   const passed=rx.text===text,n=new TextEncoder().encode(text).length;const events=[{time:0,message:'Idle carrier · acquiring 300 bit/s FSK'}];
    rx.frames.filter(f=>f.stop).forEach((f,i)=>events.push({time:(f.sample+10*RATE/300)/RATE,received:new TextDecoder().decode(new Uint8Array(rx.bytes.slice(0,i+1)))}));
    events.push({time:tx.samples.length/RATE-.05,message:passed?'Payload verified':'Payload mismatch · try a cleaner line'});
-   result={left:tx.samples,events,passed};await play();
+   result={left:tx.samples,events,passed,stats:{connectSeconds:null,verifiedAtSeconds:tx.samples.length/RATE-.05,verifiedBytes:passed?n:0,usefulBitsPerSecond:passed?n*8/(tx.samples.length/RATE):null,retrainRequests:0,invalidHdlcFrames:null}};await play();
  }else{
    $('status').textContent='Loading the WebAssembly modems…';
    worker=new Worker('./worker.mjs',{type:'module'});
    worker.onerror=e=>fail(e.message||'Could not load the modem worker.');
-   worker.onmessage=async({data})=>{if(data.type==='progress'){$('status').textContent=`Generating call · ${data.time.toFixed(1)} s simulated`;}else if(data.type==='error'){fail(data.message);}else if(data.type==='result'){worker.terminate();worker=null;result=data;await play();}};
-   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked,v34MaxRate:mode==='34'?Number($('v34Rate').value):0}});
+   worker.onmessage=async({data})=>{if(data.type==='progress'){$('status').textContent=`${data.state||'Generating call'} · ${data.time.toFixed(1)} s simulated`;}else if(data.type==='error'){fail(data.message);}else if(data.type==='result'){worker.terminate();worker=null;result=data;await play();}};
+   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked,v34MaxRate:mode==='34'?Number($('v34Rate').value):0,v92Startup:$('v92Startup').value,line:{noiseDb:['32','34'].includes(mode)?Number($('lineNoise').value):0,lossDb:['32','34'].includes(mode)?Number($('lineLoss').value):0,clockPpm:['32','34'].includes(mode)?Number($('lineClock').value):0,delayMs:isPcm()?0:Number($('lineDelay').value)}}});
  }
  }catch(e){fail(e.message);}
 }

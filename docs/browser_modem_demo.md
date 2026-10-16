@@ -295,3 +295,84 @@ for both modes. Damaged-codeword tests require rejection or changed decoded
 text, and malformed frame lengths must reject. Offline regressions execute
 both modes through the packaged HTML's file runner and check startup/QAM
 controls are disabled. Existing V.32/V.34/V.90 regressions remain in place.
+
+## V.92, line experiments and transfer statistics (2026-10-17)
+
+V.92 now runs two full engines with PCM upstream enabled through the existing
+V.250 `+PIG=0` setting. The startup selector offers full startup (`+PQC=3`),
+Quick Connect (`+PQC=0`), and a two-call comparison. The analogue caller and
+digital answerer negotiate actual V.92 48000/56000 on the clean synthetic
+line. Tests require the engine's reported carrier to be V92, complete
+bidirectional payloads, and the short-Phase-1 / short-Phase-2 events for
+Quick Connect (V.92 §§6, 9.2, 9.4; V.250 §6.8.7).
+
+The browser DTE adapter now discards bytes delivered before CONNECT, matching
+the native data-port gate. V.92 initially delivered pre-CONNECT async noise
+and LAPM startup bytes to the application buffer; its valid payload followed
+that prefix, so the old browser length framing never recovered. Dropping
+host bytes while the port is closed fixes the browser boundary, without
+altering bearer samples, training, or LAPM bit capture. The reply buffer is
+allocated from the actual decoded reply length, not from the expected input.
+
+The comparison creates independent full and short calls with identical
+channel settings. It is not persistent reuse of a measured physical-line
+profile. Both calls must verify their data before a saving is reported.
+Without V.8bis, connection time measured at both DTE CONNECT events was
+14.02 s full versus 12.54 s Quick Connect (1.48 s saved). With V.8bis the
+12000-byte qualification saved 6.52 s. The suite checks 12000-byte varied
+payloads in both directions in both startup configurations, with no invalid
+captured HDLC frames.
+
+### Channel placement and limits
+
+The new controls keep native media and the DS0 byte-exact (V.90 §5):
+
+- Additional one-way propagation delay, 0–200 ms, is a codeword FIFO in each
+  direction. It preserves every octet and the 160-sample callback cadence;
+  its leading idle codewords are the line's initial state. This is additional
+  to the existing one-frame browser pair pipeline. V.32/V.34/V.90/V.92 support it.
+- V.32/V.34 noise, attenuation and clock drift run **after** the network D/A,
+  on the synthetic linear waveform just before `me_rx_audio()`. A hook guarded
+  by `__EMSCRIPTEN__` calls the browser adapter; native builds do not contain
+  the hook. Original transmitted/received DS0 codewords are not re-encoded.
+- Noise is repeatable, with independent endpoint seeds 1234/1235 by default.
+  Light/moderate/heavy/severe map to 40/30/24/16 dB relative to a fixed
+  2500-linear-unit RMS reference. These labels are not measured channel SNR.
+  Attenuation is 0–24 dB in the UI; the noise floor is applied after loss.
+- The waveform-only clock experiment supports ±100 ppm. A causal 65-tap
+  windowed-sinc reader uses a 128-sample lookback, adding 16 ms when enabled;
+  the caller still provides and consumes exactly 160 samples per callback.
+  The clean synchronous path bypasses that filter. These are channel-model
+  choices, not changes to ITU modem DSP constants.
+- V.90/V.92 expose propagation delay only. Their byte-exact PCM receivers
+  would bypass a linear-only noise model, so the other controls are disabled
+  rather than claiming to impair those receivers. x2/K56flex payload demos
+  retain their fixed codeword path.
+
+With analogue impairments enabled, waveform playback/WAV show the received
+linear signals, labelled accordingly. Captured G.711 remains the original
+transmitted DS0. A moderate-noise V.34 row passes at 26400/26400 with a
+retrain request; 6 dB attenuation and +10 ppm rows pass at 33600/33600.
+A 16-dB noise-reference plus 24-dB-loss row does not connect and reports no
+verified bytes or throughput. These are synthetic experiments, not hardware
+qualification or a universal rate-versus-SNR model.
+
+### What the statistics measure
+
+Connection time is the sample-clock time when both host ports have CONNECT,
+including LAPM setup. Verified bytes count the original UTF-8 message and
+its returned `ACK: ` message, excluding the two-byte length headers. Useful
+throughput is those verified bits divided by time from connection to complete
+bidirectional verification: an aggregate application goodput, including
+framing, acknowledgements, compression and round-trip effects. It is not a
+physical line rate or a bit-error estimate. Failed transfers report zero
+verified bytes and no useful throughput.
+
+Retrain requests count captured `[ME]` request log entries across endpoints;
+CRC-invalid frames count the passive HDLC decoder's rejected candidates.
+These are observable events, not inferred modem failures or a BER. PCM and
+FSK demos mark inapplicable metrics explicitly. Statistics and comparison
+results follow the playback clock and do not expose future verification.
+Regression tests check timing arithmetic, byte counts, disabled controls,
+codeword FIFO continuity, line-setting validation, payloads under impairment,
+and the generated file runner's V.92 comparison and statistics timeline.

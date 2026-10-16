@@ -4587,6 +4587,7 @@ var _browser_send = Module['_browser_send'] = makeInvalidEarlyAccess('_browser_s
 var _browser_monitor = Module['_browser_monitor'] = makeInvalidEarlyAccess('_browser_monitor');
 var _browser_bit_count = Module['_browser_bit_count'] = makeInvalidEarlyAccess('_browser_bit_count');
 var _browser_read_bits = Module['_browser_read_bits'] = makeInvalidEarlyAccess('_browser_read_bits');
+var _browser_modulation = Module['_browser_modulation'] = makeInvalidEarlyAccess('_browser_modulation');
 var _browser_rate = Module['_browser_rate'] = makeInvalidEarlyAccess('_browser_rate');
 var _browser_tx_rate = Module['_browser_tx_rate'] = makeInvalidEarlyAccess('_browser_tx_rate');
 var _browser_rx_rate = Module['_browser_rx_rate'] = makeInvalidEarlyAccess('_browser_rx_rate');
@@ -4596,6 +4597,9 @@ var _browser_clear_received = Module['_browser_clear_received'] = makeInvalidEar
 var _browser_destroy = Module['_browser_destroy'] = makeInvalidEarlyAccess('_browser_destroy');
 var _browser_pcm_encode = Module['_browser_pcm_encode'] = makeInvalidEarlyAccess('_browser_pcm_encode');
 var _browser_pcm_decode = Module['_browser_pcm_decode'] = makeInvalidEarlyAccess('_browser_pcm_decode');
+var _browser_line_config = Module['_browser_line_config'] = makeInvalidEarlyAccess('_browser_line_config');
+var _browser_line_samples = Module['_browser_line_samples'] = makeInvalidEarlyAccess('_browser_line_samples');
+var _browser_line_clipped = Module['_browser_line_clipped'] = makeInvalidEarlyAccess('_browser_line_clipped');
 var _emscripten_stack_get_end = makeInvalidEarlyAccess('_emscripten_stack_get_end');
 var _emscripten_stack_get_base = makeInvalidEarlyAccess('_emscripten_stack_get_base');
 var _emscripten_stack_init = makeInvalidEarlyAccess('_emscripten_stack_init');
@@ -4619,6 +4623,7 @@ function assignWasmExports(wasmExports) {
   _browser_monitor = Module['_browser_monitor'] = createExportWrapper('browser_monitor', 0);
   _browser_bit_count = Module['_browser_bit_count'] = createExportWrapper('browser_bit_count', 1);
   _browser_read_bits = Module['_browser_read_bits'] = createExportWrapper('browser_read_bits', 1);
+  _browser_modulation = Module['_browser_modulation'] = createExportWrapper('browser_modulation', 0);
   _browser_rate = Module['_browser_rate'] = createExportWrapper('browser_rate', 0);
   _browser_tx_rate = Module['_browser_tx_rate'] = createExportWrapper('browser_tx_rate', 0);
   _browser_rx_rate = Module['_browser_rx_rate'] = createExportWrapper('browser_rx_rate', 0);
@@ -4628,6 +4633,9 @@ function assignWasmExports(wasmExports) {
   _browser_destroy = Module['_browser_destroy'] = createExportWrapper('browser_destroy', 0);
   _browser_pcm_encode = Module['_browser_pcm_encode'] = createExportWrapper('browser_pcm_encode', 5);
   _browser_pcm_decode = Module['_browser_pcm_decode'] = createExportWrapper('browser_pcm_decode', 5);
+  _browser_line_config = Module['_browser_line_config'] = createExportWrapper('browser_line_config', 4);
+  _browser_line_samples = Module['_browser_line_samples'] = createExportWrapper('browser_line_samples', 0);
+  _browser_line_clipped = Module['_browser_line_clipped'] = createExportWrapper('browser_line_clipped', 0);
   _emscripten_stack_get_end = wasmExports['emscripten_stack_get_end'];
   _emscripten_stack_get_base = wasmExports['emscripten_stack_get_base'];
   _emscripten_stack_init = wasmExports['emscripten_stack_init'];

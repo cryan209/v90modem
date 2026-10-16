@@ -2,7 +2,7 @@ import createModem from './dist/modem-engine.mjs';
 import assert from 'node:assert/strict';
 import {transmit,receive,wav} from './dist/fsk.mjs';
 import {hdlcFrames,inspectorText,negotiationRecords} from './dist/negotiation.mjs';
-import {runPair} from './dist/engine-pair.mjs';
+import {runPair,validateLine,delayLine} from './dist/engine-pair.mjs';
 const examples=['A','\0\0\0',String.fromCharCode(...Array.from({length:95},(_,i)=>i+32)),'Kia ora — hello 🌏','x'.repeat(240)];
 for(const profile of ['v21','bell103'])for(const text of examples)for(const snr of [99,24,12]){
  const tx=transmit(text,profile,snr),rx=receive(tx.samples,profile);
@@ -107,3 +107,44 @@ for(const [mode,id] of [['x2',2],['flex',56]]){
   console.log(`PASS: ${mode} detects damaged codewords and rejects invalid frames`);
  }finally{m._free(input);m._free(output);}
 }
+
+// Preserve the DS0 exactly while adding propagation across callback boundaries.
+const delayed=delayLine(23),sourceCodewords=Uint8Array.from({length:480},(_,i)=>i%256),receivedCodewords=[];
+for(let off=0;off<480;off+=160){const block=delayed(sourceCodewords.slice(off,off+160));assert.equal(block.length,160);receivedCodewords.push(...block);}
+assert.deepEqual(receivedCodewords,[...new Uint8Array(23).fill(255),...sourceCodewords.slice(0,457)]);
+for(const bad of [{noiseDb:NaN},{lossDb:-1},{clockPpm:101},{delayMs:1.5},{seed:-1}])assert.throws(()=>validateLine(34,bad));
+assert.throws(()=>validateLine(92,{noiseDb:30}),/V.32\/V.34 only/);
+assert.throws(()=>validateLine('x2',{delayMs:20}),/fixed byte-exact/);
+
+const statText='Measured transfer — 0123456789';
+for(const [mode,line] of [[34,{}],[34,{noiseDb:30}],[34,{lossDb:6}],[34,{clockPpm:10}],[90,{delayMs:20}],[92,{delayMs:20}]]){
+ const r=await runPair(mode,statText,()=>{},()=>false,{v8:true,line});
+ assert.ok(r.passed,`V.${mode} impaired line ${JSON.stringify(line)}`);
+ assert.equal(r.received,statText);assert.equal(r.reply,'ACK: '+statText);
+ const s=r.stats,n=new TextEncoder().encode(statText).length;
+ assert.equal(s.verifiedBytes,n*2+5);assert.equal(s.callerBytes,n);assert.equal(s.answererBytes,n+5);
+ assert.ok(s.connectSeconds>0);assert.ok(s.transferSeconds>0);
+ assert.ok(Math.abs(s.usefulBitsPerSecond-s.verifiedBytes*8/s.transferSeconds)<1e-6);
+ assert.equal(s.clippedSamples,0);
+ assert.equal(r.waveform,line.noiseDb||line.lossDb||line.clockPpm?'received':'transmitted');
+ if(line.noiseDb===30){assert.ok(r.txRate<33600);assert.ok(r.rxRate<33600);}
+ if(mode===92){assert.equal(r.modulation,'V92');assert.equal(r.txRate,48000);assert.equal(r.rxRate,56000);}
+ console.log(`PASS: V.${mode}, line ${JSON.stringify(line)}, verified payload, measured rates ${r.txRate}/${r.rxRate} and statistics`);
+}
+for(const v8bis of [false,true]){
+ const r=await runPair(92,sustained,()=>{},()=>false,{v8:true,v8bis,v92Startup:'compare'});
+ assert.ok(r.passed);assert.equal(r.modulation,'V92');assert.equal(r.txRate,48000);assert.equal(r.rxRate,56000);
+ assert.ok(r.comparison.full.passed);assert.ok(r.comparison.quick.passed);
+ assert.ok(r.comparison.savedSeconds>0);
+ assert.ok(r.protocol.some(e=>/short Phase 1 complete/.test(e.line)));
+ assert.ok(r.protocol.some(e=>/short Phase 2 \(digital\)/.test(e.line)));
+ assert.ok(r.protocol.some(e=>/short Phase 2 \(analogue\)/.test(e.line)));
+ assert.ok(!r.protocol.some(e=>/short Phase 2 abandoned/.test(e.line)));
+ assert.equal(r.stats.invalidHdlcFrames,0);
+ console.log(`PASS: V.92 full/Quick Connect comparison, V.8bis=${v8bis}, 12000-byte bidirectional payload, saving ${r.comparison.savedSeconds.toFixed(2)} s`);
+}
+
+const failedLine=await runPair(34,'Severe line test',()=>{},()=>false,{v8:true,line:{noiseDb:16,lossDb:24}});
+assert.equal(failedLine.passed,false);assert.equal(failedLine.stats.verifiedBytes,0);
+assert.equal(failedLine.stats.connectSeconds,null);assert.equal(failedLine.stats.usefulBitsPerSecond,null);
+console.log('PASS: failed channel makes no connection, verified-byte or throughput claim');
