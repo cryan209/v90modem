@@ -211,3 +211,19 @@ bypassing conservative training-rate checks. That bypass was removed and is
 not shipped. Slowing Phase-4 equalizer adaptation reduced measured quality
 and was also discarded. Higher automatic rates still need receiver/rate
 estimator work; a CONNECT indication alone is insufficient validation.
+
+### Paired B1/DATA conditioning below 31200 (2026-10-16)
+
+The bundled engine includes the native V.34 receiver fix enabling its existing
+complete B1 equalizer fit and matching DATA timing recovery at 3429 symbols/s
+from 26400 bit/s upward. Previously both were gated to 31200/33600. The
+noise/timing A/B matrix improved from 111/160 to 123/160 passing forced-rate
+rows, with no regressions; million-bit qualification passed all 16 rows at
+26400/30 dB and 28800/36 dB injected noise. See `docs/v34_data_mode_rates.md`
+for the rates, delays, laws, failed alternative arms and reproduction tool.
+
+This fixes receiver behaviour, not the separately conservative empirical
+TRN/B1 rate policy. The default browser ceiling remains 24000. The bundle
+was rebuilt from committed sources in an isolated staging directory so
+parallel, uncommitted engine work was not included, then passed the browser
+regressions before offline packaging.

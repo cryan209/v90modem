@@ -119,8 +119,8 @@
     "spandsp-master/src/v29rx.c": "2dc9988a98e0484e95d7fb50f2b1fadadce36c8f3a961a14100964559919af02",
     "spandsp-master/src/v29tx.c": "97ce8ecd3fc059a7a8ce01cdfc81c609501bc8b3758031555310cda933295c89",
     "spandsp-master/src/v32bis.c": "b4d7a1737367f1f764c9e9b21085a2ceb850087275e6c808530f1e1a60435a42",
-    "spandsp-master/src/v34rx.c": "4c045c18acec9b5a56c79fbf4b6323a531f440943a8a200368bee7dbcfcda165",
-    "spandsp-master/src/v34rx_data.c": "ee9518eb7e5d60e0819691bef1798909bc40624941e851626aafb527f5e17ca6",
+    "spandsp-master/src/v34rx.c": "46a0d99b9b5e36644a2bb3c0b70704fa854455f6b64fe8f11d0d0fcef945e6d6",
+    "spandsp-master/src/v34rx_data.c": "8b8c3435ffa70719cab92102c9eee334b2a7a8a5e2410752b74f25eb4107a891",
     "spandsp-master/src/v34rx_phase3.c": "d9f9c53f20529de406c17478c350a72fb41f80b3a10da1e471a6d2b7c296ab8e",
     "spandsp-master/src/v34rx_phase4_trn.c": "31a837d1dea19a2d71aad59a11a63f54e86286b1b540d337d009694cfedda03f",
     "spandsp-master/src/v34tx.c": "f2d3f6fc8b52165852ba6804d547e9a453a7c0da98f16cea702edb1cb7ba5205",
@@ -132,5 +132,5 @@
     "spandsp-master/src/vector_int.c": "3a104273edbc446d3fc9a6b21e91588feebc0b71086527eccf3cc888f0769c40",
     "web/modem-lab/wasm/browser_peer.c": "ce7bdce32df53d298ce0d35c41a01358c28876af8fe63247cc224b7dc25d627a"
   },
-  "headers_sha256": "42fbdd8bcce87000a8bc2a567f76deaf4456a5b9d59eee0f92f91eb301f46cba"
+  "headers_sha256": "2d2cd25a9ff93423998861c59dda59ed1f56a6351b13fd689c892064c8546d7f"
 }
