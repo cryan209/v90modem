@@ -137,6 +137,28 @@ typedef struct {
     int tx_bit_count;
     uint64_t rx_bit_accum;
     int rx_bit_count;
+    /* 6.3.9 / 6.4 control channel: every 64th data frame carries six bits of
+     * a repeating 96-bit sequence in its sign positions. */
+    bool cc_tx_active;               /* peer requested it (INFO bit 27) */
+    bool cc_rx_active;               /* we requested it */
+    uint32_t tx_frame_index;         /* data frames sent since data mode began */
+    uint32_t rx_frame_index;
+    uint8_t cc_tx_seq[96];
+    int cc_tx_pos;
+    bool cc_tx_cleardown;
+    bool cc_tx_retrain;
+    bool cc_tx_cleardown_done;       /* a sequence carrying the cleardown bit has been sent whole */
+    uint8_t cc_tx_secondary[54];
+    uint8_t cc_rx_seq[96];
+    int cc_rx_pos;
+    bool cc_rx_valid;                /* at least one good sequence seen */
+    bool cc_rx_cleardown;
+    bool cc_rx_retrain;
+    uint8_t cc_rx_secondary[54];
+    unsigned cc_rx_sequences_ok;
+    unsigned cc_rx_pattern_errors;
+    unsigned cc_rx_crc_errors;
+    int cc_rx_bad_run;               /* consecutive bad sequences */
 } v91_state_t;
 
 typedef enum {
@@ -270,6 +292,22 @@ void v91_request_cleardown(v91_state_t *s);
 void v91_note_recovery_timeout(v91_state_t *s);
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
 void v91_deactivate_data_mode(v91_state_t *s);
+
+/*
+ * Control channel (6.3.9, 6.4).  `tx_supply` is true when the peer set INFO
+ * bit 27; `rx_expect` is true when we did.  Call after v91_activate_data_mode.
+ * Primary data bits per frame drop by six on every 64th frame, so use
+ * v91_tx_bytes_for_frames() to size the next transmit block.
+ */
+void v91_set_control_channel(v91_state_t *s, bool tx_supply, bool rx_expect);
+void v91_cc_request_cleardown(v91_state_t *s);            /* Table 3 bit 16; see cc_tx_cleardown_done */
+void v91_cc_request_retrain(v91_state_t *s);              /* Table 3 bit 17 */
+void v91_cc_set_secondary(v91_state_t *s, const uint8_t bits[54]);
+/* True after repeated sequences fail the slip pattern or CRC (8.5). */
+bool v91_cc_slip_suspected(const v91_state_t *s);
+/* Bytes the transmitter still needs to emit `frames` data frames. */
+int v91_tx_bytes_for_frames(const v91_state_t *s, int frames);
+
 
 /*
  * True when the CP frame's constellation masks can carry the K data bits

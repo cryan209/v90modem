@@ -510,6 +510,24 @@ double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s);
  */
 bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out);
 
+/* V.91 control-channel variants: the six sign bits of the frame carry
+ * cc_signs (map) / are returned raw in bits_out[0..5] (demap), unscrambled. */
+int v90_map_sr0_frame_cc(v90_law_t law,
+                         const vpcm_cp_frame_t *cp,
+                         int bits_per_frame,
+                         uint32_t *scramble_reg,
+                         int *prev_sign,
+                         const uint8_t *bits_in,
+                         const uint8_t *cc_signs,
+                         uint8_t frame_out[6]);
+int v90_demap_mapped_frame_cc(v90_law_t law,
+                              const vpcm_cp_frame_t *cp,
+                              int bits_per_frame,
+                              uint32_t *descramble_reg,
+                              int *prev_sign,
+                              const uint8_t codewords[6],
+                              bool cc_frame,
+                              uint8_t bits_out[]);
 /* Transmit counterpart of v90_demap_mapped_frame (Sr=0), see v90.c. */
 int v90_map_sr0_frame(v90_law_t law,
                       const vpcm_cp_frame_t *cp,

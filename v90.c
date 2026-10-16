@@ -5278,13 +5278,14 @@ static int v90_codeword_to_ucode_law(v90_law_t law, uint8_t codeword)
  * scramble_reg/prev_sign carry transmitter state across frames.
  * Returns V90_FRAME_LEN, or 0 when the bits do not fit the CP constellations.
  */
-int v90_map_sr0_frame(v90_law_t law,
-                      const vpcm_cp_frame_t *cp,
-                      int bits_per_frame,
-                      uint32_t *scramble_reg,
-                      int *prev_sign,
-                      const uint8_t *bits_in,
-                      uint8_t frame_out[V90_FRAME_LEN])
+int v90_map_sr0_frame_cc(v90_law_t law,
+                         const vpcm_cp_frame_t *cp,
+                         int bits_per_frame,
+                         uint32_t *scramble_reg,
+                         int *prev_sign,
+                         const uint8_t *bits_in,
+                         const uint8_t *cc_signs,
+                         uint8_t frame_out[V90_FRAME_LEN])
 {
     uint8_t scrambled[64];
     uint64_t r = 0;
@@ -5300,8 +5301,14 @@ int v90_map_sr0_frame(v90_law_t law,
         return 0;
     k = bits_per_frame - V90_FRAME_LEN;
     sc.sr = *scramble_reg;
-    for (int i = 0; i < bits_per_frame; i++)
-        scrambled[i] = (uint8_t)v90_scramble_bit(&sc, bits_in[i] & 1);
+    for (int i = 0; i < bits_per_frame; i++) {
+        /* V.91 6.3.9: in a control-channel frame the six sign bits carry
+         * control bits that are differentially encoded but not scrambled. */
+        if (cc_signs && i < V90_FRAME_LEN)
+            scrambled[i] = (uint8_t)(cc_signs[i] & 1);
+        else
+            scrambled[i] = (uint8_t)v90_scramble_bit(&sc, bits_in[i] & 1);
+    }
     for (int i = 0; i < k; i++)
         r |= (uint64_t)scrambled[V90_FRAME_LEN + i] << i;
 
@@ -5332,13 +5339,26 @@ int v90_map_sr0_frame(v90_law_t law,
     return V90_FRAME_LEN;
 }
 
-int v90_demap_mapped_frame(v90_law_t law,
-                           const vpcm_cp_frame_t *cp,
-                           int bits_per_frame,
-                           uint32_t *descramble_reg,
-                           int *prev_sign,
-                           const uint8_t codewords[V90_FRAME_LEN],
-                           uint8_t bits_out[])
+int v90_map_sr0_frame(v90_law_t law,
+                      const vpcm_cp_frame_t *cp,
+                      int bits_per_frame,
+                      uint32_t *scramble_reg,
+                      int *prev_sign,
+                      const uint8_t *bits_in,
+                      uint8_t frame_out[V90_FRAME_LEN])
+{
+    return v90_map_sr0_frame_cc(law, cp, bits_per_frame, scramble_reg,
+                                prev_sign, bits_in, NULL, frame_out);
+}
+
+int v90_demap_mapped_frame_cc(v90_law_t law,
+                              const vpcm_cp_frame_t *cp,
+                              int bits_per_frame,
+                              uint32_t *descramble_reg,
+                              int *prev_sign,
+                              const uint8_t codewords[V90_FRAME_LEN],
+                              bool cc_frame,
+                              uint8_t bits_out[])
 {
     int labels[V90_FRAME_LEN];
     int moduli[V90_FRAME_LEN];
@@ -5388,11 +5408,27 @@ int v90_demap_mapped_frame(v90_law_t law,
     for (int i = 0; i < k; i++)
         scrambled[V90_FRAME_LEN + i] = (uint8_t)((r >> i) & 1);
 
-    for (int i = 0; i < bits_per_frame; i++)
-        bits_out[i] = (uint8_t)v90_descramble_reg_bit(descramble_reg,
-                                                      scrambled[i]);
+    for (int i = 0; i < bits_per_frame; i++) {
+        if (cc_frame && i < V90_FRAME_LEN)
+            bits_out[i] = scrambled[i];   /* control bits are not scrambled */
+        else
+            bits_out[i] = (uint8_t)v90_descramble_reg_bit(descramble_reg,
+                                                          scrambled[i]);
+    }
     *prev_sign = sign_prev;
     return bits_per_frame;
+}
+
+int v90_demap_mapped_frame(v90_law_t law,
+                           const vpcm_cp_frame_t *cp,
+                           int bits_per_frame,
+                           uint32_t *descramble_reg,
+                           int *prev_sign,
+                           const uint8_t codewords[V90_FRAME_LEN],
+                           uint8_t bits_out[])
+{
+    return v90_demap_mapped_frame_cc(law, cp, bits_per_frame, descramble_reg,
+                                     prev_sign, codewords, false, bits_out);
 }
 
 int v90_demap_shaped_frame(v90_law_t law,

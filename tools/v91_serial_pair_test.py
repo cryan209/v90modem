@@ -151,7 +151,25 @@ def main() -> int:
             a2c = b"V91-ANSWERER-TO-CALLER-9876543210\r\n"
             expect_payload(caller_fd, answerer_fd, c2a, 5)
             expect_payload(answerer_fd, caller_fd, a2c, 5)
-            print(f"v91_serial_pair_test: OK ({label})")
+            # 8.6: a local hangup from data mode goes out as the control
+            # channel's cleardown bit and the peer drops on receiving it.
+            time.sleep(1.2)
+            os.write(caller_fd, b"+++")
+            time.sleep(1.2)
+            os.write(caller_fd, b"ATH\r")
+            ends = drain([caller_fd, answerer_fd], 6.0)
+            if b"NO CARRIER" not in ends[answerer_fd]:
+                raise RuntimeError(f"answerer did not clear down: {ends[answerer_fd]!r}")
+            terminate(caller)
+            terminate(answerer)
+            caller_log.close()
+            answerer_log.close()
+            alog = answerer_log_path.read_text(errors="replace")
+            if "cc tx=1 rx=1" not in alog:
+                raise RuntimeError("control channel was not negotiated on both directions")
+            if "peer cleardown (control channel)" not in alog:
+                raise RuntimeError("peer did not see the control-channel cleardown")
+            print(f"v91_serial_pair_test: OK ({label}; control-channel cleardown)")
             return 0
         except Exception as exc:
             print(f"v91_serial_pair_test: FAIL: {exc}", file=sys.stderr)

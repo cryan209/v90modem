@@ -1384,6 +1384,20 @@ bool v91_note_frame_sync_reacquired(v91_state_t *s)
     s->data_mode_active = true;
     s->rx_bit_accum = 0;
     s->rx_bit_count = 0;
+    s->tx_frame_index = 0;
+    s->rx_frame_index = 0;
+    s->cc_tx_pos = 0;
+    s->cc_tx_cleardown = false;
+    s->cc_tx_retrain = false;
+    s->cc_tx_cleardown_done = false;
+    s->cc_rx_pos = 0;
+    s->cc_rx_valid = false;
+    s->cc_rx_cleardown = false;
+    s->cc_rx_retrain = false;
+    s->cc_rx_sequences_ok = 0;
+    s->cc_rx_pattern_errors = 0;
+    s->cc_rx_crc_errors = 0;
+    s->cc_rx_bad_run = 0;
     return true;
 }
 
@@ -1508,6 +1522,107 @@ void v91_deactivate_data_mode(v91_state_t *s)
     s->rx_bit_count = 0;
 }
 
+#define V91_CC_FRAME_PERIOD 64
+#define V91_CC_SEQ_BITS 96
+
+static const uint8_t v91_cc_slip_pattern[16] = {0,1,1,1,0,1,1,1,1,1,1,1,1,0,1,0};
+
+/* Table 3: bits 0:15 slip pattern, 16 cleardown, 17 retrain, 18:23 reserved 0,
+   24:77 secondary channel, 78:93 CRC (10.1.2.3.2/V.34), 94:95 fill 00. */
+static void v91_cc_build_sequence(v91_state_t *s)
+{
+    uint16_t crc;
+
+    memset(s->cc_tx_seq, 0, V91_CC_SEQ_BITS);
+    memcpy(s->cc_tx_seq, v91_cc_slip_pattern, 16);
+    s->cc_tx_seq[16] = s->cc_tx_cleardown ? 1 : 0;
+    s->cc_tx_seq[17] = s->cc_tx_retrain ? 1 : 0;
+    for (int i = 0; i < 54; i++)
+        s->cc_tx_seq[24 + i] = s->cc_tx_secondary[i] & 1U;
+    crc = v91_crc_bits(s->cc_tx_seq, 78);
+    for (int i = 0; i < 16; i++)
+        s->cc_tx_seq[78 + i] = (uint8_t) ((crc >> i) & 1U);
+}
+
+static void v91_cc_accept_bits(v91_state_t *s, const uint8_t six[6])
+{
+    uint16_t crc;
+    uint16_t got = 0;
+
+    memcpy(s->cc_rx_seq + s->cc_rx_pos, six, 6);
+    s->cc_rx_pos += 6;
+    if (s->cc_rx_pos < V91_CC_SEQ_BITS)
+        return;
+    s->cc_rx_pos = 0;
+    if (memcmp(s->cc_rx_seq, v91_cc_slip_pattern, 16) != 0) {
+        s->cc_rx_pattern_errors++;
+        s->cc_rx_bad_run++;
+        return;
+    }
+    crc = v91_crc_bits(s->cc_rx_seq, 78);
+    for (int i = 0; i < 16; i++)
+        got |= (uint16_t) ((s->cc_rx_seq[78 + i] & 1U) << i);
+    if (crc != got) {
+        s->cc_rx_crc_errors++;
+        s->cc_rx_bad_run++;
+        return;
+    }
+    s->cc_rx_valid = true;
+    s->cc_rx_cleardown = s->cc_rx_seq[16] != 0;
+    s->cc_rx_retrain = s->cc_rx_seq[17] != 0;
+    memcpy(s->cc_rx_secondary, s->cc_rx_seq + 24, 54);
+    s->cc_rx_sequences_ok++;
+    s->cc_rx_bad_run = 0;
+}
+
+void v91_set_control_channel(v91_state_t *s, bool tx_supply, bool rx_expect)
+{
+    if (!s)
+        return;
+    s->cc_tx_active = tx_supply;
+    s->cc_rx_active = rx_expect;
+    s->cc_tx_pos = 0;
+    s->cc_rx_pos = 0;
+}
+
+void v91_cc_request_cleardown(v91_state_t *s)
+{
+    if (s)
+        s->cc_tx_cleardown = true;
+}
+
+void v91_cc_request_retrain(v91_state_t *s)
+{
+    if (s)
+        s->cc_tx_retrain = true;
+}
+
+void v91_cc_set_secondary(v91_state_t *s, const uint8_t bits[54])
+{
+    if (s && bits)
+        memcpy(s->cc_tx_secondary, bits, 54);
+}
+
+bool v91_cc_slip_suspected(const v91_state_t *s)
+{
+    return s && s->cc_rx_active && s->cc_rx_bad_run >= 2;
+}
+
+int v91_tx_bytes_for_frames(const v91_state_t *s, int frames)
+{
+    long long need_bits = 0;
+    uint32_t f;
+
+    if (!s || !s->data_mode_active || s->active_transparent_mode || frames <= 0)
+        return 0;
+    f = s->tx_frame_index;
+    for (int i = 0; i < frames; i++, f++)
+        need_bits += (s->cc_tx_active && (f % V91_CC_FRAME_PERIOD) == 0)
+                         ? s->active_k : s->active_k + 6;
+    need_bits -= s->tx_bit_count;
+    return need_bits > 0 ? (int) ((need_bits + 7) / 8) : 0;
+}
+
 int v91_tx_codewords(v91_state_t *s,
                      uint8_t *g711_out,
                      int g711_max,
@@ -1543,21 +1658,40 @@ int v91_tx_codewords(v91_state_t *s,
     d = s->active_k + 6;
     while (out_pos + VPCM_CP_FRAME_INTERVALS <= g711_max) {
         uint8_t bits[64];
+        bool cc = s->cc_tx_active && (s->tx_frame_index % V91_CC_FRAME_PERIOD) == 0;
+        int need = cc ? s->active_k : d;
 
-        while (s->tx_bit_count < d && data_pos < data_len) {
+        while (s->tx_bit_count < need && data_pos < data_len) {
             s->tx_bit_accum |= ((uint64_t) data_in[data_pos++]) << s->tx_bit_count;
             s->tx_bit_count += 8;
         }
-        if (s->tx_bit_count < d)
+        if (s->tx_bit_count < need)
             break;
+        /* A control-channel frame spends its six sign bits on the control
+           sequence, so only K user bits are taken from the stream. */
         for (int i = 0; i < d; i++)
-            bits[i] = (uint8_t) ((s->tx_bit_accum >> i) & 1U);
-        if (v90_map_sr0_frame((v90_law_t) s->law, &s->active_cp, d,
-                              &s->scramble_reg, &s->diff_sign, bits,
-                              g711_out + out_pos) == 0)
+            bits[i] = cc ? ((i < 6) ? 0 : (uint8_t) ((s->tx_bit_accum >> (i - 6)) & 1U))
+                         : (uint8_t) ((s->tx_bit_accum >> i) & 1U);
+        if (cc) {
+            if (s->cc_tx_pos == 0)
+                v91_cc_build_sequence(s);
+            if (v90_map_sr0_frame_cc((v90_law_t) s->law, &s->active_cp, d,
+                                     &s->scramble_reg, &s->diff_sign, bits,
+                                     s->cc_tx_seq + s->cc_tx_pos,
+                                     g711_out + out_pos) == 0)
+                return out_pos;
+            s->cc_tx_pos = (s->cc_tx_pos + 6) % V91_CC_SEQ_BITS;
+            /* 8.6: cleardown is signalled once the current sequence is complete. */
+            if (s->cc_tx_pos == 0 && s->cc_tx_seq[16])
+                s->cc_tx_cleardown_done = true;
+        } else if (v90_map_sr0_frame((v90_law_t) s->law, &s->active_cp, d,
+                                     &s->scramble_reg, &s->diff_sign, bits,
+                                     g711_out + out_pos) == 0) {
             return out_pos;
-        s->tx_bit_accum >>= d;
-        s->tx_bit_count -= d;
+        }
+        s->tx_bit_accum >>= need;
+        s->tx_bit_count -= need;
+        s->tx_frame_index++;
         out_pos += VPCM_CP_FRAME_INTERVALS;
     }
     return out_pos;
@@ -1596,15 +1730,20 @@ int v91_rx_codewords(v91_state_t *s,
     d = s->active_k + 6;
     while (in_pos + VPCM_CP_FRAME_INTERVALS <= g711_len) {
         uint8_t bits[64];
+        bool cc = s->cc_rx_active && (s->rx_frame_index % V91_CC_FRAME_PERIOD) == 0;
+        int first = cc ? 6 : 0;
 
-        if (v90_demap_mapped_frame((v90_law_t) s->law, &s->active_cp, d,
-                                   &s->rx_scramble_reg, &s->rx_prev_sign,
-                                   g711_in + in_pos, bits) != d)
+        if (v90_demap_mapped_frame_cc((v90_law_t) s->law, &s->active_cp, d,
+                                      &s->rx_scramble_reg, &s->rx_prev_sign,
+                                      g711_in + in_pos, cc, bits) != d)
             return out_pos;
         in_pos += VPCM_CP_FRAME_INTERVALS;
-        for (int i = 0; i < d; i++)
-            s->rx_bit_accum |= ((uint64_t) bits[i]) << (s->rx_bit_count + i);
-        s->rx_bit_count += d;
+        s->rx_frame_index++;
+        if (cc)
+            v91_cc_accept_bits(s, bits);
+        for (int i = first; i < d; i++)
+            s->rx_bit_accum |= ((uint64_t) bits[i]) << (s->rx_bit_count + i - first);
+        s->rx_bit_count += d - first;
         while (s->rx_bit_count >= 8 && out_pos < data_max) {
             data_out[out_pos++] = (uint8_t) (s->rx_bit_accum & 0xFFU);
             s->rx_bit_accum >>= 8;

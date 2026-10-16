@@ -8647,6 +8647,110 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
     return true;
 }
 
+/* V.91 6.3.9 / 6.4: control channel carried in the sign bits of every 64th
+ * data frame.  Primary data must still round-trip byte-exact (K user bits in
+ * those frames), the 96-bit sequence must verify (slip pattern + CRC), and
+ * cleardown / retrain / secondary bits must arrive. */
+static bool test_v91_control_channel(v91_law_t law)
+{
+    enum { FRAMES = 64 * 16 * 3 };
+    vpcm_cp_frame_t cp;
+    v91_state_t tx;
+    v91_state_t rx;
+    uint8_t cw[FRAMES * 6];
+    uint8_t in[FRAMES * 7];
+    uint8_t out[FRAMES * 7];
+    uint8_t secondary[54];
+    int need;
+    int produced;
+    int got;
+    int pass;
+
+    vpcm_log("Test: V.91 control channel (%s)", vpcm_law_to_str(law));
+    vpcm_cp_init(&cp);
+    cp.drn = 19;
+    cp.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cp.masks[0]);
+    for (int i = 0; i < 54; i++)
+        secondary[i] = (uint8_t) ((i * 7 + 3) & 1);
+
+    for (pass = 0; pass < 2; pass++) {
+        v91_init(&tx, law, V91_MODE_TRANSPARENT);
+        v91_init(&rx, law, V91_MODE_TRANSPARENT);
+        if (!v91_activate_data_mode(&tx, &cp) || !v91_activate_data_mode(&rx, &cp)) {
+            fprintf(stderr, "V.91 CC data-mode activation failed\n");
+            return false;
+        }
+        v91_set_control_channel(&tx, true, false);
+        v91_set_control_channel(&rx, false, true);
+        v91_cc_set_secondary(&tx, secondary);
+        if (pass == 1) {
+            v91_cc_request_cleardown(&tx);
+            v91_cc_request_retrain(&tx);
+        }
+        fill_pattern(in, (int) sizeof(in), 0x91CC0000U + (uint32_t) pass);
+        need = v91_tx_bytes_for_frames(&tx, FRAMES);
+        if (need <= 0 || need > (int) sizeof(in)) {
+            fprintf(stderr, "V.91 CC byte need %d out of range\n", need);
+            return false;
+        }
+        /* 3 sequences of 16 control frames each use 3 * 16 * 6 fewer sign bits. */
+        produced = v91_tx_codewords(&tx, cw, (int) sizeof(cw), in, need);
+        if (produced != FRAMES * 6) {
+            fprintf(stderr, "V.91 CC tx produced %d of %d\n", produced, FRAMES * 6);
+            return false;
+        }
+        got = v91_rx_codewords(&rx, out, (int) sizeof(out), cw, produced);
+        if (got != need - 0 && got != need - 1) {
+            fprintf(stderr, "V.91 CC rx returned %d bytes, sent %d\n", got, need);
+            return false;
+        }
+        if (memcmp(in, out, (size_t) got) != 0) {
+            fprintf(stderr, "V.91 CC primary data mismatch at byte %d\n",
+                    first_mismatch_index(in, out, got));
+            return false;
+        }
+        if (rx.cc_rx_sequences_ok != 3 || rx.cc_rx_crc_errors || rx.cc_rx_pattern_errors) {
+            fprintf(stderr, "V.91 CC sequences ok=%u crc=%u pattern=%u (want 3/0/0)\n",
+                    rx.cc_rx_sequences_ok, rx.cc_rx_crc_errors, rx.cc_rx_pattern_errors);
+            return false;
+        }
+        if (rx.cc_rx_cleardown != (pass == 1) || rx.cc_rx_retrain != (pass == 1)
+            || memcmp(rx.cc_rx_secondary, secondary, 54) != 0) {
+            fprintf(stderr, "V.91 CC flags/secondary wrong (cleardown=%d retrain=%d)\n",
+                    rx.cc_rx_cleardown, rx.cc_rx_retrain);
+            return false;
+        }
+    }
+
+    /* Slip: dropping one codeword shifts the frame grid, so the next control
+     * sequences fail the slip pattern and the receiver flags it. */
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&rx, law, V91_MODE_TRANSPARENT);
+    (void) v91_activate_data_mode(&tx, &cp);
+    (void) v91_activate_data_mode(&rx, &cp);
+    v91_set_control_channel(&tx, true, false);
+    v91_set_control_channel(&rx, false, true);
+    need = v91_tx_bytes_for_frames(&tx, FRAMES);
+    produced = v91_tx_codewords(&tx, cw, (int) sizeof(cw), in, need);
+    (void) v91_rx_codewords(&rx, out, (int) sizeof(out), cw, 64 * 6 * 2);
+    memmove(cw + 64 * 6 * 2, cw + 64 * 6 * 2 + 1, (size_t) (produced - 64 * 6 * 2 - 1));
+    got = v91_rx_codewords(&rx, out, (int) sizeof(out), cw + 64 * 6 * 2,
+                           produced - 64 * 6 * 2 - 6);
+    /* With a sparse CP a shifted frame usually fails to demap at all (the
+     * residue no longer fits the constellations); with a full CP it decodes to
+     * garbage and the control sequence exposes it.  Either way it is seen. */
+    if (got >= need - (64 * 6 * 2 / 6) * (cp.drn + 20) / 8
+        && !v91_cc_slip_suspected(&rx)
+        && rx.cc_rx_pattern_errors + rx.cc_rx_crc_errors == 0) {
+        fprintf(stderr, "V.91 CC did not notice a one-codeword slip\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 control channel (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
@@ -10899,6 +11003,8 @@ static bool run_vpcm_session_suite(void)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW)
+        && test_v91_control_channel(V91_LAW_ULAW)
+        && test_v91_control_channel(V91_LAW_ALAW)
         && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ULAW)
         && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ALAW)
         && test_v90_startup_contract_failure_cleanup();

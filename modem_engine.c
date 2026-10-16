@@ -1703,6 +1703,12 @@ static long long g_v91_rx_dil_start_abs;
 static int g_v91_rx_robbed_phase;   /* robbed cadence on our RX path, -1 = none */
 static int g_v91_tx_align_phase;    /* peer-requested cadence for our TX, -1 = none */
 static bool g_v91_data_tx_aligned;
+static bool me_v91_control_channel(void);
+static bool g_v91_peer_wants_cc;          /* peer set INFO bit 27 */
+static bool g_v91_we_want_cc;
+static bool g_v91_cleardown_pending;      /* local hangup waiting on the control channel */
+static long long g_v91_cleardown_start_abs;
+static long long g_v91_cleardown_done_abs = -1;
 static long long g_v91_tx_b1_end_abs;   /* TX position just after our B1, -1 = not yet */
 static long long g_v91_rx_b1_end_abs;   /* RX position just after the peer's B1 */
 static int g_v91_sim_robbed_phase;  /* env V91_SIM_ROBBED_RX, -1 = off */
@@ -1732,6 +1738,7 @@ static int v91_live_build_startup(v91_law_t law,
     v91_init(state, law, V91_MODE_TRANSPARENT);
     memset(&info, 0, sizeof(info));
     info.request_default_dil = true;
+    info.request_control_channel = g_v91_we_want_cc;
     info.tx_uses_alaw = (law == V91_LAW_ALAW);
     info.power_measured_after_digital_impairments = true;
 
@@ -1817,6 +1824,10 @@ static void v91_live_reset(void)
     g_v91_data_tx_aligned = false;
     g_v91_tx_b1_end_abs = -1;
     g_v91_rx_b1_end_abs = -1;
+    g_v91_peer_wants_cc = false;
+    g_v91_we_want_cc = false;
+    g_v91_cleardown_pending = false;
+    g_v91_cleardown_done_abs = -1;
     g_v91_sim_robbed_phase = -1;
 }
 
@@ -1848,6 +1859,7 @@ static bool v91_live_start_locked(void)
     g_v91_cp_local = g_v91_cp_template;
     g_v91_cp_total_bits = vpcm_cp_v91_bit_length(&g_v91_cp_template);
     v91_default_dil_init(&g_v91_default_dil);
+    g_v91_we_want_cc = me_v91_control_channel();
     g_v91_startup_tx_len = v91_live_build_startup(law,
                                                   &g_v91_tx,
                                                   g_v91_startup_tx,
@@ -1889,6 +1901,9 @@ static void v91_live_try_enter_data_locked(void)
         g_state = ME_HANGUP;
         return;
     }
+    /* 6.4: we supply a control channel only if the peer asked for one. */
+    v91_set_control_channel(&g_v91_tx, g_v91_peer_wants_cc, false);
+    v91_set_control_channel(&g_v91_rx, false, g_v91_we_want_cc);
     /* 8 frames per data block keep the byte count exact for every drn. */
     g_v91_data_tx_bytes = (int)g_v91_peer_drn + 20;
     g_v91_data_rx_bytes = (int)g_v91_local_drn + 20;
@@ -1906,10 +1921,11 @@ static void v91_live_try_enter_data_locked(void)
     g_v91_data_rx_synced = false;
     g_data_connect_reported = true;
     di_on_connected(rate);
-    trace_phase("V91 enter DATA: rate=%d (rx drn=%u tx drn=%u robbed=%d rx_phase=%d)",
+    trace_phase("V91 enter DATA: rate=%d (rx drn=%u tx drn=%u robbed=%d rx_phase=%d cc tx=%d rx=%d)",
                 rate, g_v91_local_drn, g_v91_peer_drn,
                 g_v91_rx.rx_robbed_bit_detected ? 1 : 0,
-                g_v91_rx_robbed_phase);
+                g_v91_rx_robbed_phase,
+                g_v91_tx.cc_tx_active ? 1 : 0, g_v91_rx.cc_rx_active ? 1 : 0);
 }
 
 /* Refill the TX startup queue when it drains.  Returns false when the
@@ -2045,15 +2061,31 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
         if (g_v91_data_tx_pos >= V91_LIVE_DATA_CODEWORDS) {
             uint8_t data[V91_LIVE_DATA_CODEWORDS];
 
-            if (g_v91_data_tx_bytes <= 0 || g_v91_data_tx_bytes > (int)sizeof(data))
+            /* Control-channel frames carry six fewer user bits, so the byte
+             * count per block varies; ask the encoder what it still needs. */
+            int need = v91_tx_bytes_for_frames(&g_v91_tx, V91_LIVE_DATA_FRAMES);
+
+            if (need <= 0 || need > (int)sizeof(data))
                 return false;
-            ds_tx_fill_bytes(&g_data_stack, data, g_v91_data_tx_bytes);
+            ds_tx_fill_bytes(&g_data_stack, data, need);
             if (v91_tx_codewords(&g_v91_tx,
                                  g_v91_data_tx,
                                  sizeof(g_v91_data_tx),
                                  data,
-                                 g_v91_data_tx_bytes) != V91_LIVE_DATA_CODEWORDS)
+                                 need) != V91_LIVE_DATA_CODEWORDS)
                 return false;
+            if (g_v91_cleardown_pending) {
+                /* Let the peer receive the whole sequence (and decode its
+                 * block) before the bearer is dropped under it. */
+                if (g_v91_tx.cc_tx_cleardown_done && g_v91_cleardown_done_abs < 0)
+                    g_v91_cleardown_done_abs = base + pos;
+                if ((g_v91_cleardown_done_abs >= 0
+                     && base + pos - g_v91_cleardown_done_abs > 4000)
+                    || base + pos - g_v91_cleardown_start_abs > 3 * 8000) {
+                    trace_phase("V91 control-channel cleardown sent");
+                    g_state = ME_HANGUP;
+                }
+            }
             g_v91_data_tx_pos = 0;
         }
         available = V91_LIVE_DATA_CODEWORDS - g_v91_data_tx_pos;
@@ -2143,6 +2175,7 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
             v91_live_rx_fail_locked(want_ack ? "INFO'" : "INFO");
             return;
         }
+        g_v91_peer_wants_cc = info.request_control_channel;
         v91_live_rx_enter_stage(want_ack ? V91_LIVE_RX_EU : V91_LIVE_RX_INFO_ACK);
         return;
     }
@@ -2401,12 +2434,14 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                     g_v91_data_rx_pos = 0;
                     continue;
                 }
+                uint32_t frame0 = g_v91_rx.rx_frame_index;
+
                 decoded = v91_rx_codewords(&g_v91_rx,
                                                 data,
                                                 sizeof(data),
                                                 g_v91_data_rx,
                                                 sizeof(g_v91_data_rx));
-                if (decoded != g_v91_data_rx_bytes) {
+                if (g_v91_rx.rx_frame_index - frame0 != V91_LIVE_DATA_FRAMES) {
                     ME_LOG("[ME] V.91 data frame decode failed: decoded=%d/%d codewords=",
                            decoded, g_v91_data_rx_bytes);
                     if (me_verbose_enabled()) {
@@ -2420,6 +2455,28 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                 }
                 ds_rx_push_bytes(&g_data_stack, data, decoded);
                 g_v91_data_rx_pos = 0;
+                if (g_v91_rx.cc_rx_cleardown) {
+                    /* 8.6: the peer signalled cleardown on the control channel. */
+                    ME_LOG("[ME] V.91 control channel: peer cleardown\n");
+                    trace_phase("V91 peer cleardown (control channel)");
+                    g_state = ME_HANGUP;
+                    return;
+                }
+                if (g_v91_rx.cc_rx_retrain) {
+                    /* 8.4.1: retrain warning; we have no retrain procedure to
+                     * run yet, so end the call instead of corrupting data. */
+                    ME_LOG("[ME] V.91 control channel: peer retrain warning\n");
+                    trace_phase("V91 peer retrain warning (control channel)");
+                    g_state = ME_HANGUP;
+                    return;
+                }
+                if (v91_cc_slip_suspected(&g_v91_rx)) {
+                    ME_LOG("[ME] V.91 control channel: frame sync loss (slip pattern/CRC failed)\n");
+                    trace_phase("V91 control-channel frame sync loss");
+                    v91_note_frame_sync_loss(&g_v91_rx);
+                    g_state = ME_HANGUP;
+                    return;
+                }
             }
             continue;
         }
@@ -3977,6 +4034,15 @@ static int me_k56flex_mode(void)
 }
 
 /* ME_V8_ADVERTISE_V91 (any value) always adds V.91; otherwise AT+MS=V91. */
+static bool me_v91_control_channel(void)
+{
+    /* 6.4: optional; on by default, it gives slip detection and in-band
+       cleardown for 125 bit/s of primary rate. */
+    const char *v = getenv("ME_V91_CONTROL_CHANNEL");
+
+    return !(v && v[0] == '0');
+}
+
 static bool me_advertise_v91(void)
 {
     return getenv("ME_V8_ADVERTISE_V91") != NULL || g_offer_v91;
@@ -10936,6 +11002,18 @@ void me_hangup(void)
         cc_v110_disconnect(&g_cc);
         ME_LOG("[ME] V.110: disconnect requested: S OFF, X ON, D = 0 (7.1.4.1)\n");
         trace_phase("V.110 disconnect request");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    /* V.91 8.6: from data mode with a control channel, signal cleardown in
+     * Table 3 bit 16 and let the current sequence finish before the bearer
+     * goes; a second request is immediate. */
+    if (g_mod == ME_MOD_V91 && g_state == ME_DATA && g_v91_tx.cc_tx_active
+        && !g_v91_cleardown_pending) {
+        g_v91_cleardown_pending = true;
+        g_v91_cleardown_start_abs = g_v91_tx_abs_pos;
+        v91_cc_request_cleardown(&g_v91_tx);
+        trace_phase("V91 cleardown initiated (control channel)");
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }

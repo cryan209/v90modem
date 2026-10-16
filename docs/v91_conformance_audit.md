@@ -194,3 +194,28 @@ request on the live path, V.54 loop 3, and a spec-only decoder run on our own
 tap (the only validation available without a peer).  Test-only note: the
 robbed-bit startup test no longer asserts that B1 survives an unrestricted
 constellation under robbing (it is real scrambled ones now and does not).
+
+### Control channel (6.3.9, 6.4) -- added 2026-10-16
+
+- `v90_map_sr0_frame_cc` / `v90_demap_mapped_frame_cc` carry the six control
+  bits in the sign positions: differentially coded, not scrambled, and the
+  scrambler/descrambler do not advance over them.
+- `v91.c`: Table 3 sequence (slip pattern `0111011111111010`, cleardown bit 16,
+  retrain bit 17, 54 secondary bits, CRC over bits 0:77), one six-bit chunk
+  every 64th data frame starting with the first data frame; a receiver that
+  counts frames verifies pattern + CRC per 96 bits and flags a slip after two
+  bad sequences in a row (`v91_cc_slip_suspected`).  The CRC span (bits 0:77,
+  INFO-style init and bit order) is read from the text by analogy with the INFO
+  CRC; there is no peer to confirm it.
+- Supply-iff-requested is honoured: the transmitter inserts the channel when
+  the peer set INFO bit 27; we request it by default (`ME_V91_CONTROL_CHANNEL=0`
+  turns the request off).  Primary rate drops by 125 bit/s; the live block fill
+  asks `v91_tx_bytes_for_frames()` for exactly what 8 frames need.
+- 8.6: a local hangup from data mode sets bit 16, waits for the current
+  sequence to finish plus 0.5 s, then drops the bearer; the receiving side
+  clears down on the bit.  A peer retrain warning (bit 17) currently ends the
+  call (no retrain procedure yet), and a slip ends it too (8.5 without a
+  re-acquisition attempt).
+- Tests: `test_v91_control_channel` (data byte-exact across CC frames, flags,
+  secondary bits, slip) and the live pair test, which now also hangs up and
+  checks the peer saw the bit.
