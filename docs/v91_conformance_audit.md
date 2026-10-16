@@ -24,7 +24,7 @@ only on the loopback/session path, missing = not there):
 | 6.3.1 | GPC scrambler on the primary channel | **missing in data mode** (used only for SCR/CP/J/PHIL) |
 | 6.3.3 - 6.3.8 | V.90 5.4 encoder: bit parsing, modulus encoder, mapper, differential encoding of sign bits, sign assignment, mux | **missing** (see below) |
 | 6.3.9 / 6.4 | Control channel (96-bit sequence, Table 3) | **missing** |
-| 6.5 | Transparent mode | partial: codewords pass through; not offered by the live engine |
+| 6.5 | Transparent mode | done, live 2026-10-17 (`ME_V91_TRANSPARENT`); data bits are the codewords, no control channel |
 | 7.1 | B1 = 12 codewords from mapping binary ones through the data encoder | **non-conformant** (bring-up mapper) |
 | 7.2 | CP (Table 4) | partial / **non-conformant layout** (see below) |
 | 7.3 | DIL; default DIL (Table 5) | done (`v91_default_dil_init` matches N=125, LSP/LTP 12, SP 0FC0, TP 0FFF, H=1, training 124,0,123,1...62) |
@@ -37,9 +37,9 @@ only on the loopback/session path, missing = not there):
 | 8.3 | Escape to V.34 (no INFO' in 1.5 s, no B1 in 10 s, INFO0a/c handshake) | **missing in live engine**: a failure sets `ME_HANGUP` |
 | 8.4 - 8.5 | Retrain, 10 s timer, loss of frame sync | flags only (`retrain_timer_active`); no timer, no INFO re-entry live |
 | 8.6 | Cleardown via drn=0 or control channel bit 16 | partial: startup only; a peer CP with drn=0 is treated as a startup failure |
-| 8.7 | Transparent grant needs verified unrestricted 64k channel | partial: only LSB-robbing is detected, no polarity/other checks (see 6.5 NOTE) |
+| 8.7 | Transparent grant needs verified unrestricted 64k channel | done for what a DIL can show: codeword-exact DIL (polarity or any change fails it) and no robbed LSBs; both CPs must grant, bit 41 clears down |
 | 8.8 | 4-wire leased line | n/a (same start-up) |
-| 9 | Test loop 3 (V.54) | **missing** |
+| 9 | Test loop 3 (V.54) | done 2026-10-17: `AT&T3` (circuit 141) / `AT&T0`; circuit 142 reported in the trace |
 | 5 | Circuits, DTE interface | PTY via `data_interface.c` with V.14/V.42 covers 5.2 |
 
 ## Data-mode encoding is not V.91 (the important gap)
@@ -322,3 +322,34 @@ request one, so that path has no test.
 fields), PHIL (none when the DIL is already known, some when waiting) and Em on
 our taps.  Both ends are this tree, so a foreign peer's J is still unverified;
 the decoder's J CRC span mirrors `v90_dil_crc16_bits`, not an independent read.
+
+### Transparent mode and V.54 loop 3 -- 2026-10-17
+
+**Transparent (6.5, 8.7).**  `ME_V91_TRANSPARENT=1` sets INFO bit 40, `=2` also
+bit 41.  A request from either end is granted (CP bit 18, drn 28) when the DIL
+we received was codeword-exact with no robbed LSBs; transparent mode runs only
+when both CPs grant, otherwise the CP parameters are used non-transparently, or
+both ends clear down if a requester set bit 41.  B1 is 12 codewords of ones and
+data bytes are the codewords themselves (64000 bit/s); there is no control
+channel and no 8.4-8.6 machinery.  `v91_serial_pair_test.py --transparent
+{caller,answerer,both}` covers grant, refusal on a robbed trunk
+(`--robbed-phase 2`) and bit-41 cleardown; the spec decoder checks B1 and the
+raw data stream on our taps.  What a DIL cannot show (a gain or an A/D pad that
+preserves codeword identity does not exist, so this is complete for the DIL
+itself) is a channel that degrades only data patterns; nothing checks that.
+
+**Loop 3 (clause 9).**  `AT&T3` is V.24 circuit 141 asserted by the DTE (`AT&T0`
+releases it; other `&T` values are ERROR, as the analogue and remote loops do
+not exist here).  The decoded line data goes back to the transmitter instead of
+the data stack, the DTE's own data waits, and underrun is padded with binary
+ones.  Circuit 142 (test indicator) is on while the loop is closed; there is no
+physical or AT-visible circuit for it, so it is reported only in the trace
+(`V91 loop 3 ON/OFF`).  `--loop3` in the pair test closes the loop at the
+answerer, checks the caller gets its data back, the answerer's DTE sees none, and
+normal data resumes after `AT&T0`.  The loop is below error control, so with
+V.42 the peer would see its own frames reflected: use it without EC.
+
+**Still not verifiable here.**  The INFO and control-channel CRC spans are
+checked by `tools/v91_spec_decode.py` (written from the text), but no foreign
+V.91 peer exists to confirm them, and the same holds for J.  Nothing else in the
+audit table is open.

@@ -1764,6 +1764,12 @@ static const char *at_cmd_amp_M(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_amp_T(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 8);
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_amp_R(at_state_t *s, const char *t)
 {
     return at_forward_alias(s, t, 2, 2);

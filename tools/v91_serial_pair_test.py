@@ -115,6 +115,10 @@ def main() -> int:
         "--transparent-cleardown", action="store_true",
         help="with --transparent: also set INFO bit 41 (cleardown if not granted)")
     parser.add_argument(
+        "--loop3", action="store_true",
+        help="answerer closes V.54 loop 3 with AT&T3 (circuit 141): the caller must get its data "
+             "back and the answerer's DTE must see none; AT&T0 restores normal data (clause 9)")
+    parser.add_argument(
         "--attempts", type=int, default=3,
         help="run again (in a fresh process) up to this many times when a call fails; the "
              "host's 100-200 ms scheduling stalls and V.8 timeouts are not V.91 defects, "
@@ -238,6 +242,35 @@ def main() -> int:
             a2c = b"V91-ANSWERER-TO-CALLER-9876543210\r\n"
             expect_payload(caller_fd, answerer_fd, c2a, 5)
             expect_payload(answerer_fd, caller_fd, a2c, 5)
+            if args.loop3:
+                time.sleep(1.2)
+                os.write(answerer_fd, b"+++")
+                time.sleep(1.2)
+                got = drain([answerer_fd], 1.0)[answerer_fd]
+                if b"OK" not in got:
+                    raise RuntimeError(f"answerer did not reach command mode: {got!r}")
+                os.write(answerer_fd, b"AT&T3\r")
+                got = drain([answerer_fd], 1.0)[answerer_fd]
+                if b"OK" not in got:
+                    raise RuntimeError(f"AT&T3 refused: {got!r}")
+                os.write(answerer_fd, b"ATO\r")
+                drain([answerer_fd], 1.5)
+                probe = b"LOOP3-PROBE-0123456789\r\n"
+                expect_payload(caller_fd, caller_fd, probe, 6)
+                leaked = drain([answerer_fd], 1.0)[answerer_fd]
+                if b"LOOP3-PROBE" in leaked:
+                    raise RuntimeError("loop 3 leaked the data into the answerer's DTE")
+                time.sleep(1.2)
+                os.write(answerer_fd, b"+++")
+                time.sleep(1.2)
+                drain([answerer_fd], 1.0)
+                os.write(answerer_fd, b"AT&T0\r")
+                if b"OK" not in drain([answerer_fd], 1.0)[answerer_fd]:
+                    raise RuntimeError("AT&T0 refused")
+                os.write(answerer_fd, b"ATO\r")
+                drain([answerer_fd, caller_fd], 1.5)
+                expect_payload(caller_fd, answerer_fd, c2a, 6)
+                label += "; V.54 loop 3 via AT&T3 (circuits 141/142)"
             # 8.6: a local hangup from data mode goes out as the control
             # channel's cleardown bit and the peer drops on receiving it.
             time.sleep(1.2)

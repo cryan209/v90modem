@@ -499,6 +499,8 @@ void di_report_pmhr(int value)
 
 static di_break_cb_t break_cb;
 void di_set_break_cb(di_break_cb_t cb) { break_cb = cb; }
+static di_loop3_cb_t loop3_cb;
+void di_set_loop3_cb(di_loop3_cb_t cb) { loop3_cb = cb; }
 
 static int handle_v250_parameter(const char *text)
 {
@@ -516,6 +518,16 @@ static int handle_v250_parameter(const char *text)
      * the framing has no break (V.34/V.90 datapumps, CLEAR). */
     if (text[0] == '\\' && (text[1] == 'B' || text[1] == 'b'))
         return break_cb && break_cb(atoi(text + 2) * 100) == 0 ? 0 : -1;
+
+    /* AT&T0 ends and AT&T3 starts V.54 loop 3.  The other &T values are
+     * analogue loops and remote requests, which this DCE does not have. */
+    if (text[0] == '&' && (text[1] == 'T' || text[1] == 't')) {
+        int v = text[2] ? atoi(text + 2) : 0;
+
+        if ((v != 0 && v != 3) || !loop3_cb)
+            return -1;
+        return loop3_cb(v == 3) == 0 ? 0 : -1;
+    }
 
     pthread_mutex_lock(&v250_mtx);
     info[0] = '\0';

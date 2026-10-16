@@ -1719,6 +1719,12 @@ static int g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
 static uint8_t g_v91_data_rx[V91_LIVE_DATA_CODEWORDS];
 static int g_v91_data_rx_pos;
 static bool g_v91_data_tx_guard;
+static bool g_v91_loop3;                  /* V.54 loop 3 closed (&T3) */
+static volatile int g_v91_loop3_req;      /* what the DTE asked for */
+static uint8_t g_v91_loop3_buf[8192];
+static int g_v91_loop3_n;
+static int me_set_loop3(int on);
+static void v91_live_apply_loop3_locked(void);
 static bool g_v91_data_rx_synced;
 /* Robbed-cadence frame alignment.  A robbed-bit trunk steals the LSB of
  * every sixth codeword at a fixed cadence; the data mapper protects only
@@ -1976,6 +1982,9 @@ static void v91_live_reset(void)
     g_v91_tx_data_live = false;
     g_v91_rx_data_live = false;
     g_v91_sim_robbed_phase = -1;
+    g_v91_loop3 = false;
+    g_v91_loop3_req = 0;
+    g_v91_loop3_n = 0;
     g_v91_local_specify = false;
     g_v91_want_transparent = false;
     g_v91_want_transparent_cd = false;
@@ -2419,6 +2428,8 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
             return true;
       }
     }
+    if (g_state == ME_DATA)
+        v91_live_apply_loop3_locked();
     if (g_v91_test_retrain_abs > 0 && g_state == ME_DATA
         && base + pos - g_v91_data_enter_abs > g_v91_test_retrain_abs) {
         g_v91_test_retrain_abs = 0;
@@ -2439,7 +2450,16 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
 
             if (need <= 0 || need > (int)sizeof(data))
                 return false;
-            ds_tx_fill_bytes(&g_data_stack, data, need);
+            if (g_v91_loop3) {
+                int n = g_v91_loop3_n < need ? g_v91_loop3_n : need;
+
+                memcpy(data, g_v91_loop3_buf, (size_t)n);
+                memmove(g_v91_loop3_buf, g_v91_loop3_buf + n, (size_t)(g_v91_loop3_n - n));
+                g_v91_loop3_n -= n;
+                memset(data + n, 0xFF, (size_t)(need - n));
+            } else {
+                ds_tx_fill_bytes(&g_data_stack, data, need);
+            }
             if (v91_tx_codewords(&g_v91_tx,
                                  g_v91_data_tx,
                                  sizeof(g_v91_data_tx),
@@ -2940,8 +2960,17 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                 }
                 /* Until both directions are past B1 the stack is not online; the
                  * peer is sending idle marks at that point. */
-                if (g_state == ME_DATA)
+                if (g_state == ME_DATA && g_v91_loop3) {
+                    int room = (int)sizeof(g_v91_loop3_buf) - g_v91_loop3_n;
+                    int n = decoded < room ? decoded : room;
+
+                    if (n > 0) {
+                        memcpy(g_v91_loop3_buf + g_v91_loop3_n, data, (size_t)n);
+                        g_v91_loop3_n += n;
+                    }
+                } else if (g_state == ME_DATA) {
                     ds_rx_push_bytes(&g_data_stack, data, decoded);
+                }
                 g_v91_data_rx_pos = 0;
                 if (g_v91_rx.cc_rx_cleardown) {
                     /* 8.6: the peer signalled cleardown on the control channel. */
@@ -3095,6 +3124,34 @@ static void me_cc_break_cb(void *ctx, bool on)
 }
 
 /* data_interface.c's \B: no engine lock (the AT path holds t31_mtx). */
+/* V.54 loop 3 (V.91 clause 9): what the receiver decodes from the line goes
+ * straight back to the transmitter instead of the data stack, and the DTE's
+ * own data waits.  &T3 is circuit 141; the test indicator (circuit 142) is on
+ * for as long as the loop is closed.  Short reads are padded with binary ones,
+ * which is what the line carries when no data is queued. */
+static int me_set_loop3(int on)
+{
+    /* Called from the AT interpreter with t31_mtx held, so no engine lock
+     * here (see g_cfg_mtx); the media thread applies the request. */
+    if (on && (g_mod != ME_MOD_V91 || g_state != ME_DATA))
+        return -1;
+    g_v91_loop3_req = on ? 1 : 0;
+    return 0;
+}
+
+/* Media thread, g_state_mtx held. */
+static void v91_live_apply_loop3_locked(void)
+{
+    bool want = g_v91_loop3_req != 0;
+
+    if (want == g_v91_loop3)
+        return;
+    g_v91_loop3_n = 0;
+    g_v91_loop3 = want;
+    trace_phase(want ? "V91 loop 3 ON (circuit 141 ON, circuit 142 ON)"
+                     : "V91 loop 3 OFF (circuit 141 OFF, circuit 142 OFF)");
+}
+
 static int me_request_break(int ms)
 {
     if (!g_cc_active || g_cc.mode == CC_CLEAR || g_state != ME_DATA)
@@ -11325,6 +11382,7 @@ void me_init(void)
         di_set_connect_info_cb(me_connect_info);
         di_set_link_detail_cb(me_link_detail);
         di_set_break_cb(me_request_break);
+        di_set_loop3_cb(me_set_loop3);
 
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
                me_offer_str());

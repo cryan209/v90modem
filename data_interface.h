@@ -141,6 +141,12 @@ void di_set_link_detail_cb(di_link_detail_cb_t cb);
  * Called on the AT path: must not take engine locks. */
 typedef int (*di_break_cb_t)(int ms);
 void di_set_break_cb(di_break_cb_t cb);
+
+/* AT&T0 / AT&T3: V.54 loop 3 (V.91 clause 9).  &T3 is V.24 circuit 141 (local
+ * loopback) asserted by the DTE; the engine answers with circuit 142 (test
+ * indicator).  Returns 0, or -1 when there is no V.91 data mode to loop. */
+typedef int (*di_loop3_cb_t)(int on);
+void di_set_loop3_cb(di_loop3_cb_t cb);
 void di_update_link(const v250_connect_report_t *rep, const char *detail, const char *state);
 
 /*

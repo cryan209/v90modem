@@ -45,6 +45,7 @@ const char *wordlist[] =
     "&K",       /* Courier - Data compression */
     "&M",       /* Courier - Error control */
     "&R",       /* Courier - RTS (received data) flow control */
+    "&T",       /* Hayes - Test: &T3 = V.54 loop 3 (V.24 circuit 141) */
     "&V",       /* Hayes - View active configuration */
     "&W",       /* Hayes - Store the active configuration */
     "&Y",       /* Hayes - Select the stored profile used at power-on */
