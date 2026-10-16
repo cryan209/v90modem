@@ -25,6 +25,9 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ce
     setenv("ME_V90_JA_HEURISTIC_FALLBACK_MS", "0", 1);
     setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 1);
     if (mode == 90 && calling) setenv("ME_V90_ROLE", "analogue", 1);
+    /* V.34 §11.4: exercise the existing 3429-symbol/s training path.
+       Keep normal TRN/B1 rate selection and §11.5 retraining enabled. */
+    if (mode == 34) setenv("ME_V34_BAUD", "3429", 1);
     if (mode == 34 && ceiling > 0) { char rate[16];snprintf(rate,sizeof rate,"%d",ceiling);setenv("ME_V34_BPS",rate,1); }
     if (mode == 32) setenv("ME_V32BIS_MAX_BPS", "9600", 1);
     setenv("ME_V34_SPAN_FLOW_LOG", "1", 1);

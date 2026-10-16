@@ -6,7 +6,7 @@ const descriptions={
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
  bell103:['The sound of 300 bits a second.','Bell 103’s originating channel uses 1270 Hz for a 1 and 1070 Hz for a 0. A separate JavaScript receiver recovers your message from the waveform.'],
  '32':['A conversation before the conversation.','Two instances of the real modem engine negotiate V.32 at up to 9,600 bit/s, train their receivers, and exchange your message and an acknowledgement over G.711.'],
- '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions. The default 21,600 bit/s ceiling avoids repeated training on this virtual line.'],
+ '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions. The default 24,000 bit/s ceiling avoids repeated training on this virtual line.'],
  '90':['A digital end. An analogue end.','V.90 sends PCM downstream and QAM upstream. The calling modem runs the analogue role; the answering modem runs the digital role. Both train and recover real payload bytes.'],
 };
 const isFsk=()=>mode==='v21'||mode==='bell103';

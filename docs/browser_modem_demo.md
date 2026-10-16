@@ -157,7 +157,7 @@ to exercise every browser's rendering or security policy.
 ## V.34 and startup selection
 
 V.34 uses the same real engine pair and clean G.711 bearer, rather than audio
-recordings. The default 21600 bit/s offer ceiling avoids retrains on this synthetic path.
+recordings. The default 24000 bit/s offer ceiling and 3429-symbol/s training profile avoid retrains on this synthetic path.
 The V.34 ceiling selector also offers 19200, 24000, and Automatic; the higher
 offers can trigger real retrains, retained in the events and inspector. The
 ceiling limits the offer; the actual connection rate is still negotiated.
@@ -194,3 +194,20 @@ to reproduce the original behavior. Long UTF-8 messages pass without retrains
 at the default ceiling both with and without V.8bis, including direct-file runs.
 This is a demo profile choice, not a fix to the underlying rate-estimation or
 retraining-acquisition discrepancy. See `docs/v34_data_mode_rates.md`.
+
+### V.34 3429-symbol/s browser profile (2026-10-16)
+
+The browser adapter now requests the existing 3429-symbol/s path and defaults
+to a 24000 bit/s offer ceiling. Normal Phase-4 TRN rate selection, B1 checks
+and §11.5 retraining remain enabled (V.34 §11.4–11.5). A deterministic
+12000-byte varied ASCII transfer and its 12005-byte acknowledgement passed
+at 24000/24000 without retrains or invalid captured HDLC frames. The previous
+3200-symbol/s automatic profile finished at 21600/21600 after two retrains.
+This is a browser profile improvement; it does not change the native default
+or establish performance on a physical telephone line.
+
+A diagnostic-only 3429/33600 run also passed that payload, but required
+bypassing conservative training-rate checks. That bypass was removed and is
+not shipped. Slowing Phase-4 equalizer adaptation reduced measured quality
+and was also discarded. Higher automatic rates still need receiver/rate
+estimator work; a CONNECT indication alone is insufficient validation.

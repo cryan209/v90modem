@@ -638,3 +638,19 @@ as alternatives. Additional long UTF-8 payload checks at 21600 pass without
 retrain requests with V.8bis both off and on. This contains the symptom for
 the showcase; it does not resolve TRN/B1 estimator consistency or the failed
 retrain acquisition. These are software-only results, not hardware evidence.
+
+## Browser profile comparison (2026-10-16)
+
+With the normal engine TRN/B1 rate checks (V.34 §11.4) and §11.5 retraining
+enabled, the isolated browser pair at 3429 symbols/s transferred 12000 bytes
+of deterministic varied ASCII and a 12005-byte acknowledgement at 24000/24000,
+without retrains or invalid captured HDLC frames. Both V.8 and V.8bis+V.8
+passed. The 3200-symbol/s automatic offer comparison settled at 21600/21600
+after two retrains. The browser now uses ME_V34_BAUD=3429 with a 24000 offer
+ceiling; native engine defaults are unchanged. This is synthetic-loop evidence.
+
+Bypassing the rate guards at 3429 allowed a clean 33600/33600 transfer, while
+3200/31200 produced 31 invalid captured HDLC frames. Neither bypass ships.
+Reducing decision-directed Phase-4 TRN adaptation after 512T made the measured
+quality worse and was reverted. Future work must improve acquisition or justify
+rate-estimator calibration with error measurements rather than disabling guards.

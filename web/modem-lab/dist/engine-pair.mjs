@@ -12,9 +12,9 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   const a=await createModem(options('caller')),b=await createModem(options('answerer'));
   if(a.HEAPU8.buffer===b.HEAPU8.buffer)throw new Error('Modem instances share memory');
   const frame=value=>{const body=new TextEncoder().encode(value),out=new Uint8Array(body.length+2);out[0]=body.length&255;out[1]=body.length>>8;out.set(body,2);return out;};
-  const unframe=(m)=>{const n=m._browser_received_n(),data=m.HEAPU8.slice(m._browser_received(),m._browser_received()+n);if(n<2)return {text:'',complete:false};const size=data[0]|(data[1]<<8);if(size>1024)throw new Error('Corrupt message length');return {text:new TextDecoder().decode(data.slice(2,Math.min(n,size+2))),complete:n>=size+2};};
-  const bytes=frame(text);let replies=null;
-  const pa=a._malloc(bytes.length),pb=b._malloc(1026);
+  const unframe=(m)=>{const n=m._browser_received_n(),data=m.HEAPU8.slice(m._browser_received(),m._browser_received()+n);if(n<2)return {text:'',complete:false};const size=data[0]|(data[1]<<8);if(size>65533)throw new Error('Corrupt message length');return {text:new TextDecoder().decode(data.slice(2,Math.min(n,size+2))),complete:n>=size+2};};
+  const bytes=frame(text);if(bytes.length>60002)throw new Error('Message exceeds 60000 UTF-8 bytes');let replies=null;
+  const pa=a._malloc(bytes.length),pb=b._malloc(bytes.length+5);
   a.HEAPU8.set(bytes,pa);
   a._browser_init(Number(mode),1,startupFlags,startup.v34MaxRate||0);b._browser_init(Number(mode),0,startupFlags,startup.v34MaxRate||0);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();

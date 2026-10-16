@@ -51,8 +51,19 @@ for(const [mode,startup] of [[34,{v8:true,v8bis:false}],[34,{v8:true,v8bis:true}
 await assert.rejects(runPair(90,'bad',()=>{},()=>false,{v8:false,v8bis:false}),/require V.8/);
 
 for(const v8bis of [false,true]){
- const r=await runPair(34,'Stable V.34 — '+('0123456789'.repeat(22)),()=>{},()=>false,{v8:true,v8bis,v34MaxRate:21600});
- assert.ok(r.passed);assert.equal(r.txRate,21600);assert.equal(r.rxRate,21600);
+ const r=await runPair(34,'Stable V.34 — '+('0123456789'.repeat(22)),()=>{},()=>false,{v8:true,v8bis,v34MaxRate:24000});
+ assert.ok(r.passed);assert.equal(r.txRate,24000);assert.equal(r.rxRate,24000);
  assert.ok(!r.protocol.some(e=>/V\.34.*(?:asking for .*retraining|training failed|restarting Phase 2)/.test(e.line)),'Stable V.34 retrained');
- console.log(`PASS: V.34 21600 ceiling, V.8bis=${v8bis}, long payload, no retrains`);
+ console.log(`PASS: V.34 24000 ceiling, V.8bis=${v8bis}, long payload, no retrains`);
+}
+
+// Varied sustained traffic catches errors hidden by short/repetitive messages.
+let payloadSeed=1234;
+const sustained=Array.from({length:12000},()=>{payloadSeed=(Math.imul(payloadSeed,1664525)+1013904223)>>>0;return String.fromCharCode(32+payloadSeed%95);}).join('');
+for(const v8bis of [false,true]){
+ const r=await runPair(34,sustained,()=>{},()=>false,{v8:true,v8bis,v34MaxRate:24000});
+ assert.ok(r.passed);assert.equal(r.txRate,24000);assert.equal(r.rxRate,24000);
+ assert.ok(!r.protocol.some(e=>/V\.34.*(?:asking for .*retraining|training failed|restarting Phase 2)/.test(e.line)));
+ assert.equal(r.negotiation.frames.filter(f=>!f.valid).length,0);
+ console.log(`PASS: V.34 sustained 12000-byte transfer, V.8bis=${v8bis}, 24000/24000, no retrains or invalid HDLC`);
 }
