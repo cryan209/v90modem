@@ -13698,7 +13698,14 @@ search:
             if (s->x2_mode)
                 v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, best_expanded);
             /*endif*/
+            /* A window whose best fit is under the 0.95 below fails and
+               commits nothing, so its constellation power would never be
+               used: skip that 32000-symbol run.  It was the 21-22 ms
+               callback of every retry window live (rf-mini-20261016 opt-5,
+               after the 4-point training failed). */
+            b1_template_skip_cma = best_match < 0.95f;
             (void) v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
+            b1_template_skip_cma = false;
             s->v90_far_tap_measured = best_tap;
             if (best_trellis >= 0)
                 s->v90_t3_trellis_size = best_trellis;
