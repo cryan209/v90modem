@@ -3134,3 +3134,63 @@ Evidence: `artifacts/apple-9667-20261016/` contains source WAV, raw dial and
 receive taps, final hook status, call log, response CSV/JSON and visually
 inspected `call-response.png`. This was a received test sweep, not CONNECT
 or payload evidence, and it does not demonstrate a change in live-call SNR.
+
+### How clean the received 9668 DIL is (2026-10-16)
+
+The seven complete playbacks are consistent and clean after correct source
+alignment and accurate offline reference interpolation. The first exploratory
+model appeared to split them into four good and three bad returns; that was
+an analysis error, not established hardware corruption. A wide alignment
+search selects a neighbouring pulse for the three low-scoring cases, and
+band-limited interpolation removes another significant measurement floor.
+Do not record the discarded exploratory fit scores as measured line defects.
+
+`tools/apple_dil_quality.py` fits a forward channel from the actual mu-law
+source to the native RX recording. It analyzes only 300–3400 Hz, using an
+identical offline bandpass on source and RX. The original coarse matches are
+supervised whole-sequence recognition; finer alignment, rate and FIR fitting
+use training samples only. Source interpolation uses a band-limited 64x
+reference rather than cubic interpolation near Nyquist. Neither the live
+path nor the saved receive samples are modified.
+
+Analysis excludes approximately the first 150 ms and uses native relative
+indices 1500–15499. Within each 3000-sample cycle, 1000 samples train, 500
+are guarded, the next 1000 score, and the remaining 500 are guarded. There
+are 5000 training and 4500 scoring samples (including a final partial scoring
+window); PSD scores use only the four complete contiguous 1000-sample score
+windows, never a spliced waveform. The strongest initial DIL onset is not
+covered by this held-out residual figure.
+
+| playback | 65-tap in-band signal/residual | residual RMS, native RX counts |
+|---|---|---|
+| 1 | 55.52 dB | 2.23 |
+| 2 | 55.71 dB | 2.26 |
+| 3 | 55.51 dB | 2.31 |
+| 4 | 55.84 dB | 2.23 |
+| 5 | 55.60 dB | 2.21 |
+| 6 | 55.32 dB | 2.28 |
+| 7 | 55.47 dB | 2.32 |
+
+Held-out signal RMS is 1331–1379 native counts. Independent quiet windows
+2.15–2.45 s after each coarse start measure 1.60–1.67 counts RMS in-band.
+The active residual is therefore only about 2.5–3 dB above the quiet floor,
+including reference/interpolation/channel-model error. At a full-scale
+*digital sine* reference those numbers correspond to roughly 80 dB active
+noise/residual headroom and 83 dB quiet noise headroom; these are not a
+calibrated analog full-scale specification or the SNR of a louder signal.
+
+The timing search selects a nominal reference-index adjustment of +190 ppm
+on every playback. This is relative to the nominal 10286 Hz analysis grid,
+not independently calibrated physical oscillator error. Alignment optima
+are interior to the search. Increasing the FIR from 65 to 129 taps changes
+scores by less than 0.1 dB. An unrelated-reference control scores below
+0 dB on every playback, rejecting a trivial fit to the envelope. The raw
+17-tap scores of 14–17 dB are dominated by insufficient channel modeling,
+not the additive noise floor.
+
+Conclusion: the analyzed DIL portions are repeatable and close to the
+measured noise floor once filtering/timing are accounted for. This is a
+supervised waveform benchmark for V.90 §8.4.1 source material, not an
+unassisted DIL decoder, G.711 codeword BER, negotiated constellation margin
+or CONNECT demonstration. `quality.json`, `quality.log` and the inspected
+`dil-quality.png` are beside the original 9668 evidence.
