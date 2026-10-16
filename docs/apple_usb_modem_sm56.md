@@ -2720,3 +2720,73 @@ checks pass. Stream transport completion alone is not a modem pass.
 `make gui-apple-test` now includes hardware-free fragmented socket exchanges
 in both directions, a deliberately truncated channel which must fail, and
 invalid descriptor rejection before opening USB.
+
+## Separating loopback impairments (2026-10-16)
+
+`tools/apple_loopback_spectrum.py` compares the saved full-alphabet probes
+above, with Welch spectra, transfer response/coherence, and independent
+held-out forward/inverse models. It does not change the live audio path.
+Si3056 §5.30 defines the loopback boundaries; these measurements therefore
+characterize those local paths, not an end-to-end SIP line or a foreign modem.
+The isolation and analog probes use the same quarter-scale transmitted
+samples. Digital uses full scale; the gain plots divide by the actual saved
+TX samples, while the absolute power plots retain that level difference.
+
+Measurements on the two devices (0:13 / 0:14):
+
+| diagnostic | isolation | analog, quiet call |
+|---|---|---|
+| gain at 1 kHz | -1.02 / -1.02 dB | -1.72 / -1.49 dB |
+| gain at 3.4 kHz | -2.99 / -2.99 dB | -3.64 / -3.42 dB |
+| gain at 3.8 kHz | -19.60 / -19.60 dB | -20.27 / -20.03 dB |
+| gain at 3.9 kHz | -27.93 / -27.91 dB | -29.00 / -28.76 dB |
+| median coherence, 300–3400 Hz | 0.999999 / 0.999999 | 0.999995 / 0.999991 |
+| 257-tap forward prediction SNR | 71.94 / 71.89 dB | 34.32 / 33.75 dB |
+| 257-tap inverse reconstruction SNR | 51.67 / 51.24 dB | 21.81 / 21.92 dB |
+| inverse plus 8 oracle feedback taps | 70.39 / 70.34 dB | 57.13 / 50.68 dB |
+
+The shared sharp upper-band roll-off is already present in isolation mode.
+Adding the analog path changes the 1 kHz gain by only 0.5–0.7 dB and retains
+almost the same response shape. This points to filtering inside the common
+loopback path as the principal full-band PCM impairment. Inversion amplifies
+errors where that filter has removed signal; the inverse score must not be
+called the additive line SNR. The much better oracle scores demonstrate
+recoverable intersymbol interference under ideal previous decisions, but
+are neither measured modem BER nor an achievable-rate prediction. The
+oracle receives true previous symbols and has no decision error propagation.
+In particular these numbers do not establish the cause of the isolation
+19200 failure or the analog 33600 bit errors documented above.
+
+Quadratic/cubic forward models do not improve held-out scores: isolation
+71.53 / 71.48 dB and analog 34.23 / 33.70 dB. There is no evidence here that
+this particular static polynomial distortion model explains the residual.
+That does not exclude clipping at higher drive, dynamic nonlinearity, clock
+drift, narrowband interference or time-varying effects. A level sweep and
+longer independent captures are needed to separate them. Current captures
+also cannot estimate remote echo or the relative clocks of two devices:
+each local loopback shares its own audio clock.
+
+Both digital controls have unity gain/coherence and exact raw sample returns.
+Their fitted ~139 dB score is numerical regularization error, not a hardware
+noise-floor measurement. In contrast, the retained packet fault has median
+coherence 0.516 and only 3.10 dB forward prediction despite a superficially
+flat response. Treat that as transport corruption, not a telephone filter.
+
+The models use 6000 training samples, a 500-sample gap and 4944 held-out
+samples; the centered input windows span ±128 samples. Neither the training
+nor target windows overlap across the gap. The tool exports measured FIR
+coefficients and a residual RMS for diagnostic replay. A white-noise replay
+using that RMS is only an approximation: it does not establish that the
+residual is white, independent, Gaussian or stationary.
+
+Reproduction requires NumPy, SciPy and Matplotlib:
+
+```sh
+MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_loopback_spectrum.py \
+  --self-check --out artifacts/apple-loopback-spectrum-check
+```
+
+The synthetic controls check a known FIR with DC and independent noise,
+held-out inverse/ideal feedback fits, and an unrelated-signal negative
+control. The retained plots, model files and JSON measurements are under
+`artifacts/apple-loopback-spectrum-20261016-verified/`.
