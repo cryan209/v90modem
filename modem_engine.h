@@ -189,6 +189,10 @@ int  me_tx_g711(uint8_t *codewords, int count);
  * memory-buffered so no disk write() lands on the media clock; call this at
  * call boundaries (media-down) so a later kill cannot lose the capture. */
 void me_flush_g711_taps(void);
+/* Offline replays only: block until the V.90 CP and Ja worker threads have
+ * nothing posted or running, so their results land at the same media frame
+ * on every run (v90_engine_replay --sync). */
+void me_replay_wait_workers(void);
 /* Flush the ME_IO_SCHEDULE record (see modem_engine.c). */
 void me_flush_io_schedule(void);
 

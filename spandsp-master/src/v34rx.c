@@ -27,6 +27,27 @@
 
 /* THIS IS A WORK IN PROGRESS - NOT YET FUNCTIONAL! */
 
+/* Optimisation is confined to the V.90 T/3 acquisition helpers.
+
+   The makefile builds this file with -O2 (the rest of SpanDSP is built
+   without an -O flag at all, because configure gets CFLAGS from the
+   makefile).  Optimising the whole file is NOT bit-exact: on 3 of 24
+   recorded RasFinder calls it moves our own Phase 2 transmit by about 1%
+   and a Phase 3 S detection by a frame (v90_engine_replay --sync,
+   rf-mini-20261016).  So every function is optnone except those between
+   the "optimize on/off" pairs below: the B1 template build and search, the
+   4-point training and their least-squares solve, which on the same 24 calls give
+   identical decoded bits and identical transmit and receive dumps.  They
+   run in the media callback just after B1, and unoptimised they took 20-26
+   ms there on the slowest host that runs calls -- a hole in our RTP that
+   made the AudioCodes re-centre its playout and move our echo
+   (docs/v90_rasfinder_phase4.md).  Adding a function to a region needs the
+   same --sync replay check. */
+#if defined(__clang__) && defined(__OPTIMIZE__)
+#define V34RX_OPTIMIZE_REGIONS
+#pragma clang optimize off
+#endif
+
 #if defined(HAVE_CONFIG_H)
 #include "config.h"
 #endif
@@ -55,7 +76,13 @@
 #include "spandsp/logging.h"
 #include "spandsp/bit_operations.h"
 #include "spandsp/bitstream.h"
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 #include "spandsp/complex.h"
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 #include "spandsp/vector_float.h"
 #include "spandsp/complex_vector_float.h"
 #include "spandsp/vector_int.h"
@@ -11365,6 +11392,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 }
 /*- End of function --------------------------------------------------------*/
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 /* Solve the small real normal equation used by supervised B1 acquisition. */
 static bool v90_t3_solve(double *a, double *b, double *x, int n)
 {
@@ -11425,6 +11455,9 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
         x[i] = b[i];
     return true;
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 /* V.34 11.4.1.1.5/11.4.1.2.5 conditions the receiver on the complete B1
    frame.  Scalar calibration alone leaves the dense 3429-baud modes exposed
@@ -11518,6 +11551,9 @@ complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol)
     return y;
 }
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
 {
     complexf_t z = {0.0f, 0.0f};
@@ -11527,6 +11563,9 @@ static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
         z = s->v90_t3_raw[index & V34_V90_T3_RAW_MASK];
     return z;
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 /* The raw stream at a fractional sample position.  The timing loop corrects
    in whole samples and keeps the leftover fraction; applying that fraction
@@ -11560,6 +11599,9 @@ static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
     return z;
 }
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 static complexf_t v90_t3_matched_get(const v34_rx_state_t *s, int64_t index)
 {
     complexf_t z = {0.0f, 0.0f};
@@ -11569,6 +11611,9 @@ static complexf_t v90_t3_matched_get(const v34_rx_state_t *s, int64_t index)
         z = s->v90_t3_matched[index & V34_V90_T3_RAW_MASK];
     return z;
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 /* The matched-filtered stream at a fractional sample position.  The timing
    detector has to measure the instant the receiver is actually using,
@@ -11635,6 +11680,9 @@ static void v90_t3_make_rrc(v34_rx_state_t *s)
 #endif
 }
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 static float v90_t3_coarse_score(v34_rx_state_t *s, int64_t first,
                                  bool conjugate)
 {
@@ -11736,6 +11784,9 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     }
     return (float)(1.0 - error/power);
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 /*! The carrier rotation that comes with reading the T/3 ring `offset`
     samples further on, in radians.
@@ -12855,6 +12906,9 @@ static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame)
     /*endfor*/
 }
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 /* One acquisition pass over the currently loaded B1 template. */
 static float v90_t3_acquire_pass(v34_rx_state_t *s,
                                  int64_t search_start,
@@ -12939,6 +12993,9 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
     *coarse_out = score[0];
     return best_match;
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 /*- End of function --------------------------------------------------------*/
 
 /* A rejected acquisition window is not a failed call: E is detected on the CP
@@ -12972,6 +13029,9 @@ static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why)
 }
 /*- End of function --------------------------------------------------------*/
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 /* The fractionally spaced filter's output at raw index c, through taps w. */
 static complexf_t v90_t3_fse_at(const v34_rx_state_t *s,
                                 const complexf_t w[V34_V90_T3_FSE_TAPS],
@@ -13355,9 +13415,15 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     }
     return first;
 }
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 /*- End of function --------------------------------------------------------*/
 
 static bool b1_template_skip_cma;
+static bool v90_t3_cma_begin(v34_rx_state_t *rx, int scrambler_tap, int trellis);
+static bool v90_t3_cma_continue(v34_rx_state_t *rx, int limit);
+static void v90_t3_cma_abandon(v34_rx_state_t *rx);
 
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
@@ -13442,6 +13508,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_srch_step = 0;
     s->v90_t3_srch_built = false;
     s->v90_t3_srch_blind_first = -1;
+    s->v90_t3_srch_mp_cma_measured = false;
+    v90_t3_cma_abandon(s);
     s->v90_t3_srch_blind_stage =
         (!s->v90_t3_blind_tried  &&  !s->x2_mode
          &&  !V34_DIAG_GETENV("ME_V90_T3_NO_BLIND"))  ?  0  :  2;
@@ -13484,23 +13552,34 @@ search:
             return;
         /*endif*/
         s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+        /* The MP template's constellation power is a 32000-symbol run of
+           the mapper, about 5 ms unoptimised (v34tx.c is), so it is spread
+           over these three packets and finished just before
+           v90_t3_blind_acquire(), its only consumer here.  Same frames, same
+           order, same sums as measuring it at once. */
         if (s->v90_t3_srch_blind_stage == 0)
         {
-            (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+            s->v90_t3_srch_mp_cma_measured = v90_t3_cma_begin(s, mp_tap, mp_trellis);
+            (void) v90_t3_cma_continue(s, V34_V90_T3_CMA_MEASURE_SYMBOLS/3);
             s->v90_t3_srch_blind_stage = 1;
             return;
         }
         /*endif*/
         if (s->v90_t3_srch_blind_stage == 1)
         {
+            (void) v90_t3_cma_continue(s, 2*(V34_V90_T3_CMA_MEASURE_SYMBOLS/3));
             s->v90_t3_srch_blind_first = v90_t3_blind_locate(s);
             s->v90_t3_srch_blind_stage = (s->v90_t3_srch_blind_first >= 0)  ?  3  :  2;
             if (s->v90_t3_srch_blind_stage == 2)
+            {
                 s->v90_t3_blind_tried = true;
+                (void) v90_t3_cma_continue(s, V34_V90_T3_CMA_MEASURE_SYMBOLS);
+            }
             /*endif*/
             return;
         }
         /*endif*/
+        (void) v90_t3_cma_continue(s, V34_V90_T3_CMA_MEASURE_SYMBOLS);
         s->v90_t3_blind_tried = true;
         s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_first,
                                                           s->v90_t3_srch_blind_coeff);
@@ -13605,7 +13684,14 @@ search:
         {
             s->v90_far_tap_measured = mp_tap;
             s->v90_t3_trellis_size = mp_trellis;
+            /* Stage 0 measured this very template's constellation power and
+               the template builds since skipped it, so v90_t3_cma_* still
+               hold that measurement: rebuilding only the 128 B1 symbols is
+               the same result for a 32000-symbol run less (about 5 ms of
+               this media callback unoptimised). */
+            b1_template_skip_cma = s->v90_t3_srch_mp_cma_measured;
             (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+            b1_template_skip_cma = false;
         }
         else
         {
@@ -17244,6 +17330,88 @@ static void v90_t3_b1_put_bit(void *user_data, int bit)
    for 80-130 ms at every V.34 data-mode entry (rtp-tx.csv,
    rf-tower-v34-2) and put a hole in the signal the far end receives. */
 static bool b1_template_skip_cma = false;
+/* Set by v90_t3_cma_begin(): leave the constellation-power run to
+   v90_t3_cma_continue() and keep the mapper for it. */
+static bool b1_template_cma_deferred = false;
+
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
+/* Godard's dispersion constant, from the constellation rather than from
+   the call.  It is E[|x|^4]/E[|x|^2] of the points the far end is
+   actually transmitting, and this local transmitter is generating exactly
+   those -- so it is known here, at the handover, and does not have to be
+   waited for.  Measuring it from the received symbols instead needs
+   thousands of SETTLED ones, which is precisely what a call that
+   collapses early never provides: live on 2026-08-24 a 28800 call lost
+   the constellation 0.9 s after B1, so the blind loop that exists to
+   recover it could never arm.  Keep generating past B1 for the sample --
+   the symbols are still drawn from the same mapper -- and throw them
+   away.  The three helpers below take the sums in one fixed order, so the
+   measurement is the same whether it runs at once or over several
+   packets (v90_t3_cma_continue()). */
+static void b1_cma_template_sums(const v34_rx_state_t *rx,
+                                 double *p2_sum,
+                                 double *p4_sum,
+                                 int *n_sym)
+{
+    for (int n = 0;  n < rx->v90_t3_b1_symbols;  n++)
+    {
+        double p2 = rx->v90_t3_b1[n].re*rx->v90_t3_b1[n].re
+                  + rx->v90_t3_b1[n].im*rx->v90_t3_b1[n].im;
+
+        *p2_sum += p2;
+        *p4_sum += p2*p2;
+        (*n_sym)++;
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Mapping frames until *n_sym reaches limit.  False if the mapper stopped
+   first, which ends the measurement there. */
+static bool b1_cma_mapper_sums(v34_state_t *tx,
+                               double *p2_sum,
+                               double *p4_sum,
+                               int *n_sym,
+                               int limit)
+{
+    int16_t frame[16];
+
+    while (*n_sym < limit)
+    {
+        if (v34_get_mapping_frame_state(tx, frame) != 16)
+            return false;
+        /*endif*/
+        for (int n = 0;  n < 8;  n++)
+        {
+            double re = frame[2*n]/128.0;
+            double im = frame[2*n + 1]/128.0;
+            double p2 = re*re + im*im;
+
+            *p2_sum += p2;
+            *p4_sum += p2*p2;
+            (*n_sym)++;
+        }
+        /*endfor*/
+    }
+    /*endwhile*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void b1_cma_store(v34_rx_state_t *rx, double p2_sum, double p4_sum, int n_sym)
+{
+    if (p2_sum > 0.0)
+    {
+        rx->v90_t3_cma_r2 = (float) (p4_sum/p2_sum);
+        rx->v90_t3_cma_n = n_sym;
+        rx->v90_t3_cma_p2 = p2_sum;
+        rx->v90_t3_cma_p4 = p4_sum;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
 
 static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                                               int scrambler_tap,
@@ -17328,63 +17496,91 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
             rx->v90_t3_b1[dst].im = frame[2*n + 1]/128.0f;
         }
     }
-    /* Godard's dispersion constant, from the constellation rather than from
-       the call.  It is E[|x|^4]/E[|x|^2] of the points the far end is
-       actually transmitting, and this local transmitter is generating exactly
-       those -- so it is known here, at the handover, and does not have to be
-       waited for.  Measuring it from the received symbols instead needs
-       thousands of SETTLED ones, which is precisely what a call that
-       collapses early never provides: live on 2026-08-24 a 28800 call lost
-       the constellation 0.9 s after B1, so the blind loop that exists to
-       recover it could never arm.  Keep generating past B1 for the sample --
-       the symbols are still drawn from the same mapper -- and throw them
-       away. */
+    /* The constellation power: see b1_cma_template_sums(). */
+    if (b1_template_cma_deferred)
+    {
+        /* The caller runs the rest with v90_t3_cma_continue(), a packet
+           at a time. */
+        rx->v90_t3_cma_run_p2 = 0.0;
+        rx->v90_t3_cma_run_p4 = 0.0;
+        rx->v90_t3_cma_run_n = 0;
+        b1_cma_template_sums(rx, &rx->v90_t3_cma_run_p2,
+                             &rx->v90_t3_cma_run_p4, &rx->v90_t3_cma_run_n);
+        rx->v90_t3_cma_tx = tx;
+        return rx->v90_t3_b1_symbols > 0;
+    }
+    /*endif*/
     if (!b1_template_skip_cma)
     {
         double p2_sum = 0.0;
         double p4_sum = 0.0;
         int n_sym = 0;
 
-        for (int n = 0;  n < rx->v90_t3_b1_symbols;  n++)
-        {
-            double p2 = rx->v90_t3_b1[n].re*rx->v90_t3_b1[n].re
-                      + rx->v90_t3_b1[n].im*rx->v90_t3_b1[n].im;
-
-            p2_sum += p2;
-            p4_sum += p2*p2;
-            n_sym++;
-        }
-        /*endfor*/
-        while (n_sym < V34_V90_T3_CMA_MEASURE_SYMBOLS)
-        {
-            if (v34_get_mapping_frame_state(tx, frame) != 16)
-                break;
-            /*endif*/
-            for (int n = 0;  n < 8;  n++)
-            {
-                double re = frame[2*n]/128.0;
-                double im = frame[2*n + 1]/128.0;
-                double p2 = re*re + im*im;
-
-                p2_sum += p2;
-                p4_sum += p2*p2;
-                n_sym++;
-            }
-            /*endfor*/
-        }
-        /*endwhile*/
-        if (p2_sum > 0.0)
-        {
-            rx->v90_t3_cma_r2 = (float) (p4_sum/p2_sum);
-            rx->v90_t3_cma_n = n_sym;
-            rx->v90_t3_cma_p2 = p2_sum;
-            rx->v90_t3_cma_p4 = p4_sum;
-        }
-        /*endif*/
+        b1_cma_template_sums(rx, &p2_sum, &p4_sum, &n_sym);
+        (void) b1_cma_mapper_sums(tx, &p2_sum, &p4_sum, &n_sym,
+                                  V34_V90_T3_CMA_MEASURE_SYMBOLS);
+        b1_cma_store(rx, p2_sum, p4_sum, n_sym);
     }
+    /*endif*/
     v34_free(tx);
     return rx->v90_t3_b1_symbols > 0;
 }
+
+/* Build the template for (tap, trellis) and start measuring its
+   constellation power, which v90_t3_cma_continue() carries on. */
+static bool v90_t3_cma_begin(v34_rx_state_t *rx, int scrambler_tap, int trellis)
+{
+    bool built;
+
+    v90_t3_cma_abandon(rx);
+    b1_template_cma_deferred = true;
+    built = v34_build_expected_b1_tap_trellis(rx, scrambler_tap, trellis, 0);
+    b1_template_cma_deferred = false;
+    return built  &&  rx->v90_t3_cma_tx != NULL;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Carry the measurement on until limit symbols (V34_V90_T3_CMA_MEASURE_SYMBOLS
+   or more finishes it).  True once it is finished and stored. */
+static bool v90_t3_cma_continue(v34_rx_state_t *rx, int limit)
+{
+    v34_state_t *tx = (v34_state_t *) rx->v90_t3_cma_tx;
+
+    if (tx == NULL)
+        return false;
+    /*endif*/
+    if (limit > V34_V90_T3_CMA_MEASURE_SYMBOLS)
+        limit = V34_V90_T3_CMA_MEASURE_SYMBOLS;
+    /*endif*/
+    if (b1_cma_mapper_sums(tx, &rx->v90_t3_cma_run_p2, &rx->v90_t3_cma_run_p4,
+                           &rx->v90_t3_cma_run_n, limit)
+        &&
+        rx->v90_t3_cma_run_n < V34_V90_T3_CMA_MEASURE_SYMBOLS)
+    {
+        return false;
+    }
+    /*endif*/
+    b1_cma_store(rx, rx->v90_t3_cma_run_p2, rx->v90_t3_cma_run_p4, rx->v90_t3_cma_run_n);
+    v34_free(tx);
+    rx->v90_t3_cma_tx = NULL;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Drop a measurement in progress (a new search, a new call, v34_free()). */
+static void v90_t3_cma_abandon(v34_rx_state_t *rx)
+{
+    if (rx->v90_t3_cma_tx)
+    {
+        v34_free((v34_state_t *) rx->v90_t3_cma_tx);
+        rx->v90_t3_cma_tx = NULL;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 /*- End of function --------------------------------------------------------*/
 
 static bool v34_build_expected_b1_tap(v34_rx_state_t *rx, int scrambler_tap)
@@ -17567,6 +17763,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pending = false;
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
+    v90_t3_cma_abandon(rx);
     rx->v90_t3_blind_tried = false;
     rx->v90_t3_srch_running = false;
     rx->v90_t3_acq_abandoned = false;

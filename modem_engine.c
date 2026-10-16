@@ -61,6 +61,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <unistd.h>
 #include <string.h>
 #include <pthread.h>
 #include <math.h>
@@ -1595,6 +1596,8 @@ static pthread_mutex_t g_v90_cp_live_mtx;
 static pthread_cond_t  g_v90_cp_live_cond;
 static pthread_t       g_v90_cp_live_thread;
 static bool            g_v90_cp_live_thread_started = false;
+/* Set by me_replay_wait_workers(): an offline --sync replay. */
+static bool            g_me_replay_sync = false;
 static bool            g_v90_cp_live_shutdown = false;
 static bool            g_v90_cp_live_pending = false;
 static bool            g_v90_cp_live_running = false;
@@ -4795,7 +4798,11 @@ static void v90_cp_live_capture_append(const int16_t *samples, int count)
         && !g_v90_cp_live_running) {
         g_v90_cp_live_pending = true;
         g_v90_cp_live_next_request = -1;
-        pthread_cond_signal(&g_v90_cp_live_cond);
+        /* A replay run with --sync wakes the worker between frames instead
+           (me_replay_wait_workers()), so it never reads state this callback
+           is still changing. */
+        if (!g_me_replay_sync)
+            pthread_cond_signal(&g_v90_cp_live_cond);
     }
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
 }
@@ -7719,9 +7726,29 @@ static bool me_x2_upstream_squelched(void)
     return g_x2_squelch;
 }
 
+/* ME_RX_BIT_DUMP=<file>: every bit the V.34/V.90 receiver hands up, one
+   ASCII '0'/'1' each ('x' for a status), so two builds' decodes of the same
+   replay can be compared bit for bit (diagnostic). */
+static void me_rx_bit_dump(int bit)
+{
+    static FILE *f;
+    static bool tried;
+
+    if (!tried) {
+        const char *path = getenv("ME_RX_BIT_DUMP");
+
+        tried = true;
+        if (path && *path)
+            f = fopen(path, "w");
+    }
+    if (f)
+        fputc(bit >= 0 ? '0' + (bit & 1) : 'x', f);
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
+    me_rx_bit_dump(bit);
     if (g_mod == ME_MOD_X2) {
         /* x2 owns MP/E (Draft 0.33 sections 20..21); the V.34 receiver
          * suppresses B1 internally and supplies descrambled payload bits.
@@ -11964,6 +11991,31 @@ static void *v90_p3_ja_worker(void *user_data)
         pthread_mutex_unlock(&g_v90_p3_ja_mtx);
     }
     return NULL;
+}
+
+/* See modem_engine.h.  Polled: a diagnostic path, never on a live call. */
+void me_replay_wait_workers(void)
+{
+    g_me_replay_sync = true;
+    for (;;) {
+        bool busy = false;
+
+        if (g_v90_cp_live_thread_started) {
+            pthread_mutex_lock(&g_v90_cp_live_mtx);
+            if (g_v90_cp_live_pending)
+                pthread_cond_signal(&g_v90_cp_live_cond);
+            busy = g_v90_cp_live_pending || g_v90_cp_live_running;
+            pthread_mutex_unlock(&g_v90_cp_live_mtx);
+        }
+        if (!busy && g_v90_p3_ja_thread_started) {
+            pthread_mutex_lock(&g_v90_p3_ja_mtx);
+            busy = g_v90_p3_ja_pending || g_v90_p3_ja_busy;
+            pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+        }
+        if (!busy)
+            return;
+        usleep(50);
+    }
 }
 
 static void v90_p3_ja_worker_start(void)
@@ -17948,7 +18000,16 @@ const char *me_get_dial_uri(void)
    so the slow step can be named.  Cheap: two clock reads per callback. */
 static void me_media_timing_note(const char *dir, uint64_t ns)
 {
-    if (ns > 20000000ULL)
+    static uint64_t limit_ns;
+
+    /* ME_SLOW_CALLBACK_US lowers the threshold (diagnostic): a replay on a
+       faster host shows the same steps at a fraction of the mini's time. */
+    if (limit_ns == 0)
+    {
+        const char *e = getenv("ME_SLOW_CALLBACK_US");
+        limit_ns = (e && atoi(e) > 0) ? 1000ULL*(uint64_t) atoi(e) : 20000000ULL;
+    }
+    if (ns > limit_ns)
         ME_LOG("[ME] slow media callback: %s took %.1f ms (state=%d mod=%d v34_rx=%d v34_tx=%d)\n",
                dir, (double) ns/1e6, (int) g_state, (int) g_mod,
                g_v34 ? v34_get_rx_stage(g_v34) : -1, g_v34 ? v34_get_tx_stage(g_v34) : -1);

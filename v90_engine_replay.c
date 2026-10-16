@@ -29,6 +29,9 @@
  *
  *   v90_engine_replay <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS] [--dial]
  *
+ * --sync makes the run deterministic (media clock, CP worker drained every
+ * frame) so two builds can be compared bit for bit; implies --fast.
+ *
  * --dial replays a call this side ORIGINATED (V.8 caller), for recordings of
  * outbound calls such as the RasFinder's.
  *
@@ -222,6 +225,7 @@ int main(int argc, char *argv[])
     int fast = 0;
     int dial = 0;
     int split = 0;
+    int sync = 0;
 
     /* The live engine runs the Phase 3 Ja scan on a worker thread; a replay
        must see its result at the same sample every run. */
@@ -240,7 +244,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--schedule IO.bin]\n",
+                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--sync] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -262,6 +266,8 @@ int main(int argc, char *argv[])
             dial = 1;
         else if (strcmp(argv[i], "--split") == 0)
             split = 1;
+        else if (strcmp(argv[i], "--sync") == 0)
+            sync = 1;
         else if (strcmp(argv[i], "--schedule") == 0 && i + 1 < argc)
             schedule = argv[++i];
         else
@@ -289,6 +295,15 @@ int main(int argc, char *argv[])
     fflush(stdout);
 
     me_set_verbose(1);
+    if (sync) {
+        /* --sync: a run that is the same on every run.  The engine's timers
+           read the media clock instead of the wall clock, and the strict CP
+           worker is drained after every frame, so its answers land at the
+           same frame however fast the host is.  For comparing two builds,
+           not for imitating a live call's timing. */
+        setenv("ME_MEDIA_CLOCK", "1", 1);
+        fast = 1;
+    }
     me_init();
     di_set_callbacks(replay_dial, replay_answer, replay_hangup, NULL);
     if (di_open(pty_link) < 0) {
@@ -391,10 +406,14 @@ int main(int argc, char *argv[])
         } else {
             me_rx_g711(tap + pos, FRAME_BYTES);
         }
+        if (sync)
+            me_replay_wait_workers();
         /* Pull the transmit side and throw it away.  The engine's phase
            machine advances on both directions, and the peer's answers are
            already in the recording. */
         (void)me_tx_g711(tx, FRAME_BYTES);
+        if (sync)
+            me_replay_wait_workers();
         me_flush_g711_taps();
         if (!fast) {
             /* Absolute schedule rather than a fixed sleep, so the replay does

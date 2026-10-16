@@ -19,6 +19,15 @@ SPANDSP_DIR  = $(SPANDSP_ROOT)/src
 SPANDSP_LIB  = $(SPANDSP_DIR)/.libs/libspandsp.a
 SPANDSP_MAKE = $(SPANDSP_ROOT)/Makefile
 SPANDSP_HOST_STAMP := $(SPANDSP_ROOT)/.build-host
+# SpanDSP is configured with CFLAGS from this makefile, which replaces
+# autoconf's -g -O2, so the library is built unoptimised.  Turning that on
+# for the whole library changes our transmit and decode (v90_engine_replay
+# --sync differs on 3 of 24 RasFinder taps; v34tx.c alone at -O2, even with
+# every function optnone, stops v56_loopback_test --ad 5 --edd 3 syncing),
+# so only v34rx.c is built optimised, with clang, and it confines that to
+# the regions it marks itself (see the comment at the top of v34rx.c).  Its
+# unoptimised B1 acquisition made 20-26 ms media callbacks after B1.
+SPANDSP_V34RX_OPT_CFLAGS = -O2
 
 # Shared defaults
 PJ_CFLAGS   ?=
@@ -830,6 +839,17 @@ $(SPANDSP_LIB): FORCE
 		 CFLAGS="$(TIFF_CFLAGS) $(JPEG_CFLAGS)" \
 		 LDFLAGS="$(TIFF_LDFLAGS) $(JPEG_LDFLAGS)" \
 		 ./configure --enable-v34 --enable-v32bis); \
+	fi; \
+	if $(CC) --version 2>/dev/null | grep -q clang; then \
+		opt="$(SPANDSP_V34RX_OPT_CFLAGS)"; \
+		stamp="$(SPANDSP_ROOT)/src/.v34-opt-cflags"; \
+		if [ "$$(cat "$$stamp" 2>/dev/null)" != "$$opt" ]; then \
+			rm -f "$(SPANDSP_ROOT)"/src/v34rx.lo "$(SPANDSP_ROOT)"/src/v34rx.o "$(SPANDSP_ROOT)"/src/.libs/v34rx.o; \
+			printf '%s\n' "$$opt" > "$$stamp"; \
+		fi; \
+		$(MAKE) -C "$(SPANDSP_ROOT)/src" \
+			CFLAGS="$$opt $$(sed -n 's/^CFLAGS = //p' "$(SPANDSP_ROOT)/src/Makefile")" \
+			v34rx.lo; \
 	fi; \
 	$(MAKE) -C "$(SPANDSP_ROOT)"; \
 	printf '%s\n' "$$current_host" > "$(SPANDSP_HOST_STAMP)"

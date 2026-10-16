@@ -11948,6 +11948,13 @@ SPAN_DECLARE(int) v34_free(v34_state_t *s)
         fclose(s->rx.v90_t3_sym_dump);
         s->rx.v90_t3_sym_dump = NULL;
     }
+    /* A V.90 B1 template's constellation-power run still in progress
+       (v34rx.c, v90_t3_cma_continue()). */
+    if (s->rx.v90_t3_cma_tx)
+    {
+        v34_free((v34_state_t *) s->rx.v90_t3_cma_tx);
+        s->rx.v90_t3_cma_tx = NULL;
+    }
     /*endif*/
     span_free(s);
     return 0;

@@ -190,6 +190,8 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `DS_TX_FRAME_DUMP` | data_stack.c |  | d | Optional byte-level diagnostic at the DTE/compressor/LAPM boundary. |
 | `FAX_TEST_LOG` | fax_class2.c, fax_class2_test.c |  | t |  |
 | `ME_GUI_PORT` | modem_engine.c, sip_modem.c, v34rx.c |  | sd | Launcher-owned diagnostic port; enable bounded passive GUI taps. |
+| `ME_RX_BIT_DUMP` | modem_engine.c |  | d | Every bit the V.34/V.90 receiver hands up, '0'/'1' per byte; compares two builds' decodes of one replay. |
+| `ME_SLOW_CALLBACK_US` | modem_engine.c |  | d | Threshold of the "slow media callback" log (default 20 ms); lower it to see the same steps on a faster host. |
 | `ME_V34_DATA_TIMING_DIAG_FREEZE` | v34rx.c |  | dh | ME_V34_DATA_TIMING_DIAG_FREEZE=1 holds the Godard symbol timing loop for |
 | `ME_V34_DUMP_MP_DIBITS` | v34rx.c |  | - | Guard against NaN/Inf from coefficient divergence — reset to |
 | `ME_V34_EQ_DIAG` | v34rx.c |  | - | equalizer trace is explicitly requested. |
