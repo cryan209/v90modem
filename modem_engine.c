@@ -2849,7 +2849,11 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
                 return;
             }
             if (g_v91_peer_cp.drn == 0) {
-                v91_live_rx_fail_locked("CP cleardown (drn 0)");
+                /* 8.6: drn = 0 in CP is cleardown, not a start-up failure
+                 * (which would escape to V.34 and keep the call up). */
+                ME_LOG("[ME] V.91 peer cleardown (CP drn 0)\n");
+                trace_phase("V91 peer cleardown (CP drn 0)");
+                g_state = ME_HANGUP;
                 return;
             }
             if ((g_v91_peer_cp.transparent_mode_granted && g_v91_peer_cp.drn != 28)

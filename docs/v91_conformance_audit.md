@@ -1,6 +1,6 @@
 # V.91 conformance audit (ITU-T V.91, 05/99)
 
-**Update 2026-10-16 (same day, later): the gaps marked DONE below were closed; see "Progress" at the end.**
+**Update 2026-10-17: every row of the table below is closed (the sections after it are the original 2026-10-16 audit, kept for the reasoning; "Progress" at the end says what was done). The only open items are things no in-tree test can confirm: see "Still not verifiable here".**
 
 Audited 2026-10-16 by reading the whole Recommendation (`ITU Docs/T-REC-V.91-199905-I!!PDF-E.pdf`,
 ~870 lines of text, 14 pages) against `v91.c`, `vpcm_v91_session.c`,
@@ -21,22 +21,22 @@ only on the loopback/session path, missing = not there):
 | Clause | Subject | State |
 |---|---|---|
 | 6.1 / 6.2 | Rates 28000..64000 step 8000/6, K 15..42, 8000 baud | done (`vpcm_cp_drn_to_k`: K = drn+14, drn 1..28) |
-| 6.3.1 | GPC scrambler on the primary channel | **missing in data mode** (used only for SCR/CP/J/PHIL) |
-| 6.3.3 - 6.3.8 | V.90 5.4 encoder: bit parsing, modulus encoder, mapper, differential encoding of sign bits, sign assignment, mux | **missing** (see below) |
-| 6.3.9 / 6.4 | Control channel (96-bit sequence, Table 3) | **missing** |
+| 6.3.1 | GPC scrambler on the primary channel | done: the V.90 5.4 encoder scrambles with GPC in data mode (`v91_tx_codewords`) |
+| 6.3.3 - 6.3.8 | V.90 5.4 encoder: bit parsing, modulus encoder, mapper, differential encoding of sign bits, sign assignment, mux | done: `v90_map_sr0_frame` / `v90_demap_mapped_frame`, Sr = 0, S = 6 |
+| 6.3.9 / 6.4 | Control channel (96-bit sequence, Table 3) | done (slip pattern, cleardown bit 16, retrain bit 17, CRC); checked by the spec decoder |
 | 6.5 | Transparent mode | done, live 2026-10-17 (`ME_V91_TRANSPARENT`); data bits are the codewords, no control channel |
-| 7.1 | B1 = 12 codewords from mapping binary ones through the data encoder | **non-conformant** (bring-up mapper) |
-| 7.2 | CP (Table 4) | partial / **non-conformant layout** (see below) |
+| 7.1 | B1 = 12 codewords from mapping binary ones through the data encoder | done (two frames of ones through the encoder) |
+| 7.2 | CP (Table 4) | done: reserved bits zero, multiple-of-6 length, variable gamma read live; spec decoder checks every CP |
 | 7.3 | DIL; default DIL (Table 5) | done (`v91_default_dil_init` matches N=125, LSP/LTP 12, SP 0FC0, TP 0FFF, H=1, training 124,0,123,1...62) |
 | 7.4 - 7.7 | Eu / Es / Ez / Em lengths and initialisation | done (12/12/24/12 symbols); init rules covered by loopback tests only |
-| 7.8 | INFO (Table 6) | done as a frame; live engine only ever uses default DIL, no control channel, no transparent request |
+| 7.8 | INFO (Table 6) | done, all bits live (26 DIL, 27 control channel, 40/41 transparent) |
 | 7.7 / 7.9 / 7.10 | Em / J / PHIL | done, live behind `ME_V91_SPECIFY_DIL=1` (2026-10-17); default start-up still asks for the default DIL |
 | 7.11 | SCR, multiple of 6 symbols | done |
 | 8.1 | V.8 selection, 75 +/- 5 ms silence | done (V.8 `V8_PSTN_PCM_MODEM_V91` picks it; `V91_PHASE1_SILENCE_SYMBOLS` 600) |
-| 8.2 | Start-up Figures 1-3 | Figure 1 only (both default DIL) live; Figures 2-3 on the session path |
-| 8.3 | Escape to V.34 (no INFO' in 1.5 s, no B1 in 10 s, INFO0a/c handshake) | **missing in live engine**: a failure sets `ME_HANGUP` |
-| 8.4 - 8.5 | Retrain, 10 s timer, loss of frame sync | flags only (`retrain_timer_active`); no timer, no INFO re-entry live |
-| 8.6 | Cleardown via drn=0 or control channel bit 16 | partial: startup only; a peer CP with drn=0 is treated as a startup failure |
+| 8.2 | Start-up Figures 1-3 | Figures 1-3 live (Figure 3's zero-length DIL on the transmit side only) |
+| 8.3 | Escape to V.34 (no INFO' in 1.5 s, no B1 in 10 s, INFO0a/c handshake) | done: 1.5 s INFO' and 10 s B1 timers escape to V.34 |
+| 8.4 - 8.5 | Retrain, 10 s timer, loss of frame sync | done: retrain from data mode with a 10 s timer; reacquiring the grid without a retrain (8.5 "by another means") not attempted |
+| 8.6 | Cleardown via drn=0 or control channel bit 16 | done: control channel bit 16 and CP drn = 0 (a peer's drn 0 now ends the call instead of escaping to V.34) |
 | 8.7 | Transparent grant needs verified unrestricted 64k channel | done for what a DIL can show: codeword-exact DIL (polarity or any change fails it) and no robbed LSBs; both CPs must grant, bit 41 clears down |
 | 8.8 | 4-wire leased line | n/a (same start-up) |
 | 9 | Test loop 3 (V.54) | done 2026-10-17: `AT&T3` (circuit 141) / `AT&T0`; circuit 142 reported in the trace |
@@ -353,3 +353,16 @@ V.42 the peer would see its own frames reflected: use it without EC.
 checked by `tools/v91_spec_decode.py` (written from the text), but no foreign
 V.91 peer exists to confirm them, and the same holds for J.  Nothing else in the
 audit table is open.
+
+### 8.6 and the closing pass -- 2026-10-17
+
+A peer CP with drn = 0 used to be reported as a start-up receive failure, which
+escaped to V.34 and kept the call up; it is now cleardown (`ME_HANGUP`).  We do
+not send drn = 0 ourselves: a local hangup uses the control channel (bit 16) or
+drops immediately without one, both of which 8.6 allows only as "or" alternatives
+for the CP route, so a conformant peer that waits for either will see the media
+go away.  The CP-within-1.5-s rule (8.2.1.8) is our obligation, not something to
+enforce on the peer, and is met by construction (the DIL we receive lasts about
+0.19 s).  The earlier note that our robbed-cadence request sat in reserved CP
+bits was already obsolete: it was deleted on 2026-10-16 and the spec decoder
+checks the reserved bits are zero.
