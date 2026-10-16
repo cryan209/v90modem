@@ -32,6 +32,11 @@
  * --sync makes the run deterministic (media clock, CP worker drained every
  * frame) so two builds can be compared bit for bit; implies --fast.
  *
+ * --echo-ref cancels the echo of the recorded live-tx.g711 beside the tap
+ * instead of the replay's own transmit.  Without it a replay's receiver sees
+ * a different echo residue from Phase 4 on, wherever its transmit timing has
+ * drifted from the live call's (needs a tap that starts at byte 0).
+ *
  * --dial replays a call this side ORIGINATED (V.8 caller), for recordings of
  * outbound calls such as the RasFinder's.
  *
@@ -226,6 +231,8 @@ int main(int argc, char *argv[])
     int dial = 0;
     int split = 0;
     int sync = 0;
+    int echo_ref = 0;
+    uint8_t *ref_tap = NULL;
 
     /* The live engine runs the Phase 3 Ja scan on a worker thread; a replay
        must see its result at the same sample every run. */
@@ -244,7 +251,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--sync] [--schedule IO.bin]\n",
+                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--sync] [--echo-ref] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -266,6 +273,8 @@ int main(int argc, char *argv[])
             dial = 1;
         else if (strcmp(argv[i], "--split") == 0)
             split = 1;
+        else if (strcmp(argv[i], "--echo-ref") == 0)
+            echo_ref = 1;
         else if (strcmp(argv[i], "--sync") == 0)
             sync = 1;
         else if (strcmp(argv[i], "--schedule") == 0 && i + 1 < argc)
@@ -305,6 +314,35 @@ int main(int argc, char *argv[])
         fast = 1;
     }
     me_init();
+    if (echo_ref) {
+        /* Same directory, same naming rule as tx_tap_first_energy(). */
+        char tx_path[1024];
+        const char *base = strrchr(path, '/');
+        FILE *f;
+        long len;
+
+        base = base ? base + 1 : path;
+        snprintf(tx_path, sizeof(tx_path), "%.*slive-tx.g711",
+                 (int)(base - path), path);
+        if (!(f = fopen(tx_path, "rb"))) {
+            fprintf(stderr, "--echo-ref: cannot open %s\n", tx_path);
+            return 1;
+        }
+        fseek(f, 0, SEEK_END);
+        len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        ref_tap = malloc((size_t)(len > 0 ? len : 1));
+        if (!ref_tap || fread(ref_tap, 1, (size_t)len, f) != (size_t)len) {
+            fprintf(stderr, "--echo-ref: cannot read %s\n", tx_path);
+            return 1;
+        }
+        fclose(f);
+        /* Both taps start at media connect, so transmit octet n of the
+           replay is octet start + n of the recorded transmit. */
+        if (start < len)
+            me_replay_set_echo_reference(ref_tap + start, len - start);
+        printf("engine replay: echo reference %s (%.1f s)\n", tx_path, len/8000.0);
+    }
     di_set_callbacks(replay_dial, replay_answer, replay_hangup, NULL);
     if (di_open(pty_link) < 0) {
         fprintf(stderr, "cannot open the replay PTY at %s\n", pty_link);
@@ -440,7 +478,9 @@ int main(int argc, char *argv[])
            me_modulation_to_str(snap.modulation));
     fflush(stdout);
     di_close();
+    me_replay_set_echo_reference(NULL, 0);
     me_destroy();
+    free(ref_tap);
     free(tap);
     return 0;
 }

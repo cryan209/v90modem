@@ -11819,6 +11819,29 @@ static float v90_t3_offset_rotation(const v34_rx_state_t *s, float offset)
     with the current taps at an offset of `offset` samples, and derotated
     both by the carrier loop's standing phase -- which is what the slicer
     sees -- and by the phase the offset itself implies. */
+/* How many raw samples past a symbol's last FSE tap its interpolation reads.
+   v90_t3_raw_get_frac() blends a sample with the NEXT one whenever the
+   fraction is positive, and v90_t3_raw_get() returns zero for a sample not
+   yet received -- so a symbol emitted as soon as its last tap had arrived,
+   which is every symbol in steady state, fed that tap half a zero whenever
+   the timing loop sat on the positive side of a sample.  That side is where
+   every whole-sample timing step lands one way round, and where the fraction
+   creeps to before a step the other way: the peer's clock is ~6 ppm off ours
+   on the RasFinder, so a step falls every 17.5 s, and each one either
+   corrupted the newest tap at a stroke (opt-1, -4, -7: lattice 0.035 ->
+   0.100, then a slow walk off and the discontinuity resync 1.5-2 s later) or
+   removed a corruption the equalizer had spent 17 s adapting around (opt-12:
+   0.03 -> 0.57 in one symbol).  The signal was clean throughout -- a
+   least-squares equalizer refitted outside the receiver held 0.016-0.05 to
+   the lattice across every one of those steps (docs/v90_rasfinder_phase4.md,
+   2026-10-16).  Wait for the sample instead.  Linear interpolation needs
+   one, whatever the fraction (it is held under 1.5 by the loop's clamp). */
+static int v90_t3_frac_lookahead(float frac)
+{
+    return (frac > 1e-4f) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
 {
     int pre = V34_V90_T3_FSE_TAPS/2;
@@ -11846,6 +11869,15 @@ static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
             at - pre < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + 8)
         {
             break;
+        }
+        /*endif*/
+        /* A late candidate's newest symbols reach past what has been
+           received; scoring them against zeros would count against the very
+           offset that is right (see v90_t3_frac_lookahead()). */
+        if (at - pre + V34_V90_T3_FSE_TAPS + v90_t3_frac_lookahead(sub)
+                > s->v90_t3_raw_count)
+        {
+            continue;
         }
         /*endif*/
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
@@ -12110,6 +12142,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
     while (s->v90_t3_acquired
            && budget-- > 0
            && s->v90_t3_next_symbol - pre + V34_V90_T3_FSE_TAPS
+                + v90_t3_frac_lookahead(s->v90_t3_timing_enabled
+                                            ? s->v90_t3_gardner.acc : 0.0f)
                 <= s->v90_t3_raw_count)
     {
         complexf_t y = {0.0f, 0.0f};

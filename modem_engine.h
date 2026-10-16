@@ -193,6 +193,11 @@ void me_flush_g711_taps(void);
  * nothing posted or running, so their results land at the same media frame
  * on every run (v90_engine_replay --sync). */
 void me_replay_wait_workers(void);
+/* Offline replays only: cancel the echo of the RECORDED transmit tap
+ * (live-tx.g711, one codeword per transmit octet from call start) instead of
+ * the replay's own transmit, which stops matching the live call once Phase 4
+ * timing differs (v90_engine_replay --echo-ref).  NULL turns it off. */
+void me_replay_set_echo_reference(const uint8_t *tap, long len);
 /* Flush the ME_IO_SCHEDULE record (see modem_engine.c). */
 void me_flush_io_schedule(void);
 

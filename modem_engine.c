@@ -15510,10 +15510,41 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
     return false;
 }
 
+/* v90_engine_replay --echo-ref.  A replay regenerates our transmit, and in
+   Phase 4 and data mode that transmit follows the replay's own timing and
+   decode, not the live call's: on rf-mini-20261016/opt2-5 the two part at
+   the start of TRN2d, and from there the line echo canceller subtracted an
+   echo that was never on the wire -- the replay's 4-point training then
+   failed (0.0148) where the live call's measured 0.00024.  The echo that IS
+   in a recorded receive tap is the echo of the recorded transmit tap, so a
+   replay that wants the live receiver's view feeds the canceller from that. */
+static bool g_tx_from_g711 = false;
+static const uint8_t *g_echo_ref_tap = NULL;
+static long g_echo_ref_len = 0;
+static uint64_t g_echo_ref_pos = 0;
+
+void me_replay_set_echo_reference(const uint8_t *tap, long len)
+{
+    g_echo_ref_tap = tap;
+    g_echo_ref_len = tap ? len : 0;
+}
+
 static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
 {
+    int16_t ref[320];
+
     if (!amp || len <= 0 || (g_mod != ME_MOD_V34 && g_mod != ME_MOD_V90))
         return;
+    if (g_echo_ref_tap && g_tx_from_g711 && len <= (int)(sizeof(ref)/sizeof(ref[0]))) {
+        for (int i = 0; i < len; i++) {
+            uint64_t k = g_echo_ref_pos + (uint64_t)i;
+
+            ref[i] = (k < (uint64_t)g_echo_ref_len) ? pcm_to_linear(g_echo_ref_tap[k])
+                                                    : 0;
+        }
+        g_echo_ref_pos += (uint64_t)len;
+        amp = ref;
+    }
     pthread_mutex_lock(&g_state_mtx);
     /* Fill unconditionally: the NLMS canceller below is optional (g_echo_can),
        but the Phase 3 far-end-S echo gate needs this TX reference on every
@@ -15528,7 +15559,6 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
 }
 
 static void me_tx_audio_impl(int16_t *amp, int len);
-static bool g_tx_from_g711 = false;
 
 void me_tx_audio(int16_t *amp, int len)
 {
@@ -17739,6 +17769,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     }
     pthread_mutex_unlock(&g_state_mtx);
 
+    g_echo_ref_pos = g_tx_chunk_base + (uint64_t)offset;
     for (; offset < count; ) {
         int16_t linear[320];
         int chunk = count - offset;
