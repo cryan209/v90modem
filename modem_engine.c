@@ -1639,6 +1639,7 @@ static v90_cp_live_rx_counters_t g_v90_cp_live_rx_baseline;
 typedef enum {
     V91_LIVE_TX_INFO = 0,   /* INFO repeats until the peer's INFO arrives (8.2.1.2) */
     V91_LIVE_TX_SCRIPT,
+    V91_LIVE_TX_PHIL,       /* PHIL until the peer's J is in (8.2.1.6) */
     V91_LIVE_TX_SCR,
     V91_LIVE_TX_CP,
     V91_LIVE_TX_TAIL,
@@ -1649,6 +1650,8 @@ typedef enum {
     V91_LIVE_RX_INFO,
     V91_LIVE_RX_INFO_ACK,
     V91_LIVE_RX_EU,
+    V91_LIVE_RX_J,          /* peer specified a DIL: its descriptor (7.9) */
+    V91_LIVE_RX_PHIL,       /* PHIL, ended by Em (7.7, 7.10) */
     V91_LIVE_RX_DIL,
     V91_LIVE_RX_SCR_CP,
     V91_LIVE_RX_ES,
@@ -1666,6 +1669,23 @@ static int g_v91_data_tx_bytes;
 static int g_v91_data_rx_bytes;
 static vpcm_cp_frame_t g_v91_peer_cp;
 static v91_dil_desc_t g_v91_default_dil;
+/* Specified-DIL start-up (8.2.1.5-8.2.1.7): when ME_V91_SPECIFY_DIL is set we
+ * leave INFO bit 26 at 1 and send J; whichever DIL we ask for is the one the
+ * peer sends, and the DIL we send is whatever the peer's INFO/J asked for. */
+static bool g_v91_local_specify;
+static v91_dil_desc_t g_v91_local_dil;
+static const v91_dil_desc_t *g_v91_rx_dil_expect;
+static bool g_v91_peer_default_dil;      /* peer's INFO bit 26 = 0 */
+static bool g_v91_peer_j_valid;
+static v91_dil_desc_t g_v91_peer_j;
+static uint8_t g_v91_rx_j_bits[V91_J_MAX_BITS];
+static uint8_t g_v91_rx_j_cw[V91_J_MAX_BITS];
+static int g_v91_rx_j_len;
+static int g_v91_rx_j_total;
+static v91_state_t g_v91_rx_j_snap;      /* RX coder state at J start */
+static int g_v91_rx_em_run;
+static int g_v91_rx_phil_count;
+static int g_v91_tx_phil_sent;
 static uint8_t g_v91_local_drn;
 static uint8_t g_v91_peer_drn;
 static uint8_t g_v91_startup_tx[V91_LIVE_STARTUP_MAX];
@@ -1744,7 +1764,7 @@ static int v91_live_append(uint8_t *dst, int cap, int pos,
 static void v91_live_fill_info(v91_info_frame_t *info, v91_law_t law, bool ack)
 {
     memset(info, 0, sizeof(*info));
-    info->request_default_dil = true;
+    info->request_default_dil = !g_v91_local_specify;
     info->request_control_channel = g_v91_we_want_cc;
     info->acknowledge_info_frame = ack;
     info->tx_uses_alaw = (law == V91_LAW_ALAW);
@@ -1777,15 +1797,42 @@ static int v91_live_build_startup(v91_law_t law,
     return pos;
 }
 
-/* After the peer's INFO has been received (8.2.1.3, 8.2.1.4): INFO', then Eu
- * and the default DIL. */
-static int v91_live_build_info_ack_eu_dil(v91_state_t *state, uint8_t *out, int out_cap)
+/* Em, then the DIL the peer asked for (8.2.1.7).  A zero-length DIL (Figure 3)
+ * is Em alone. */
+static int v91_live_build_em_dil(v91_state_t *state, const v91_dil_desc_t *dil,
+                                 uint8_t *out, int out_cap)
+{
+    uint8_t tmp[2048];
+    int pos = 0;
+    int len;
+
+#define V91_APPEND_EXPR(expr) do { \
+        len = (expr); \
+        if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0) \
+            return 0; \
+    } while (0)
+    V91_APPEND_EXPR(v91_tx_em_codewords(state, tmp, sizeof(tmp)));
+    if (dil->n > 0)
+        V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), dil));
+#undef V91_APPEND_EXPR
+    return pos;
+}
+
+/* After the peer's INFO has been received (8.2.1.3-8.2.1.7): INFO', then
+ *   both default:           Eu, default DIL
+ *   we specify, peer default: J, Em, default DIL
+ *   we specify, peer too:     J, then PHIL until the peer's J is in
+ *   we default, peer specifies: PHIL until the peer's J is in
+ * *phil_next is set when the script ends in the PHIL wait. */
+static int v91_live_build_info_ack_eu_dil(v91_state_t *state, uint8_t *out, int out_cap,
+                                          bool *phil_next)
 {
     v91_info_frame_t info;
     uint8_t tmp[2048];
     int pos = 0;
     int len;
 
+    *phil_next = false;
     v91_live_fill_info(&info, state->law, true);
 #define V91_APPEND_EXPR(expr) do { \
         len = (expr); \
@@ -1793,9 +1840,23 @@ static int v91_live_build_info_ack_eu_dil(v91_state_t *state, uint8_t *out, int 
             return 0; \
     } while (0)
     V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
-    V91_APPEND_EXPR(v91_tx_eu_codewords(state, tmp, sizeof(tmp)));
-    V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &g_v91_default_dil));
+    if (!g_v91_local_specify && g_v91_peer_default_dil) {
+        V91_APPEND_EXPR(v91_tx_eu_codewords(state, tmp, sizeof(tmp)));
+        V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &g_v91_default_dil));
+        return pos;
+    }
+    if (g_v91_local_specify)
+        V91_APPEND_EXPR(v91_tx_j_codewords(state, tmp, sizeof(tmp), &g_v91_local_dil));
 #undef V91_APPEND_EXPR
+    if (g_v91_peer_default_dil) {
+        /* We already know what the peer wants: no PHIL (8.2.1.6). */
+        int n = v91_live_build_em_dil(state, &g_v91_default_dil, tmp, sizeof(tmp));
+
+        if (n <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, n)) < 0)
+            return 0;
+        return pos;
+    }
+    *phil_next = true;
     return pos;
 }
 
@@ -1874,6 +1935,15 @@ static void v91_live_reset(void)
     g_v91_tx_data_live = false;
     g_v91_rx_data_live = false;
     g_v91_sim_robbed_phase = -1;
+    g_v91_local_specify = false;
+    g_v91_rx_dil_expect = &g_v91_default_dil;
+    g_v91_peer_default_dil = true;
+    g_v91_peer_j_valid = false;
+    g_v91_rx_j_len = 0;
+    g_v91_rx_j_total = 0;
+    g_v91_rx_em_run = 0;
+    g_v91_rx_phil_count = 0;
+    g_v91_tx_phil_sent = 0;
 }
 
 /* Build a fresh startup (8.2.1.2: Ez, INFO, ...).  keep_clock leaves the TX/RX
@@ -1920,6 +1990,15 @@ static bool v91_live_begin_startup_locked(bool keep_clock)
     g_v91_cp_local = g_v91_cp_template;
     g_v91_cp_total_bits = vpcm_cp_v91_bit_length(&g_v91_cp_template);
     v91_default_dil_init(&g_v91_default_dil);
+    /* ME_V91_SPECIFY_DIL=1: request a specified DIL (INFO bit 26 = 1, J, Em).
+     * The descriptor is the default one, so the receive side stays comparable;
+     * what changes is the start-up sequence (Figures 2 and 3/V.91). */
+    env = getenv("ME_V91_SPECIFY_DIL");
+    if (env && atoi(env) > 0) {
+        g_v91_local_specify = true;
+        g_v91_local_dil = g_v91_default_dil;
+        g_v91_rx_dil_expect = &g_v91_local_dil;
+    }
     g_v91_we_want_cc = me_v91_control_channel();
     g_v91_startup_tx_len = v91_live_build_startup(law,
                                                   &g_v91_tx,
@@ -2109,13 +2188,17 @@ static bool v91_live_tx_refill_locked(void)
     case V91_LIVE_TX_INFO: {
         if (g_v91_rx_stage >= V91_LIVE_RX_INFO_ACK) {
             /* The peer's INFO is in: finish with INFO', Eu and the DIL. */
+            bool phil_next;
+
             len = v91_live_build_info_ack_eu_dil(&g_v91_tx, g_v91_startup_tx,
-                                                 (int)sizeof(g_v91_startup_tx));
+                                                 (int)sizeof(g_v91_startup_tx),
+                                                 &phil_next);
             if (len <= 0)
                 return false;
             g_v91_startup_tx_len = len;
             g_v91_startup_tx_pos = 0;
-            g_v91_tx_stage = V91_LIVE_TX_SCRIPT;
+            g_v91_tx_phil_sent = 0;
+            g_v91_tx_stage = phil_next ? V91_LIVE_TX_PHIL : V91_LIVE_TX_SCRIPT;
             return true;
         }
         {
@@ -2131,6 +2214,32 @@ static bool v91_live_tx_refill_locked(void)
             return true;
         }
     }
+    case V91_LIVE_TX_PHIL:
+        /* 8.2.1.6: PHIL until the DIL the peer wants is known.  PHIL carries on
+         * from J when we sent one, otherwise both coders start from zero
+         * (7.10). */
+        if (g_v91_peer_j_valid) {
+            len = v91_live_build_em_dil(&g_v91_tx, &g_v91_peer_j, g_v91_startup_tx,
+                                        (int)sizeof(g_v91_startup_tx));
+            if (len <= 0)
+                return false;
+            g_v91_startup_tx_len = len;
+            g_v91_startup_tx_pos = 0;
+            g_v91_tx_stage = V91_LIVE_TX_SCRIPT;
+            return true;
+        }
+        if (g_v91_tx_phil_sent >= V91_LIVE_SCR_MAX_SYMBOLS)
+            return false;
+        len = v91_tx_phil_codewords(&g_v91_tx, g_v91_startup_tx,
+                                    (int)sizeof(g_v91_startup_tx),
+                                    VPCM_CP_FRAME_INTERVALS,
+                                    g_v91_local_specify || g_v91_tx_phil_sent > 0);
+        if (len != VPCM_CP_FRAME_INTERVALS)
+            return false;
+        g_v91_startup_tx_len = len;
+        g_v91_startup_tx_pos = 0;
+        g_v91_tx_phil_sent += len;
+        return true;
     case V91_LIVE_TX_SCRIPT:
         /* Fixed script drained: start the SCR run (GPC reset). */
         len = v91_tx_scr_codewords(&g_v91_tx, g_v91_startup_tx,
@@ -2216,8 +2325,10 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
                 if (!v91_live_tx_refill_locked()) {
                     if (g_v91_tx_stage == V91_LIVE_TX_DONE && g_v91_tx_b1_end_abs < 0)
                         g_v91_tx_b1_end_abs = base + pos;
-                    if (g_v91_tx_stage == V91_LIVE_TX_SCR) {
-                        ME_LOG("[ME] V.91 SCR fill exhausted waiting for peer DIL\n");
+                    if (g_v91_tx_stage == V91_LIVE_TX_SCR || g_v91_tx_stage == V91_LIVE_TX_PHIL) {
+                        ME_LOG("[ME] V.91 %s fill exhausted waiting for peer %s\n",
+                               g_v91_tx_stage == V91_LIVE_TX_PHIL ? "PHIL" : "SCR",
+                               g_v91_tx_stage == V91_LIVE_TX_PHIL ? "J" : "DIL");
                         if (g_v91_retraining)
                             g_state = ME_HANGUP;
                         else
@@ -2322,6 +2433,8 @@ static const char *v91_live_rx_stage_name(v91_live_rx_stage_t s)
     case V91_LIVE_RX_INFO:     return "INFO";
     case V91_LIVE_RX_INFO_ACK: return "INFO_ACK";
     case V91_LIVE_RX_EU:       return "EU";
+    case V91_LIVE_RX_J:        return "J";
+    case V91_LIVE_RX_PHIL:     return "PHIL";
     case V91_LIVE_RX_DIL:      return "DIL";
     case V91_LIVE_RX_SCR_CP:   return "SCR_CP";
     case V91_LIVE_RX_ES:       return "ES";
@@ -2349,6 +2462,40 @@ static void v91_live_rx_enter_stage(v91_live_rx_stage_t stage)
 static bool v91_live_codeword_matches(uint8_t cw, uint8_t expected)
 {
     return cw == expected || cw == (uint8_t)(expected & 0xFE);
+}
+
+/* The peer's INFO' is in.  What follows depends on what each end asked for
+ * (8.2.1.4-8.2.1.7, Figures 1-3): Eu when both took the default DIL, the
+ * peer's J when it specified one, otherwise PHIL ended by Em.  The coders
+ * carry on from the last INFO symbol into J (7.9) and restart at zero for a
+ * PHIL that follows no J (7.10). */
+static void v91_live_rx_after_info_ack(bool peer_default_dil, uint8_t last_cw)
+{
+    g_v91_peer_default_dil = peer_default_dil;
+    g_v91_rx_em_run = 0;
+    g_v91_rx_phil_count = 0;
+    if (peer_default_dil && !g_v91_local_specify) {
+        v91_live_rx_enter_stage(V91_LIVE_RX_EU);
+        return;
+    }
+    if (!peer_default_dil) {
+        g_v91_rx.rx_prev_sign = (last_cw & 0x80) ? 1 : 0;
+        g_v91_rx.rx_scramble_reg = 0;
+        g_v91_rx_j_snap = g_v91_rx;
+        g_v91_rx_j_len = 0;
+        g_v91_rx_j_total = 0;
+        v91_live_rx_enter_stage(V91_LIVE_RX_J);
+        return;
+    }
+    v91_rx_diff_reset(&g_v91_rx);
+    v91_live_rx_enter_stage(V91_LIVE_RX_PHIL);
+}
+
+/* The DIL we asked for follows Eu or Em: arm its reception. */
+static void v91_live_rx_enter_dil(void)
+{
+    g_v91_rx_em_run = 0;
+    v91_live_rx_enter_stage(V91_LIVE_RX_DIL);
 }
 
 static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
@@ -2394,10 +2541,14 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
                 v91_init(&scratch, g_v91_rx.law, V91_MODE_TRANSPARENT);
                 if (v91_rx_info_codewords(&scratch, g_v91_rx_win, V91_INFO_SYMBOLS, &info)) {
                     g_v91_peer_wants_cc = info.request_control_channel;
+                    g_v91_peer_default_dil = info.request_default_dil;
                     trace_phase("V91 RX found INFO onset (ack=%d)",
                                 info.acknowledge_info_frame ? 1 : 0);
-                    v91_live_rx_enter_stage(info.acknowledge_info_frame
-                                            ? V91_LIVE_RX_EU : V91_LIVE_RX_INFO_ACK);
+                    if (info.acknowledge_info_frame)
+                        v91_live_rx_after_info_ack(info.request_default_dil,
+                                                   g_v91_rx_win[V91_INFO_SYMBOLS - 1]);
+                    else
+                        v91_live_rx_enter_stage(V91_LIVE_RX_INFO_ACK);
                 }
             }
         }
@@ -2415,10 +2566,12 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
             return;
         }
         g_v91_peer_wants_cc = info.request_control_channel;
+        g_v91_peer_default_dil = info.request_default_dil;
         /* INFO repeats (ack = 0) until the peer has ours; the first INFO' ends
-         * the exchange and Eu follows it. */
+         * the exchange and Eu, J or PHIL follows it. */
         if (info.acknowledge_info_frame)
-            v91_live_rx_enter_stage(V91_LIVE_RX_EU);
+            v91_live_rx_after_info_ack(info.request_default_dil,
+                                       g_v91_rx_accum[V91_INFO_SYMBOLS - 1]);
         else
             v91_live_rx_enter_stage(V91_LIVE_RX_INFO_ACK);
         return;
@@ -2432,18 +2585,74 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
             return;
         }
         if (v91_live_rx_collect(cw, V91_EU_SYMBOLS))
-            v91_live_rx_enter_stage(V91_LIVE_RX_DIL);
+            v91_live_rx_enter_dil();
+        return;
+    }
+    case V91_LIVE_RX_J: {
+        int bit = v91_rx_diff_scrambled_bit(&g_v91_rx, cw);
+
+        if (g_v91_rx_j_len >= V91_J_MAX_BITS) {
+            v91_live_rx_fail_locked("J length");
+            return;
+        }
+        g_v91_rx_j_cw[g_v91_rx_j_len] = cw;
+        g_v91_rx_j_bits[g_v91_rx_j_len++] = (uint8_t)bit;
+        if (g_v91_rx_j_total == 0) {
+            int total = v91_j_length_from_prefix(g_v91_rx_j_bits, g_v91_rx_j_len);
+
+            if (total < 0) {
+                v91_live_rx_fail_locked("J header");
+                return;
+            }
+            g_v91_rx_j_total = total;
+        }
+        if (g_v91_rx_j_total == 0 || g_v91_rx_j_len < g_v91_rx_j_total)
+            return;
+        {
+            /* Re-run the descriptor check on a copy of the coder state from
+             * the start of J; the live state has already moved past it. */
+            v91_state_t scratch = g_v91_rx_j_snap;
+
+            if (!v91_rx_j_codewords(&scratch, g_v91_rx_j_cw, g_v91_rx_j_len, &g_v91_peer_j)) {
+                v91_live_rx_fail_locked("J descriptor");
+                return;
+            }
+        }
+        g_v91_peer_j_valid = true;
+        trace_phase("V91 peer J: %d bits, %d DIL segment(s)", g_v91_rx_j_len,
+                    (int)g_v91_peer_j.n);
+        /* The peer ends J with Em, or with PHIL when it is still waiting for
+         * our own descriptor (8.2.1.5-8.2.1.7). */
+        v91_live_rx_enter_stage(V91_LIVE_RX_PHIL);
+        return;
+    }
+    case V91_LIVE_RX_PHIL: {
+        int bit = v91_rx_diff_scrambled_bit(&g_v91_rx, cw);
+
+        g_v91_rx_phil_count++;
+        if (bit) {
+            if (g_v91_rx_em_run != 0 || g_v91_rx_phil_count > V91_LIVE_SCR_MAX_SYMBOLS) {
+                v91_live_rx_fail_locked(g_v91_rx_em_run ? "Em" : "PHIL");
+                return;
+            }
+            return;
+        }
+        /* Em is 12 scrambled zeros; PHIL's ones never contain a zero. */
+        if (++g_v91_rx_em_run == V91_EM_SYMBOLS) {
+            trace_phase("V91 RX Em after %d PHIL symbol(s)", g_v91_rx_phil_count - V91_EM_SYMBOLS);
+            v91_live_rx_enter_dil();
+        }
         return;
     }
     case V91_LIVE_RX_DIL: {
-        int dil_len = v91_dil_symbol_count(&g_v91_default_dil);
+        int dil_len = v91_dil_symbol_count(g_v91_rx_dil_expect);
 
         if (g_v91_rx_accum_len == 0)
             g_v91_rx_dil_start_abs = abs_pos;
         if (!v91_live_rx_collect(cw, dil_len))
             return;
         if (!v91_rx_dil_codewords(&g_v91_rx, g_v91_rx_accum, dil_len,
-                                  &g_v91_default_dil)) {
+                                  g_v91_rx_dil_expect)) {
             v91_live_rx_fail_locked("DIL");
             return;
         }

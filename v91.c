@@ -770,6 +770,38 @@ int v91_j_descriptor_bit_len(const v91_dil_desc_t *desc)
     return v90_dil_descriptor_bit_len(&v90_desc);
 }
 
+/* Total length of a J (Table 12/V.90) from its first 51 descrambled bits, so a
+ * receiver can tell where J ends before it has seen the rest.  Returns 0 while
+ * more bits are needed, -1 if the prefix cannot be a descriptor. */
+int v91_j_length_from_prefix(const uint8_t *bits, int nbits)
+{
+    v90_dil_desc_t d;
+    int i;
+    int len;
+
+    if (!bits || nbits < 0)
+        return -1;
+    for (i = 0; i < nbits && i < 17; i++) {
+        if (!bits[i])
+            return -1;
+    }
+    if (nbits > 17 && bits[17])
+        return -1;
+    if (nbits < 51)
+        return 0;
+    memset(&d, 0, sizeof(d));
+    for (i = 0; i < 8; i++)
+        d.n |= (uint8_t) ((bits[18 + i] & 1U) << i);
+    for (i = 0; i < 7; i++) {
+        d.lsp |= (uint8_t) ((bits[35 + i] & 1U) << i);
+        d.ltp |= (uint8_t) ((bits[43 + i] & 1U) << i);
+    }
+    d.lsp++;
+    d.ltp++;
+    len = v90_dil_descriptor_bit_len(&d);
+    return (len > 0 && len <= V91_J_MAX_BITS) ? len : -1;
+}
+
 int v91_tx_j_codewords(v91_state_t *s,
                        uint8_t *g711_out,
                        int g711_max,

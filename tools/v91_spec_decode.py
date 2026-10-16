@@ -172,26 +172,21 @@ def parse_cp(bits, rep):
     return cp, total
 
 
-def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload):
-    rep = Report(name)
-    raw = open(path, "rb").read()
-    syms = [to_ucode_sign(c, law) for c in raw]
+def find_infos(syms):
+    """Ez then the run of valid INFO frames: (ez_start, end_of_ez, infos, end)."""
     i, N = 0, len(syms)
-    # Ez: 24 identical Ucode-66 symbols (7.6)
     ez = None
     while i + 24 <= N:
         if all(s == syms[i] and s[0] == 66 for s in syms[i:i + 24]):
             ez = i
             break
         i += 1
-    if not rep.check(ez is not None, "Ez found"):
-        return rep, None, None
-    # skip any longer run of the same symbol
+    if ez is None:
+        return None, None, [], 0
     i = ez
     while i < N and syms[i] == syms[ez]:
         i += 1
-    rep.ok("Ez at %d (%d symbols)" % (ez, i - ez))
-    # INFO frames
+    ez_end = i
     infos = []
     while i + 62 <= N:
         f, probs = parse_info(syms[i:i + 62])
@@ -199,28 +194,134 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload):
             break
         infos.append(f)
         i += 62
-    rep.check(len(infos) >= 2, "%d INFO frames decoded (sync, CRC, fill valid)" % len(infos))
-    if len(infos) < 2:
-        return rep, None, None
-    rep.check(not infos[0]["ack"] and infos[-1]["ack"],
-              "INFO repeats with ack=0, ends with INFO' (ack=1)")
-    rep.check(all(f["default_dil"] for f in infos), "default DIL requested (bit 26 = 0)")
-    info = infos[-1]
-    rep.ok("INFO fields: cc=%d alaw=%d maxpow=%d transparent=%d" %
-           (info["cc"], info["alaw"], info["maxpow"], info["transp"]))
-    rep.check(info["alaw"] == (1 if law == "alaw" else 0), "INFO bit 39 matches the law")
-    # Eu: 12 symbols, Ucode 66, constant sign (zeros, differential)
-    eu = syms[i:i + 12]
-    rep.check(len(eu) == 12 and all(u == 66 for u, _ in eu) and len({s for _, s in eu}) == 1,
-              "Eu: 12 x Ucode 66, differential zeros")
-    i += 12
-    # DIL
+    return ez, ez_end, infos, i
+
+
+def quick_info(path, law):
+    """The INFO' fields of a stream, or None."""
+    syms = [to_ucode_sign(c, law) for c in open(path, "rb").read()]
+    _, _, infos, _ = find_infos(syms)
+    return infos[-1] if len(infos) >= 2 else None
+
+
+def j_length(bits):
+    """Table 12/V.90 length from the header fields (7.9)."""
+    n = field(bits, 18, 8)
+    lsp = field(bits, 35, 7) + 1
+    ltp = field(bits, 43, 7) + 1
+    alpha = (lsp + 15) // 16 * 17
+    beta = alpha + (ltp + 15) // 16 * 17
+    crc_start = 187 + beta + (n + 1) // 2 * 17
+    total = crc_start + 18
+    return total + (total & 1), crc_start, n, lsp, ltp
+
+
+def check_startup_dil(rep, syms, i, own_def, peer_def):
+    """Everything between the last INFO' and the end of the DIL (8.2.1.4-8.2.1.7,
+    Figures 1-3).  The DIL a modem receives is the one it asked for, so when a
+    descriptor is given here it is the DEFAULT one (this harness specifies the
+    default descriptor through J, which keeps the DIL check comparable).
+    Returns the index after the DIL."""
+    prev = syms[i - 1][1]
+    gpc = Gpc()
+    if own_def and peer_def:
+        eu = syms[i:i + 12]
+        rep.check(len(eu) == 12 and all(u == 66 for u, _ in eu) and len({s for _, s in eu}) == 1,
+                  "Eu: 12 x Ucode 66, differential zeros")
+        i += 12
+    else:
+        if not own_def:
+            # J: differential coder carries on from INFO, scrambler starts at zero (7.9)
+            bits = []
+            total = None
+            j = i
+            while j < len(syms) and syms[j][0] == 66:
+                bits.append(gpc.push(syms[j][1] ^ prev))
+                prev = syms[j][1]
+                j += 1
+                if total is None and len(bits) == 51:
+                    if bits[:17] != [1] * 17 or bits[17] != 0:
+                        break
+                    total = j_length(bits)[0]
+                if total is not None and len(bits) == total:
+                    break
+            if not rep.check(total is not None and len(bits) == total,
+                             "J present after INFO' (bit 26 = 1)"):
+                return None
+            _, crc_start, n, lsp, ltp = j_length(bits)
+            rep.check(bits[:17] == [1] * 17 and bits[17] == 0 and not any(bits[26:35])
+                      and bits[42] == 0 and bits[50] == 0,
+                      "J framing: 17 ones, zero, reserved zeros (Table 12/V.90)")
+            # Table 12/V.90: the 17 sync ones + zero, bit 34 and every start bit
+            # (each 17th from bit 51) are outside the CRC generator.
+            covered = [b for k, b in enumerate(bits[:crc_start])
+                       if not (k < 18 or k == 34 or (k >= 51 and (k - 51) % 17 == 0))]
+            rep.check(crc16(covered) == field(bits, crc_start + 1, 16)
+                      and bits[crc_start + 17] == 0,
+                      "J CRC over %d bits" % crc_start)
+            rep.check((n, lsp, ltp) == (125, 12, 12),
+                      "J asks for the default descriptor (n=%d lsp=%d ltp=%d)" % (n, lsp, ltp))
+            rep.ok("J: %d bits" % total)
+            i = j
+        else:
+            gpc, prev = Gpc(), 0                  # PHIL without J restarts both coders (7.10)
+        # PHIL (scrambled ones), then Em (12 scrambled zeros)
+        ones = 0
+        zeros = 0
+        j = i
+        while j < len(syms) and syms[j][0] == 66:
+            b = gpc.push(syms[j][1] ^ prev)
+            prev = syms[j][1]
+            j += 1
+            if b == 1 and zeros == 0:
+                ones += 1
+            elif b == 0:
+                zeros += 1
+                if zeros == 12:
+                    break
+            else:
+                break
+        rep.check(zeros == 12, "Em: 12 descrambled zeros after %d PHIL symbol(s)" % ones)
+        if not own_def and peer_def:
+            rep.check(ones == 0, "no PHIL when the DIL requested is already known (8.2.1.6)")
+        if own_def or not peer_def:
+            rep.check(ones > 0 or not own_def, "PHIL sent while waiting for the peer's J (8.2.1.6)")
+        if zeros != 12:
+            return None
+        i = j
     exp = expected_default_dil()
     got = syms[i:i + len(exp)]
     bad = sum(1 for a, b in zip(got, exp) if a != b)
     rep.check(len(got) == len(exp) and bad == 0,
               "default DIL: %d symbols, %d mismatches against Table 5 / V.90 8.4.1" % (len(got), bad))
-    i += len(exp)
+    return i + len(exp)
+
+
+def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload, peer_default=True):
+    rep = Report(name)
+    raw = open(path, "rb").read()
+    syms = [to_ucode_sign(c, law) for c in raw]
+    N = len(syms)
+    ez, ez_end, infos, i = find_infos(syms)
+    if not rep.check(ez is not None, "Ez found"):
+        return rep, None, None
+    rep.ok("Ez at %d (%d symbols)" % (ez, ez_end - ez))
+    rep.check(len(infos) >= 2, "%d INFO frames decoded (sync, CRC, fill valid)" % len(infos))
+    if len(infos) < 2:
+        return rep, None, None
+    rep.check(not infos[0]["ack"] and infos[-1]["ack"],
+              "INFO repeats with ack=0, ends with INFO' (ack=1)")
+    own_def = infos[-1]["default_dil"]
+    rep.check(all(f["default_dil"] == own_def for f in infos),
+              "DIL request in INFO bit 26 (%s) is the same in every frame"
+              % ("default" if own_def else "specified"))
+    info = infos[-1]
+    rep.ok("INFO fields: cc=%d alaw=%d maxpow=%d transparent=%d" %
+           (info["cc"], info["alaw"], info["maxpow"], info["transp"]))
+    rep.check(info["alaw"] == (1 if law == "alaw" else 0), "INFO bit 39 matches the law")
+    i = check_startup_dil(rep, syms, i, own_def, peer_default)
+    if i is None:
+        return rep, None, None
     # SCR / CP / Es : descramble from here
     gpc, prev = Gpc(), 0
     bits = []
@@ -397,9 +498,13 @@ def main():
         cp = None
         info = None
 
+    qi = {"A": quick_info(a_path, law), "B": quick_info(b_path, law)}
+    pdef = {"A": qi["B"]["default_dil"] if qi["B"] else True,
+            "B": qi["A"]["default_dil"] if qi["A"] else True}
     boxes = {}
     for name, path in (("A", a_path), ("B", b_path)):
-        r, cp, info = decode_stream(path, law, lambda: False, lambda: None, name, None)
+        r, cp, info = decode_stream(path, law, lambda: False, lambda: None, name, None,
+                                    pdef[name])
         boxes[name] = (r, cp, info)
     fails = 0
     for name, path, other in (("A", a_path, "B"), ("B", b_path, "A")):
@@ -407,7 +512,7 @@ def main():
         _, other_cp, _ = boxes[other]
         cc = bool(other_info and other_info["cc"])
         rep, _, _ = decode_stream(path, law, lambda cc=cc: cc, lambda cp=other_cp: cp,
-                                  name, payloads[name])
+                                  name, payloads[name], pdef[name])
         print("== stream %s (%s) ==" % (name, path))
         print("\n".join(rep.notes))
         fails += len(rep.fails)

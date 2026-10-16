@@ -105,6 +105,10 @@ def main() -> int:
         "--escape", action="store_true",
         help="both ends abandon V.91 start-up after 0.7 s and escape to V.34 (8.3)")
     parser.add_argument(
+        "--specify-dil", choices=("caller", "answerer", "both"), default=None,
+        help="that end requests a specified DIL (INFO bit 26 = 1, J, PHIL, Em; 8.2.1.5-8.2.1.7, "
+             "Figures 2 and 3)")
+    parser.add_argument(
         "--attempts", type=int, default=3,
         help="run again (in a fresh process) up to this many times when a call fails; the "
              "host's 100-200 ms scheduling stalls and V.8 timeouts are not V.91 defects, "
@@ -147,6 +151,13 @@ def main() -> int:
         for env in (caller_env, answerer_env):
             env["V91_TEST_ESCAPE_AFTER_MS"] = "700"
         label += ", escape to V.34"
+
+    if args.specify_dil in ("caller", "both"):
+        caller_env["ME_V91_SPECIFY_DIL"] = "1"
+    if args.specify_dil in ("answerer", "both"):
+        answerer_env["ME_V91_SPECIFY_DIL"] = "1"
+    if args.specify_dil:
+        label += f", {args.specify_dil} specifies the DIL (J/PHIL/Em)"
 
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory(prefix="v91-serial-pair-") as temp_dir:

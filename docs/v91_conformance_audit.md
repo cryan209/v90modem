@@ -30,7 +30,7 @@ only on the loopback/session path, missing = not there):
 | 7.3 | DIL; default DIL (Table 5) | done (`v91_default_dil_init` matches N=125, LSP/LTP 12, SP 0FC0, TP 0FFF, H=1, training 124,0,123,1...62) |
 | 7.4 - 7.7 | Eu / Es / Ez / Em lengths and initialisation | done (12/12/24/12 symbols); init rules covered by loopback tests only |
 | 7.8 | INFO (Table 6) | done as a frame; live engine only ever uses default DIL, no control channel, no transparent request |
-| 7.9 / 7.10 | J / PHIL | partial: in `v91.c` and the session/loopback path, **not in the live engine** |
+| 7.7 / 7.9 / 7.10 | Em / J / PHIL | done, live behind `ME_V91_SPECIFY_DIL=1` (2026-10-17); default start-up still asks for the default DIL |
 | 7.11 | SCR, multiple of 6 symbols | done |
 | 8.1 | V.8 selection, 75 +/- 5 ms silence | done (V.8 `V8_PSTN_PCM_MODEM_V91` picks it; `V91_PHASE1_SILENCE_SYMBOLS` 600) |
 | 8.2 | Start-up Figures 1-3 | Figure 1 only (both default DIL) live; Figures 2-3 on the session path |
@@ -133,8 +133,7 @@ against the text and exercised by the loopback tests
    it in the control channel's secondary data or a private INFO bit nobody
    else reads).
 3. Control channel (Table 3) with slip detection, then retrain/cleardown on it.
-4. 8.3 timers and escape to V.34, 8.4/8.5 recovery timer, J/PHIL/Em in the live
-   engine, transparent request live.
+4. 8.3 timers and escape to V.34, 8.4/8.5 recovery timer, transparent request live.  (J/PHIL/Em: live 2026-10-17.)
 5. V.54 loop 3 (clause 9) last.
 
 ## Peer availability
@@ -246,8 +245,8 @@ constellation under robbing (it is real scrambled ones now and does not).
   data block) used to hang the call up; in these runs it now shows up as
   "retrain #1: frame decode failed" on both ends and the call survives.
 - Pair test: `make v91-serial-pair-test` now also runs `--retrain` and
-  `--escape`.  Still open: J/PHIL/Em and transparent-mode request on the live
-  path, V.54 loop 3, a spec-only decoder on our own tap.
+  `--escape`.  Still open: transparent-mode request on the live
+  path, V.54 loop 3.
 
 ### Spec-only decoder (`tools/v91_spec_decode.py`) -- added 2026-10-16
 
@@ -303,3 +302,23 @@ Things found on the way:
   process (a real bug fails all three), and the `--escape` variant checks the
   escape and the start of V.34 Phase 2 on both ends rather than a finished V.34
   call (which is slow and timing-sensitive here).
+
+### J / PHIL / Em on the live path -- 2026-10-17
+
+`ME_V91_SPECIFY_DIL=1` sets INFO bit 26 and runs the specified-DIL start-up of
+8.2.1.5-8.2.1.7 (Figures 2 and 3) in `modem_engine.c`: the TX script builder
+chooses Eu+DIL (both default), J then Em+DIL (peer default), or J/nothing
+followed by PHIL until the peer's J is in (`V91_LIVE_TX_PHIL`, escape to V.34 if
+it never arrives); the receiver gains J and PHIL/Em stages
+(`v91_j_length_from_prefix()` finds the end of J from its header, so no length
+is assumed).  The descriptor we request is the default one, so the DIL check
+and rate selection are unchanged -- only the sequence differs.  A zero-length
+DIL from the peer is handled on the transmit side (Em alone), but we never
+request one, so that path has no test.
+
+`tools/v91_serial_pair_test.py --specify-dil {caller,answerer,both}` (in
+`make v91-serial-pair-test`) passes with data both ways, and
+`tools/v91_spec_decode.py` checks J (framing, Table 12 CRC span, descriptor
+fields), PHIL (none when the DIL is already known, some when waiting) and Em on
+our taps.  Both ends are this tree, so a foreign peer's J is still unverified;
+the decoder's J CRC span mirrors `v90_dil_crc16_bits`, not an independent read.
