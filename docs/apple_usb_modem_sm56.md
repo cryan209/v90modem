@@ -3075,3 +3075,62 @@ python3 tools/apple_snr_sweep.py --quiet-pbx root@asterisk.net.cryan.nz \
 MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_snr_report.py \
   --self-check artifacts/apple-snr-check
 ```
+
+## Fresh physical call to PBX 9667 (2026-10-16)
+
+The current dialplan is Answer, Wait(1), Playback(sweep), Hangup. The actual
+`/var/lib/asterisk/sounds/sweep.wav` retrieved for comparison is mono 16-bit
+8000 Hz, 160000 samples / 20 seconds. Its sweep is logarithmic, about
+`f(t) proportional to exp(0.2649*t)`, not the minutes-long approximately
+linear sweep inferred from the older short capture. The current reference
+therefore supersedes that description of 9667.
+
+Called 9667 physically with modem 0:13 / audio UID 145430. The standalone
+audio instrument sent the four DTMF digits at native 10286 Hz and recorded
+the dial/answer interval separately from the following 26-second receive
+capture. There is an unmeasured audio restart gap between those files; they
+are not spliced or treated as one sample-continuous recording. No modem
+engine training or local DAA loopback was enabled. Receive gain remained
+zero. The line was released in a finally block and on-hook verified.
+
+`tools/apple_9667_report.py` compares short-window received RMS against the
+actual source WAV at corresponding sweep frequencies, normalizing to 1 kHz.
+The recording includes approximately the last 17 seconds of sweep followed
+by a call-progress tone. An abrupt downward frequency jump bounds the sweep;
+post-call audio is excluded from the frequency-response estimate. Finite
+windows and the end transition limit the highest-frequency measurements;
+there is no quoted result beyond the approximately 3.73 kHz analyzed range.
+
+| received frequency | response relative to 1 kHz |
+|---|---|
+| 50 Hz | -22.18 dB |
+| 100 Hz | -7.93 dB |
+| 200 Hz | -1.19 dB |
+| 300 Hz | -0.37 dB |
+| 1 kHz | 0 dB |
+| 2 kHz | -0.11 dB |
+| 3 kHz | -0.21 dB |
+| 3.4 kHz | -0.51 dB |
+| 3.6 kHz | -2.62 dB |
+
+The upper -3 dB crossing is approximately 3.63 kHz for this complete
+PBX/ATA/line/Apple receive path. It is narrower than the 4.44 kHz combined
+local-loopback result at 10286 Hz: the PBX reference is itself an 8 kHz
+signal, and this is a different path. No component-specific filter or
+extension beyond the DS0 band can be inferred from this call alone.
+
+At 1 kHz the receive level is about 20213 RMS counts, approximately -1.19 dB
+relative to a full-scale digital sine, versus 4745 RMS counts for the earlier
+strongest internal analog-loop tone. No analyzed sweep window hits the
+32760-count near-rail threshold. The whole receive file *does* contain rail
+samples (5.93%): these belong to the call-progress tone after the sweep,
+not a clipped sweep. The instrument's whole-file RMS label "noise floor"
+is inappropriate for a recording full of tones; it is not a live-call SNR.
+The source-to-received digital level at 1 kHz is +1.85 dB, which describes
+two digital taps with different reference scales and is not a calibrated
+analog gain or dBm measurement. Both audio runs reported zero render errors.
+
+Evidence: `artifacts/apple-9667-20261016/` contains source WAV, raw dial and
+receive taps, final hook status, call log, response CSV/JSON and visually
+inspected `call-response.png`. This was a received test sweep, not CONNECT
+or payload evidence, and it does not demonstrate a change in live-call SNR.
