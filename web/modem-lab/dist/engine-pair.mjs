@@ -2,6 +2,7 @@ import createModem from './modem-engine.mjs';
 import {negotiationRecords} from './negotiation.mjs';
 export function expand(code){const u=(~code)&255;const t=(((u&15)<<3)+132)<<((u>>4)&7);return ((u&128)?132-t:t-132)/32768;}
 export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,startup={v8:true,v8bis:false}){
+  if(['x2','flex'].includes(String(mode)))return runPcmDemo(String(mode),text,onProgress,shouldStop);
   if(![32,34,90].includes(Number(mode)))throw new Error('Unsupported modem mode');
   if(startup.v8===false&&Number(mode)!==32)throw new Error('V.34 and V.90 require V.8 in this demo');
   if(startup.v8bis&&startup.v8===false)throw new Error('V.8bis requires V.8 in this demo');
@@ -58,4 +59,39 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
     return {left:l,right:r,events,startup,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
       rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate()};
   }finally{a._free(pa);b._free(pb);a._browser_destroy();b._browser_destroy();}
+}
+
+// Two isolated instances: the receiver receives only DS0 codewords and a
+// fixed public profile. This is a downstream payload demonstration, not startup.
+async function runPcmDemo(mode,text,onProgress,shouldStop){
+ const id=mode==='x2'?2:56,name=mode==='x2'?'x2':'K56flex';
+ const bytes=new TextEncoder().encode(text);
+ if(bytes.length>60000)throw new Error('Message exceeds 60000 UTF-8 bytes');
+ const packet=new Uint8Array(bytes.length+2);packet[0]=bytes.length&255;packet[1]=bytes.length>>8;packet.set(bytes,2);
+ onProgress({time:0,state:'Encoding downstream PCM payload'});
+ await new Promise(resolve=>setTimeout(resolve,0));if(shouldStop())throw new Error('Call cancelled');
+ const a=await createModem({print:()=>{},printErr:()=>{}}),b=await createModem({print:()=>{},printErr:()=>{}});
+ if(a.HEAPU8.buffer===b.HEAPU8.buffer)throw new Error('PCM instances share memory');
+ const capacity=Math.ceil(packet.length*8/42)*8+16;
+ const src=a._malloc(packet.length),tx=a._malloc(capacity),rx=b._malloc(capacity),decoded=b._malloc(packet.length+16);
+ try{
+  a.HEAPU8.set(packet,src);const samples=a._browser_pcm_encode(id,src,packet.length,tx,capacity);
+  if(samples<0)throw new Error(name+' encoder rejected the payload');
+  const octets=a.HEAPU8.slice(tx,tx+samples);b.HEAPU8.set(octets,rx);
+  const n=b._browser_pcm_decode(id,rx,samples,decoded,packet.length+16);
+  if(n<2)throw new Error(name+' decoder rejected the received codewords');
+  const data=b.HEAPU8.slice(decoded,decoded+n),size=data[0]|(data[1]<<8);
+  if(size>n-2)throw new Error('Corrupt PCM message length');
+  const received=new TextDecoder().decode(data.slice(2,2+size));
+  const prefix=2400,length=prefix+samples+4000,left=new Float32Array(length),right=new Float32Array(length);
+  left.set(Float32Array.from(octets,expand),prefix);
+  const end=(prefix+samples)/8000,passed=received===text;
+  return {kind:'pcm',mode,profile:mode==='x2'?'Short-record allocation 15; B=37, MD=5; GPC':'µ-law, 56000 bit/s, no impairment report',
+   left,right,events:[{time:0,message:name+' downstream PCM · fixed profile · no dial-up negotiation'},
+    {time:.3,message:'Encoding '+bytes.length+' UTF-8 bytes at 56,000 bit/s'},
+    {time:end,received},{time:end,message:passed?'Payload verified':'Payload mismatch'}],
+   received,reply:'',passed,rate:56000,txRate:56000,rxRate:0,constellations:[],protocol:[],droppedProtocol:0,
+   negotiation:{records:[],frames:[]},wireBits:{},bitClock:[],g711:{serverTx:Array.from(octets,x=>x.toString(16).padStart(2,'0')).join('')},
+   pcm:{samples,frameSamples:mode==='x2'?6:8,frameBits:mode==='x2'?42:56,sourceBytes:bytes.length,decodedBytes:size},logs:[]};
+ }finally{a._free(src);a._free(tx);b._free(rx);b._free(decoded);}
 }

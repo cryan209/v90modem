@@ -3,26 +3,35 @@ import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
 let mode='v21',context,source,worker,result,started=0,animation=0,downloadUrl,playing=false,elapsed=0,lastInspect=-1,captureUrl,plotType='spectrum';
 const descriptions={
+ x2:['The first wave of PCM modems.','The real x2 mapper sends your text as six-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
+ flex:['Eight samples, fifty-six bits.','The real K56flex mapper sends your text as eight-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
  bell103:['The sound of 300 bits a second.','Bell 103’s originating channel uses 1270 Hz for a 1 and 1070 Hz for a 0. A separate JavaScript receiver recovers your message from the waveform.'],
  '32':['A conversation before the conversation.','Two instances of the real modem engine negotiate V.32 at up to 9,600 bit/s, train their receivers, and exchange your message and an acknowledgement over G.711.'],
  '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions. Automatic rate selection reaches 33,600 bit/s on this virtual line.'],
  '90':['A digital end. An analogue end.','V.90 sends PCM downstream and QAM upstream. The calling modem runs the analogue role; the answering modem runs the digital role. Both train and recover real payload bytes.'],
 };
+const isPcm=()=>['x2','flex'].includes(mode);
 const isFsk=()=>mode==='v21'||mode==='bell103';
 function updateStartup(){
  const fsk=isFsk();if(mode!=='32')$('startupV8').checked=true;
- $('startupV8').disabled=fsk||mode!=='32'||playing;
+ if(isPcm()){$('startupV8').checked=false;$('startupBis').checked=false;}
+ $('startupV8').disabled=isPcm()||fsk||mode!=='32'||playing;
  if(!$('startupV8').checked)$('startupBis').checked=false;
- $('startupBis').disabled=fsk||!$('startupV8').checked||playing;
+ $('startupBis').disabled=isPcm()||fsk||!$('startupV8').checked||playing;
  $('v34RateControl').hidden=mode!=='34';$('v34Rate').disabled=mode!=='34'||playing;
- $('startupHint').textContent=fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
+ $('startupHint').textContent=isPcm()?'Fixed downstream profile; V.8/V.8bis and line training are not run.':fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
 }
 function updateCount(){const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;$('dial').disabled=n===0||n>240||playing;}
 function select(next){stop();mode=next;document.querySelectorAll('.mode').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
  $('modeTitle').textContent=descriptions[mode][0];$('modeDescription').textContent=descriptions[mode][1];
- updateStartup();$('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':'WEBASSEMBLY · REAL ENGINE';
- $('showConstellation').disabled=isFsk();setPlot(isFsk()?'spectrum':'constellation');
+ updateStartup();$('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':isPcm()?'WEBASSEMBLY · PCM PAYLOAD':'WEBASSEMBLY · REAL ENGINE';
+ $('showConstellation').disabled=isFsk()||isPcm();setPlot(isFsk()||isPcm()?'spectrum':'constellation');
+ $('inspectSide').disabled=isPcm();$('inspectStage').disabled=isPcm();
+ $('inspectorFeatures').textContent=isPcm()?'Fixed profile · PCM codewords':'V.8 · INFO · Ja / DIL · LAPM';
+ $('dial').textContent=isPcm()?'▶ Encode & send':'▶ Dial & send';
+ $('trafficLabel').textContent=isPcm()?'SERVER → PCM RECEIVER':'CALLER → ANSWERER';
+ $('scopeLabel').textContent=isPcm()?'SERVER PCM WAVEFORM · 8 kHz':'CALLER WAVEFORM · 8 kHz';
  $('noise').disabled=!isFsk();$('noiseHint').textContent=isFsk()?'Noise is added to the FSK signal before the receiver sees it.':'The advanced modes use a clean, byte-exact G.711 virtual line.';
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('status').textContent='Ready to dial';$('events').textContent='The receiver listens to the generated samples.\nNo prerecorded audio. No text shortcut.';
  elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;$('inspectOutput').textContent='No capture yet.';
@@ -70,7 +79,7 @@ function drawInspector(t,force=false){
  $('inspectTimeValue').textContent=t.toFixed(2)+' s';
  if(!force&&Math.abs(t-lastInspect)<.15)return;lastInspect=t;
  $('inspectOutput').textContent=result?.protocol?inspectorText(result,t,$('inspectView').value,$('inspectSide').value,$('inspectStage').value):isFsk()?'This FSK demo sends an idle carrier and asynchronous characters. It has no V.8, INFO, Ja/DIL, or LAPM negotiation.':'No capture yet.';
- $('inspectHint').textContent=`Endpoint names identify the observing modem; “peer” means the other modem. Times are sample-clock frame timestamps (20 ms resolution).${$('inspectStage').value==='pcm'?' Ja describes the requested learning sequence; DIL is the PCM learning waveform sent in response.':''}${result?.droppedProtocol?' Log limit reached: '+result.droppedProtocol+' lines omitted.':''}`;
+ $('inspectHint').textContent=isPcm()?'Downstream payload only. The fixed profile is shared with an independent receiver; no handshake or upstream is simulated.':`Endpoint names identify the observing modem; “peer” means the other modem. Times are sample-clock frame timestamps (20 ms resolution).${$('inspectStage').value==='pcm'?' Ja describes the requested learning sequence; DIL is the PCM learning waveform sent in response.':''}${result?.droppedProtocol?' Log limit reached: '+result.droppedProtocol+' lines omitted.':''}`;
  $('inspectOutput').scrollTop=$('inspectOutput').scrollHeight;
 }
 function draw(t){drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
@@ -104,7 +113,7 @@ async function dial(){
 function fail(message){stop();$('status').textContent='Could not run: '+message;$('events').textContent='Serve this folder over HTTP and build the WASM assets first.\n'+message;}
 $('inspectTime').addEventListener('input',()=>{$('inspectFollow').checked=false;drawInspector(elapsed,true);});$('inspectFollow').addEventListener('change',()=>drawInspector(elapsed,true));
 $('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(const id of ['inspectView','inspectSide','inspectStage'])$(id).addEventListener('change',()=>drawInspector(elapsed,true));
-$('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage='Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});
+$('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage=result.kind==='pcm'?'Downstream payload only: fixed profile, exact server PCM codewords, independent decoded UTF-8 text; no dial-up handshake or upstream.':'Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});
 $('showSpectrum').addEventListener('click',()=>{setPlot('spectrum');draw(elapsed);});$('showConstellation').addEventListener('click',()=>{setPlot('constellation');draw(elapsed);});
 $('startupV8').addEventListener('change',updateStartup);$('startupBis').addEventListener('change',updateStartup);
 $('dial').addEventListener('click',dial);$('stop').addEventListener('click',stop);$('message').addEventListener('input',updateCount);

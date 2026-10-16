@@ -4594,6 +4594,8 @@ var _browser_received_n = Module['_browser_received_n'] = makeInvalidEarlyAccess
 var _browser_received = Module['_browser_received'] = makeInvalidEarlyAccess('_browser_received');
 var _browser_clear_received = Module['_browser_clear_received'] = makeInvalidEarlyAccess('_browser_clear_received');
 var _browser_destroy = Module['_browser_destroy'] = makeInvalidEarlyAccess('_browser_destroy');
+var _browser_pcm_encode = Module['_browser_pcm_encode'] = makeInvalidEarlyAccess('_browser_pcm_encode');
+var _browser_pcm_decode = Module['_browser_pcm_decode'] = makeInvalidEarlyAccess('_browser_pcm_decode');
 var _emscripten_stack_get_end = makeInvalidEarlyAccess('_emscripten_stack_get_end');
 var _emscripten_stack_get_base = makeInvalidEarlyAccess('_emscripten_stack_get_base');
 var _emscripten_stack_init = makeInvalidEarlyAccess('_emscripten_stack_init');
@@ -4624,6 +4626,8 @@ function assignWasmExports(wasmExports) {
   _browser_received = Module['_browser_received'] = createExportWrapper('browser_received', 0);
   _browser_clear_received = Module['_browser_clear_received'] = createExportWrapper('browser_clear_received', 0);
   _browser_destroy = Module['_browser_destroy'] = createExportWrapper('browser_destroy', 0);
+  _browser_pcm_encode = Module['_browser_pcm_encode'] = createExportWrapper('browser_pcm_encode', 5);
+  _browser_pcm_decode = Module['_browser_pcm_decode'] = createExportWrapper('browser_pcm_decode', 5);
   _emscripten_stack_get_end = wasmExports['emscripten_stack_get_end'];
   _emscripten_stack_get_base = wasmExports['emscripten_stack_get_base'];
   _emscripten_stack_init = wasmExports['emscripten_stack_init'];

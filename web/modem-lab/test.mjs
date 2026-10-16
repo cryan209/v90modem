@@ -1,3 +1,4 @@
+import createModem from './dist/modem-engine.mjs';
 import assert from 'node:assert/strict';
 import {transmit,receive,wav} from './dist/fsk.mjs';
 import {hdlcFrames,inspectorText,negotiationRecords} from './dist/negotiation.mjs';
@@ -66,4 +67,43 @@ for(const v8bis of [false,true])for(const ceiling of [24000,0]){
  assert.ok(!r.protocol.some(e=>/V\.34.*(?:asking for .*retraining|training failed|restarting Phase 2)/.test(e.line)));
  assert.equal(r.negotiation.frames.filter(f=>!f.valid).length,0);
  console.log(`PASS: V.34 sustained 12000-byte transfer, V.8bis=${v8bis}, ceiling=${ceiling||'automatic'}, ${r.txRate}/${r.rxRate}, no retrains or invalid HDLC`);
+}
+
+// Proprietary PCM demonstrations must really decode, without claiming startup.
+for(const mode of ['x2','flex'])for(const text of [...examples,sustained]){
+ const r=await runPair(mode,text);
+ assert.equal(r.kind,'pcm');assert.ok(r.passed);assert.equal(r.received,text);
+ assert.equal(r.reply,'');assert.equal(r.txRate,56000);assert.equal(r.rxRate,0);
+ assert.equal(r.pcm.frameSamples,mode==='x2'?6:8);
+ assert.equal(r.pcm.frameBits,mode==='x2'?42:56);
+ assert.equal(r.g711.serverTx.length,r.pcm.samples*2);
+ assert.equal(r.negotiation.frames.length,0);assert.equal(r.protocol.length,0);
+ assert.ok(!r.events.some(e=>/Connected|V\.8|LAPM/.test(e.message||'')));
+ assert.match(inspectorText(r,60),/no analogue equalizer/);
+ assert.ok(inspectorText(r,0,'raw').includes('(no codewords yet)'));
+ assert.ok(r.left.some(x=>x!==0));assert.ok(r.right.every(x=>x===0));
+ console.log(`PASS: ${mode} downstream PCM, ${new TextEncoder().encode(text).length} bytes, independent decode, no fabricated connection`);
+}
+for(const mode of ['x2','flex']){
+ let cancelled=false;
+ await assert.rejects(runPair(mode,'cancel',()=>{cancelled=true;},()=>cancelled),/Call cancelled/);
+}
+
+// A damaged DS0 must affect the independent decoder, rather than returning
+// text from the transmitter or an out-of-band application copy.
+for(const [mode,id] of [['x2',2],['flex',56]]){
+ const r=await runPair(mode,'Independent PCM receiver test');
+ const wire=Uint8Array.from(r.g711.serverTx.match(/../g),h=>parseInt(h,16));
+ wire.fill(0,0,r.pcm.frameSamples);
+ const m=await createModem({print:()=>{},printErr:()=>{}}),input=m._malloc(wire.length),output=m._malloc(256);
+ try{
+  m.HEAPU8.set(wire,input);const n=m._browser_pcm_decode(id,input,wire.length,output,256);
+  const data=n>0?m.HEAPU8.slice(output,output+n):new Uint8Array();
+  const size=data[0]|(data[1]<<8);
+  const decoded=new TextDecoder().decode(data.slice(2,2+size));
+  assert.ok(n<0||decoded!=='Independent PCM receiver test');
+  assert.equal(m._browser_pcm_encode(999,input,1,output,256),-1);
+  assert.equal(m._browser_pcm_decode(id,input,wire.length-1,output,256),-1);
+  console.log(`PASS: ${mode} detects damaged codewords and rejects invalid frames`);
+ }finally{m._free(input);m._free(output);}
 }

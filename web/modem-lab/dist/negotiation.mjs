@@ -73,6 +73,12 @@ export function negotiationRecords(result){
  return {records:records.sort((a,b)=>a.time-b.time),frames:rawFrames};
 }
 export function inspectorText(result,time,view='simple',side='all',stage='all'){
+ if(result.kind==='pcm'){
+  const count=Math.min(result.pcm.samples,Math.max(0,Math.floor((time-.3)*8000)));
+  const header=`${result.mode==='x2'?'x2':'K56flex'} DOWNSTREAM PCM DEMO\nFixed profile: ${result.profile}\n${result.pcm.frameBits} bits / ${result.pcm.frameSamples} samples · 56,000 bit/s\nIndependent exact-codeword receiver; no analogue equalizer, V.8/V.8bis negotiation, LAPM or upstream.\n${count} received codewords so far.`;
+  return view==='raw'?header+'\nLatest 64 exact µ-law codewords:\n'+(result.g711.serverTx.slice(Math.max(0,count-64)*2,count*2).match(/.{1,2}/g)?.join(' ')||'(no codewords yet)'):header;
+ }
+
  const allowed=r=>r.time<=time && (side==='all'||r.side===side) && (stage==='all'||r.stage===stage);
  const stamp=r=>`${r.time.toFixed(2).padStart(5)} s  ${r.side.toUpperCase()}`;
  if(view==='simple')return (result.negotiation?.records||[]).filter(allowed).map(r=>`${stamp(r)}  ${r.title}${r.repeatTimes.filter(t=>t<=time).length>1?' [repeated]':''}${r.fields.length?'\n    '+r.fields.join('\n    '):''}${r.hex?'\n    '+r.hex:''}`).join('\n\n')||'No decoded negotiation records yet.';

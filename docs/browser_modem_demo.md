@@ -262,3 +262,36 @@ The packager now refreshes both existing offline entry points together,
 `artifacts/modem-lab.html` and `web/modem-lab/dist/standalone.html`; the
 offline regression requires their contents to match. An HTML file already
 open in a browser needs reloading to use the refreshed embedded engine.
+
+## x2 and K56flex downstream PCM demos (2026-10-17)
+
+The x2 and K56flex buttons run the existing C payload mapper and its inverse
+in separate WebAssembly instances. They are explicitly **downstream payload
+only**, using a fixed shared profile. They do not initialize the full modem
+engine, emit CONNECT, simulate line training or upstream replies, or fall back
+to V.90. See `docs/x2_implementation.md` and `docs/k56flex_implementation.md`
+for the native implementations' startup and interoperability limits.
+
+- x2 uses recovered short-record allocation 15, B=37 and MD=5, GPC source
+  scrambling: 42 source bits per six 8-kHz PCM codewords, or 56000 bit/s.
+  This is actual mapper bit accounting, not the historical nominal CONNECT
+  display index (x2 Draft 0.33 §§10/11/15/16/21/22).
+- K56flex uses the shipped mu-law 56000 profile, report field zero: 56 bits
+  per eight PCM codewords (K56flex Draft 0.23 §§7.1–7.12).
+
+A two-byte little-endian application length precedes UTF-8 text. Encoders
+zero-pad the final mapping frame. Only transmitted codewords and the public
+fixed profile cross to the receiver; decoding never receives the input text.
+The waveform expands the emitted mu-law codewords for playback, with a
+300-ms silence lead-in and 500-ms tail. The receiver consumes the byte-exact
+codewords, not speaker audio. The server occupies the left audio channel;
+the right channel is silent. These paths have no QAM constellation or LAPM
+capture, so the lab disables those controls and exposes the profile and raw
+codewords in the signal inspector and JSON export instead.
+
+Browser regressions check ASCII, NULs, varied characters, UTF-8, 240-byte and
+12000-byte messages, cancellation, payload recovery and sample accounting
+for both modes. Damaged-codeword tests require rejection or changed decoded
+text, and malformed frame lengths must reject. Offline regressions execute
+both modes through the packaged HTML's file runner and check startup/QAM
+controls are disabled. Existing V.32/V.34/V.90 regressions remain in place.

@@ -19,7 +19,9 @@ def main():
     pair = pair.replace('export function ', 'function ').replace('export async function ', 'async function ')
     binary = base64.b64encode((DIST/'modem-engine.wasm').read_bytes()).decode()
     assert pair.count('const options=(side)=>({') == 1, 'WASM factory changed; update offline packager'
-    pair = pair.replace('const options=(side)=>({', "const wasmBytes=Uint8Array.from(atob('"+binary+"'),c=>c.charCodeAt(0));\n  const options=(side)=>({wasmBinary:wasmBytes,locateFile:name=>name,")
+    pair = "const wasmBytes=Uint8Array.from(atob('"+binary+"'),c=>c.charCodeAt(0));\n"+pair
+    pair = pair.replace('const options=(side)=>({', 'const options=(side)=>({wasmBinary:wasmBytes,locateFile:name=>name,')
+    pair = pair.replace('createModem({print:', 'createModem({wasmBinary:wasmBytes,locateFile:name=>name,print:')
     worker = (DIST/'worker.mjs').read_text().replace("import {runPair} from './engine-pair.mjs';", '')
     encoded = base64.b64encode((engine+'\n'+negotiation+'\n'+pair+'\n'+worker).encode()).decode()
     fsk = (DIST/'fsk.mjs').read_text().replace('export const ', 'const ').replace('export function ', 'function ')
