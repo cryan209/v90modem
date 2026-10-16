@@ -248,3 +248,35 @@ constellation under robbing (it is real scrambled ones now and does not).
 - Pair test: `make v91-serial-pair-test` now also runs `--retrain` and
   `--escape`.  Still open: J/PHIL/Em and transparent-mode request on the live
   path, V.54 loop 3, a spec-only decoder on our own tap.
+
+### Spec-only decoder (`tools/v91_spec_decode.py`) -- added 2026-10-16
+
+A receiver written from the Recommendation text that imports nothing from the
+tree.  `tools/v91_serial_pair_test.py` records both transmit taps
+(`VPCM_G711_TAP_DIR`) and runs it on every default pair call; the decoder
+applies each stream to the CP that the OTHER stream sent (7.2: a CP configures
+the peer's transmitter).  It checks Ez, every INFO frame (sync, CRC, fill), Eu,
+the default DIL symbol by symbol against Table 5 / V.90 8.4.1 (1500 symbols, 0
+mismatches), SCR as descrambled ones, every CP (start bits, reserved bits,
+length a multiple of 6, CRC), Es, B1 as descrambled ones, every data frame
+against the CP constellations, every control-channel sequence (slip pattern +
+CRC) and the test payload as 8N1 characters in the primary bit stream.  It
+accepts our transmit side of a real call on all of those.  Sensitivity checked
+by corrupting taps: one flipped DIL symbol, one flipped SCR sign and a flipped
+data byte are each reported.
+
+What that does and does not establish: the Ucode/sign mapping, scrambler,
+mixed-radix descending-label encoder, differential signs, DIL, CP layout and
+length are checked against the text.  The CRC conventions are not independent:
+CP uses the V.90 convention validated against a real analogue modem's CPt;
+the INFO CRC span (bits 12:41) and the control-channel CRC span (bits 0:77)
+are our reading by analogy, so a peer could still disagree on those two.
+
+**Finding.**  The decoder shows an idle gap of about 3000 symbols between B1
+and the first data frame (3270 in one run).  V.91 has data follow B1 directly
+(8.2.1.11, 7.1), so a conformant peer would try to decode our idle as data and
+lose frame sync.  The gap is an artefact of the live engine (the RX discards
+the packet after B1 while it waits for the local TX to finish, then the TX
+inserts a guard packet); removing it needs B1 followed immediately by the first
+data block and the receiver switching to data in the same codeword stream.
+That is the next conformance fix.

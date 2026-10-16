@@ -125,6 +125,10 @@ def main() -> int:
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory(prefix="v91-serial-pair-") as temp_dir:
         temp = pathlib.Path(temp_dir)
+        # Transmit taps for tools/v91_spec_decode.py (a receiver written from
+        # the Recommendation, checking what we actually put on the wire).
+        caller_env["VPCM_G711_TAP_DIR"] = str(temp / "caller-taps")
+        answerer_env["VPCM_G711_TAP_DIR"] = str(temp / "answerer-taps")
         caller_pty = temp / "caller-pty"
         answerer_pty = temp / "answerer-pty"
         caller_log_path = temp / "caller.log"
@@ -197,6 +201,24 @@ def main() -> int:
                 raise RuntimeError("control channel was not negotiated on both directions")
             if "peer cleardown (control channel)" not in alog:
                 raise RuntimeError("peer did not see the control-channel cleardown")
+            if not (args.retrain or args.escape):
+                decode = subprocess.run(
+                    [sys.executable, str(pathlib.Path(__file__).with_name("v91_spec_decode.py")),
+                     str(temp / "caller-taps" / "live-tx.g711"),
+                     str(temp / "answerer-taps" / "live-tx.g711"), "ulaw",
+                     "V91-CALLER-TO-ANSWERER-0123456789\r\n",
+                     "V91-ANSWERER-TO-CALLER-9876543210\r\n"],
+                    capture_output=True, text=True)
+                keep = os.environ.get("V91_KEEP_TAPS")
+                if keep:
+                    import shutil
+                    shutil.copytree(temp / "caller-taps", pathlib.Path(keep) / "caller-taps", dirs_exist_ok=True)
+                    shutil.copytree(temp / "answerer-taps", pathlib.Path(keep) / "answerer-taps", dirs_exist_ok=True)
+                    print(decode.stdout)
+                if decode.returncode != 0:
+                    raise RuntimeError("spec decoder rejected our transmit taps:\n"
+                                       + decode.stdout + decode.stderr)
+                label += "; spec decoder agrees"
             print(f"v91_serial_pair_test: OK ({label}; control-channel cleardown)")
             return 0
         except Exception as exc:
