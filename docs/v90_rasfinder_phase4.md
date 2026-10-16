@@ -1,5 +1,100 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-16 (late): what fires the "upstream discontinuity resync" -- four causes, one fixed
+
+The 13 data-mode calls in `opt-*`/`opt2-*` that ended in "V.90 upstream
+abrupt discontinuity: 3 local timing searches failed" (V.90 9.6 / V.34 11.6
+resync request) do not share a cause.  Measured off the taps, receiver-independent
+first (`tools/measure_timing_slips.py`, `tools/echo_lag_track.py`, a
+least-squares equalizer refitted outside the receiver on the same
+post-echo-canceller samples), then with the receiver's own symbols:
+
+| cause | calls | ours? |
+| --- | --- | --- |
+| FSE's newest tap read an unreceived sample across a timing step | opt-12, opt-6, opt-9, opt2-1, opt2-4, opt2-7 | ours, **fixed (5eec76d5)** |
+| slow equalizer walk-off from ~18 s into data, 6311 only | opt-1, opt-4, opt-7 | ours, **open** |
+| our echo moved 5 ms (the AudioCodes re-centred its playout) | opt-3, opt2-5, opt2-6 | trigger is probably our send timing; open |
+| the peer started a retrain itself | opt-8 | no |
+
+**No call had a slip or level change on the wire.**  The peer's symbol-rate
+line holds its phase to +/-10 degrees through every resync instant, and the
+received level and spectrum are flat (+/-0.6 dB per 250 Hz band) between early
+data mode and the collapse.  Our transmit tap is unchanged until our own Rd.
+
+**First, the replay had to be made to agree with the call.**  `--sync` replays
+diverged from live at B1: on opt2-5 the 4-point training failed (0.0148)
+where the live call measured 0.00024.  Two reasons: the live RX arrives as two
+80-sample calls per 20 ms tick (`--split`, which also puts the echo
+canceller's bulk delay on the live 1923 rather than 1843), and from TRN2d on
+the replay's own transmit parts from the live one (`v34_tx.raw` differs from
+sample 27999), so the canceller was subtracting an echo that was never on the
+wire.  **`v90_engine_replay --echo-ref`** (new) feeds the canceller from the
+recorded `live-tx.g711` instead.  With `--dial --sync --split --echo-ref` all
+six calls in question fire their resync within 20 ms of the live instant, and
+the unfixed build reproduces 11 of the 13 live resyncs across the 19 taps.
+
+**The fixed defect.**  The RasFinder's clock is ~6 ppm off ours (Gardner
+`freq` -2e-5 T/3 per symbol; the independent fit sees the same -0.058 T/3/s
+delay drift, and its -3.9 deg/s phase drift is exactly that delay at the
+1829 Hz carrier), so the timing loop takes a whole T/3 step every 17.5 s
+(56000 symbols).  The step itself is seamless by construction -- `acc` -0.503
+at index n reads the same samples as +0.497 at n-1 (`V90_T3_SYMBOL_PROBE`
+either side of opt-1's step) -- but the receiver emits each symbol the moment
+its 21st tap has arrived (`next_symbol - pre + 21 == raw_count` in the probe),
+and with a positive fraction `v90_t3_raw_get_frac()` blends that tap with the
+NEXT sample, which `v90_t3_raw_get()` returns as zero.  So on 6311 (drift
+negative) each step flipped the fraction to +0.5 and halved the newest tap at
+a stroke: lattice error 0.027 -> 0.089 at the first step, 0.035 -> 0.100 at
+the second.  On 6313 (opt-12, drift positive) the fraction crept up to +0.5
+over 17 s, the equalizer adapted around the growing corruption, and the step
+that removed it took the eye from 0.032 to 0.569 in one symbol.  The signal
+was clean across all of it: the outside equalizer refitted per 1200 symbols
+holds 0.016-0.05.  Fix: the emitter waits for the one sample interpolation
+needs; the slip scorer skips candidates that reach past the ring.  After it,
+every step is invisible (0.027/0.027, 0.034/0.035, 0.019/0.021 either side)
+and opt-12 holds 0.020 for the rest of its valid recording.
+
+Across the 13 calls with a live resync (replay valid only up to the live
+resync, after which the peer is answering our Rd):
+
+| build | holds past its live resync | same instant as live | fires earlier |
+| --- | --- | --- | --- |
+| before | 1 | 11 | 1 |
+| 5eec76d5 | 6 | 5 | 2 (opt-1 by 0.2 s, opt-7 by 1.6 s: the walk-off below) |
+
+**Open: the 6311 walk-off.**  On every 6311 call the receiver's eye rises
+from 0.026 to ~0.04 from about 18 s into data mode, then walks off over
+1.5-2 s (0.05 -> 0.6) around 28-30 s.  The wire does not change (the outside
+refit holds 0.041-0.050 from 3.8 s to 27.5 s), and nothing in the receiver
+visibly moves: FSE centroid 10.46-10.54 throughout, Gardner accumulator
+tracking cleanly, the output is not rotated or scaled (best rotation 0, gain
+0.99-1.00 until 0.25), no restore or blind recovery before it.  The DD-LMS
+step governs it: 0.02 (default) collapses there, 0.05-0.1 at ~22 s, 0.01 and
+0.005 hold to the end of every valid window (8 and 9 of the 13 instead of 6,
+none earlier) but their eye still climbs to 0.08-0.1, so a smaller step only
+postpones it.  Left at 0.02 here: changing it needs the upstream rate matrix
+(`tools/v90_upstream_bench.sh`), not 6311 alone.
+
+**Open: echo moves.**  On opt2-5, opt2-6 and opt-3 the eye goes white in one
+symbol (0.026 -> 0.6) with the wire's level, spectrum and timing unchanged,
+and `echo_lag_track.py` shows our echo stepping 40 samples (5 ms) at that
+instant and back 0.25-0.8 s later (opt2-5: 2008 -> 1968 at 26.9 s, back at
+27.7 s; opt2-6: 1967 -> 1926 at 29.8 s; opt-3: 1928 -> 1968 at 57.85 s).  No
+shift, rotation or refit of an outside equalizer recovers the symbols, as
+expected for ~-21 dB of uncancelled echo against a 35 dB eye.  The canceller's
+tracker logs the move only after the resync has already fired (60 ms after).
+Each move follows late RTP sends from us (opt-3: one 22 ms late send 170 ms
+before; opt2-5/-6: a burst 10-16 ms late 0.3-0.8 s before), but a similar
+burst ~0.5 s into data mode appears on 17 of the 19 calls and only these
+three moved, so send timing is a likely trigger and not shown to be the
+cause.  Receive-side compute is not it: data-mode callbacks are 2.1 ms at most
+in the replay (`ME_SLOW_CALLBACK_US=2000`).
+
+**opt-8** is the peer's: the symbol power jumps (lattice error 1.3) and the
+peer's retrain is detected 75 ms after our resync request.
+
+Live batch, mini, 5eec76d5: LIVE_RESULTS_PENDING
+
 ## 2026-10-16 (night): the post-B1 callbacks were unoptimised code; LAPM 4/20 -> 15/19
 
 **SpanDSP has been built at -O0 all along.**  The makefile configures it
