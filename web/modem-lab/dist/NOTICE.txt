@@ -1,0 +1,9 @@
+The Modem Lab uses the vendored SpanDSP implementation from v90modem.
+SpanDSP is licensed under GNU LGPL 2.1; see COPYING.spandsp.
+Source and build scripts: https://github.com/cryan209/v90modem
+  spandsp-master/src/       SpanDSP DSP implementation and local modifications
+  web/modem-lab/wasm/       Browser adapter and portable build configuration
+  tools/build_modem_wasm.py Rebuild the module with Emscripten 4.0.16
+
+The generated module is unoptimised scalar wasm32. No system SpanDSP is used.
+This is an offline software loopback, not a physical-modem interoperability claim.
