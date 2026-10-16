@@ -941,8 +941,12 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        which they answer the question that matters.  The mean
                        squared distance is scale-free against the lattice, so
                        distance against the mean symbol power is the receive
-                       SNR of the constellation actually in use, and 6 dB per
-                       bit per symbol is the slope every QAM ladder has.
+                       SNR of the constellation actually in use. The 6 dB
+                       slope below is an empirical fit to one old hardware
+                       channel, not a general QAM law or a V.34 requirement.
+                       Clean 3429/33600 loopback can pass PRBS while this
+                       model predicts only 26400; do not treat that prediction
+                       as an independently measured channel capacity.
 
                        This is the only measurement in the call that sees what
                        the data mode sees.  The Phase-2 L1/L2 probe cannot:

@@ -11466,14 +11466,19 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
    Keep the proven lower-rate and V.90 paths on their existing conditioning. */
 bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
 {
-    /* bit_rate encodes 2*(N - 1): N >= 13 means 31200/33600 bit/s. */
+    /* bit_rate encodes 2*(N - 1): N >= 11 means 26400 bit/s and up.
+       V.34 11.4 B1 conditioning and 12.5.2 DATA timing must be enabled
+       together: the complete-frame fit alone lets the Godard loop walk
+       away from its solution. At 26400/28800 the old N >= 13 gate left
+       both disabled and corrupted otherwise recoverable noisy payloads.
+       See docs/v34_data_mode_rates.md for the timing/noise A/B matrix. */
     return s->duplex && !s->v90_mode
-        && s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 24;
+        && s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 20;
 }
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
 {
-    /* V.34 12.5.2: the 3429/33600 primary also needs DATA timing
+    /* V.34 12.5.2: the 3429/26400-and-up primary also needs DATA timing
      * recovery after PP/B1. Without it, the second primary burst loses
      * the dense constellation even though B1 correlation is valid. */
     return v34_rx_b1_batch_eq_enabled(s)

@@ -690,3 +690,64 @@ varied DATA: the short known frame does not fully constrain generalisation
 to the dense data constellation. Future work should compare the unchanged
 complete-frame fit with the DATA transmit reference across timing phases and
 noise levels before changing the training-rate policy.
+
+## Missing 3429-baud conditioning below 31200 (2026-10-16)
+
+Found a receiver configuration defect rather than a broken 1664-point map:
+`v34_rx_b1_batch_eq_enabled()` admitted only N >= 13 (31200/33600), and
+`v34_rx_data_mm_timing_enabled()` used the same gate. At 26400/28800, the
+receiver therefore skipped both the existing complete-frame supervised B1
+fit (V.34 §11.4.1.1.5/11.4.1.2.5) and its matching decision-directed DATA
+timing recovery (§12.5.2). The gate now starts at N >= 11 (26400). Lower
+rates, other bauds, V.90 and HDX retain their previous selection rules. No
+taps, gains, timing constants, bearer samples or rate-policy values changed.
+
+Controlled comparisons used initial 3429/33600 at both ends, with identical
+V.250 MP limits selecting each target rate. Each row graded 100000 actual
+PRBS bits per direction, not the B1 correlation or decision-directed SNR.
+The matrix was target rates 24000/26400/28800/31200/33600, both G.711 laws,
+one-way delays 0/1/7/23 samples, and clean/40/36/30 dB injected noise.
+
+| Target / noise | Before | Both conditioning stages |
+|---|---:|---:|
+| 26400 / 30 dB | 2/8 | 8/8 |
+| 28800 / 40 dB | 4/8 | 6/8 |
+| 28800 / 36 dB | 6/8 | 8/8 |
+| 28800 / 30 dB | 0/8 | 2/8 |
+
+Other rows did not change pass/fail in this matrix. Separate one-variable
+arms showed the stages must stay paired: timing-only gave 3/8 at 26400/30
+and 7/8 at 28800/36; fit-only failed even clean 26400 and 28800. The latter
+leaves the old Godard DATA loop active after installing the fitted taps.
+Both together preserve the known high-rate path's conditioning/timing handoff.
+
+Longer qualification requested one million PRBS bits in each direction at
+26400/30 and 28800/36, for both laws and all four delays: **16/16 passed**,
+zero bit errors. Eight representative million-bit cases are pinned in the
+fast list, including exact negotiated-rate assertions. 28800/30 remained
+unreliable on the longer runs (0/8), so its two short passes are not evidence
+that this is a safe rate at that noise level. Physical modem interop remains
+unmeasured by these synthetic tests.
+
+Reproduce a matrix with `python3 tools/v34_rate_sweep.py`; use `--binary`
+to compare saved baseline/candidate executables, keeping all other arguments
+identical. Each row uses an isolated scratch directory and emits a JSON
+record with the binary SHA-256, exact rate assertions, selected TRN/DATA
+measurements and final PRBS result. Forced-rate failures are measurements,
+not assertions that the automatic modem should select that rate.
+
+### Rate-model limitation is independent
+
+The `(snr_db + 13)/6` mapping was fitted to one old ~18 dB hardware case
+(documented above), not derived from V.34. A source comment incorrectly
+called 6 dB per information bit per symbol a universal QAM slope; that comment
+is corrected. At clean 3429/33600, TRN reports ~32 dB and predicts 24000,
+while DATA reports ~37 dB and predicts 26400 even during zero-error 33600
+PRBS transfer. This proves underprediction for this synthetic channel, but
+does not justify replacing the model from a single clean run. The 160-row
+noise/timing sweep also shows non-monotonic reliability when conditioning
+differs by rate, and failures at 33600 with 36 dB injected noise.
+
+The receiver fix does not recalibrate either the TRN or B1 rate guards. The
+browser's default 24000 profile remains conservative; higher automatic
+offers still need a model validated against actual DATA errors and hardware.
