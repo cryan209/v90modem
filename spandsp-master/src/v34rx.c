@@ -1932,6 +1932,9 @@ uint16_t v34_rx_j_ordered16(uint16_t rx_recent16, int total_bits, int phase)
 }
 /*- End of function --------------------------------------------------------*/
 
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
 static int mp_preamble_score(uint32_t bitstream)
 {
     int k;
@@ -1955,6 +1958,9 @@ static int mp_preamble_score(uint32_t bitstream)
     return score;
 }
 /*- End of function --------------------------------------------------------*/
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 static bool mp_preamble_has_start_zero(uint32_t bitstream)
 {
@@ -2563,6 +2569,21 @@ int v34_rx_phase3_j_pattern_bit(int pat_type, int bit_idx)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The MP CRC recovery below (mp_try_*_recovery) evaluates up to ~100000
+   trial frames in ONE media callback when a frame fails its CRC, and
+   crc_itu16_bits() lives in crc.c, which is built unoptimised.  At -O0 that
+   was a 105-132 ms callback (rf-bbs-7: the MP-stage entry of both failed
+   §11.6 renegotiations), a hole in our RTP exactly as for the B1 acquisition.
+   Integer-only and deterministic, so the -O2 region is bit-exact. */
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize on
+#endif
+static inline uint16_t mp_crc_bit(uint8_t bit, uint16_t crc)
+{
+    /* crc_itu16_bits(bit, 1, crc) */
+    return (uint16_t) ((((bit ^ crc) & 1)  ?  ((crc >> 1) ^ 0x8408)  :  (crc >> 1)));
+}
+
 static uint16_t mp_crc_bits(const uint8_t bits[], int type)
 {
     int i;
@@ -2578,7 +2599,7 @@ static uint16_t mp_crc_bits(const uint8_t bits[], int type)
         /* Each 17-bit block is: start bit + 16 payload bits.
            CRC is over the 16 payload bits only (exclude start bit). */
         for (j = 0;  j < 16;  j++)
-            crc = crc_itu16_bits(bits[i + 1 + j], 1, crc);
+            crc = mp_crc_bit(bits[i + 1 + j], crc);
         /*endfor*/
     }
     /*endfor*/
@@ -2599,7 +2620,7 @@ static bool mp_crc_ok(const uint8_t bits[], int type, uint16_t *rx_crc_out, uint
     for (i = 0;  i < 16;  i++)
     {
         rx_crc |= bits[crc_start + i] << i;
-        crc = crc_itu16_bits(bits[crc_start + i], 1, crc);
+        crc = mp_crc_bit(bits[crc_start + i], crc);
     }
     /*endfor*/
     if (rx_crc_out)
@@ -2949,9 +2970,25 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
             uint16_t rx_crc;
             uint16_t residual_crc;
 
-            memcpy(trial, base_trial, sizeof(trial));
+            /* Count the changes first: most of the 3^n states exceed
+               MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES and used to be built, then
+               discarded, which was most of this function's ~20 ms in the media
+               callback.  Same states tried in the same order. */
             code = state;
             change_count = (base_slip != 0) ? 1 : 0;
+            for (i = 0;  i < boundary_count;  i++)
+            {
+                if (code % 3 != 1)
+                    change_count++;
+                /*endif*/
+                code /= 3;
+            }
+            /*endfor*/
+            if (change_count <= 0  ||  change_count > MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES)
+                continue;
+            /*endif*/
+            memcpy(trial, base_trial, sizeof(trial));
+            code = state;
             for (i = 0;  i < boundary_count;  i++)
             {
                 int trit;
@@ -2963,13 +3000,9 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
                 if (slip == 0)
                     continue;
                 /*endif*/
-                change_count++;
                 mp_apply_boundary_slip(trial, boundaries[i], target, slip);
             }
             /*endfor*/
-            if (change_count <= 0  ||  change_count > MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES)
-                continue;
-            /*endif*/
             crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
             fill_ok = mp_fill_ok(trial, type);
             if (crc_ok  &&  fill_ok)
@@ -2988,6 +3021,9 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
     return false;
 }
 /*- End of function --------------------------------------------------------*/
+#if defined(V34RX_OPTIMIZE_REGIONS)
+#pragma clang optimize off
+#endif
 
 static int mp_data_bit_index(int type, int frame_idx)
 {

@@ -885,3 +885,18 @@ tower was not reachable on 2026-10-17, so no live call has confirmed either
 way.  Next: one live RasFinder call on the current build and read
 `slow media callback` against the first reneg; if a stall remains, find the
 step with `ME_SLOW_CALLBACK_US` on the Mini rather than on a faster host.
+
+**Fixed (same day): the MP-stage callback stall.**  The 105-132 ms was
+`mp_try_boundary_bruteforce_recovery()` (5 base slips x 3^9 boundary states,
+up to ~100000 trial frames when a frame fails its CRC), running in the media
+callback with `crc_itu16_bits()` (crc.c, built `-O0`) called once per bit, and
+building every trial before throwing away those over
+`MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES`.  Now: the MP CRC/slip/recovery functions
+and `mp_preamble_score()` are in v34rx.c's `-O2` regions with an inline CRC bit
+step (`mp_crc_bit`, identical to `crc_itu16_bits(b,1,crc)`), and the change
+count is taken before a trial is built (same states, same order).  On the
+rf-bbs-7 replay no callback exceeds 3 ms in MP stage (was 105.7 ms; 22.8 ms
+after the -O2 move alone); `V34_MP_RX_DUMP` and the filtered log are
+byte-identical before and after; `make test-fast` 576/576.  Not live-verified:
+the next RasFinder call should show no `slow media callback` at the first
+reneg's MP entry and a first reneg that completes.
