@@ -113,7 +113,7 @@ const delayed=delayLine(23),sourceCodewords=Uint8Array.from({length:480},(_,i)=>
 for(let off=0;off<480;off+=160){const block=delayed(sourceCodewords.slice(off,off+160));assert.equal(block.length,160);receivedCodewords.push(...block);}
 assert.deepEqual(receivedCodewords,[...new Uint8Array(23).fill(255),...sourceCodewords.slice(0,457)]);
 for(const bad of [{noiseDb:NaN},{lossDb:-1},{clockPpm:101},{delayMs:1.5},{seed:-1}])assert.throws(()=>validateLine(34,bad));
-assert.throws(()=>validateLine(92,{noiseDb:30}),/V.32\/V.34 only/);
+assert.throws(()=>validateLine(92,{noiseDb:30}),/analogue modem modes only/);
 assert.throws(()=>validateLine('x2',{delayMs:20}),/fixed byte-exact/);
 
 const statText='Measured transfer — 0123456789';
@@ -164,3 +164,29 @@ for(const v8bis of [false,true]){
  }
  console.log(`PASS: V.90 at 80-ms delay, V.8bis=${v8bis}, event and endpoint reports agree at 31200/56000`);
 }
+
+
+// Real engine paths: UTF-8, the full UI payload limit, and legacy startup.
+const addedModes=[['v22',1200,1200,'V22'],['v22bis',2400,2400,'V22B'],['v32bis',14400,14400,'V32B'],['v23',75,1200,'V23C'],['bell212',1200,1200,'B212'],[91,52000,52000,'V91']];
+for(const [mode,tx,rx,carrier] of addedModes){
+ for(const text of ['Kia ora — hello 🌏',String.fromCharCode(...Array.from({length:240},(_,i)=>33+(i*37)%90))]){
+  const legacy=['v23','bell212'].includes(mode);
+  const r=await runPair(mode,text,()=>{},()=>false,{v8:!legacy,v8bis:false});
+  assert.ok(r.passed,`${mode} failed: ${r.logs.slice(-10).join('\n')}`);assert.equal(r.received,text);assert.equal(r.reply,'ACK: '+text);
+  assert.equal(r.modulation,carrier);assert.equal(r.txRate,tx);assert.equal(r.rxRate,rx);assert.equal(r.droppedProtocol,0);
+  const connects=r.events.filter(e=>e.rates);assert.ok(connects.length);
+  for(const e of connects){assert.deepEqual(e.rates.caller,{tx,rx});assert.deepEqual(e.rates.answerer,{tx:rx,rx:tx});}
+  if(mode==='v23'){assert.equal(r.stats.invalidHdlcFrames,null);assert.ok(!r.logs.some(l=>l.includes('V.42 LAPM connected')));}
+  else assert.ok(r.negotiation.frames.some(f=>f.valid&&f.type==='SABME'));
+ }
+ console.log(`PASS: ${carrier} real-engine UTF-8 and 240-byte payloads, both directions, negotiated ${tx}/${rx}`);
+}
+for(const mode of ['v22','v22bis','v32bis']){
+ const r=await runPair(mode,'Legacy startup',()=>{},()=>false,{v8:false,v8bis:false});
+ assert.ok(r.passed,`${mode} legacy startup failed`);
+ console.log(`PASS: ${mode} V.25 startup without V.8`);
+}
+for(const mode of ['v23','bell212'])await assert.rejects(runPair(mode,'invalid',()=>{},()=>false,{v8:true}),/legacy startup/);
+assert.throws(()=>checkPcmRates('V23C',{tx:1200,rx:1200},{tx:1200,rx:1200}),/inconsistent/);
+assert.throws(()=>checkPcmRates('V91',{tx:65000,rx:65000},{tx:65000,rx:65000}),/inconsistent/);
+console.log('PASS: legacy startup gating and asymmetric/digital directional rate validation');

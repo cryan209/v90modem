@@ -2,7 +2,8 @@
 
 `web/modem-lab/dist/` is a buildless interactive browser demo. It contains
 JavaScript V.21/Bell 103 FSK and the real C modem engine compiled to WebAssembly
-for V.32 at 9600 bit/s, V.34, and V.90. It has no remote service dependency.
+for V.22/V.22bis, V.23, Bell 212A, V.32/V.32bis, V.34, V.90/V.91/V.92.
+It has no remote service dependency.
 
 ## Run
 
@@ -460,3 +461,57 @@ exercise noisy V.34, failed training and cancellation after a completed call.
 The generated offline HTML is tested with the actual inline runner, all three
 modes, displayed table values, export availability and impairment gating.
 These are synthetic software checks, not hardware interoperability results.
+
+
+## Additional engine modulations (2026-10-17)
+
+The lab also exposes these existing native engine paths through isolated WASM
+instances. These are complete simulated calls with independently decoded
+messages and acknowledgements, rather than fixed PCM payload demonstrations.
+
+| Lab mode | Engine offer | Caller TX / RX on the clean test line | Startup / data |
+| --- | --- | --- | --- |
+| V.22 | `v22-1200` | 1200 / 1200 bit/s | V.8 or V.25; LAPM |
+| V.22bis | `v22` | 2400 / 2400 bit/s | V.8 or V.25; LAPM |
+| V.32bis | `v32bis` | 14400 / 14400 bit/s | V.8 or V.25; LAPM |
+| Bell 212A | `b212` | 1200 / 1200 bit/s | Bell answer tone; LAPM |
+| V.23 mode 2 | `v23c` | 75 / 1200 bit/s | Constant-carrier FSK; V.14 asynchronous characters |
+| V.91 | `v91` | 52000 / 52000 bit/s | V.8; symmetric digital PCM; LAPM |
+
+V.22 uses the existing 1200-bit/s path (V.22bis §6.3.1); V.22bis uses 2400.
+V.32 remains capped at 9600 while the separate V.32bis preset permits 14400
+(V.32bis §6). Bell 212A uses the engine's 2225-Hz answer-tone procedure, as
+covered in `docs/bell212a.md`. Bell 212A and V.23 disable V.8/V.8bis controls.
+The V.22 and V.32 families permit both V.8 and legacy startup. V.91 requires
+V.8 in this lab and uses ordinary non-transparent mode; the measured 52000
+rate is reported, rather than advertising a fabricated 64000 connection.
+
+V.23's caller uploads on the 75-bit/s backward channel and receives on the
+1200-bit/s forward channel (V.23 §§2/4), matching the engine's videotex
+arrangement. Reports must agree with the opposite endpoint and retain the
+asymmetry. The 240-byte message limit also applies here, so allow time for
+the slow upload. Its statistics mark HDLC CRC counts inapplicable because
+this preset uses asynchronous characters without LAPM. The received byte
+comparison still checks the message and acknowledgement exactly.
+
+Analogue channel experiments also support V.22/V.22bis/V.32bis/Bell 212A/V.23,
+on the same post-D/A waveform hook as V.32/V.34. V.91 keeps exact G.711
+codewords and the shared sample clock (V.91 §§6.1/6.2, V.90 §5); only
+propagation delay is exposed. Playback is an audible rendering of those
+codewords, not an analogue interoperation claim. V.23 and V.91 select the
+spectrum display because they have no analogue QAM constellation to show.
+The Reliability panel continues to compare V.34/V.90/V.92.
+
+Regression coverage verifies UTF-8 and varied 240-byte payloads in both
+directions for all six additions, exact carrier/rate reports at every
+connection event, V.25 startup for the V.22/V.32 families, legacy control
+gating, and the generated offline runner's controls and displayed rates.
+These checks exercise software pairs, not physical modem interoperability.
+
+Additional channel probes pass for V.22/V.22bis/V.32bis/V.23 with light noise
+and 20 ms delay, Bell 212A with light noise and no added delay, and V.91 with
+80 ms delay. Bell 212A with 20 ms added delay fails LAPM establishment and
+reports no CONNECT or verified bytes, with or without noise. The lab calls
+out this limitation; it does not disable error checking or change training
+constants to manufacture a pass. The datapump-only delayed tests in
+`docs/bell212a.md` do not cover this engine/LAPM failure.

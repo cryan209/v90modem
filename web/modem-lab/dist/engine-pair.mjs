@@ -1,5 +1,6 @@
 import createModem from './modem-engine.mjs';
 import {negotiationRecords} from './negotiation.mjs';
+const additionalModes={v22:22,v22bis:222,v32bis:323,v23:23,bell212:212};
 export function expand(code){const u=(~code)&255;const t=(((u&15)<<3)+132)<<((u>>4)&7);return ((u&128)?132-t:t-132)/32768;}
 export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,startup={v8:true,v8bis:false}){
   const line=validateLine(mode,startup.line);
@@ -12,8 +13,10 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   }
 
   if(['x2','flex'].includes(String(mode)))return runPcmDemo(String(mode),text,onProgress,shouldStop);
-  if(![32,34,90,92].includes(Number(mode)))throw new Error('Unsupported modem mode');
-  if(startup.v8===false&&Number(mode)!==32)throw new Error('V.34, V.90 and V.92 require V.8 in this demo');
+  const engineId=additionalModes[mode]??Number(mode);
+  if(![22,222,23,212,32,323,34,90,91,92].includes(engineId))throw new Error('Unsupported modem mode');
+  if(startup.v8===false&&[34,90,91,92].includes(engineId))throw new Error('V.34, V.90, V.91 and V.92 require V.8 in this demo');
+  if([23,212].includes(engineId)&&(startup.v8!==false||startup.v8bis))throw new Error('V.23 and Bell 212A use legacy startup without V.8/V.8bis');
   if(startup.v8bis&&startup.v8===false)throw new Error('V.8bis requires V.8 in this demo');
   const startupFlags=(startup.v8===false?0:1)|(startup.v8bis?2:0)|(startup.v92Startup==='quick'?4:0);
   const logs=[],protocol=[],bitClock=[];let simTime=0,droppedProtocol=0;
@@ -26,12 +29,12 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   const bytes=frame(text);if(bytes.length>60002)throw new Error('Message exceeds 60000 UTF-8 bytes');let replies=null;
   const pa=a._malloc(bytes.length);let pb=0;
   a.HEAPU8.set(bytes,pa);
-  a._browser_init(Number(mode),1,startupFlags,startup.v34MaxRate||0);b._browser_init(Number(mode),0,startupFlags,startup.v34MaxRate||0);
+  a._browser_init(engineId,1,startupFlags,startup.v34MaxRate||0);b._browser_init(engineId,0,startupFlags,startup.v34MaxRate||0);
   for(const [m,seed] of [[a,line.seed],[b,(line.seed+1)>>>0]]){
     if(m._browser_line_config(line.noiseDb,line.lossDb,line.clockPpm,seed)!==0)throw new Error('Unsupported analogue line settings');
   }
   const toCaller=delayLine(line.delayMs*8),toAnswerer=delayLine(line.delayMs*8);
-  const analogueActive=[32,34].includes(Number(mode))&&(line.noiseDb||line.lossDb||line.clockPpm);
+  const analogueActive=[22,222,23,212,32,323,34].includes(engineId)&&(line.noiseDb||line.lossDb||line.clockPpm);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
   const callerCodewords=new Uint8Array(480000),answererCodewords=new Uint8Array(480000);
@@ -51,13 +54,13 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
       if(block%10===0){const raw=b.UTF8ToString(b._browser_monitor());if(raw){const monitor=JSON.parse('{'+raw+'}');if(monitor.iq[0].length)constellations.push({time:(block+1)*.02,points:monitor.iq[0]});}}
       bitClock.push({time:simTime,callerTx:a._browser_bit_count(1),callerRx:a._browser_bit_count(0),answererTx:b._browser_bit_count(1),answererRx:b._browser_bit_count(0)});
       const time=(block+1)*.02, ar=a._browser_rate(),br=b._browser_rate();
-      const startupName=side=>startup.v8===false?'V.25':startup.v8bis&&!protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line))?'V.8bis':'V.8';
+      const startupName=side=>engineId===212?'Bell answer tone':engineId===23?'V.23 carrier':startup.v8===false?'V.25':startup.v8bis&&!protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line))?'V.8bis':'V.8';
       const states=side=>['idle','dialing',startupName(side),'training','data','hangup'];
       const callerRates={tx:a._browser_tx_rate(),rx:a._browser_rx_rate()},answererRates={tx:b._browser_tx_rate(),rx:b._browser_rx_rate()};
       const carrier=a.UTF8ToString(a._browser_modulation());
       if(ar&&br)checkPcmRates(carrier,callerRates,answererRates);
       const state=`${sa}/${sb}/${ar}/${br}/${callerRates.tx}/${callerRates.rx}/${answererRates.tx}/${answererRates.rx}/${startupName('caller')}/${startupName('answerer')}`;
-      if(state!==lastState){events.push({time,...(ar&&br?{rates:{caller:callerRates,answerer:answererRates},carrier}:{}),message:ar&&br?(['V90','V92'].includes(carrier)?`Connected · ${carrier.replace('V','V.')} · caller upload ${callerRates.tx} / download ${callerRates.rx} bit/s`:`Connected · caller TX ${callerRates.tx} / RX ${callerRates.rx} bit/s`):`Training · caller ${states('caller')[sa]} / answerer ${states('answerer')[sb]}`});lastState=state;}
+      if(state!==lastState){events.push({time,...(ar&&br?{rates:{caller:callerRates,answerer:answererRates},carrier}:{}),message:ar&&br?(['V90','V92','V23C'].includes(carrier)?`Connected · ${carrier.replace('V','V.')} · caller upload ${callerRates.tx} / download ${callerRates.rx} bit/s`:`Connected · caller TX ${callerRates.tx} / RX ${callerRates.rx} bit/s`):`Training · caller ${states('caller')[sa]} / answerer ${states('answerer')[sb]}`});lastState=state;}
       if(ar && br){
         if(connectedAt===null)connectedAt=time;
         if(at<bytes.length)at+=a._browser_send(pa+at,bytes.length-at);
@@ -82,7 +85,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
       verifiedBytes:doneAt?payloadBytes+replyBytes:0,callerBytes:doneAt?payloadBytes:0,answererBytes:doneAt?replyBytes:0,
       usefulBitsPerSecond:doneAt&&doneAt>connectedAt?(payloadBytes+replyBytes)*8/(doneAt-connectedAt):null,
       retrainRequests:protocol.filter(e=>/\[ME\].*(?:asking for.*retrain|retrain requested|requesting.*retrain)/i.test(e.line)).length,
-      invalidHdlcFrames:negotiation.frames.filter(f=>!f.valid).length,
+      invalidHdlcFrames:engineId===23?null:negotiation.frames.filter(f=>!f.valid).length,
       clippedSamples:a._browser_line_clipped()+b._browser_line_clipped(),simulationSeconds:length/8000};
     return {stats,line,waveform:analogueActive?'received':'transmitted',modulation:a.UTF8ToString(a._browser_modulation()),left:l,right:r,events,startup,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
       rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate()};
@@ -142,18 +145,20 @@ export function validateLine(mode,input={}){
  for(const key of ['noiseDb','lossDb','clockPpm','delayMs','seed'])if(!Number.isFinite(line[key]))throw new Error('Invalid line setting: '+key);
  if((line.noiseDb!==0&&(line.noiseDb<10||line.noiseDb>80))||line.lossDb<0||line.lossDb>30||Math.abs(line.clockPpm)>100
    ||!Number.isInteger(line.delayMs)||line.delayMs<0||line.delayMs>200||!Number.isInteger(line.seed)||line.seed<0||line.seed>4294967295)throw new Error('Line settings outside the supported range');
- if(![32,34].includes(Number(mode))&&(line.noiseDb||line.lossDb||line.clockPpm))throw new Error('Analogue noise, attenuation and clock drift are supported for V.32/V.34 only');
+ if(!['32','34','v22','v22bis','v32bis','v23','bell212'].includes(String(mode))&&(line.noiseDb||line.lossDb||line.clockPpm))throw new Error('Analogue noise, attenuation and clock drift are supported for analogue modem modes only');
  if(['x2','flex'].includes(String(mode))&&line.delayMs)throw new Error('PCM payload demos use a fixed byte-exact line');
  return line;
 }
 
-// V.90 §§5/6 and V.250 6.4.3: report actual directional rates. Never
+// V.90 §§5/6, V.91 §6.1, V.23 §§2/4 and V.250 6.4.3: actual rates. Never
 // repair an impossible report by clamping or copying the other direction.
 export function checkPcmRates(carrier,caller,answerer){
- if(!['V90','V92'].includes(carrier))return;
+ if(!['V90','V91','V92','V23C'].includes(carrier))return;
  const values=[caller.tx,caller.rx,answerer.tx,answerer.rx];
  if(values.some(n=>!Number.isInteger(n)||n<=0)||caller.tx!==answerer.rx||caller.rx!==answerer.tx
-    ||(carrier==='V90'&&(caller.tx>33600||caller.rx>56000)))
+    ||(carrier==='V90'&&(caller.tx>33600||caller.rx>56000))
+    ||(carrier==='V91'&&(caller.tx>64000||caller.rx>64000))
+    ||(carrier==='V23C'&&!(caller.tx===75&&caller.rx===1200||caller.tx===1200&&caller.rx===75)))
   throw new Error(`${carrier} directional rate report is inconsistent: caller TX/RX ${caller.tx}/${caller.rx}, answerer TX/RX ${answerer.tx}/${answerer.rx}`);
 }
 

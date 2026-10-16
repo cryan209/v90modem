@@ -47,7 +47,7 @@
     "v92_analogue_phase4.c": "a7169ef258316128830a4eb203fe6a37455483f40a40315d2e0c0227b31d749b",
     "v92_analogue_phase3.c": "12c4683bc079923c35e8c63259a9539c5b46bf7f517d2d9794ace90f735e2a42",
     "v92_su.c": "ffd43d174503925b1e9adf689b103f3f1de48749b3c542df9a5738690d62fa75",
-    "modem_engine.c": "fac63a6c372275ef08b4312c5e838a178d92e89cbcf654d41277904b72fcf43f",
+    "modem_engine.c": "c373c4ffa1a12f859a377cef6edbb0384aca3604b9950d555b35cb779a60c9d9",
     "v90_analogue_linear.c": "a056760933133d4d91ee01ea67f4cb75c267990e79d0e57d0a6d913ca0015fb6",
     "v90_analogue_fse.c": "d2a92f93ca2b5675c514aad2444f69fd492b42927fb92971b5ee13d59b09dc01",
     "v90_analogue_sd.c": "87a3bdd8e3fa5e2b08ef17920d5a93dcd8315e7e360012b2dee90d6eeda22d1a",
@@ -130,7 +130,7 @@
     "spandsp-master/src/v8.c": "0fcd8339c02660094561770f52fa857702e361505b1f9d56c4c451ceb333d432",
     "spandsp-master/src/vector_float.c": "ef7b0399f3d253873bd4dbb7911010e6633591ea45586b8c1ccac6ab8c5d980a",
     "spandsp-master/src/vector_int.c": "3a104273edbc446d3fc9a6b21e91588feebc0b71086527eccf3cc888f0769c40",
-    "web/modem-lab/wasm/browser_peer.c": "b3cf212ee1d440cbcbb955d986f69d51cea7125af6e568eee46620485305fde1"
+    "web/modem-lab/wasm/browser_peer.c": "92682f09c075fdeabca1774fb32101c03fea5ee721ddc73101667a85b43f4d55"
   },
-  "headers_sha256": "5fb54825e675a108ea0af89a057fc1b5c89e419ea0fe4c857f8f2f83ca55e012"
+  "headers_sha256": "d781900b9e9773a7a3ec499942e67f38eb39c59246afa8a61527ce72cec7e2dc"
 }

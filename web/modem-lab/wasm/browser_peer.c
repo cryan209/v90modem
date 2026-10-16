@@ -20,14 +20,19 @@ static v250_connect_report_t report;
 static v250_ctl_t browser_settings;
 static int browser_line_mode, browser_long_run;
 EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ceiling) {
-    browser_line_mode=(mode==32 || mode==34);browser_long_run=(startup & 8)!=0;
+    browser_line_mode=(mode==22 || mode==222 || mode==23 || mode==212 || mode==32 || mode==323 || mode==34);browser_long_run=(startup & 8)!=0;
     received_n=connected_rate=0;memset(&report,0,sizeof report);
     v250_ctl_reset(&browser_settings);
     if(mode==92){browser_settings.pig=0;browser_settings.pqc=(startup & 4)?0:3;}
-    setenv("ME_MODE", mode == 92 ? "v92" : mode == 90 ? "v90" : mode == 34 ? "v34" : "v32bis", 1);
+    /* Browser IDs 222/323 distinguish the bis modes from V.22/V.32.
+       V.22bis 6.3.1 selects 1200/2400; V.32bis clause 6 selects its rate. */
+    const char *name=mode==22?"v22-1200":mode==222?"v22":mode==23?"v23c":mode==212?"b212":
+                     mode==91?"v91":mode==92?"v92":mode==90?"v90":mode==34?"v34":"v32bis";
+    setenv("ME_MODE",name,1);
     setenv("ME_V8", (startup & 1) ? "1" : "0", 1);
     setenv("ME_V8BIS", (startup & 2) ? "1" : "0", 1);
-    setenv("ME_DATA_FRAMING", "lapm", 1);
+    /* V.23 §§2/4: asynchronous 1200/75 channels, not a LAPM call. */
+    setenv("ME_DATA_FRAMING", mode==23?"v14":"lapm", 1);
     if(!(startup & 8))setenv("ME_GUI_PORT", "browser-passive-taps", 1);
     setenv("ME_V90_JA_HEURISTIC_FALLBACK_MS", "0", 1);
     setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 1);
@@ -36,7 +41,7 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup, int ce
        Keep normal TRN/B1 rate selection and §11.5 retraining enabled. */
     if (mode == 34) setenv("ME_V34_BAUD", "3429", 1);
     if (mode == 34 && ceiling > 0) { char rate[16];snprintf(rate,sizeof rate,"%d",ceiling);setenv("ME_V34_BPS",rate,1); }
-    if (mode == 32) setenv("ME_V32BIS_MAX_BPS", "9600", 1);
+    if (mode == 32 || mode == 323) setenv("ME_V32BIS_MAX_BPS",mode==32?"9600":"14400",1);
     /* Reliability runs measure application bytes and events, without retaining
        minutes of per-bit/plot captures. The datapumps and LAPM are unchanged. */
     setenv("ME_V34_SPAN_FLOW_LOG", (startup & 8)?"0":"1", 1);

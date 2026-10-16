@@ -4,6 +4,12 @@ import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
 let mode='v21',context,source,worker,result,started=0,animation=0,downloadUrl,playing=false,elapsed=0,lastInspect=-1,captureUrl,plotType='spectrum';
 const descriptions={
+ v22:['Phase shifts at 1,200 bits a second.','Two real V.22 engines use differential phase modulation at 600 symbols per second. They train, then exchange your text and an acknowledgement at 1,200 bit/s in both directions.'],
+ v22bis:['Four bits in every symbol.','V.22bis uses 16-QAM at 600 symbols per second for 2,400 bit/s in each direction. Two real engines negotiate and independently recover your text over LAPM.'],
+ v32bis:['The faster V.32 family.','Two real V.32bis engines train with echo cancellation and negotiate up to 14,400 bit/s. The original V.32 preset remains limited to 9,600 bit/s.'],
+ v23:['A terminal and a page of text.','V.23 mode 2 sends FSK on two unequal channels: the caller uploads at 75 bit/s and downloads at 1,200 bit/s. Real engines exchange asynchronous characters without V.8 or LAPM. Longer messages take time on the slow channel.'],
+ bell212:['The Bell answer tone.','Bell 212A starts with a 2,225 Hz answer tone, then carries 1,200 bit/s in each direction using differential phase modulation. Two real engines exchange your message over LAPM without V.8.'],
+ '91':['A digital bearer in both directions.','Two real V.91 engines negotiate symmetric PCM over a synchronous, byte-exact G.711 bearer, then verify your text over LAPM. This is a digital-to-digital experiment; audible playback does not model an analogue telephone loop.'],
  '92':['PCM in both directions.','Two real V.92 engines negotiate PCM upstream and downstream, then verify your text over LAPM. Compare full startup with the engine’s Quick Connect procedures on the same virtual line.'],
  x2:['The first wave of PCM modems.','The real x2 mapper sends your text as six-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
  flex:['Eight samples, fifty-six bits.','The real K56flex mapper sends your text as eight-sample PCM frames at 56,000 bit/s. A separate decoder recovers it from exact µ-law codewords using a fixed profile. Downstream payload only: no dial-up training or upstream connection.'],
@@ -15,29 +21,33 @@ const descriptions={
 };
 const isPcm=()=>['x2','flex'].includes(mode);
 const isFsk=()=>mode==='v21'||mode==='bell103';
+const isAnalogue=()=>['32','34','v22','v22bis','v32bis','v23','bell212'].includes(mode);
+const isLegacy=()=>['v23','bell212'].includes(mode);
+const optionalV8=()=>['32','v22','v22bis','v32bis'].includes(mode);
+const hasConstellation=()=>!isFsk()&&!isPcm()&&mode!=='v23'&&mode!=='91';
 function updateStartup(){
  updateReliabilityControls();
- const fsk=isFsk();if(mode!=='32')$('startupV8').checked=true;
- if(isPcm()){$('startupV8').checked=false;$('startupBis').checked=false;}
- $('startupV8').disabled=isPcm()||fsk||mode!=='32'||playing;
+ const fsk=isFsk();if(!optionalV8())$('startupV8').checked=true;
+ if(isPcm()||isLegacy()){$('startupV8').checked=false;$('startupBis').checked=false;}
+ $('startupV8').disabled=isPcm()||isLegacy()||fsk||!optionalV8()||playing;
  if(!$('startupV8').checked)$('startupBis').checked=false;
- $('startupBis').disabled=isPcm()||fsk||!$('startupV8').checked||playing;
+ $('startupBis').disabled=isPcm()||isLegacy()||fsk||!$('startupV8').checked||playing;
  $('v92Control').hidden=mode!=='92';$('v92Startup').disabled=mode!=='92'||playing;
  $('lineControls').hidden=fsk||isPcm();
- const analogue=['32','34'].includes(mode);
+ const analogue=isAnalogue();
  for(const id of ['lineNoise','lineLoss','lineClock'])$(id).disabled=!analogue||playing;
  $('lineDelay').disabled=fsk||isPcm()||playing;
- $('lineHint').textContent=analogue?'Noise, attenuation and clock drift affect the analogue receive waveform. The G.711 bearer stays byte-exact.':'V.90/V.92 preserve PCM codewords. Only propagation delay is available here.';
+ $('lineHint').textContent=mode==='bell212'?'Bell 212A passes on the clean 0 ms line. Its LAPM connection currently fails with 20 ms added delay. Noise, attenuation and clock drift affect only the receive waveform.':analogue?'Noise, attenuation and clock drift affect the analogue receive waveform. The G.711 bearer stays byte-exact.':'PCM modes preserve codewords. Only propagation delay is available here.';
  $('v34RateControl').hidden=mode!=='34';$('v34Rate').disabled=mode!=='34'||playing;
- $('startupHint').textContent=isPcm()?'Fixed downstream profile; V.8/V.8bis and line training are not run.':fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
+ $('startupHint').textContent=isLegacy()?'Legacy startup; V.8 and V.8bis are not used.':isPcm()?'Fixed downstream profile; V.8/V.8bis and line training are not run.':fsk?'FSK presets begin with an idle carrier.':optionalV8()?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
 }
 function updateCount(){const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;$('dial').disabled=n===0||n>240||playing;}
 function select(next){stop();mode=next;document.querySelectorAll('.mode').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
  $('modeTitle').textContent=descriptions[mode][0];$('modeDescription').textContent=descriptions[mode][1];
  updateStartup();$('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':isPcm()?'WEBASSEMBLY · PCM PAYLOAD':'WEBASSEMBLY · REAL ENGINE';
- $('showConstellation').disabled=isFsk()||isPcm();setPlot(isFsk()||isPcm()?'spectrum':'constellation');
+ $('showConstellation').disabled=!hasConstellation();setPlot(hasConstellation()?'constellation':'spectrum');
  $('inspectSide').disabled=isPcm();$('inspectStage').disabled=isPcm();
- $('inspectorFeatures').textContent=isPcm()?'Fixed profile · PCM codewords':'V.8 · INFO · Ja / DIL · LAPM';
+ $('inspectorFeatures').textContent=isPcm()?'Fixed profile · PCM codewords':mode==='v23'?'Legacy startup · asynchronous characters':isLegacy()?'Bell answer tone · LAPM':['v22','v22bis','v32bis','32'].includes(mode)?'Startup · training · LAPM':mode==='91'?'V.8 · DIL · PCM · LAPM':'V.8 · INFO · Ja / DIL · LAPM';
  $('dial').textContent=isPcm()?'▶ Encode & send':'▶ Dial & send';
  $('trafficLabel').textContent=isPcm()?'SERVER → PCM RECEIVER':'CALLER → ANSWERER';
  $('scopeLabel').textContent=isPcm()?'SERVER PCM WAVEFORM · 8 kHz':'CALLER WAVEFORM · 8 kHz';
@@ -104,7 +114,7 @@ function drawStats(t){
  $('transferStats').hidden=false;
  const connected=s.connectSeconds!==null&&t>=s.connectSeconds,verified=result.passed&&s.verifiedAtSeconds!==null&&t>=s.verifiedAtSeconds;
  $('statConnect').textContent=connected?s.connectSeconds.toFixed(2)+' s':result.kind==='pcm'||isFsk()?'Not applicable':t>=(s.simulationSeconds||Infinity)-.02?'Not established':'Waiting';
- $('statRateLabel').textContent=['V90','V92'].includes(result.modulation)?'Caller upload / download':'Caller TX / RX';
+ $('statRateLabel').textContent=['V90','V92','V23C'].includes(result.modulation)?'Caller upload / download':'Caller TX / RX';
  $('statRates').textContent=connected?`${result.txRate.toLocaleString()} / ${result.rxRate.toLocaleString()} bit/s`:result.kind==='pcm'?'56,000 downstream':isFsk()?'300 bit/s':'—';
  $('statBytes').textContent=verified?s.verifiedBytes.toLocaleString():'0';
  $('statThroughput').textContent=verified&&s.usefulBitsPerSecond!==null?Math.round(s.usefulBitsPerSecond).toLocaleString()+' bit/s':'—';
@@ -139,7 +149,7 @@ async function dial(){
    worker=new Worker('./worker.mjs',{type:'module'});
    worker.onerror=e=>fail(e.message||'Could not load the modem worker.');
    worker.onmessage=async({data})=>{if(data.type==='progress'){$('status').textContent=`${data.state||'Generating call'} · ${data.time.toFixed(1)} s simulated`;}else if(data.type==='error'){fail(data.message);}else if(data.type==='result'){worker.terminate();worker=null;result=data;await play();}};
-   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked,v34MaxRate:mode==='34'?Number($('v34Rate').value):0,v92Startup:$('v92Startup').value,line:{noiseDb:['32','34'].includes(mode)?Number($('lineNoise').value):0,lossDb:['32','34'].includes(mode)?Number($('lineLoss').value):0,clockPpm:['32','34'].includes(mode)?Number($('lineClock').value):0,delayMs:isPcm()?0:Number($('lineDelay').value)}}});
+   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked,v34MaxRate:mode==='34'?Number($('v34Rate').value):0,v92Startup:$('v92Startup').value,line:{noiseDb:isAnalogue()?Number($('lineNoise').value):0,lossDb:isAnalogue()?Number($('lineLoss').value):0,clockPpm:isAnalogue()?Number($('lineClock').value):0,delayMs:isPcm()?0:Number($('lineDelay').value)}}});
  }
  }catch(e){fail(e.message);}
 }

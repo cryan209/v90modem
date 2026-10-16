@@ -25,9 +25,13 @@ try{
  select('x2');assert.equal(document.getElementById('startupV8').disabled,true);assert.equal(document.getElementById('startupV8').checked,false);assert.equal(document.getElementById('startupBis').disabled,true);assert.equal(document.getElementById('showConstellation').disabled,true);
  select('flex');assert.equal(document.getElementById('dial').textContent,'▶ Encode & send');
  select('32');assert.equal(document.getElementById('startupV8').disabled,false);document.getElementById('startupV8').checked=false;updateStartup();assert.equal(document.getElementById('startupBis').disabled,true);
+ for(const mode of ['v22','v22bis','v32bis']){select(mode);assert.equal(document.getElementById('startupV8').disabled,false);assert.equal(document.getElementById('lineNoise').disabled,false);assert.equal(document.getElementById('reliabilityPanel').hidden,true);}
+ for(const mode of ['v23','bell212']){select(mode);assert.equal(document.getElementById('startupV8').disabled,true);assert.equal(document.getElementById('startupV8').checked,false);assert.equal(document.getElementById('startupBis').disabled,true);}
+ select('v23');assert.equal(document.getElementById('showConstellation').disabled,true);
+ select('91');assert.equal(document.getElementById('startupV8').checked,true);assert.equal(document.getElementById('startupV8').disabled,true);assert.equal(document.getElementById('lineNoise').disabled,true);assert.equal(document.getElementById('lineDelay').disabled,false);assert.equal(document.getElementById('showConstellation').disabled,true);
  select('v21');assert.equal(document.getElementById('startupV8').disabled,true);assert.equal(document.getElementById('startupBis').disabled,true);
  console.log('PASS: startup controls gate unsupported combinations');
- for(const [mode,startup] of [['x2',{}],['flex',{}],[32,{v8:false,v8bis:false}],[34,{v8:true,v8bis:true,v34MaxRate:0}],[90,{v8:true,v8bis:true,line:{delayMs:80}}],[92,{v8:true,v92Startup:'compare',line:{delayMs:20}}]]){
+ for(const [mode,startup] of [['v22',{v8:true}],['v22bis',{v8:true}],['v32bis',{v8:true}],['v23',{v8:false}],['bell212',{v8:false}],[91,{v8:true}],['x2',{}],['flex',{}],[32,{v8:false,v8bis:false}],[34,{v8:true,v8bis:true,v34MaxRate:0}],[90,{v8:true,v8bis:true,line:{delayMs:80}}],[92,{v8:true,v92Startup:'compare',line:{delayMs:20}}]]){
   const runner=createOfflineModemRunner();assert.ok(runner instanceof InlineModemRunner);
   const result=await new Promise((resolve,reject)=>{runner.onmessage=({data})=>{if(data.type==='error')reject(new Error(data.message));if(data.type==='result')resolve(data);};runner.postMessage({mode,startup,text:'Offline file test — hello'});});
   assert.ok(result.passed);assert.equal(result.received,'Offline file test — hello');assert.equal(result.reply,['x2','flex'].includes(mode)?'':'ACK: Offline file test — hello');
@@ -36,8 +40,11 @@ try{
    drawStats(result.stats.verifiedAtSeconds);assert.equal(document.getElementById('statBytes').textContent,result.stats.verifiedBytes.toLocaleString());assert.equal(document.getElementById('quickComparison').hidden,false);
    assert.equal(result.modulation,'V92');assert.equal(result.txRate,48000);assert.equal(result.rxRate,56000);assert.ok(result.comparison.full.passed);assert.ok(result.comparison.savedSeconds>0);}
   if(mode===90){assert.equal(result.txRate,31200);assert.equal(result.rxRate,56000);assert.ok(result.events.filter(e=>e.rates).every(e=>e.rates.caller.tx===31200&&e.rates.answerer.rx===31200));select('90');setTestResult(result);drawStats(result.stats.verifiedAtSeconds);assert.equal(document.getElementById('statRates').textContent,'31,200 / 56,000 bit/s');assert.equal(document.getElementById('statRateLabel').textContent,'Caller upload / download');}
+  const extra={v22:[1200,1200,'V22'],v22bis:[2400,2400,'V22B'],v32bis:[14400,14400,'V32B'],v23:[75,1200,'V23C'],bell212:[1200,1200,'B212'],91:[52000,52000,'V91']}[mode];
+  if(extra){assert.deepEqual([result.txRate,result.rxRate,result.modulation],extra);select(String(mode));setTestResult(result);drawStats(result.stats.verifiedAtSeconds);assert.equal(document.getElementById('statRates').textContent,`${extra[0].toLocaleString()} / ${extra[1].toLocaleString()} bit/s`);}
+  if(mode==='v23')assert.equal(document.getElementById('statRateLabel').textContent,'Caller upload / download');
   if(mode===34){assert.equal(result.txRate,33600);assert.equal(result.rxRate,33600);}
-  runner.terminate();console.log(`PASS: packaged file:// ${['x2','flex'].includes(mode)?mode+' downstream PCM':'V.'+mode}, no Worker, verified ${['x2','flex'].includes(mode)?'downstream':'bidirectional'} payload`);
+  runner.terminate();console.log(`PASS: packaged file:// ${['x2','flex'].includes(mode)?mode+' downstream PCM':result.modulation.replace(/^V/,'V.')}, no Worker, verified ${['x2','flex'].includes(mode)?'downstream':'bidirectional'} payload`);
  }
  for(const [id,value] of Object.entries({reliabilityScope:'all',reliabilityRepeats:'1',reliabilityDuration:'30',reliabilityV92:'quick'}))document.getElementById(id).value=value;
  select('34');document.getElementById('lineNoise').value='30';updateReliabilityControls();
