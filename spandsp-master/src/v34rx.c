@@ -2308,6 +2308,18 @@ static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
     int order;
     int domain;
 
+    /* V.34 7/10.1.3.9 (via 10.1.3.3): standalone duplex MP uses
+       the peer's scrambler and differential I1,I2 wire order. A missing
+       preamble while the peer is still sending TRN is not evidence for
+       another polynomial, bit order or absolute-phase modulation. Keep
+       those defaults when reacquiring; rotating away can miss the peer's
+       MP and spend the E deadline on false preamble locks. */
+    if (s->duplex && !s->v90_mode)
+    {
+        retry_mode = 0;
+        s->mp_phase4_retry_mode = 0;
+    }
+
     use_alt_domain = ((retry_mode & 0x4) != 0);
     use_alt_order = ((retry_mode & 0x1) != 0);
     use_alt_tap = ((retry_mode & 0x2) != 0);

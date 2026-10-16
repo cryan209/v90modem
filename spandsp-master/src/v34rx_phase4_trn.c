@@ -902,7 +902,10 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->mp_phase4_alt_domain_active = 0;
             s->mp_phase4_retry_mode = 0;
             s->mp_phase4_domain = s->mp_phase4_default_domain;
-            s->mp_phase4_bit_order = (s->phase4_trn_lock_order == 1) ? 1 : 0;
+            /* V.34 10.1.3.9 sends I1n first (10.1.3.3). The TRN
+               acquisition hint does not define MP's wire bit order. */
+            s->mp_phase4_bit_order = (s->duplex && !s->v90_mode)
+                                 ? 0 : ((s->phase4_trn_lock_order == 1) ? 1 : 0);
             s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
             s->mp_phase4_force_abs_active = 0;
             s->mp_phase4_diff_collapse_streak = 0;

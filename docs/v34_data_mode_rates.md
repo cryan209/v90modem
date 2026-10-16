@@ -751,3 +751,46 @@ differs by rate, and failures at 33600 with 36 dB injected noise.
 The receiver fix does not recalibrate either the TRN or B1 rate guards. The
 browser's default 24000 profile remains conservative; higher automatic
 offers still need a model validated against actual DATA errors and hardware.
+
+## Keep standalone MP wire decoding during acquisition (2026-10-17)
+
+Standalone duplex MP no longer rotates away from its default differential
+modulation, peer scrambler and I1,I2 bit order when a preamble is missing or
+a frame is rejected. V.34 §10.1.3.9 specifies the four-point modulation via
+§10.1.3.3; §7 supplies the scrambler. MP bit order starts at I1,I2 rather
+than inheriting the TRN acquisition hint. V.90 and HDX retain their previous
+selection rules. Preamble scores, CRC/semantic checks, rate policy and the
+§11.4 E deadline are unchanged.
+
+The reproduced mu-law delay-1/36-dB failure entered MP search while the peer
+was still sending TRN. The search rotated through other polynomials, bit
+orders and absolute phase, acquired false preambles, and missed the peer's
+MP' until the E deadline. Keeping the defaults received CRC-valid MP at
+6.42 s and completed E at 6.62/6.64 s; both directions then transferred one
+million PRBS bits at 28800 with zero errors.
+
+Before/after automatic-selection qualification: 3429/33600 initial offer,
+both G.711 laws, delays 0/1/7/23/79/160/161/319 samples, clean and
+40/36/30/24/20 dB injected noise, one million bits per direction,
+6000-block timeout. Baseline includes the preceding rate-calibration work.
+
+| Noise | Before | Fixed MP decoding |
+|---|---:|---:|
+| Clean | 16/16 | 16/16 |
+| 40 dB | 16/16 | 16/16 |
+| 36 dB | 14/16 | 16/16 |
+| 30 dB | 15/16 | 16/16 |
+| 24 dB | 16/16 | 16/16 |
+| 20 dB | 3/16 | 4/16 |
+| Total | 80/96 | 84/96 |
+
+All three startup failures at 30/36 dB now pass: mu-law delay 1 at 28800,
+and A-law delay 161 at 28800/26400. These are fast-tier million-bit
+regressions with exact negotiated-rate assertions. They reproduce the same
+MP offers with V.250 directional limits (TX ceiling 33600, RX ceiling
+28800/26400), independently of the automatic-rate calibration; the saved
+baseline fails all three and the fixed receiver passes all three. Clean rates are retained,
+including 33600 both ways in 13/16 rows. At 20 dB the changed acquisition
+trajectory newly passes mu-law/A-law delay 1 but newly fails mu-law delay 7
+with 34 bit errors; the other failures remain. This is not reliable 20-dB
+operation and does not establish physical modem interoperability.
