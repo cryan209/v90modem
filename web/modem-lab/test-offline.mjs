@@ -27,7 +27,7 @@ try{
  select('32');assert.equal(document.getElementById('startupV8').disabled,false);document.getElementById('startupV8').checked=false;updateStartup();assert.equal(document.getElementById('startupBis').disabled,true);
  select('v21');assert.equal(document.getElementById('startupV8').disabled,true);assert.equal(document.getElementById('startupBis').disabled,true);
  console.log('PASS: startup controls gate unsupported combinations');
- for(const [mode,startup] of [['x2',{}],['flex',{}],[32,{v8:false,v8bis:false}],[34,{v8:true,v8bis:true,v34MaxRate:0}],[90,{v8:true,v8bis:true}],[92,{v8:true,v92Startup:'compare',line:{delayMs:20}}]]){
+ for(const [mode,startup] of [['x2',{}],['flex',{}],[32,{v8:false,v8bis:false}],[34,{v8:true,v8bis:true,v34MaxRate:0}],[90,{v8:true,v8bis:true,line:{delayMs:80}}],[92,{v8:true,v92Startup:'compare',line:{delayMs:20}}]]){
   const runner=createOfflineModemRunner();assert.ok(runner instanceof InlineModemRunner);
   const result=await new Promise((resolve,reject)=>{runner.onmessage=({data})=>{if(data.type==='error')reject(new Error(data.message));if(data.type==='result')resolve(data);};runner.postMessage({mode,startup,text:'Offline file test — hello'});});
   assert.ok(result.passed);assert.equal(result.received,'Offline file test — hello');assert.equal(result.reply,['x2','flex'].includes(mode)?'':'ACK: Offline file test — hello');
@@ -35,6 +35,7 @@ try{
    select('92');setTestResult(result);drawStats(0);assert.equal(document.getElementById('statBytes').textContent,'0');assert.equal(document.getElementById('quickComparison').hidden,true);
    drawStats(result.stats.verifiedAtSeconds);assert.equal(document.getElementById('statBytes').textContent,result.stats.verifiedBytes.toLocaleString());assert.equal(document.getElementById('quickComparison').hidden,false);
    assert.equal(result.modulation,'V92');assert.equal(result.txRate,48000);assert.equal(result.rxRate,56000);assert.ok(result.comparison.full.passed);assert.ok(result.comparison.savedSeconds>0);}
+  if(mode===90){assert.equal(result.txRate,31200);assert.equal(result.rxRate,56000);assert.ok(result.events.filter(e=>e.rates).every(e=>e.rates.caller.tx===31200&&e.rates.answerer.rx===31200));select('90');setTestResult(result);drawStats(result.stats.verifiedAtSeconds);assert.equal(document.getElementById('statRates').textContent,'31,200 / 56,000 bit/s');assert.equal(document.getElementById('statRateLabel').textContent,'Caller upload / download');}
   if(mode===34){assert.equal(result.txRate,33600);assert.equal(result.rxRate,33600);}
   runner.terminate();console.log(`PASS: packaged file:// ${['x2','flex'].includes(mode)?mode+' downstream PCM':'V.'+mode}, no Worker, verified ${['x2','flex'].includes(mode)?'downstream':'bidirectional'} payload`);
  }

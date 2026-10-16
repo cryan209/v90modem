@@ -95,6 +95,7 @@ function drawStats(t){
  $('transferStats').hidden=false;
  const connected=s.connectSeconds!==null&&t>=s.connectSeconds,verified=result.passed&&s.verifiedAtSeconds!==null&&t>=s.verifiedAtSeconds;
  $('statConnect').textContent=connected?s.connectSeconds.toFixed(2)+' s':result.kind==='pcm'||isFsk()?'Not applicable':t>=(s.simulationSeconds||Infinity)-.02?'Not established':'Waiting';
+ $('statRateLabel').textContent=['V90','V92'].includes(result.modulation)?'Caller upload / download':'Caller TX / RX';
  $('statRates').textContent=connected?`${result.txRate.toLocaleString()} / ${result.rxRate.toLocaleString()} bit/s`:result.kind==='pcm'?'56,000 downstream':isFsk()?'300 bit/s':'—';
  $('statBytes').textContent=verified?s.verifiedBytes.toLocaleString():'0';
  $('statThroughput').textContent=verified&&s.usefulBitsPerSecond!==null?Math.round(s.usefulBitsPerSecond).toLocaleString()+' bit/s':'—';
@@ -133,7 +134,7 @@ async function dial(){
  }
  }catch(e){fail(e.message);}
 }
-function fail(message){stop();$('status').textContent='Could not run: '+message;$('events').textContent='Serve this folder over HTTP and build the WASM assets first.\n'+message;}
+function fail(message){stop();$('status').textContent='Could not run: '+message;$('events').textContent='The run stopped before a verified result.\n'+message;}
 $('inspectTime').addEventListener('input',()=>{$('inspectFollow').checked=false;drawInspector(elapsed,true);});$('inspectFollow').addEventListener('change',()=>drawInspector(elapsed,true));
 $('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(const id of ['inspectView','inspectSide','inspectStage'])$(id).addEventListener('change',()=>drawInspector(elapsed,true));
 $('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage=result.kind==='pcm'?'Downstream payload only: fixed profile, exact server PCM codewords, independent decoded UTF-8 text; no dial-up handshake or upstream.':'Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});

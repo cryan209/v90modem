@@ -2,7 +2,7 @@ import createModem from './dist/modem-engine.mjs';
 import assert from 'node:assert/strict';
 import {transmit,receive,wav} from './dist/fsk.mjs';
 import {hdlcFrames,inspectorText,negotiationRecords} from './dist/negotiation.mjs';
-import {runPair,validateLine,delayLine} from './dist/engine-pair.mjs';
+import {runPair,validateLine,delayLine,checkPcmRates} from './dist/engine-pair.mjs';
 const examples=['A','\0\0\0',String.fromCharCode(...Array.from({length:95},(_,i)=>i+32)),'Kia ora — hello 🌏','x'.repeat(240)];
 for(const profile of ['v21','bell103'])for(const text of examples)for(const snr of [99,24,12]){
  const tx=transmit(text,profile,snr),rx=receive(tx.samples,profile);
@@ -148,3 +148,19 @@ const failedLine=await runPair(34,'Severe line test',()=>{},()=>false,{v8:true,l
 assert.equal(failedLine.passed,false);assert.equal(failedLine.stats.verifiedBytes,0);
 assert.equal(failedLine.stats.connectSeconds,null);assert.equal(failedLine.stats.usefulBitsPerSecond,null);
 console.log('PASS: failed channel makes no connection, verified-byte or throughput claim');
+
+assert.throws(()=>checkPcmRates('V90',{tx:56000,rx:56000},{tx:56000,rx:56000}),/inconsistent/);
+assert.throws(()=>checkPcmRates('V90',{tx:0,rx:56000},{tx:56000,rx:31200}),/inconsistent/);
+assert.throws(()=>checkPcmRates('V90',{tx:31200,rx:56000},{tx:56000,rx:28800}),/inconsistent/);
+checkPcmRates('V90',{tx:31200,rx:56000},{tx:56000,rx:31200});
+for(const v8bis of [false,true]){
+ const r=await runPair(90,'V90 delayed report',()=>{},()=>false,{v8:true,v8bis,line:{delayMs:80}});
+ assert.ok(r.passed);assert.equal(r.txRate,31200);assert.equal(r.rxRate,56000);
+ const connections=r.events.filter(e=>e.rates);assert.ok(connections.length);
+ for(const e of connections){
+  assert.equal(e.rates.caller.tx,31200);assert.equal(e.rates.caller.rx,56000);
+  assert.equal(e.rates.answerer.tx,56000);assert.equal(e.rates.answerer.rx,31200);
+  assert.match(e.message,/upload 31200 \/ download 56000/);
+ }
+ console.log(`PASS: V.90 at 80-ms delay, V.8bis=${v8bis}, event and endpoint reports agree at 31200/56000`);
+}

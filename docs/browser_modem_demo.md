@@ -376,3 +376,32 @@ results follow the playback clock and do not expose future verification.
 Regression tests check timing arithmetic, byte counts, disabled controls,
 codeword FIFO continuity, line-setting validation, payloads under impairment,
 and the generated file runner's V.92 comparison and statistics timeline.
+
+## V.90 directional CONNECT report at 80 ms delay (2026-10-17)
+
+Reproduced `Connected · caller TX 56000 / RX 56000` with 80 ms additional
+one-way delay, with V.8bis off and on. Both payloads passed, but the displayed
+upload rate was false. The digital modem's MP/upstream decoder and subsequent
+analogue transmit handover both selected 31200 bit/s.
+
+At this timing, the analogue receiver finishes downstream B1d before its
+transmitter finishes upstream B1. `me_v90_analogue_rx_codewords_locked()`
+therefore latched upstream=0/downstream=56000 at DATA entry. At the later DTE
+CONNECT, the report callback kept that incomplete latch, and the browser's
+scalar-CONNECT fallback turned the missing upload into another 56000.
+
+V.250 §6.4.3 reporting now reads the completed analogue modem negotiation at
+report time (V.90 §9.4.2), rather than the early DATA-entry latch. The browser
+requires explicit directional PCM reports; it does not substitute the scalar
+CONNECT value or clamp an impossible upload to a plausible rate. V.90/V.92
+caller TX and RX must match the opposite endpoint's RX and TX; V.90 upload
+must also remain within its 33600-bit/s QAM limit. Invalid or missing reports
+stop the lab with a diagnostic instead of displaying invented speeds.
+
+Connection events include both endpoints' structured rate observations and
+label the analogue caller's upload/download. The 80-ms regressions require
+31200/56000 at every connection event and 56000/31200 at the digital endpoint,
+with independently verified payloads and V.8bis both off and on. The packaged
+file runner checks the same delayed case and the displayed statistics labels.
+The existing 0/1/20/200-ms cases reproduced correct rates before this change;
+no training constants, negotiated offers or bearer samples changed for the fix.

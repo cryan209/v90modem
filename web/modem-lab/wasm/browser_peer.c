@@ -72,15 +72,21 @@ EMSCRIPTEN_KEEPALIVE char *browser_read_bits(int dir) {
 EMSCRIPTEN_KEEPALIVE const char *browser_modulation(void) { return report.carrier ? report.carrier : ""; }
 EMSCRIPTEN_KEEPALIVE int browser_rate(void) { return connected_rate; }
 EMSCRIPTEN_KEEPALIVE int browser_tx_rate(void) { return report.tx_rate; }
-EMSCRIPTEN_KEEPALIVE int browser_rx_rate(void) { return report.rx_rate ? report.rx_rate : connected_rate; }
+EMSCRIPTEN_KEEPALIVE int browser_rx_rate(void) {
+    if(report.carrier && (!strcmp(report.carrier,"V90") || !strcmp(report.carrier,"V92")))
+        return report.rx_rate; /* PCM directions must be explicitly reported. */
+    return report.rx_rate ? report.rx_rate : report.tx_rate;
+}
 EMSCRIPTEN_KEEPALIVE int browser_received_n(void) { return received_n; }
 EMSCRIPTEN_KEEPALIVE uint8_t *browser_received(void) { return received; }
 EMSCRIPTEN_KEEPALIVE void browser_clear_received(void) { received_n=0; }
 EMSCRIPTEN_KEEPALIVE void browser_destroy(void) { me_destroy(); }
 void di_get_v250_settings(v250_ctl_t *out) { *out=browser_settings; }
 void di_on_connected(int rate) {
-    connected_rate=rate; memset(&report,0,sizeof report); report.tx_rate=rate;
+    connected_rate=rate; memset(&report,0,sizeof report);
     if(connect_info) connect_info(rate,&report);
+    /* V.250 6.4.3: a scalar CONNECT is not two directional PCM rates. */
+    if(!report.tx_rate && (!report.carrier || (strcmp(report.carrier,"V90") && strcmp(report.carrier,"V92"))))report.tx_rate=rate;
 }
 void di_set_connect_info_cb(di_connect_info_cb_t cb) { connect_info=cb; }
 void di_on_disconnected_cause(const char *s,int o) {(void)s;(void)o;connected_rate=0;}

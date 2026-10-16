@@ -53,8 +53,11 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
       const time=(block+1)*.02, ar=a._browser_rate(),br=b._browser_rate();
       const startupName=side=>startup.v8===false?'V.25':startup.v8bis&&!protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line))?'V.8bis':'V.8';
       const states=side=>['idle','dialing',startupName(side),'training','data','hangup'];
-      const state=`${sa}/${sb}/${ar}/${br}/${startupName('caller')}/${startupName('answerer')}`;
-      if(state!==lastState){events.push({time,message:ar&&br?`Connected · caller TX ${a._browser_tx_rate()} / RX ${a._browser_rx_rate()} bit/s`:`Training · caller ${states('caller')[sa]} / answerer ${states('answerer')[sb]}`});lastState=state;}
+      const callerRates={tx:a._browser_tx_rate(),rx:a._browser_rx_rate()},answererRates={tx:b._browser_tx_rate(),rx:b._browser_rx_rate()};
+      const carrier=a.UTF8ToString(a._browser_modulation());
+      if(ar&&br)checkPcmRates(carrier,callerRates,answererRates);
+      const state=`${sa}/${sb}/${ar}/${br}/${callerRates.tx}/${callerRates.rx}/${answererRates.tx}/${answererRates.rx}/${startupName('caller')}/${startupName('answerer')}`;
+      if(state!==lastState){events.push({time,...(ar&&br?{rates:{caller:callerRates,answerer:answererRates},carrier}:{}),message:ar&&br?(['V90','V92'].includes(carrier)?`Connected · ${carrier.replace('V','V.')} · caller upload ${callerRates.tx} / download ${callerRates.rx} bit/s`:`Connected · caller TX ${callerRates.tx} / RX ${callerRates.rx} bit/s`):`Training · caller ${states('caller')[sa]} / answerer ${states('answerer')[sb]}`});lastState=state;}
       if(ar && br){
         if(connectedAt===null)connectedAt=time;
         if(at<bytes.length)at+=a._browser_send(pa+at,bytes.length-at);
@@ -142,4 +145,14 @@ export function validateLine(mode,input={}){
  if(![32,34].includes(Number(mode))&&(line.noiseDb||line.lossDb||line.clockPpm))throw new Error('Analogue noise, attenuation and clock drift are supported for V.32/V.34 only');
  if(['x2','flex'].includes(String(mode))&&line.delayMs)throw new Error('PCM payload demos use a fixed byte-exact line');
  return line;
+}
+
+// V.90 §§5/6 and V.250 6.4.3: report actual directional rates. Never
+// repair an impossible report by clamping or copying the other direction.
+export function checkPcmRates(carrier,caller,answerer){
+ if(!['V90','V92'].includes(carrier))return;
+ const values=[caller.tx,caller.rx,answerer.tx,answerer.rx];
+ if(values.some(n=>!Number.isInteger(n)||n<=0)||caller.tx!==answerer.rx||caller.rx!==answerer.tx
+    ||(carrier==='V90'&&(caller.tx>33600||caller.rx>56000)))
+  throw new Error(`${carrier} directional rate report is inconsistent: caller TX/RX ${caller.tx}/${caller.rx}, answerer TX/RX ${answerer.tx}/${answerer.rx}`);
 }

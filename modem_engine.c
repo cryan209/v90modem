@@ -11210,6 +11210,20 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
         r->tx_rate = g_report_tx_rate;
         r->rx_rate = g_report_rx_rate;
     }
+    /* V.90 9.4.2: downstream B1d may finish before the analogue
+       transmitter's upstream handover. At that instant its upstream rate
+       is still zero, so the DATA-entry latch is incomplete (80 ms one-way
+       browser delay reproduces this). V.250 6.4.3 must report the completed
+       directional negotiation, never duplicate the scalar downstream
+       CONNECT rate as the upload speed. Read the durable modem state at
+       report time; PCM-upstream V.92 has its own controller and rate latch. */
+    if (g_mod == ME_MOD_V90 && !g_v92a && g_v90a
+        && me_v90_analogue_role()) {
+        const vpcm_cp_frame_t *cp = v90_analogue_phase3_cp(g_v90a);
+
+        r->tx_rate = v90_analogue_phase3_upstream_rate(g_v90a);
+        r->rx_rate = cp ? (int)vpcm_cp_drn_to_bps(cp->drn) : 0;
+    }
     /* V.250 6.4.1: min/max are the lowest/highest rates at which the DCE
      * "may establish a connection".  Everything above steers the call into
      * the bounds; a peer can still settle outside them (V.22bis falling back
