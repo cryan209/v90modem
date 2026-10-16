@@ -364,6 +364,26 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload, pe
     if peer_cp is None:
         return rep, mycp, info
     cp = peer_cp
+    if mycp and mycp["transparent"] and cp["transparent"]:
+        # 6.5 / 8.7: both CPs granted bit 18, so the data bits ARE the PCM
+        # codewords (8 per symbol, LSB first), B1 is 12 codewords of binary
+        # ones, drn = 28, and there is no control channel.
+        es_end = i + pos + 12
+        rep.check(mycp["drn"] == 28 and cp["drn"] == 28,
+                  "transparent mode granted by both ends with drn 28 (8.7)")
+        rep.check(raw[es_end:es_end + 12] == b"\xff" * 12,
+                  "transparent B1: 12 codewords of binary ones (7.1)")
+        data = raw[es_end + 12:]
+        primary = [(c >> t) & 1 for c in data for t in range(8)]
+        rep.check(len(data) > 0, "%d transparent data codewords follow B1 directly" % len(data))
+        rep.ok("no control channel in transparent mode (6.5)")
+        if payload:
+            pat = []
+            for ch in payload.encode():
+                pat += [0] + [(ch >> t) & 1 for t in range(8)] + [1]
+            rep.check("".join(map(str, pat)) in "".join(map(str, primary)),
+                      "payload %r found in the transparent bit stream as 8N1 characters" % payload)
+        return rep, mycp, info
     drn = cp["drn"]
     K, D = drn + 14, drn + 20
     rep.ok("our transmitter uses the peer's CP: drn %d (D=%d, K=%d), %d constellation(s), dfi=%s"

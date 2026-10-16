@@ -1676,6 +1676,15 @@ static bool g_v91_local_specify;
 static v91_dil_desc_t g_v91_local_dil;
 static const v91_dil_desc_t *g_v91_rx_dil_expect;
 static bool g_v91_peer_default_dil;      /* peer's INFO bit 26 = 0 */
+/* Transparent mode (6.5, 8.7).  ME_V91_TRANSPARENT=1 sets INFO bit 40, =2 also
+ * bit 41 (cleardown if not granted).  A request from either end is granted
+ * (CP bit 18) once our receive path has shown an unrestricted 64 kbit/s
+ * channel; transparent mode runs only if BOTH CPs grant it. */
+static bool g_v91_want_transparent;
+static bool g_v91_want_transparent_cd;
+static bool g_v91_peer_req_transparent;
+static bool g_v91_peer_req_transparent_cd;
+static bool g_v91_local_grant;
 static bool g_v91_peer_j_valid;
 static v91_dil_desc_t g_v91_peer_j;
 static uint8_t g_v91_rx_j_bits[V91_J_MAX_BITS];
@@ -1765,6 +1774,8 @@ static void v91_live_fill_info(v91_info_frame_t *info, v91_law_t law, bool ack)
 {
     memset(info, 0, sizeof(*info));
     info->request_default_dil = !g_v91_local_specify;
+    info->request_transparent_mode = g_v91_want_transparent;
+    info->cleardown_if_transparent_denied = g_v91_want_transparent && g_v91_want_transparent_cd;
     info->request_control_channel = g_v91_we_want_cc;
     info->acknowledge_info_frame = ack;
     info->tx_uses_alaw = (law == V91_LAW_ALAW);
@@ -1874,6 +1885,32 @@ static int v91_live_build_cp(v91_state_t *state, uint8_t *out, int out_cap)
     return v91_tx_cp_codewords(state, out, out_cap, &cp, true);
 }
 
+/* 8.7: transparent data mode needs both CPs to grant it. */
+static bool v91_live_transparent(void)
+{
+    return g_v91_local_grant && g_v91_peer_cp_valid
+        && g_v91_peer_cp.transparent_mode_granted;
+}
+
+/* The CP that configures our transmitter / receiver, with bit 18 settled by
+ * the exchange (a granted bit that the other end did not match is cleared and
+ * the rest of the CP is used as sent, 8.7). */
+static vpcm_cp_frame_t v91_live_tx_cp(void)
+{
+    vpcm_cp_frame_t cp = g_v91_peer_cp;
+
+    cp.transparent_mode_granted = v91_live_transparent();
+    return cp;
+}
+
+static vpcm_cp_frame_t v91_live_rx_cp(void)
+{
+    vpcm_cp_frame_t cp = g_v91_cp_local;
+
+    cp.transparent_mode_granted = v91_live_transparent();
+    return cp;
+}
+
 /* Es then B1 (8.2.1.10, 8.2.1.11).  B1 is binary ones through OUR data mode,
  * which is the constellation and rate the peer asked for in its CP. */
 static int v91_live_build_tail(v91_state_t *state, uint8_t *out, int out_cap)
@@ -1885,7 +1922,11 @@ static int v91_live_build_tail(v91_state_t *state, uint8_t *out, int out_cap)
     len = v91_tx_es_codewords(state, tmp, sizeof(tmp));
     if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0)
         return 0;
-    len = v91_tx_b1_codewords(state, tmp, sizeof(tmp), &g_v91_peer_cp);
+    {
+        vpcm_cp_frame_t cp = v91_live_tx_cp();
+
+        len = v91_tx_b1_codewords(state, tmp, sizeof(tmp), &cp);
+    }
     if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0)
         return 0;
     return pos;
@@ -1936,6 +1977,11 @@ static void v91_live_reset(void)
     g_v91_rx_data_live = false;
     g_v91_sim_robbed_phase = -1;
     g_v91_local_specify = false;
+    g_v91_want_transparent = false;
+    g_v91_want_transparent_cd = false;
+    g_v91_peer_req_transparent = false;
+    g_v91_peer_req_transparent_cd = false;
+    g_v91_local_grant = false;
     g_v91_rx_dil_expect = &g_v91_default_dil;
     g_v91_peer_default_dil = true;
     g_v91_peer_j_valid = false;
@@ -1993,6 +2039,11 @@ static bool v91_live_begin_startup_locked(bool keep_clock)
     /* ME_V91_SPECIFY_DIL=1: request a specified DIL (INFO bit 26 = 1, J, Em).
      * The descriptor is the default one, so the receive side stays comparable;
      * what changes is the start-up sequence (Figures 2 and 3/V.91). */
+    env = getenv("ME_V91_TRANSPARENT");
+    if (env && atoi(env) > 0) {
+        g_v91_want_transparent = true;
+        g_v91_want_transparent_cd = (atoi(env) > 1);
+    }
     env = getenv("ME_V91_SPECIFY_DIL");
     if (env && atoi(env) > 0) {
         g_v91_local_specify = true;
@@ -2121,13 +2172,25 @@ static bool v91_live_startup_timers_locked(long long now)
  * next codeword, on the six-codeword frame grid that B1 ends on. */
 static bool v91_live_activate_tx_data_locked(void)
 {
-    if (!g_v91_peer_cp_valid || g_v91_peer_drn == 0
-        || !v91_activate_data_mode(&g_v91_tx, &g_v91_peer_cp)) {
+    vpcm_cp_frame_t cp = v91_live_tx_cp();
+
+    if ((g_v91_want_transparent || g_v91_peer_req_transparent)
+        && (g_v91_want_transparent_cd || g_v91_peer_req_transparent_cd)
+        && !v91_live_transparent()) {
+        /* 8.7: a bit-41 requester wants cleardown when it is not granted. */
+        ME_LOG("[ME] V.91 transparent mode not granted by both ends: cleardown (8.7)\n");
+        trace_phase("V91 transparent denied, cleardown");
         g_state = ME_HANGUP;
         return false;
     }
-    /* 6.4: we supply a control channel only if the peer asked for one. */
-    v91_set_control_channel(&g_v91_tx, g_v91_peer_wants_cc, false);
+    if (!g_v91_peer_cp_valid || g_v91_peer_drn == 0
+        || !v91_activate_data_mode(&g_v91_tx, &cp)) {
+        g_state = ME_HANGUP;
+        return false;
+    }
+    /* 6.4: we supply a control channel only if the peer asked for one; there
+     * is none in transparent mode (6.5). */
+    v91_set_control_channel(&g_v91_tx, g_v91_peer_wants_cc && !v91_live_transparent(), false);
     g_v91_data_tx_bytes = (int)g_v91_peer_drn + 20;
     g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
     g_v91_tx_data_live = true;
@@ -2137,12 +2200,15 @@ static bool v91_live_activate_tx_data_locked(void)
 /* 8.2.1.12: after receiving B1 the receiver decodes data from the next codeword. */
 static bool v91_live_activate_rx_data_locked(void)
 {
+    vpcm_cp_frame_t cp;
+
     g_v91_cp_local.drn = g_v91_local_drn;
-    if (g_v91_local_drn == 0 || !v91_activate_data_mode(&g_v91_rx, &g_v91_cp_local)) {
+    cp = v91_live_rx_cp();
+    if (g_v91_local_drn == 0 || !v91_activate_data_mode(&g_v91_rx, &cp)) {
         g_state = ME_HANGUP;
         return false;
     }
-    v91_set_control_channel(&g_v91_rx, false, g_v91_we_want_cc);
+    v91_set_control_channel(&g_v91_rx, false, g_v91_we_want_cc && !v91_live_transparent());
     g_v91_data_rx_bytes = (int)g_v91_local_drn + 20;
     g_v91_data_rx_pos = 0;
     g_v91_rx_data_live = true;
@@ -2367,7 +2433,9 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
 
             /* Control-channel frames carry six fewer user bits, so the byte
              * count per block varies; ask the encoder what it still needs. */
-            int need = v91_tx_bytes_for_frames(&g_v91_tx, V91_LIVE_DATA_FRAMES);
+            int need = g_v91_tx.active_transparent_mode
+                           ? V91_LIVE_DATA_CODEWORDS
+                           : v91_tx_bytes_for_frames(&g_v91_tx, V91_LIVE_DATA_FRAMES);
 
             if (need <= 0 || need > (int)sizeof(data))
                 return false;
@@ -2542,6 +2610,8 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
                 if (v91_rx_info_codewords(&scratch, g_v91_rx_win, V91_INFO_SYMBOLS, &info)) {
                     g_v91_peer_wants_cc = info.request_control_channel;
                     g_v91_peer_default_dil = info.request_default_dil;
+                    g_v91_peer_req_transparent = info.request_transparent_mode;
+                    g_v91_peer_req_transparent_cd = info.cleardown_if_transparent_denied;
                     trace_phase("V91 RX found INFO onset (ack=%d)",
                                 info.acknowledge_info_frame ? 1 : 0);
                     if (info.acknowledge_info_frame)
@@ -2567,6 +2637,8 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         }
         g_v91_peer_wants_cc = info.request_control_channel;
         g_v91_peer_default_dil = info.request_default_dil;
+        g_v91_peer_req_transparent = info.request_transparent_mode;
+        g_v91_peer_req_transparent_cd = info.cleardown_if_transparent_denied;
         /* INFO repeats (ack = 0) until the peer has ours; the first INFO' ends
          * the exchange and Eu, J or PHIL follows it. */
         if (info.acknowledge_info_frame)
@@ -2669,6 +2741,12 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
          * intervals seen here are restricted to odd Ucodes in it (LSB
          * robbing then cannot move a codeword). */
         g_v91_cp_local = g_v91_cp_template;
+        /* 8.7: grant only on an unrestricted 64 kbit/s channel.  The DIL
+         * arrived codeword-exact (polarity or any other change would have
+         * failed it) with no robbed LSBs. */
+        g_v91_local_grant = (g_v91_want_transparent || g_v91_peer_req_transparent)
+                            && !g_v91_rx.rx_robbed_bit_detected;
+        g_v91_cp_local.transparent_mode_granted = g_v91_local_grant;
         if (g_v91_rx.rx_robbed_bit_detected && g_v91_rx.rx_robbed_slot_mask != 0
             && !vpcm_cp_apply_robbed_bit_safe_slots(&g_v91_cp_local,
                                                     g_v91_rx.rx_robbed_slot_mask)) {
@@ -2754,7 +2832,7 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
                 v91_live_rx_fail_locked("CP cleardown (drn 0)");
                 return;
             }
-            if (g_v91_peer_cp.transparent_mode_granted
+            if ((g_v91_peer_cp.transparent_mode_granted && g_v91_peer_cp.drn != 28)
                 || !v91_cp_supports_drn(&g_v91_peer_cp, g_v91_peer_cp.drn)) {
                 v91_live_rx_fail_locked("CP contents");
                 return;
@@ -2792,8 +2870,10 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         /* 7.1: B1 is binary ones through the data encoder, so it is checked
          * by demapping on the receive state, which also carries the
          * descrambler and differential history on into data mode. */
+        vpcm_cp_frame_t rx_cp = v91_live_rx_cp();
+
         if (!v91_rx_b1_codewords(&g_v91_rx, g_v91_rx_accum, V91_B1_SYMBOLS,
-                                 &g_v91_cp_local)) {
+                                 &rx_cp)) {
             v91_live_rx_fail_locked("B1");
             return;
         }
@@ -2845,7 +2925,8 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                                                 sizeof(data),
                                                 g_v91_data_rx,
                                                 sizeof(g_v91_data_rx));
-                if (g_v91_rx.rx_frame_index - frame0 != V91_LIVE_DATA_FRAMES) {
+                if (!g_v91_rx.active_transparent_mode
+                    && g_v91_rx.rx_frame_index - frame0 != V91_LIVE_DATA_FRAMES) {
                     ME_LOG("[ME] V.91 data frame decode failed: decoded=%d/%d codewords=",
                            decoded, g_v91_data_rx_bytes);
                     if (me_verbose_enabled()) {

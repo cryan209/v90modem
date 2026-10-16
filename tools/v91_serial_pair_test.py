@@ -109,6 +109,12 @@ def main() -> int:
         help="that end requests a specified DIL (INFO bit 26 = 1, J, PHIL, Em; 8.2.1.5-8.2.1.7, "
              "Figures 2 and 3)")
     parser.add_argument(
+        "--transparent", choices=("caller", "answerer", "both"), default=None,
+        help="that end requests transparent mode (INFO bit 40; 6.5, 8.7)")
+    parser.add_argument(
+        "--transparent-cleardown", action="store_true",
+        help="with --transparent: also set INFO bit 41 (cleardown if not granted)")
+    parser.add_argument(
         "--attempts", type=int, default=3,
         help="run again (in a fresh process) up to this many times when a call fails; the "
              "host's 100-200 ms scheduling stalls and V.8 timeouts are not V.91 defects, "
@@ -158,6 +164,14 @@ def main() -> int:
         answerer_env["ME_V91_SPECIFY_DIL"] = "1"
     if args.specify_dil:
         label += f", {args.specify_dil} specifies the DIL (J/PHIL/Em)"
+
+    if args.transparent:
+        val = "2" if args.transparent_cleardown else "1"
+        if args.transparent in ("caller", "both"):
+            caller_env["ME_V91_TRANSPARENT"] = val
+        if args.transparent in ("answerer", "both"):
+            answerer_env["ME_V91_TRANSPARENT"] = val
+        label += f", {args.transparent} requests transparent mode"
 
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory(prefix="v91-serial-pair-") as temp_dir:
@@ -247,10 +261,20 @@ def main() -> int:
                     raise RuntimeError("V.91 did not escape to V.34 on both ends")
                 print(f"v91_serial_pair_test: OK ({label})")
                 return 0
-            if "cc tx=1 rx=1" not in alog:
-                raise RuntimeError("control channel was not negotiated on both directions")
-            if "peer cleardown (control channel)" not in alog:
-                raise RuntimeError("peer did not see the control-channel cleardown")
+            granted = bool(args.transparent) and args.robbed_phase is None
+            if granted:
+                # 8.7 / 6.5: 64000 bit/s, codewords carry the data, no control channel
+                for name, text in (("caller", clog), ("answerer", alog)):
+                    if "V91 enter DATA: rate=64000" not in text or "cc tx=0 rx=0" not in text:
+                        raise RuntimeError(f"{name} did not enter transparent data mode")
+                label += "; transparent mode at 64000"
+            else:
+                if args.transparent and "rate=64000" in alog:
+                    raise RuntimeError("transparent mode granted on a robbed-bit path")
+                if "cc tx=1 rx=1" not in alog:
+                    raise RuntimeError("control channel was not negotiated on both directions")
+                if "peer cleardown (control channel)" not in alog:
+                    raise RuntimeError("peer did not see the control-channel cleardown")
             if not (args.retrain or args.escape):
                 decode = subprocess.run(
                     [sys.executable, str(pathlib.Path(__file__).with_name("v91_spec_decode.py")),
@@ -269,14 +293,22 @@ def main() -> int:
                     raise RuntimeError("spec decoder rejected our transmit taps:\n"
                                        + decode.stdout + decode.stderr)
                 label += "; spec decoder agrees"
-            print(f"v91_serial_pair_test: OK ({label}; control-channel cleardown)")
+            print(f"v91_serial_pair_test: OK ({label}"
+                  + ("" if granted else "; control-channel cleardown") + ")")
             return 0
         except Exception as exc:
-            print(f"v91_serial_pair_test: FAIL: {exc}", file=sys.stderr)
             terminate(caller)
             terminate(answerer)
             caller_log.close()
             answerer_log.close()
+            if (args.transparent and args.transparent_cleardown
+                    and args.robbed_phase is not None
+                    and all("V91 transparent denied, cleardown" in p.read_text(errors="replace")
+                            for p in (caller_log_path, answerer_log_path))):
+                # 8.7: bit 41 set and the request not granted -> both ends clear down
+                print(f"v91_serial_pair_test: OK ({label}; cleared down as bit 41 requires)")
+                return 0
+            print(f"v91_serial_pair_test: FAIL: {exc}", file=sys.stderr)
             print("--- caller log ---", file=sys.stderr)
             print(caller_log_path.read_text(errors="replace"), file=sys.stderr)
             print("--- answerer log ---", file=sys.stderr)

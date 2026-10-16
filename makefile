@@ -298,6 +298,10 @@ v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --specify-dil caller
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --specify-dil answerer
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --specify-dil both
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent both
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent caller
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent answerer --robbed-phase 2
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent caller --transparent-cleardown --robbed-phase 2
 
 # Receive-path conformance against a downstream we did not generate.  Encodes a
 # known-open defect (docs/eicon_downstream_comparison.md, Finding 4: DIL
