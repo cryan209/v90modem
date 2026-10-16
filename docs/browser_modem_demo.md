@@ -88,3 +88,51 @@ is native behavior or WASM-specific, and it is not hardware evidence.
 
 SpanDSP's LGPL license and source/build pointers are in `dist/COPYING.spandsp`
 and `dist/NOTICE.txt`.
+
+## Negotiation inspector
+
+The expandable inspector has **Simple decode**, **Verbose decode / engine
+log**, and **Raw octets & bitstreams** views, with observing-endpoint and
+protocol-stage filters. It follows playback by default. Its independent
+inspector-time slider lets you revisit an earlier exchange without replaying
+the call. All timestamps use the simulation's 20 ms frame clock, not the
+engine's wall-clock `[TRACE]` prefix. TX log messages can describe queued
+protocol material; data-layer HDLC timestamps mark completion at the tap.
+
+The simple view retains actual V.8 CM/JM/CJ menu octets and peer capability
+summaries, INFO0d/INFO0a role evidence, INFO1 channel selections, the parsed
+Ja DIL descriptor (N/LSP/LTP), DIL transmission and measurement reports,
+and V.42 detection/negotiation. The `a` and `d` role interpretation here
+applies to V.90; call direction alone does not establish the PCM role.
+Fields are taken from engine decodes, not reconstructed from the selected UI
+mode. Engine labels are retained in raw/verbose views, including an existing
+Tx INFO1d raw-frame label used for the analogue INFO1a block.
+
+Four complete raw data-layer bitstreams (caller/answerer × TX/RX) are captured
+using existing `DS_TX_BIT_DUMP` / `DS_RX_BIT_DUMP` hooks in each module's MEMFS.
+The browser adapter flushes them and measures cumulative bit counts per frame.
+The JavaScript inspector searches flags, removes HDLC bit stuffing, groups
+LSB-first octets, and checks the reflected CRC-16 residual `0xf0b8` (V.42
+clauses 7–8). Simple decode includes CRC-valid XID, SABME and UA records. XID
+fields follow V.42 Table 11: optional procedures, TX/RX N401 in **bits**, TX/RX
+window k, and private V.42bis P0/P1/P2. The observer identity and TX/RX direction
+are preserved: a received peer menu is not this modem's own advertised offer.
+
+Raw coverage is explicitly bounded. V.8 octets are decoded menu bytes; their
+LSB-first rendering omits FSK preambles/start/stop bits. Packed INFO1 bytes
+retain the engine's layout. There is no complete demodulated bitstream for
+every startup phase or for Ja. DIL is a PCM training waveform, not application
+bits. Exact G.711 codewords for both complete TX streams are also captured,
+so the DS0 during Ja/DIL can be inspected at any simulation time. Display
+windows show the most recent 512 data-layer bits and 64 G.711 codewords;
+**Capture JSON** exports the complete captured streams, logs and decoded frames.
+Verbose display shows at most 600 matching log lines at a time; its complete
+capture is capped at 20,000 lines and an explicit omission count is shown if
+reached. Current regression calls do not reach that cap.
+
+The browser-only adapter enables verbose/FLOW logs for offline inspection.
+This does **not** change the rule against FLOW logging on live calls. Native
+engine/DSP sources are unchanged by the inspector. Tests require real CRC-valid
+XID/SABME/UA frames in both advanced modes, check decoded XID parameters, flip
+a captured bit to prove CRC rejection, verify timeline filtering and exact
+DS0 capture lengths, and continue to verify payloads and constellation taps.

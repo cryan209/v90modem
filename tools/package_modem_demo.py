@@ -14,16 +14,20 @@ def main():
     html = (DIST/'index.html').read_text()
     engine = (DIST/'modem-engine.mjs').read_text().replace('export default createModem;', '')
     pair = (DIST/'engine-pair.mjs').read_text().replace("import createModem from './modem-engine.mjs';", '')
+    pair = pair.replace("import {negotiationRecords} from './negotiation.mjs';", '')
+    negotiation=(DIST/'negotiation.mjs').read_text().replace('export const ', 'const ').replace('export function ', 'function ')
     pair = pair.replace('export function ', 'function ').replace('export async function ', 'async function ')
     binary = base64.b64encode((DIST/'modem-engine.wasm').read_bytes()).decode()
-    pair = pair.replace('const options=()=>({', "const wasmBytes=Uint8Array.from(atob('"+binary+"'),c=>c.charCodeAt(0));\n  const options=()=>({wasmBinary:wasmBytes,locateFile:name=>name,")
+    assert pair.count('const options=(side)=>({') == 1, 'WASM factory changed; update offline packager'
+    pair = pair.replace('const options=(side)=>({', "const wasmBytes=Uint8Array.from(atob('"+binary+"'),c=>c.charCodeAt(0));\n  const options=(side)=>({wasmBinary:wasmBytes,locateFile:name=>name,")
     worker = (DIST/'worker.mjs').read_text().replace("import {runPair} from './engine-pair.mjs';", '')
-    encoded = base64.b64encode((engine+'\n'+pair+'\n'+worker).encode()).decode()
+    encoded = base64.b64encode((engine+'\n'+negotiation+'\n'+pair+'\n'+worker).encode()).decode()
     fsk = (DIST/'fsk.mjs').read_text().replace('export const ', 'const ').replace('export function ', 'function ')
     app = (DIST/'app.mjs').read_text().replace("import {transmit,receive,wav,RATE} from './fsk.mjs';", '')
+    app = app.replace("import {inspectorText} from './negotiation.mjs';", '')
     app = app.replace("new Worker('./worker.mjs',{type:'module'})", "new Worker(offlineWorkerUrl,{type:'module'})")
     setup = "const offlineWorkerUrl=URL.createObjectURL(new Blob([new TextDecoder().decode(Uint8Array.from(atob(document.getElementById('modem-worker').textContent.trim()),c=>c.charCodeAt(0)))],{type:'text/javascript'}));\nwindow.addEventListener('pagehide',()=>URL.revokeObjectURL(offlineWorkerUrl));\n"
-    script = fsk+'\n'+setup+app
+    script = fsk+'\n'+negotiation+'\n'+setup+app
     assert '</script' not in script.lower()
     html = html.replace('<link rel="stylesheet" href="style.css">', '<style>'+(DIST/'style.css').read_text()+'</style>')
     license_text=html_escape.escape((DIST/'COPYING.spandsp').read_text())

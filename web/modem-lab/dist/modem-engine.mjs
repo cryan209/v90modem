@@ -4585,6 +4585,8 @@ var _browser_input = Module['_browser_input'] = makeInvalidEarlyAccess('_browser
 var _browser_output = Module['_browser_output'] = makeInvalidEarlyAccess('_browser_output');
 var _browser_send = Module['_browser_send'] = makeInvalidEarlyAccess('_browser_send');
 var _browser_monitor = Module['_browser_monitor'] = makeInvalidEarlyAccess('_browser_monitor');
+var _browser_bit_count = Module['_browser_bit_count'] = makeInvalidEarlyAccess('_browser_bit_count');
+var _browser_read_bits = Module['_browser_read_bits'] = makeInvalidEarlyAccess('_browser_read_bits');
 var _browser_rate = Module['_browser_rate'] = makeInvalidEarlyAccess('_browser_rate');
 var _browser_tx_rate = Module['_browser_tx_rate'] = makeInvalidEarlyAccess('_browser_tx_rate');
 var _browser_rx_rate = Module['_browser_rx_rate'] = makeInvalidEarlyAccess('_browser_rx_rate');
@@ -4613,6 +4615,8 @@ function assignWasmExports(wasmExports) {
   _browser_output = Module['_browser_output'] = createExportWrapper('browser_output', 0);
   _browser_send = Module['_browser_send'] = createExportWrapper('browser_send', 2);
   _browser_monitor = Module['_browser_monitor'] = createExportWrapper('browser_monitor', 0);
+  _browser_bit_count = Module['_browser_bit_count'] = createExportWrapper('browser_bit_count', 1);
+  _browser_read_bits = Module['_browser_read_bits'] = createExportWrapper('browser_read_bits', 1);
   _browser_rate = Module['_browser_rate'] = createExportWrapper('browser_rate', 0);
   _browser_tx_rate = Module['_browser_tx_rate'] = createExportWrapper('browser_tx_rate', 0);
   _browser_rx_rate = Module['_browser_rx_rate'] = createExportWrapper('browser_rx_rate', 0);

@@ -4,6 +4,7 @@
  */
 #include <emscripten.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "modem_engine.h"
@@ -23,7 +24,10 @@ EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling) {
     setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 1);
     if (mode == 90 && calling) setenv("ME_V90_ROLE", "analogue", 1);
     if (mode == 32) setenv("ME_V32BIS_MAX_BPS", "9600", 1);
-    me_set_verbose(0); me_init(); me_set_law(ME_LAW_ULAW);
+    setenv("ME_V34_SPAN_FLOW_LOG", "1", 1);
+    setenv("DS_TX_BIT_DUMP", "/tx.bits", 1);
+    setenv("DS_RX_BIT_DUMP", "/rx.bits", 1);
+    me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
     if (calling) me_dial("browser-peer");
     me_on_sip_connected();
     return 0;
@@ -39,6 +43,18 @@ EMSCRIPTEN_KEEPALIVE char *browser_monitor(void) {
     int n=lm_gui_json(monitor_json,sizeof monitor_json);
     if(n<0)monitor_json[0]=0;
     return monitor_json;
+}
+/* V.42 §7 wire bits, before HDLC interpretation. MEMFS only; no host files. */
+EMSCRIPTEN_KEEPALIVE int browser_bit_count(int dir) {
+    fflush(NULL);
+    FILE *f=fopen(dir ? "/tx.bits" : "/rx.bits","r");
+    if(!f)return 0; fseek(f,0,SEEK_END); int n=(int)ftell(f); fclose(f); return n;
+}
+EMSCRIPTEN_KEEPALIVE char *browser_read_bits(int dir) {
+    int n=browser_bit_count(dir); char *p=malloc((size_t)n+1); if(!p)return NULL;
+    FILE *f=fopen(dir ? "/tx.bits" : "/rx.bits","r");
+    if(f){n=(int)fread(p,1,(size_t)n,f);fclose(f);}else n=0;
+    p[n]=0;return p;
 }
 EMSCRIPTEN_KEEPALIVE int browser_rate(void) { return connected_rate; }
 EMSCRIPTEN_KEEPALIVE int browser_tx_rate(void) { return report.tx_rate; }

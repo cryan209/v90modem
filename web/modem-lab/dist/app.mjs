@@ -1,6 +1,7 @@
 import {transmit,receive,wav,RATE} from './fsk.mjs';
+import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
-let mode='v21',context,source,worker,result,started=0,animation=0,downloadUrl,playing=false,elapsed=0,plotType='spectrum';
+let mode='v21',context,source,worker,result,started=0,animation=0,downloadUrl,playing=false,elapsed=0,lastInspect=-1,captureUrl,plotType='spectrum';
 const descriptions={
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
  bell103:['The sound of 300 bits a second.','Bell 103’s originating channel uses 1270 Hz for a 1 and 1070 Hz for a 0. A separate JavaScript receiver recovers your message from the waveform.'],
@@ -15,6 +16,7 @@ function select(next){stop();mode=next;document.querySelectorAll('.mode').forEac
  $('showConstellation').disabled=isFsk();setPlot(isFsk()?'spectrum':'constellation');
  $('noise').disabled=!isFsk();$('noiseHint').textContent=isFsk()?'Noise is added to the FSK signal before the receiver sees it.':'The advanced modes use a clean, byte-exact G.711 virtual line.';
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('status').textContent='Ready to dial';$('events').textContent='The receiver listens to the generated samples.\nNo prerecorded audio. No text shortcut.';
+ elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;$('inspectOutput').textContent='No capture yet.';
  $('clock').textContent='00.00 s';$('duration').textContent='—';result=null;$('download').disabled=true;draw(0);
 }
 function stop(){worker?.terminate();worker=null;if(source){source.onended=null;try{source.stop();}catch{}source=null;}
@@ -53,18 +55,27 @@ function plotConstellation(t){
  const unit=Math.min(w,h)*.46/scale;c.fillStyle='#c8ee9aaa';
  for(const [re,im] of points){c.beginPath();c.arc(w/2+re*unit,h/2-im*unit,2.1,0,Math.PI*2);c.fill();}
 }
-function draw(t){const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
+function drawInspector(t,force=false){
+ if(!$('inspector').open)return;
+ if($('inspectFollow').checked)$('inspectTime').value=String(t);else t=Number($('inspectTime').value);
+ $('inspectTimeValue').textContent=t.toFixed(2)+' s';
+ if(!force&&Math.abs(t-lastInspect)<.15)return;lastInspect=t;
+ $('inspectOutput').textContent=result?.protocol?inspectorText(result,t,$('inspectView').value,$('inspectSide').value,$('inspectStage').value):isFsk()?'This FSK demo sends an idle carrier and asynchronous characters. It has no V.8, INFO, Ja/DIL, or LAPM negotiation.':'No capture yet.';
+ $('inspectHint').textContent=`Endpoint names identify the observing modem; “peer” means the other modem. Times are sample-clock frame timestamps (20 ms resolution).${$('inspectStage').value==='pcm'?' Ja describes the requested learning sequence; DIL is the PCM learning waveform sent in response.':''}${result?.droppedProtocol?' Log limit reached: '+result.droppedProtocol+' lines omitted.':''}`;
+ $('inspectOutput').scrollTop=$('inspectOutput').scrollHeight;
+}
+function draw(t){drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
 function tick(){if(!playing)return;elapsed=Math.min(context.currentTime-started,result.left.length/RATE);draw(elapsed);showEvents(elapsed);animation=requestAnimationFrame(tick);}
 async function play(){
  const buffer=context.createBuffer(result.right?2:1,result.left.length,RATE);buffer.copyToChannel(result.left,0);if(result.right)buffer.copyToChannel(result.right,1);
  source=context.createBufferSource();source.buffer=buffer;const gain=context.createGain();gain.gain.value=.65;source.connect(gain).connect(context.destination);
  source.onended=()=>{elapsed=result.left.length/RATE;draw(elapsed);showEvents(elapsed);stop();$('status').textContent=result.passed?'Complete · payload verified':result.error||'Run ended without a verified payload';};
  started=context.currentTime;source.start();$('lamp').classList.add('on');$('status').textContent='Sending carrier';tick();
- $('duration').textContent=(result.left.length/RATE).toFixed(2)+' s';$('download').disabled=false;
+ $('duration').textContent=(result.left.length/RATE).toFixed(2)+' s';$('download').disabled=false;$('exportCapture').disabled=!result.protocol;$('inspectTime').max=String(result.left.length/RATE);drawInspector(elapsed,true);
 }
 async function dial(){
  stop();const text=$('message').value;if(!text||new TextEncoder().encode(text).length>240)return;
- try{context??=new AudioContext();await context.resume();playing=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
+ try{context??=new AudioContext();await context.resume();result=null;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('events').textContent='';$('download').disabled=true;
  if(isFsk()){
    const snrs=[99,24,12,0],tx=transmit(text,mode,snrs[Number($('noise').value)]),rx=receive(tx.samples,mode);
@@ -82,10 +93,13 @@ async function dial(){
  }catch(e){fail(e.message);}
 }
 function fail(message){stop();$('status').textContent='Could not run: '+message;$('events').textContent='Serve this folder over HTTP and build the WASM assets first.\n'+message;}
+$('inspectTime').addEventListener('input',()=>{$('inspectFollow').checked=false;drawInspector(elapsed,true);});$('inspectFollow').addEventListener('change',()=>drawInspector(elapsed,true));
+$('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(const id of ['inspectView','inspectSide','inspectStage'])$(id).addEventListener('change',()=>drawInspector(elapsed,true));
+$('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage='Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});
 $('showSpectrum').addEventListener('click',()=>{setPlot('spectrum');draw(elapsed);});$('showConstellation').addEventListener('click',()=>{setPlot('constellation');draw(elapsed);});
 $('dial').addEventListener('click',dial);$('stop').addEventListener('click',stop);$('message').addEventListener('input',updateCount);
 $('noise').addEventListener('input',()=>{$('noiseValue').textContent=['Clean','24 dB SNR','12 dB SNR','0 dB SNR'][$('noise').value];});
 document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>select(b.dataset.mode)));
 $('download').addEventListener('click',()=>{if(!result)return;if(downloadUrl)URL.revokeObjectURL(downloadUrl);downloadUrl=URL.createObjectURL(new Blob([wav(result.left,result.right)],{type:'audio/wav'}));const a=document.createElement('a');a.href=downloadUrl;a.download=`modem-${mode}.wav`;a.click();});
-window.addEventListener('pagehide',()=>{stop();context?.close();if(downloadUrl)URL.revokeObjectURL(downloadUrl);});
+window.addEventListener('pagehide',()=>{stop();context?.close();if(downloadUrl)URL.revokeObjectURL(downloadUrl);if(captureUrl)URL.revokeObjectURL(captureUrl);});
 updateCount();draw(0);

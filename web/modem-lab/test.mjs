@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {transmit,receive,wav} from './dist/fsk.mjs';
+import {hdlcFrames,inspectorText,negotiationRecords} from './dist/negotiation.mjs';
 import {runPair} from './dist/engine-pair.mjs';
 const examples=['A','\0\0\0',String.fromCharCode(...Array.from({length:95},(_,i)=>i+32)),'Kia ora — hello 🌏','x'.repeat(240)];
 for(const profile of ['v21','bell103'])for(const text of examples)for(const snr of [99,24,12]){
@@ -19,6 +20,19 @@ for(const mode of [32,90])for(const text of ['Hello from the browser!','Kia ora 
  const result=await runPair(mode,text);
  assert.ok(result.passed,`Mode ${mode} failed training or payload`);
  assert.equal(result.received,text);assert.equal(result.reply,'ACK: '+text);
+ assert.equal(result.g711.callerTx.length,result.left.length*2);
+ assert.equal(result.g711.answererTx.length,result.right.length*2);
+ assert.equal(result.droppedProtocol,0,'Protocol log capture was truncated');
+ const frames=result.negotiation.frames;
+ for(const name of ['XID','SABME','UA'])assert.ok(frames.some(f=>f.valid&&f.type===name),`Missing CRC-valid ${name}`);
+ const xid=frames.find(f=>f.valid&&f.type==='XID'&&f.side==='caller'&&f.direction==='TX');
+ assert.ok(xid.fields.some(s=>s==='V.42bis codewords P1: 1024'));
+ const original=result.wireBits.callerTx,index=xid.wireStart+16;
+ const corrupt=original.slice(0,index)+(original[index]==='1'?'0':'1')+original.slice(index+1);
+ assert.ok(!hdlcFrames(corrupt,result.bitClock,'callerTx').some(f=>f.wireStart===xid.wireStart&&f.valid),'Corrupt HDLC frame accepted');
+ assert.ok(!inspectorText(result,0,'simple').includes('XID · FCS valid'),'Future events leaked into timeline');
+ assert.ok(inspectorText(result,60,'raw').includes('captured bits so far'));
+ if(mode===90){const simple=inspectorText(result,60);for(const field of ['INFO0d','INFO0a','INFO1a','parsed Ja DIL descriptor','sending DIL'])assert.ok(simple.includes(field),`Missing ${field}`);}
  assert.ok(result.constellations.some(f=>f.points.length>0),'No measured QAM symbols');
  if(mode===32){assert.equal(result.txRate,9600);assert.equal(result.rxRate,9600);}
  else{assert.equal(result.txRate,31200);assert.equal(result.rxRate,56000);}
