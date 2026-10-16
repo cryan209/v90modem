@@ -287,6 +287,11 @@ static int line_hook(int off_hook)
     /* Si3056 §5.22: OPE must be cleared before an off-hook transition and
      * re-enabled after 25 ms. Leaving it set trips on normal make transients. */
     if (off_hook && (protection&8) && reg_write(17,(unsigned char)(protection&~8)) < 0) return -1;
+    if (off_hook) {
+        int actual = reg_read(17);
+        line_event("seizure_protection",@{@"before":@(protection),@"disabled_readback":@(actual),@"aux_before":@(reg_read(19)),@"current_before":@(reg_read(12)),@"termination":@(reg_read(26)),@"counter":@(reg_read(31))});
+        if (actual < 0 || (actual&8)) { fprintf(stderr,"cannot verify overload detector disarmed before seizure\n"); reg_write(17,(unsigned char)protection); return -1; }
+    }
     line_event("hook_request",@{@"off_hook":@(off_hook),@"register_before":@(v)});
     v = off_hook ? (v | REG_HOOK_BIT) : (v & ~REG_HOOK_BIT);
     /* The monitor bit is left set either way: on-hook it is what makes a
@@ -297,6 +302,16 @@ static int line_hook(int off_hook)
         fprintf(stderr, "hook write rejected\n"); return -1;
     }
     if (off_hook && (protection&8)) {
+        /* Do not use USB write completion alone to time the DAA transition.
+         * Read OH back before starting the Si3056 §5.22 settling interval.
+         * Live alternated tests: without this barrier 3/3 OPD trips; with
+         * it 3/3 normal seizures, with OPE restored and unchanged termination. */
+        int actual = reg_read(REG_HOOK);
+        if (actual < 0 || !(actual&REG_HOOK_BIT)) {
+            reg_write(REG_HOOK,(unsigned char)(v&~REG_HOOK_BIT));
+            reg_write(17,(unsigned char)protection);
+            return -1;
+        }
         usleep(25000);
         if (reg_write(17,(unsigned char)protection) < 0) {
             reg_write(REG_HOOK,(unsigned char)(v&~1)); return -1;

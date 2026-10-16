@@ -3223,3 +3223,64 @@ snapshot and build provenance, per-port events/logs/results, on-hook
 self-test, and `6311-warm/`. The current physical line/DAA seizure fault
 must be resolved before this run can assess any of the three RasFinder
 ports.
+
+
+### Seizure follow-up: protection re-arm timing (2026-10-16)
+
+The initial failures above do not establish a defective modem or line.
+Readback confirmed OPE clears (register 17 0x0c -> 0x04); termination
+register 26 was 0x00 (ILIM=0, nominal 160 mA overload threshold), not the
+60 mA setting. The fault also occurred after keeping native audio running
+on-hook, and after selecting the 8 ms off-hook counter. Both experiments
+retained overload protection; the counter was restored to 0x20.
+
+One 800-ohm DC termination seizure passed at current code 4 (~13.2 mA),
+but the subsequent normal-termination standalone hook test also passed,
+while an 800-ohm call attempt failed. Thus the first apparent termination
+correlation was not reproducible and is not a fix. Register 26 was restored
+to 0x00. Low current measured after OPD cannot exclude an earlier transient
+because hardware protection changes the termination when it fires.
+
+The useful controlled comparison adds an OH register readback immediately
+after the hook write, before the existing 25 ms OPE re-arm wait. Alternated
+call-path seizure tests with normal termination gave:
+
+* Existing sequence: 3/3 OPD trips before audio.
+* OH readback before the settling interval: 3/3 successful seizures, no OPD.
+
+These short tests used a 50 ms audio hold, within the initial 300 ms silence
+so no destination digits were transmitted. All returned on-hook. The
+comparison holds the diagnostic OPE-clear verification constant between
+arms; only the new arm includes the post-hook readback. This supports a
+USB/DAA transition/re-arm timing problem rather than a sustained line
+overcurrent. It does not independently measure the physical switch timing
+or distinguish synchronization from the extra readback delay.
+
+The coupler now verifies that OPE is clear before seizure, confirms OH
+after the write, and then starts the Si3056 §5.22 25 ms settling interval.
+Failed readbacks abort and restore protection; the overload guard remains
+active after re-arming. No current-limit threshold is raised. The hardware
+comparison, build logs, and subsequent call evidence are under the same
+artifact root (`seizure-comparison.json`, `seizure-*-*.jsonl`, `readback.log`).
+The coupler builds and its diagnostic self-test passes.
+
+
+With that readback sequence, fresh strict-V.34 calls at native 9600 Hz
+passed seizure on **all three** requested ports with normal termination,
+OPE enabled, current code 7 (~23.1 mA), and no OPD/overload event:
+
+| destination | observed result | CONNECT/data |
+|---|---|---|
+| 6311 | Answer tone, V.8 succeeds, V.34 reaches `PHASE3_WAIT_S` / TX `J`; later NO CARRIER | none |
+| 6312 | Answer tone, V.34 reaches `PHASE3_WAIT_S` / TX `FIRST_S`; later NO CARRIER | none |
+| 6313 | Answer tone, V.8 call negotiation fails (status 4) | none |
+
+PBX snapshots identify the current Apple modem source as AudioCodes
+extension 6314; the earlier HT802 topology should not be assumed for this
+run. PBX snapshots for 6311/6312 show ulaw. The 6313 active snapshot was
+empty, so the observed answer tone/V.8 samples alone do not establish its
+PBX bridge details. All three attempts ended on-hook. Evidence is in
+`6311-fixed/`, `6312-fixed/`, `6313-fixed/` and `fixed-summary.json`.
+These are successful line seizure/dial/answer tests, not successful data
+connections. The remaining V.8/V.34 interoperability problem is separate
+from the reproduced and corrected protection re-arm startup issue.
