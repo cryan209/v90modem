@@ -1,10 +1,14 @@
 import createModem from './modem-engine.mjs';
 import {negotiationRecords} from './negotiation.mjs';
 export function expand(code){const u=(~code)&255;const t=(((u&15)<<3)+132)<<((u>>4)&7);return ((u&128)?132-t:t-132)/32768;}
-export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false){
+export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,startup={v8:true,v8bis:false}){
+  if(![32,34,90].includes(Number(mode)))throw new Error('Unsupported modem mode');
+  if(startup.v8===false&&Number(mode)!==32)throw new Error('V.34 and V.90 require V.8 in this demo');
+  if(startup.v8bis&&startup.v8===false)throw new Error('V.8bis requires V.8 in this demo');
+  const startupFlags=(startup.v8===false?0:1)|(startup.v8bis?2:0);
   const logs=[],protocol=[],bitClock=[];let simTime=0,droppedProtocol=0;
   const options=(side)=>({print:line=>capture(side,line),printErr:line=>capture(side,line)});
-  function capture(side,line){if(protocol.length<20000){protocol.push({time:simTime,side,line});logs.push(line);}else droppedProtocol++;}
+  function capture(side,line){if(protocol.length<100000){protocol.push({time:simTime,side,line});logs.push(line);}else droppedProtocol++;}
   const a=await createModem(options('caller')),b=await createModem(options('answerer'));
   if(a.HEAPU8.buffer===b.HEAPU8.buffer)throw new Error('Modem instances share memory');
   const frame=value=>{const body=new TextEncoder().encode(value),out=new Uint8Array(body.length+2);out[0]=body.length&255;out[1]=body.length>>8;out.set(body,2);return out;};
@@ -12,7 +16,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false){
   const bytes=frame(text);let replies=null;
   const pa=a._malloc(bytes.length),pb=b._malloc(1026);
   a.HEAPU8.set(bytes,pa);
-  a._browser_init(Number(mode),1);b._browser_init(Number(mode),0);
+  a._browser_init(Number(mode),1,startupFlags);b._browser_init(Number(mode),0,startupFlags);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
   const callerCodewords=new Uint8Array(480000),answererCodewords=new Uint8Array(480000);
@@ -29,8 +33,10 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false){
       if(block%10===0){const raw=b.UTF8ToString(b._browser_monitor());if(raw){const monitor=JSON.parse('{'+raw+'}');if(monitor.iq[0].length)constellations.push({time:(block+1)*.02,points:monitor.iq[0]});}}
       bitClock.push({time:simTime,callerTx:a._browser_bit_count(1),callerRx:a._browser_bit_count(0),answererTx:b._browser_bit_count(1),answererRx:b._browser_bit_count(0)});
       const time=(block+1)*.02, ar=a._browser_rate(),br=b._browser_rate();
-      const state=`${sa}/${sb}/${ar}/${br}`;
-      if(state!==lastState){events.push({time,message:ar&&br?`Connected · caller TX ${a._browser_tx_rate()} / RX ${a._browser_rx_rate()} bit/s`:`Training · caller ${['idle','dialing','V.8','training','data','hangup'][sa]} / answerer ${['idle','dialing','V.8','training','data','hangup'][sb]}`});lastState=state;}
+      const startupName=side=>startup.v8===false?'V.25':startup.v8bis&&!protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line))?'V.8bis':'V.8';
+      const states=side=>['idle','dialing',startupName(side),'training','data','hangup'];
+      const state=`${sa}/${sb}/${ar}/${br}/${startupName('caller')}/${startupName('answerer')}`;
+      if(state!==lastState){events.push({time,message:ar&&br?`Connected · caller TX ${a._browser_tx_rate()} / RX ${a._browser_rx_rate()} bit/s`:`Training · caller ${states('caller')[sa]} / answerer ${states('answerer')[sb]}`});lastState=state;}
       if(ar && br){
         if(at<bytes.length)at+=a._browser_send(pa+at,bytes.length-at);
         if(replies && bt<replies.length)bt+=b._browser_send(pb+bt,replies.length-bt);
@@ -49,7 +55,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false){
     const hex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
     const g711={callerTx:hex(callerCodewords.subarray(0,length)),answererTx:hex(answererCodewords.subarray(0,length))};
     const negotiation=negotiationRecords({protocol,bitClock,wireBits});
-    return {left:l,right:r,events,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
+    return {left:l,right:r,events,startup,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
       rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate()};
   }finally{a._free(pa);b._free(pb);a._browser_destroy();b._browser_destroy();}
 }

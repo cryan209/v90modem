@@ -6,13 +6,21 @@ const descriptions={
  v21:['Two tones, every bit.','V.21 switches between 980 Hz for a 1 and 1180 Hz for a 0. This demo sends eight data bits between a start bit and a stop bit, 300 times a second.'],
  bell103:['The sound of 300 bits a second.','Bell 103’s originating channel uses 1270 Hz for a 1 and 1070 Hz for a 0. A separate JavaScript receiver recovers your message from the waveform.'],
  '32':['A conversation before the conversation.','Two instances of the real modem engine negotiate V.32 at up to 9,600 bit/s, train their receivers, and exchange your message and an acknowledgement over G.711.'],
+ '34':['An analogue conversation, both ways.','Two complete V.34 engines probe the line, negotiate their symbol and bit rates, train, and exchange your text using QAM in both directions.'],
  '90':['A digital end. An analogue end.','V.90 sends PCM downstream and QAM upstream. The calling modem runs the analogue role; the answering modem runs the digital role. Both train and recover real payload bytes.'],
 };
 const isFsk=()=>mode==='v21'||mode==='bell103';
+function updateStartup(){
+ const fsk=isFsk();if(mode!=='32')$('startupV8').checked=true;
+ $('startupV8').disabled=fsk||mode!=='32'||playing;
+ if(!$('startupV8').checked)$('startupBis').checked=false;
+ $('startupBis').disabled=fsk||!$('startupV8').checked||playing;
+ $('startupHint').textContent=fsk?'FSK presets begin with an idle carrier.':mode==='32'?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy V.32 startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
+}
 function updateCount(){const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;$('dial').disabled=n===0||n>240||playing;}
 function select(next){stop();mode=next;document.querySelectorAll('.mode').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
  $('modeTitle').textContent=descriptions[mode][0];$('modeDescription').textContent=descriptions[mode][1];
- $('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':'WEBASSEMBLY · REAL ENGINE';
+ updateStartup();$('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':'WEBASSEMBLY · REAL ENGINE';
  $('showConstellation').disabled=isFsk();setPlot(isFsk()?'spectrum':'constellation');
  $('noise').disabled=!isFsk();$('noiseHint').textContent=isFsk()?'Noise is added to the FSK signal before the receiver sees it.':'The advanced modes use a clean, byte-exact G.711 virtual line.';
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('status').textContent='Ready to dial';$('events').textContent='The receiver listens to the generated samples.\nNo prerecorded audio. No text shortcut.';
@@ -20,7 +28,7 @@ function select(next){stop();mode=next;document.querySelectorAll('.mode').forEac
  $('clock').textContent='00.00 s';$('duration').textContent='—';result=null;$('download').disabled=true;draw(0);
 }
 function stop(){worker?.terminate();worker=null;if(source){source.onended=null;try{source.stop();}catch{}source=null;}
- playing=false;cancelAnimationFrame(animation);$('stop').disabled=true;$('lamp').classList.remove('on');document.querySelectorAll('.mode').forEach(b=>b.disabled=false);$('message').disabled=false;updateCount();
+ playing=false;cancelAnimationFrame(animation);$('stop').disabled=true;$('lamp').classList.remove('on');document.querySelectorAll('.mode').forEach(b=>b.disabled=false);$('message').disabled=false;updateCount();updateStartup();
  if(result){$('status').textContent='Stopped';}
 }
 function showEvents(t){
@@ -75,7 +83,7 @@ async function play(){
 }
 async function dial(){
  stop();const text=$('message').value;if(!text||new TextEncoder().encode(text).length>240)return;
- try{context??=new AudioContext();await context.resume();result=null;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
+ try{context??=new AudioContext();await context.resume();result=null;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;updateStartup();elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('events').textContent='';$('download').disabled=true;
  if(isFsk()){
    const snrs=[99,24,12,0],tx=transmit(text,mode,snrs[Number($('noise').value)]),rx=receive(tx.samples,mode);
@@ -88,7 +96,7 @@ async function dial(){
    worker=new Worker('./worker.mjs',{type:'module'});
    worker.onerror=e=>fail(e.message||'Could not load the modem worker.');
    worker.onmessage=async({data})=>{if(data.type==='progress'){$('status').textContent=`Generating call · ${data.time.toFixed(1)} s simulated`;}else if(data.type==='error'){fail(data.message);}else if(data.type==='result'){worker.terminate();worker=null;result=data;await play();}};
-   worker.postMessage({mode,text});
+   worker.postMessage({mode,text,startup:{v8:$('startupV8').checked,v8bis:$('startupBis').checked}});
  }
  }catch(e){fail(e.message);}
 }
@@ -97,9 +105,10 @@ $('inspectTime').addEventListener('input',()=>{$('inspectFollow').checked=false;
 $('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(const id of ['inspectView','inspectSide','inspectStage'])$(id).addEventListener('change',()=>drawInspector(elapsed,true));
 $('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage='Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});
 $('showSpectrum').addEventListener('click',()=>{setPlot('spectrum');draw(elapsed);});$('showConstellation').addEventListener('click',()=>{setPlot('constellation');draw(elapsed);});
+$('startupV8').addEventListener('change',updateStartup);$('startupBis').addEventListener('change',updateStartup);
 $('dial').addEventListener('click',dial);$('stop').addEventListener('click',stop);$('message').addEventListener('input',updateCount);
 $('noise').addEventListener('input',()=>{$('noiseValue').textContent=['Clean','24 dB SNR','12 dB SNR','0 dB SNR'][$('noise').value];});
 document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>select(b.dataset.mode)));
 $('download').addEventListener('click',()=>{if(!result)return;if(downloadUrl)URL.revokeObjectURL(downloadUrl);downloadUrl=URL.createObjectURL(new Blob([wav(result.left,result.right)],{type:'audio/wav'}));const a=document.createElement('a');a.href=downloadUrl;a.download=`modem-${mode}.wav`;a.click();});
 window.addEventListener('pagehide',()=>{stop();context?.close();if(downloadUrl)URL.revokeObjectURL(downloadUrl);if(captureUrl)URL.revokeObjectURL(captureUrl);});
-updateCount();draw(0);
+updateCount();updateStartup();draw(0);

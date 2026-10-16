@@ -16,8 +16,10 @@ static int received_n, connected_rate;
 static char monitor_json[65536];
 static di_connect_info_cb_t connect_info;
 static v250_connect_report_t report;
-EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling) {
-    setenv("ME_MODE", mode == 90 ? "v90" : "v32bis", 1);
+EMSCRIPTEN_KEEPALIVE int browser_init(int mode, int calling, int startup) {
+    setenv("ME_MODE", mode == 90 ? "v90" : mode == 34 ? "v34" : "v32bis", 1);
+    setenv("ME_V8", (startup & 1) ? "1" : "0", 1);
+    setenv("ME_V8BIS", (startup & 2) ? "1" : "0", 1);
     setenv("ME_DATA_FRAMING", "lapm", 1);
     setenv("ME_GUI_PORT", "browser-passive-taps", 1);
     setenv("ME_V90_JA_HEURISTIC_FALLBACK_MS", "0", 1);

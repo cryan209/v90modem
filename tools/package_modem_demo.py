@@ -36,7 +36,7 @@ class InlineModemRunner {
   postMessage(data){
     runPair(data.mode,data.text,p=>{
       if(!this.cancelled)this.onmessage?.({data:{type:'progress',...p}});
-    },()=>this.cancelled).then(result=>{
+    },()=>this.cancelled,data.startup).then(result=>{
       if(!this.cancelled)this.onmessage?.({data:{type:'result',...result}});
     }).catch(error=>{
       if(!this.cancelled)this.onmessage?.({data:{type:'error',message:error.message}});

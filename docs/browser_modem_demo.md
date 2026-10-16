@@ -2,7 +2,7 @@
 
 `web/modem-lab/dist/` is a buildless interactive browser demo. It contains
 JavaScript V.21/Bell 103 FSK and the real C modem engine compiled to WebAssembly
-for V.32 at 9600 bit/s and V.90. It has no remote service dependency.
+for V.32 at 9600 bit/s, V.34, and V.90. It has no remote service dependency.
 
 ## Run
 
@@ -33,7 +33,7 @@ there are no external scripts, fonts, audio files, or network requests.
   The receiver gets neither the source text nor transmitter bit boundaries.
   Noise is repeatable uniform noise at clean, 24, 12, or 0 dB SNR. Start-up
   is an idle carrier; this does not implement V.25 call establishment.
-* **V.32 / V.90:** two fresh isolated instances of the same WASM module,
+* **V.32 / V.34 / V.90:** two fresh isolated instances of the same WASM module,
   one calling and one answering. Each consumes the previous opposite TX
   frame before generating 160 G.711 codewords. The DS0 remains byte-exact
   (V.90 clause 5). V.32bis is rate-limited to the V.32 9600 bit/s mode
@@ -128,7 +128,7 @@ so the DS0 during Ja/DIL can be inspected at any simulation time. Display
 windows show the most recent 512 data-layer bits and 64 G.711 codewords;
 **Capture JSON** exports the complete captured streams, logs and decoded frames.
 Verbose display shows at most 600 matching log lines at a time; its complete
-capture is capped at 20,000 lines and an explicit omission count is shown if
+capture is capped at 100,000 lines and an explicit omission count is shown if
 reached. Current regression calls do not reach that cap.
 
 The browser-only adapter enables verbose/FLOW logs for offline inspection.
@@ -153,3 +153,29 @@ construction deliberately throws. Both V.32 and V.90 must still exchange real
 UTF-8 payloads and acknowledgements, and cooperative cancellation is checked.
 This regression complements the normal DSP/inspector suite; it does not pretend
 to exercise every browser's rendering or security policy.
+
+## V.34 and startup selection
+
+V.34 uses the same real engine pair and clean G.711 bearer, rather than audio
+recordings. On this synthetic path the current engine retrains once before
+settling at 21600 bit/s in both directions; the actual transitions remain in
+the events and protocol inspector. Rates are negotiated, not preset in the UI.
+
+The startup controls apply to both virtual modems. **V.8 negotiation** is on by
+default. It can be disabled for V.32, selecting the engine's V.25/legacy startup.
+V.34 and V.90 require V.8 in this demo, so its checkbox stays enabled in value
+and locked for those modes. **V.8bis before V.8** enables the existing
+`ME_V8BIS` pre-negotiation on V.32, V.34 and V.90; it is available only with V.8.
+FSK preset playback does not implement these startup protocols, so both controls
+are disabled there. Controls are locked while generating/playing a call.
+
+V.8bis completion and mode-selection messages are included in simple decode
+and verbose logs. The result/JSON capture records the requested startup options.
+The generic engine state is labelled V.25, V.8bis or V.8 according to the actual
+startup option and observed V.8bis-completion log, rather than always saying V.8.
+
+Regression coverage includes long UTF-8 payloads through V.34 with V.8 and
+V.8bis, legacy V.32 without V.8, V.32 with V.8bis, and V.90 with V.8bis. It
+requires actual V.8bis completion at both ends and no CM/JM menus in legacy
+mode, and rejects unsupported V.8-off V.34/V.90 requests. The generated-file
+harness also runs V.34/V.8bis without constructing a Worker.

@@ -33,6 +33,7 @@ export function hdlcFrames(bits,clock,key){
   return frames;
 }
 export function protocolStage(line){
+ if(/V\.8bis|V8bis/.test(line))return 'v8';
  if(/V\.8|[<>](CM|JM|CJ|CI):|V8 result/.test(line))return 'v8';
  if(/INFO[01]/.test(line))return 'info';
  if(/Ja|Jd|DIL|CP[at]|TRN[12]d/.test(line))return 'pcm';
@@ -49,6 +50,7 @@ export function negotiationRecords(result){
    const e=logs[i];if(/^\[TRACE/.test(e.line))continue;const line=cleanProtocolLine(e.line),stage=e.stage||protocolStage(e.line);let title='',fields=[],hex='';
    const menu=line.match(/([<>])(CM|JM|CJ|CI):\s*((?:[0-9a-f]{2}\s*)+)/i);
    if(menu){title=`${menu[1]==='<'?'TX':'RX'} ${menu[2]} · ${menu[2]==='CM'?'calling menu':menu[2]==='JM'?'joint menu':menu[2]==='CJ'?'menu acknowledgement':'call indication'}`;hex=menu[3].trim();}
+   else if(/V\.8bis.*(complete|done)|V8bis.*done|V8bis.*cap|V\.8bis.*cap/i.test(line))title=line;
    else if(/V\.8 peer (offer|summary):/.test(line) && !/protocol=None/.test(line))title=line;
    else if(/Rx INFO0a V\.92 flags:/.test(line)){title='RX INFO0a · peer is the analogue modem';fields=[line];}
    else if(/^(Tx|Rx) INFO[01][acd]?(?: \(|:)/.test(line)){

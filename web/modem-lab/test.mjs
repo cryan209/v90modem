@@ -38,3 +38,14 @@ for(const mode of [32,90])for(const text of ['Hello from the browser!','Kia ora 
  else{assert.equal(result.txRate,31200);assert.equal(result.rxRate,56000);}
  console.log(`PASS: V.${mode}, ${new TextEncoder().encode(text).length} bytes, both directions, ${result.left.length/8000}s, measured constellation`);
 }
+
+for(const [mode,startup] of [[34,{v8:true,v8bis:false}],[34,{v8:true,v8bis:true}],[32,{v8:false,v8bis:false}],[32,{v8:true,v8bis:true}],[90,{v8:true,v8bis:true}]]){
+ const r=await runPair(mode,'Startup test — '+('0123456789'.repeat(22)),()=>{},()=>false,startup);
+ assert.ok(r.passed,`V.${mode} startup failed`);assert.equal(r.droppedProtocol,0);
+ assert.ok(r.negotiation.frames.some(f=>f.valid&&f.type==='XID'));
+ if(mode===34){assert.ok(r.txRate>0&&r.txRate<=33600);assert.ok(r.protocol.some(e=>/selected V34|mod=V34|modulation=V34/.test(e.line)),'Did not actually select V.34');}
+ if(startup.v8bis)for(const side of ['caller','answerer'])assert.ok(r.protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line)),'V.8bis did not complete');
+ if(startup.v8===false){assert.ok(!r.protocol.some(e=>/[<>](CM|JM):/.test(e.line)));assert.ok(r.events.some(e=>e.message?.includes('V.25')));}
+ console.log(`PASS: V.${mode}, startup ${JSON.stringify(startup)}, payload, LAPM, rates ${r.txRate}/${r.rxRate}`);
+}
+await assert.rejects(runPair(90,'bad',()=>{},()=>false,{v8:false,v8bis:false}),/require V.8/);
