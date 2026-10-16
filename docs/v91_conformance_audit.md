@@ -363,7 +363,7 @@ retrain (8.4.1), then CP with drn = 0 (sent twice, then the line is held about
 1 s so the peer's jitter buffer drains them before the bearer drops).  With a
 control channel it still uses bit 16; in transparent mode 8.4-8.6 do not apply
 and the bearer simply goes.  `v91_serial_pair_test.py --no-control-channel` checks
-the peer logs "peer cleardown (CP drn 0)".  The CP-within-1.5-s rule (8.2.1.8) is our obligation, not something to
+the peer logs "peer cleardown (CP drn 0)" and the spec decoder confirms our tap ends in a retrain start-up whose CP has drn = 0.  The CP-within-1.5-s rule (8.2.1.8) is our obligation, not something to
 enforce on the peer, and is met by construction (the DIL we receive lasts about
 0.19 s).  The earlier note that our robbed-cadence request sat in reserved CP
 bits was already obsolete: it was deleted on 2026-10-16 and the spec decoder
