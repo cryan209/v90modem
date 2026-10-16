@@ -1546,6 +1546,7 @@ static int audio_start(void)
         fprintf(stderr, "nominal rate did not take (asked %.0f, is %.0f)\n", want, got);
         return -1;
     }
+    fprintf(stderr, "[APPLE] native HAL nominal rate: requested %.0f, read back %.0f Hz\n", want, got);
     comp = AudioComponentFindNext(NULL, &cd);
     if (!comp || AudioComponentInstanceNew(comp, &au) != noErr) {
         fprintf(stderr, "could not create HAL audio unit\n"); return -1;
@@ -1694,8 +1695,9 @@ static int hardware_loopback(const char *mode)
                 @"reason":@"Requires an idle on-hook modem; stop raw recording first"});
             return 1;
         }
-        if (g_rate != 8000 && g_rate != 9600) {
-            loopback_save(@{@"mode":@(mode),@"passed":@NO,@"status":@"refused",@"reason":@"Use 8000 or 9600 Hz"}); return 1;
+        /* Si3056 §5.30 standalone probes bypass engine resamplers. */
+        if (g_rate != 8000 && g_rate != 9600 && g_rate != 10286) {
+            loopback_save(@{@"mode":@(mode),@"passed":@NO,@"status":@"refused",@"reason":@"Use 8000, 9600 or 10286 Hz"}); return 1;
         }
         int watch = gui_watch, monitored = gui_audio_active;
         gui_watch = 0;
@@ -1793,7 +1795,7 @@ static int hardware_loopback(const char *mode)
         if (stream_pass) reason = "Sample stream completed; modem result is reported by peer";
         if (!restored) reason = "Register restoration failed";
         else if (result.found) reason = powered ? "Line-side return measured; sample errors are not a PCM BER" : passed ? "Known pattern returned" : "Return differs from the test pattern";
-        loopback_save(@{@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
+        loopback_save(@{@"rate_hz":@(g_rate),@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
             @"stream":@(loopback_peer_fd >= 0),@"stream_tx_samples":@(loopback_count[1]),@"stream_rx_samples":@(loopback_count[0]),@"stream_gap_samples":@(loopback_stream_gaps),
             @"pattern":@(loopback_pattern),@"line_side":@(powered),@"tx_scale":@(powered ? 0.25 : 1.0),
             @"reason":@(reason),@"restored":@(restored),@"frames_compared":@(result.frames),

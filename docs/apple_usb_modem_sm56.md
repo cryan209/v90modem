@@ -2867,3 +2867,74 @@ Synthetic checks verify integrated white-noise band power and the centered
 FIR's complex-response convention. Results, response/inverse CSVs and the
 visually inspected plot are in `artifacts/apple-line-characterize-20261016/`.
 No new hardware call or audio-path change was needed for this analysis.
+
+### Native sample rate really extends the passband (2026-10-16)
+
+The 3.45 kHz cutoff above is **an 8000 Hz mode result**, not the modem's
+maximum analog bandwidth. New physical tests on both devices establish that
+its common loopback filter moves with the native sample rate:
+
+| native samples/s | analog -3 dB, 0:13 / 0:14 | analog -10 dB | analog -20 dB | gain at 4 kHz relative to 1 kHz |
+|---|---|---|---|---|
+| 8000 | 3452 / 3451 Hz | 3653 / 3653 Hz | 3817 / 3816 Hz | Nyquist; not reported |
+| 9600 | 4176 / 4175 Hz | 4415 / 4414 Hz | 4610 / 4610 Hz | -0.68 / -0.69 dB |
+| 10286 | 4442 / 4440 Hz | 4699 / 4698 Hz | 4911 / 4910 Hz | -0.10 / -0.11 dB |
+
+Both isolation loops give essentially the same edge as their analog loops
+(within about 5 Hz at -3 dB). The device is not restricted to a fixed
+3.4 kHz passband. At 10286 Hz, 4.2 kHz is only about 0.4 dB down on 0:13;
+4.4 kHz is 2.3 dB down. These are combined local TX/RX responses, not a
+measurement of the remote ATA/SIP path. They do not establish a new CONNECT
+rate or justify changing the engine's supported 8000/9600 Hz grids.
+
+Implementation is deliberately confined to standalone loopback diagnostics:
+Si3056 §5.30 probes now also accept `--rate 10286` with `--loopback-pattern
+prbs`. G.711 alphabet probes and peer-stream tests still require 8000 Hz.
+The PRBS is generated directly on the selected native grid; callbacks capture
+and render it directly, with no engine resampler. Each run logs the HAL
+nominal-rate readback and records `rate_hz` in its result. No training tables
+or DSP constants changed.
+
+`tools/apple_native_rate_probe.py` performs digital, isolation and quiet-call
+analog tests on each modem at each rate. The uniform signed PRBS is lower
+power than the previous full-alphabet G.711 probe: the analog 300–3400 Hz
+quiet-referenced SNRs are about 53/52/52 dB on 0:13 and 47/46/45 dB on 0:14
+at 8000/9600/10286 Hz respectively. These must not be compared directly with
+the earlier 60/53 dB without accounting for the changed probe power. Native
+rate changes the filter bandwidth as well as noise integration and signal
+power in the fixed 300–3400 Hz band.
+
+`tools/apple_native_rate_report.py` fits 513 taps using 0.6 seconds of
+training, then independently scores a later interval starting at 0.75 seconds.
+Input windows do not overlap between train and test. It validates the recorded
+HAL readback, exports normalized response CSVs, plots the comparison and
+excludes failed probes explicitly.
+
+There were 21 attempts: 19 completed passes (18 distinct device/rate/mode
+combinations plus one repeated digital control), and two retained failures:
+
+* 0:13, 9600 Hz digital: 3772/9600 raw sample errors. Three-sample exact
+  matches identify two delays, 1178 and 1098 samples, separated by 80 samples.
+  Its repeat returned 9600/9600 exact. This is further evidence of the existing
+  intermittent transport fault, not noise or a filter defect.
+* 0:14, 10286 Hz isolation: test register readback failed before audio start;
+  registers were restored. The repeat passed without relaxing any checks.
+
+Every attempt restored registers and verified on-hook afterwards; completed
+runs reported zero stream gaps. Both devices finished at 9600 Hz. All four
+`make gui-apple-test` checks passed (the GUI check needed localhost socket
+permission outside the sandbox); the direct diagnostic self-test also passed.
+
+Evidence roots are `artifacts/apple-native-rates-20261016/`,
+`artifacts/apple-native-rates-20261016-repeat13/`,
+`artifacts/apple-native-rates-20261016-device14/` and
+`artifacts/apple-native-rates-20261016-repeat14/`. The first contains the
+combined summary and visually inspected `native-response.png`.
+
+```sh
+python3 tools/apple_native_rate_probe.py --quiet-pbx root@asterisk.net.cryan.nz \
+  --out artifacts/apple-native-rate-check
+# Include all evidence roots when a stopped sequence required a fresh repeat.
+MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_native_rate_report.py \
+  artifacts/apple-native-rate-check
+```
