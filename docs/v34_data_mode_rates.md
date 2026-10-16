@@ -752,6 +752,68 @@ The receiver fix does not recalibrate either the TRN or B1 rate guards. The
 browser's default 24000 profile remains conservative; higher automatic
 offers still need a model validated against actual DATA errors and hardware.
 
+## Corrected 3429 training-rate calibration (2026-10-16)
+
+The old `(SNR+13)/6` formula was applied independently in TRN and the engine's
+B1 guard, pinning the clean browser pair to 24000 even though complete-frame
+B1 conditioning supports clean 33600 DATA. Both now call
+`v34_rx_training_rate()`. For the standalone full-duplex 3429 receiver it
+uses the noise/timing PRBS calibration below; other bauds, V.90/HDX and
+measurements below the calibrated range keep their previous policy.
+
+| Training SNR at least | Receive offer, bit/s |
+|---:|---:|
+| 26.5 dB | 26400 |
+| 29.0 dB | 28800 |
+| 31.0 dB | 31200 |
+| 31.5 dB | 33600 |
+
+These are receiver-specific empirical thresholds, not ITU DSP constants or
+a universal QAM formula. They are based on the forced-rate noise/timing
+comparisons above. They apply to acquisition TRN/B1 SNR, not the subsequently
+conditioned decision-directed DATA estimate. MP bounds, probe projection,
+common mask and negotiated directional offers still cap the result
+(V.34 §10.1.3.9/§11.4); B1 and loss/retrain checks remain active.
+
+Validation enabled actual automatic TRN selection, without forced MP limits:
+initial 3429/33600, both laws, delays 0/1/7/23/79/160/161/319 samples,
+clean/40/36/30/24/20 dB injected noise, one million PRBS bits per direction
+and a 6000-block timeout. Before/after pass counts were:
+
+| Noise | Legacy | Calibrated |
+|---|---:|---:|
+| Clean | 16/16 | 16/16 |
+| 40 dB | 16/16 | 16/16 |
+| 36 dB | 15/16 | 14/16 |
+| 30 dB | 14/16 | 15/16 |
+| 24 dB | 16/16 | 16/16 |
+| 20 dB | 3/16 | 3/16 |
+
+Both versions pass 80/96; the improvement is the selected rate, not an
+increased startup pass count. Legacy clean offers were 24000 (one direction
+21600 in one row). The calibrated receiver selected 33600 both ways in
+13/16 clean rows, with one direction at 26400/28800/31200 in the other three
+when its training estimate was lower. All 16 clean payloads were error-free.
+At 36 dB it selected 28800, at 30 dB 26400, at 24 dB 19200. The 20 dB
+selection and existing failures are unchanged.
+
+Three rows newly failed before either modem trained: mu-law delay 1 at
+36 dB, and A-law delay 161 at 36 and 30 dB. Three formerly failing rows
+newly passed: mu-law delay 1/30 dB, delay 7/36 dB, delay 161/30 dB. A FLOW
+trace of mu-law delay 1/36 shows repeated MP CRC rejects followed by the
+§11.4 E timeout, not DATA corruption. These startup edge cases remain open;
+the calibration must not be described as eliminating them. The low-level
+harness does not perform the full engine's automatic restart.
+
+Fast-tier regressions now exercise automatic selection at 33600 on four
+clean timing phases and exact lower directional rates at four noise levels,
+with million-bit payloads and no forced rate limits. Use
+`tools/v34_rate_sweep.py --auto --bits 1000000 --blocks 6000` for additional
+automatic rows; `--delays` and `--noise` select the qualification matrix.
+The public training-rate API also removes duplicated formulae from the
+engine's B1 check. The legacy DATA estimate is labelled as such in logs,
+rather than claiming it independently measures channel capacity.
+
 ## Keep standalone MP wire decoding during acquisition (2026-10-17)
 
 Standalone duplex MP no longer rotates away from its default differential

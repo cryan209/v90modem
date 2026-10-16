@@ -43,7 +43,7 @@ for(const [mode,startup] of [[34,{v8:true,v8bis:false}],[34,{v8:true,v8bis:true}
  const r=await runPair(mode,'Startup test — '+('0123456789'.repeat(22)),()=>{},()=>false,startup);
  assert.ok(r.passed,`V.${mode} startup failed`);assert.equal(r.droppedProtocol,0);
  assert.ok(r.negotiation.frames.some(f=>f.valid&&f.type==='XID'));
- if(mode===34){assert.ok(r.txRate>0&&r.txRate<=33600);assert.ok(r.protocol.some(e=>/selected V34|mod=V34|modulation=V34/.test(e.line)),'Did not actually select V.34');}
+ if(mode===34){assert.equal(r.txRate,33600);assert.equal(r.rxRate,33600);assert.ok(r.protocol.some(e=>/selected V34|mod=V34|modulation=V34/.test(e.line)),'Did not actually select V.34');}
  if(startup.v8bis)for(const side of ['caller','answerer'])assert.ok(r.protocol.some(e=>e.side===side&&/V\.8bis complete/.test(e.line)),'V.8bis did not complete');
  if(startup.v8===false){assert.ok(!r.protocol.some(e=>/[<>](CM|JM):/.test(e.line)));assert.ok(r.events.some(e=>e.message?.includes('V.25')));}
  console.log(`PASS: V.${mode}, startup ${JSON.stringify(startup)}, payload, LAPM, rates ${r.txRate}/${r.rxRate}`);
@@ -60,10 +60,10 @@ for(const v8bis of [false,true]){
 // Varied sustained traffic catches errors hidden by short/repetitive messages.
 let payloadSeed=1234;
 const sustained=Array.from({length:12000},()=>{payloadSeed=(Math.imul(payloadSeed,1664525)+1013904223)>>>0;return String.fromCharCode(32+payloadSeed%95);}).join('');
-for(const v8bis of [false,true]){
- const r=await runPair(34,sustained,()=>{},()=>false,{v8:true,v8bis,v34MaxRate:24000});
- assert.ok(r.passed);assert.equal(r.txRate,24000);assert.equal(r.rxRate,24000);
+for(const v8bis of [false,true])for(const ceiling of [24000,0]){
+ const r=await runPair(34,sustained,()=>{},()=>false,{v8:true,v8bis,v34MaxRate:ceiling});
+ assert.ok(r.passed);assert.equal(r.txRate,ceiling||33600);assert.equal(r.rxRate,ceiling||33600);
  assert.ok(!r.protocol.some(e=>/V\.34.*(?:asking for .*retraining|training failed|restarting Phase 2)/.test(e.line)));
  assert.equal(r.negotiation.frames.filter(f=>!f.valid).length,0);
- console.log(`PASS: V.34 sustained 12000-byte transfer, V.8bis=${v8bis}, 24000/24000, no retrains or invalid HDLC`);
+ console.log(`PASS: V.34 sustained 12000-byte transfer, V.8bis=${v8bis}, ceiling=${ceiling||'automatic'}, ${r.txRate}/${r.rxRate}, no retrains or invalid HDLC`);
 }

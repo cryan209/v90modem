@@ -20,7 +20,8 @@ FSK exports are mono. Speaker output can be resampled by the browser; it never
 feeds back into either modem or the virtual bearer.
 
 For a single offline file, run `python3 tools/package_modem_demo.py` and open
-`artifacts/modem-lab.html`. It embeds the worker, DSP, WASM, style, and interface;
+`artifacts/modem-lab.html` or `web/modem-lab/dist/standalone.html`. The packager
+refreshes both copies together. Each embeds the worker, DSP, WASM, style, and interface;
 there are no external scripts, fonts, audio files, or network requests.
 
 ## Signal paths
@@ -157,7 +158,7 @@ to exercise every browser's rendering or security policy.
 ## V.34 and startup selection
 
 V.34 uses the same real engine pair and clean G.711 bearer, rather than audio
-recordings. The default 24000 bit/s offer ceiling and 3429-symbol/s training profile avoid retrains on this synthetic path.
+recordings. Automatic selection uses the 3429-symbol/s training profile and reaches 33600 bit/s on the clean synthetic path. Explicit lower ceilings remain available.
 The V.34 ceiling selector also offers 19200, 24000, and Automatic; the higher
 offers can trigger real retrains, retained in the events and inspector. The
 ceiling limits the offer; the actual connection rate is still negotiated.
@@ -227,3 +228,37 @@ TRN/B1 rate policy. The default browser ceiling remains 24000. The bundle
 was rebuilt from committed sources in an isolated staging directory so
 parallel, uncommitted engine work was not included, then passed the browser
 regressions before offline packaging.
+
+### Automatic V.34 reaches 33600 (2026-10-16)
+
+Automatic is now the browser default. The TRN and B1 checks share the corrected
+receiver-specific 3429-symbol/s calibration instead of separately applying the
+old single-channel `(SNR+13)/6` model. Neither check is bypassed. Explicit
+19200/21600/24000 ceilings remain available.
+
+The clean full-engine browser pair reaches 33600/33600 with V.8 and with
+V.8bis+V.8. Regression tests require both the rate and the independently
+received 12000-byte varied payload plus acknowledgement, with no retrains
+or invalid captured HDLC frames. Direct-file fallback also requires actual
+33600/33600 transfer. V.32 and V.90 retain their previous rates.
+
+Native automatic-selection tests exercise a wider noise/timing matrix; see
+`docs/v34_data_mode_rates.md` for the calibration, limits and remaining noisy
+MP/E startup failures. This replaces the temporary conservative browser
+ceiling described in earlier dated entries.
+
+### Refresh shipped and offline engines (2026-10-17)
+
+Reproduced an actual stale-bundle mismatch: the UI offered Automatic while
+its embedded engine still applied the old training-rate formula and connected
+at 24000/24000. Rebuilt the WASM from the shared training-rate calibration
+and the V.34 §7/§10.1.3.9 MP acquisition fix. Browser-engine tests now pass
+33600/33600 with V.8 and V.8bis, including 12000 varied bytes in both
+directions with no retrains or invalid captured HDLC frames. The direct-file
+runner also passes actual 33600/33600 transfer. These are software tests,
+not physical modem interoperability measurements.
+
+The packager now refreshes both existing offline entry points together,
+`artifacts/modem-lab.html` and `web/modem-lab/dist/standalone.html`; the
+offline regression requires their contents to match. An HTML file already
+open in a browser needs reloading to use the refreshed embedded engine.

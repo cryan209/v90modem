@@ -8364,24 +8364,17 @@ static int v34_rx_current_trellis_code(const v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Whether the Phase-4 TRN SNR measurement is allowed to constrain the rate
-   this modem asks for.  It is off by default and must stay that way until
-   the Phase-4 receiver is worth measuring: swept over v34_duplex_test with
-   V34_DUPLEX_NOISE_DB from 40 dB down to 20 dB, the measurement does not
-   move (9.7, 9.8, 8.7, 8.4, 8.4, 11.4, 9.8 dB) while the same call's data
-   mode goes from 0.0018 to 0.0285 distance-to-grid.  It is reading this
-   receiver's own Phase-4 convergence, not the line.  The number is still
-   logged, because that constancy is the measurement worth having. */
+/* V.34 11.4: the full engine enables TRN-based receive-rate selection.
+   Fixed-rate datapump tests leave it diagnostic-only unless explicitly
+   testing automatic selection. v34_rx_training_rate() supplies the shared
+   receiver-specific calibration used here and by the engine's B1 check. */
 static bool v34_trn_rate_selection_enabled(const v34_state_t *s)
 {
     return s->tx.trn_rate_select;
 }
 
-/* Since Phase-4 TRN is trained decision-directed (v34rx.c) the measurement
-   follows the line, and the engine turns it on for real calls.  It stays
-   off by default for the loopback harnesses, whose ceiling is G.711 itself
-   (a clean loopback reads ~29 dB, where the live-channel calibration would
-   cap the asserted 21600 rows). */
+/* Select whether the measured TRN quality constrains our MP receive offer.
+   The peer's offer, configured bounds and common rate mask still apply. */
 SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
 {
     if (s)

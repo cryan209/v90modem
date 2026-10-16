@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=ROOT / 'v34_duplex_test')
     parser.add_argument('--initial-rate', type=int, default=33600)
+    parser.add_argument('--auto', action='store_true',
+                        help='Enable TRN rate selection, without forced MP limits')
     parser.add_argument('--rates', default='24000,26400,28800,31200,33600')
     parser.add_argument('--delays', default='0,1,7,23')
     parser.add_argument('--noise', default='clean,40,36,30')
@@ -31,7 +33,8 @@ def main():
     args = parser.parse_args()
     binary = args.binary.resolve()
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-    rows = itertools.product(map(int, args.rates.split(',')),
+    rates = [args.initial_rate] if args.auto else map(int, args.rates.split(','))
+    rows = itertools.product(rates,
                              args.laws.split(','),
                              map(int, args.delays.split(',')),
                              args.noise.split(','))
@@ -43,12 +46,16 @@ def main():
         env = {k: v for k, v in os.environ.items()
                if not k.startswith('V34_DUPLEX_')}
         limits = f'0,{rate},0,{rate}'
-        env.update(V34_DUPLEX_LOG='1', V34_DUPLEX_CALL_LIMITS=limits,
-                   V34_DUPLEX_ANSWER_LIMITS=limits,
-                   V34_DUPLEX_EXPECT_RATES=f'{rate},{rate}',
+        env.update(V34_DUPLEX_LOG='1',
                    V34_DUPLEX_DELAY=str(delay),
                    V34_DUPLEX_PAYLOAD=str(args.bits),
                    V34_DUPLEX_BLOCKS=str(args.blocks))
+        if args.auto:
+            env['V34_DUPLEX_AUTO_RATE'] = '1'
+        else:
+            env.update(V34_DUPLEX_CALL_LIMITS=limits,
+                       V34_DUPLEX_ANSWER_LIMITS=limits,
+                       V34_DUPLEX_EXPECT_RATES=f'{rate},{rate}')
         if noise != 'clean':
             env['V34_DUPLEX_NOISE_DB'] = noise
         with tempfile.TemporaryDirectory(prefix='v34-rate-') as scratch:
@@ -61,7 +68,7 @@ def main():
                    'V.34 duplex ', 'MP rates:', 'FAIL: MP rates')
         logs = [line for line in result.stdout.splitlines()
                 if any(marker in line for marker in markers)]
-        return dict(rate=rate, initial_rate=args.initial_rate, law=law,
+        return dict(rate=rate, automatic=args.auto, initial_rate=args.initial_rate, law=law,
                     delay=delay, noise=noise, bits=args.bits,
                     blocks=args.blocks, rc=result.returncode,
                     binary_sha256=digest, logs=logs)

@@ -293,6 +293,13 @@ SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s);
     \return 0 once B1 has been acquired in the current data mode, else -1. */
 SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db);
 
+/*! Estimate a receive rate from TRN/B1 training SNR (V.34 11.4).
+    This is an implementation calibration, not an ITU constellation constant.
+    \param s The modem context (receive baud and receiver implementation).
+    \param snr_db Training SNR in dB, not a decision-directed DATA estimate.
+    \return Supported rate in bit/s, or 0 for an invalid measurement. */
+SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db);
+
 /*! Let the Phase-4 TRN SNR cap the receive rate this modem asks for in MP.
     \param s The modem context.
     \param enable True to apply it. */

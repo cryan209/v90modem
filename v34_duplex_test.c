@@ -493,6 +493,11 @@ static int run_case(int baud, int bps, bool alaw)
         v34_set_eye_report_handler(call_modem, test_eye, (void *)(intptr_t)0);
         v34_set_eye_report_handler(answer_modem, test_eye, (void *)(intptr_t)1);
     }
+    /* Exercise the same TRN-based MP policy as the full engine (§11.4). */
+    if (getenv("V34_DUPLEX_AUTO_RATE")) {
+        v34_set_trn_rate_selection(call_modem, true);
+        v34_set_trn_rate_selection(answer_modem, true);
+    }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answer_modem, -12.0f);
     /* V.250 6.4.1 +MS bounds on either modem's MP, "min_tx,max_tx,min_rx,max_rx"
@@ -746,6 +751,11 @@ static int run_case(int baud, int bps, bool alaw)
            caller.rx_bits, answer.rx_bits,
            caller.bit_errors, answer.bit_errors,
            completed_block >= 0 ? (completed_block + 1)*0.020 : max_blocks*0.020);
+    if (getenv("V34_DUPLEX_AUTO_RATE")) {
+        int a2c = 0, c2a = 0;
+        if (v34_get_negotiated_mp_rates(call_modem, &a2c, &c2a) == 0)
+            printf("Auto MP rates: answer-to-caller=%d caller-to-answer=%d\n", a2c*2400, c2a*2400);
+    }
     /* V34_DUPLEX_EXPECT_RATES=a2c,c2a: the MP exchange must have settled on
        exactly these rates (bit/s), at both ends. */
     if (getenv("V34_DUPLEX_EXPECT_RATES")) {

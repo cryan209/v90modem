@@ -54,10 +54,11 @@ function createOfflineModemRunner(){
     html=html.replace('<a href="NOTICE.txt">Source &amp; license</a>', '<a href="#license">Source &amp; license</a>')
     html=html.replace('</main>', '<details id="license" class="license"><summary>Source and SpanDSP LGPL 2.1 license</summary><p>DSP source and rebuild instructions: <a href="https://github.com/cryan209/v90modem">cryan209/v90modem</a> (spandsp-master, web/modem-lab, and tools/build_modem_wasm.py).</p><pre>'+license_text+'</pre></details></main>')
     html = html.replace('<script type="module" src="app.mjs"></script>', '<script id="modem-worker" type="text/plain">'+encoded+'</script><script type="module">'+script+'</script>')
-    target=ROOT/'artifacts/modem-lab.html'
-    target.parent.mkdir(parents=True,exist_ok=True)
-    target.write_text(html)
-    print(target)
+    # Keep both existing single-file entry points on the same engine build.
+    for target in (ROOT/'artifacts/modem-lab.html', DIST/'standalone.html'):
+        target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_text(html)
+        print(target)
 
 
 if __name__ == '__main__':

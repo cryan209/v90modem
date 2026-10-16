@@ -986,8 +986,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                            data mode. */
                         V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - DATA: distance to grid %.4f per symbol "
-                                 "over %d symbols; receive SNR %.1f dB, this "
-                                 "line will carry %d bit/s%s\n",
+                                 "over %d symbols; receive SNR %.1f dB, legacy "
+                                 "DATA rate estimate %d bit/s%s\n",
                                  dist, err_count[who], snr, carries,
                                  (dist > 0.55)
                                  ? " -- OUTPUT IS WHITE, the requested rate is"
@@ -1185,8 +1185,8 @@ skip_gain_report:
                         V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream DATA: decision error "
                                  "%.4f per symbol (mean symbol power %.2f) "
-                                 "over %d symbols; receive SNR %.1f dB, this "
-                                 "line will carry %d bit/s against the %d "
+                                 "over %d symbols; receive SNR %.1f dB, legacy "
+                                 "DATA rate estimate %d bit/s against the %d "
                                  "asked for%s\n",
                                  err, pow, s->v90_t3_decision_count, snr,
                                  carries, (s->bit_rate/2 + 1)*2400,

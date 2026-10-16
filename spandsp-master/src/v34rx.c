@@ -502,8 +502,8 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_TRN_SNR_BLOCK            64
 
 /* Data-mode receive SNR to the rate the line will carry, in bits per symbol:
-   bits = (snr_db + offset)/slope.  6 dB per bit is the QAM ladder's slope;
-   the offset is calibrated so that the one live channel whose behaviour is
+   bits = (snr_db + offset)/slope. This historical single-channel model is
+   not a general QAM law; the offset was calibrated so the channel whose behaviour is
    known -- 18 dB, artifacts/v34-rate-* -- accepts 14400 at 3000 baud and
    refuses 16800, which is what those three calls did. */
 #define MP_EARLY_START_ERR_MAX          2
@@ -3111,12 +3111,38 @@ static int mp_highest_enabled_rate(int maximum, int mask)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 11.4/10.1.3.9: implementation-specific training quality -> MP offer.
+   The historical (SNR+13)/6 model fits one old 18 dB hardware channel and
+   severely underpredicts the conditioned 3429-symbol/s receiver. Use the
+   noise/timing PRBS calibration for that receiver only; preserve the old
+   policy for other bauds and V.90. These are empirical thresholds, NOT ITU
+   DSP coefficients. Qualification and failing rows: docs/v34_data_mode_rates.md. */
+SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
+{
+    int n;
+    if (!s || !isfinite(snr_db) || s->rx.baud_rate < V34_BAUD_RATE_2400
+        || s->rx.baud_rate > V34_BAUD_RATE_3429)
+        return 0;
+    if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3429)
+    {
+        if (snr_db >= 31.5f) return 33600;
+        if (snr_db >= 31.0f) return 31200;
+        if (snr_db >= 29.0f) return 28800;
+        if (snr_db >= 26.5f) return 26400;
+    }
+    n = (int) floor((snr_db + 13.0)/6.0
+                     *baud_rate_parameters[s->rx.baud_rate].baud_rate/2400.0);
+    if (n < 1) n = 1;
+    if (n > 14) n = 14;
+    return n*2400;
+}
+
 /* V.34 11.4: measure the receive channel over the Phase-4 TRN segment.
 
    TRN is a constant-modulus 4-point constellation (10.1.3.8) delivered
-   through the same equalizer, timing loop and carrier loop the data mode
-   will use, so the spread of its symbols is the receiver's own honest read
-   on what constellation density the line can carry.  Nothing earlier in the
+   through the acquisition equalizer and timing/carrier loops. Dense DATA
+   subsequently adds B1 conditioning, so TRN quality needs a calibration
+   against actual DATA errors rather than a universal bits-per-dB formula.  Nothing earlier in the
    call can substitute.  The L1/L2 probe projection in v34tx.c measures 21
    sparse tones against a single empty DFT bin: that ratio carries the DFT's
    coherent processing gain, it never sees a signal-proportional impairment
@@ -3231,14 +3257,10 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
     if (snr_db)
         *snr_db = (float) snr;
     /*endif*/
-    /* Table 16 rate index, through the same calibration the data mode's own
-       report uses (bits/symbol ~ (SNR + 13)/6, measured on the live channel,
-       docs/v34_data_mode_rates.md).  The old offset/slope pair was fitted
-       while this measurement read the receiver's own Phase-4 convergence
-       (a flat 8-11 dB whatever the line); with decision-directed TRN it
-       tracks injected noise (19.9/23.3/27.3/28.6 dB at 20/24/30/40 dB). */
-    rate_n = (int) floor((snr + 13.0)/6.0
-                         *baud_rate_parameters[s->baud_rate].baud_rate/2400.0);
+    /* V.34 Table 16: share the receiver-specific calibration with the
+       engine's B1 check, so the two training stages cannot disagree merely
+       because one still uses the historical single-channel formula. */
+    rate_n = v34_rx_training_rate(st, (float) snr)/2400;
     if (rate_n < 1)
         rate_n = 1;
     /*endif*/
