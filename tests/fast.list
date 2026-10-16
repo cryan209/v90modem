@@ -99,6 +99,10 @@ V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 3200 9600 alaw
 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 alaw
 V34_DUPLEX_DELAY=23 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 alaw
+# V.34 11.4 B1: a half-frame equalizer fit improved held-out B1 residuals
+# but corrupted following data at these timing phases. Grade actual PRBS bits.
+V34_DUPLEX_DELAY=1 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3429 33600 ulaw
+V34_DUPLEX_DELAY=79 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_LINEAR=1 V34_DUPLEX_PPM=50 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_LINEAR=1 V34_DUPLEX_PPM=-50 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 # 26400 and 28800, which did not decode at all until the transmit pulse

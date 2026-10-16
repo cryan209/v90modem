@@ -654,3 +654,39 @@ Bypassing the rate guards at 3429 allowed a clean 33600/33600 transfer, while
 Reducing decision-directed Phase-4 TRN adaptation after 512T made the measured
 quality worse and was reverted. Future work must improve acquisition or justify
 rate-estimator calibration with error measurements rather than disabling guards.
+
+## B1 conditioning versus rate judgement (2026-10-16)
+
+The engine's `v34_b1_rate_check_locked()` reads `b1_corr` saved by
+`v34rx_data.c` before `v34_rx_condition_b1_equalizer()` runs. Dense
+3429-symbol/s standalone modes (31200/33600) subsequently use a supervised
+21-tap B1 fit and data timing recovery. Thus the guard judges the acquisition
+solution, not the solution used by DATA (V.34 §11.4.1.1.5/11.4.1.2.5 and
+§12.5.2). The earlier Phase-4 TRN estimate independently limits the MP offer.
+This ordering is a plausible source of conservative rates, not proof that a
+higher rate will be reliable.
+
+An experiment trained that B1 fit on the first half of the known frame and
+reserved its tail, with a complete tap-aperture gap, for validation. At
+3429/33600 mu-law, delay 0, held-out residual SNR improved 32.37 -> 35.10 dB
+and 34.04 -> 37.43 dB; the following 100000-bit PRBS transfer was error-free.
+But a before/after timing matrix rejected the change:
+
+- Clean: 31200 and 33600, mu-law and A-law, one-way delays
+  0/1/7/23/79/160/161/319 samples: baseline 31/32 passed, candidate 29/32.
+- New failures: 33600 mu-law delay 1 (2620/0 bit errors) and delay 79
+  (1187/0), both error-free with the original complete-frame fit.
+- Existing failure: 31200 A-law delay 160, neither end trained.
+- Noise checks: 33600, both laws, delays 0/23, injected 30/36 dB noise:
+  neither version passed any of the eight rows. These deliberately forced
+  high-rate failures do not indicate a safe automatic offer at those levels.
+
+Each row requested 100000 PRBS bits per direction, with a 6000-block timeout.
+The candidate and its change to the B1 quality metric were discarded. No
+rate guards, training coefficients or calibration constants were changed.
+Delay 1 and 79 are now fast-tier regressions against trusting an improved
+B1-only metric. Even disjoint B1 validation is not a substitute for subsequent
+varied DATA: the short known frame does not fully constrain generalisation
+to the dense data constellation. Future work should compare the unchanged
+complete-frame fit with the DATA transmit reference across timing phases and
+noise levels before changing the training-rate policy.
