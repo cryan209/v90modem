@@ -2938,3 +2938,49 @@ python3 tools/apple_native_rate_probe.py --quiet-pbx root@asterisk.net.cryan.nz 
 MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_native_rate_report.py \
   artifacts/apple-native-rate-check
 ```
+
+## DAA identification: Si3018-compatible revision F (2026-10-16)
+
+The complete register dumps are retained under
+`artifacts/apple-registers-20261016/`. Comparing only with the older Si3016
+sheet gave misleading reserved-bit conflicts and a conditional domestic-only
+interpretation. The newer manufacturer Si3056/Si3018/19/10 sheet, revision
+1.06, resolves the principal identification fields:
+
+* Register 11 (0x0b), page 56: LSID occupies bits 7:4; 0001 identifies Si3018.
+  Both devices read 0x14: Si3018-compatible line-side ID, system-side revision
+  code 4 (D under §5.32/Table 22). This identifies the interface revision,
+  not conclusively the physical system-side part under Motorola's USB bridge.
+* Register 13 (0x0d), page 57: REVB occupies bits 5:2; 0x18 gives code 6,
+  revision F. Bit 6 is fixed zero, not the old domestic/international flag.
+  The Si3018 is a global line-side device (§5.1.2). Withdraw the earlier
+  conditional domestic-only interpretation.
+* Register 1 bit 0 is SB (16-bit serial mode), register 2 bit 7 is INTE;
+  registers 8/9 are PLL N/M dividers. Thus 0x01/0x83/0x02/0x0f are explained
+  without interpreting reserved bits or an invalid sample-rate code.
+* Register 14's 0x02 is ring polarity, not Si3016 safety-check-in-progress.
+  Registers 22–24 are ring validation; 0x96/0x2d/0x19 match reset defaults.
+
+Reference: https://www.skyworksinc.com/-/media/Skyworks/SL/documents/public/data-sheets/si3056.pdf
+The Si3050 family is a weaker match: it specifies register 13 bit 6 fixed
+one, versus our zero. The Si306x revision 0.9 manufacturer sheet (registers
+11/13, pp.37–38) specifies different line IDs and bit 6 fixed one as well.
+
+Read-only confirmation on both devices repeated the same ID/revision values.
+Best supported identification is **Si3018-compatible line-side DAA, revision
+F, with a Si3056-style system-side register interface, revision D**. A literal
+Si3056 BOM is not proven by register compatibility alone.
+
+The match is not complete: register 7 remains zero despite the last native
+USB audio setting being 9600 Hz; register 19 bit 3 reads one despite being
+reserved-zero; register 27 was nonzero despite being reserved; and voltage
+register 29 / threshold register 44 return plausible nonzero values although
+the Si3056 sheet restricts those features to Si3019. These are unresolved
+USB-interface/variant differences, not grounds to relabel the part Si3019
+against its explicit LSID. Keep voltage estimates uncalibrated, do not infer
+new gain/clock settings from this identification, and do not repeat reads of
+register 27 (the newer sheet says not to read or write it).
+
+The public Si3056 map lists higher SRC modes, but that does not establish
+support through this USB implementation. 10286 samples/s remains the highest
+advertised and hardware-verified Apple USB audio rate.
