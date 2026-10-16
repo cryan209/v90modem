@@ -1707,6 +1707,8 @@ static int g_v91_rx_robbed_phase;   /* robbed cadence on our RX path, -1 = none 
 static int g_v91_tx_align_phase;    /* peer-requested cadence for our TX, -1 = none */
 static bool g_v91_data_tx_aligned;
 static bool me_v91_control_channel(void);
+static bool g_v91_tx_data_live;           /* our transmitter is past B1 (8.2.1.11) */
+static bool g_v91_rx_data_live;           /* our receiver is past the peer's B1 (8.2.1.12) */
 static bool g_v91_retraining;             /* startup re-run from data mode (8.4) */
 static int g_v91_retrain_count;
 static long long g_v91_retrain_deadline;  /* TX clock: 10 s retrain timer */
@@ -1869,6 +1871,8 @@ static void v91_live_reset(void)
     g_v91_cleardown_pending = false;
     g_v91_cleardown_done_abs = -1;
     g_v91_retrain_warn_pending = false;
+    g_v91_tx_data_live = false;
+    g_v91_rx_data_live = false;
     g_v91_sim_robbed_phase = -1;
 }
 
@@ -1968,7 +1972,7 @@ static void v91_live_retrain_locked(const char *why)
         g_v91_data_rx_pos = 0;
         return;
     }
-    if (g_state != ME_DATA || g_mod != ME_MOD_V91) {
+    if (g_mod != ME_MOD_V91 || (g_state != ME_DATA && !g_v91_rx_data_live)) {
         g_state = ME_HANGUP;
         return;
     }
@@ -2034,47 +2038,53 @@ static bool v91_live_startup_timers_locked(long long now)
     return false;
 }
 
+/* 8.2.1.11: after sending Es and B1 the transmitter begins data in the very
+ * next codeword, on the six-codeword frame grid that B1 ends on. */
+static bool v91_live_activate_tx_data_locked(void)
+{
+    if (!g_v91_peer_cp_valid || g_v91_peer_drn == 0
+        || !v91_activate_data_mode(&g_v91_tx, &g_v91_peer_cp)) {
+        g_state = ME_HANGUP;
+        return false;
+    }
+    /* 6.4: we supply a control channel only if the peer asked for one. */
+    v91_set_control_channel(&g_v91_tx, g_v91_peer_wants_cc, false);
+    g_v91_data_tx_bytes = (int)g_v91_peer_drn + 20;
+    g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
+    g_v91_tx_data_live = true;
+    return true;
+}
+
+/* 8.2.1.12: after receiving B1 the receiver decodes data from the next codeword. */
+static bool v91_live_activate_rx_data_locked(void)
+{
+    g_v91_cp_local.drn = g_v91_local_drn;
+    if (g_v91_local_drn == 0 || !v91_activate_data_mode(&g_v91_rx, &g_v91_cp_local)) {
+        g_state = ME_HANGUP;
+        return false;
+    }
+    v91_set_control_channel(&g_v91_rx, false, g_v91_we_want_cc);
+    g_v91_data_rx_bytes = (int)g_v91_local_drn + 20;
+    g_v91_data_rx_pos = 0;
+    g_v91_rx_data_live = true;
+    return true;
+}
+
+/* Both directions are past B1: hand the call to the data stack. */
 static void v91_live_try_enter_data_locked(void)
 {
     uint8_t final_drn;
     int rate;
 
     if (g_state != ME_TRAINING || g_mod != ME_MOD_V91
-        || g_v91_tx_stage != V91_LIVE_TX_DONE
-        || g_v91_startup_tx_pos < g_v91_startup_tx_len
-        || g_v91_rx_stage != V91_LIVE_RX_DONE)
+        || !g_v91_tx_data_live || !g_v91_rx_data_live)
         return;
-    /* Each direction runs the rate its receiver asked for in its own CP:
-     * our transmitter follows the peer's CP, our receiver follows ours. */
-    if (!g_v91_peer_cp_valid || g_v91_peer_drn == 0 || g_v91_local_drn == 0) {
-        g_state = ME_HANGUP;
-        return;
-    }
-    g_v91_cp_local.drn = g_v91_local_drn;
-    if (!v91_activate_data_mode(&g_v91_tx, &g_v91_peer_cp)
-        || !v91_activate_data_mode(&g_v91_rx, &g_v91_cp_local)) {
-        g_state = ME_HANGUP;
-        return;
-    }
-    /* 6.4: we supply a control channel only if the peer asked for one. */
-    v91_set_control_channel(&g_v91_tx, g_v91_peer_wants_cc, false);
-    v91_set_control_channel(&g_v91_rx, false, g_v91_we_want_cc);
-    /* 8 frames per data block keep the byte count exact for every drn. */
-    g_v91_data_tx_bytes = (int)g_v91_peer_drn + 20;
-    g_v91_data_rx_bytes = (int)g_v91_local_drn + 20;
     final_drn = (g_v91_peer_drn < g_v91_local_drn) ? g_v91_peer_drn : g_v91_local_drn;
     rate = (int)vpcm_cp_drn_to_bps(final_drn);
     if (!g_v91_retraining)
         data_stack_start_online(rate, g_calling_party);
     g_state = ME_DATA;
     g_phase_start_ms = 0;
-    g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
-    g_v91_data_rx_pos = 0;
-    g_v91_data_tx_guard = true;
-    /* The peer's B1 tail and explicit guard can end at arbitrary RTP-frame
-     * offsets.  The receiver acquires the mapper boundary at the first
-     * non-idle primary-channel codeword instead of guessing packet counts. */
-    g_v91_data_rx_synced = false;
     g_data_connect_reported = true;
     if (!g_v91_retraining)
         di_on_connected(rate);
@@ -2197,6 +2207,7 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
     if (g_state == ME_TRAINING) {
         if (v91_live_startup_timers_locked(base + len))
             return false;
+      if (!g_v91_tx_data_live) {
         while (pos < len) {
             int remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
             int copy;
@@ -2222,30 +2233,16 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
             g_v91_startup_tx_pos += copy;
             pos += copy;
         }
+        /* B1 is out: data follows in the very next codeword, in this same
+         * packet when B1 ends mid-packet (8.2.1.11). */
+        if (g_v91_tx_stage == V91_LIVE_TX_DONE && !v91_live_activate_tx_data_locked())
+            return false;
         v91_live_try_enter_data_locked();
-        /* Do not mix B1 and primary-channel data in one RTP packet.  Starting
-         * data on the next pull gives both receivers an unambiguous mapper
-         * boundary after discarding the peer's final startup packet. */
-        return true;
+        if (!g_v91_tx_data_live)
+            return true;
+      }
     }
-    if (g_state == ME_DATA && g_v91_data_tx_guard) {
-        g_v91_data_tx_guard = false;
-        return true;
-    }
-    if (!g_v91_data_tx_aligned) {
-        if (g_v91_tx_b1_end_abs >= 0) {
-            /* Data frames are six codewords and follow B1 on its frame
-             * boundary (7.1, 7.7): keep the idle gap a whole number of
-             * frames so the peer can recover the boundary. */
-            int pad = (int)((6 - (base + pos - g_v91_tx_b1_end_abs) % 6) % 6);
-
-            if (pad > len - pos)
-                return true;
-            pos += pad;
-        }
-        g_v91_data_tx_aligned = true;
-    }
-    if (g_v91_test_retrain_abs > 0
+    if (g_v91_test_retrain_abs > 0 && g_state == ME_DATA
         && base + pos - g_v91_data_enter_abs > g_v91_test_retrain_abs) {
         g_v91_test_retrain_abs = 0;
         v91_live_request_retrain_locked("test hook");
@@ -2594,6 +2591,8 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         g_v91_rx_b1_end_abs = abs_pos + 1;
         trace_phase("V91 RX startup complete");
         v91_live_rx_enter_stage(V91_LIVE_RX_DONE);
+        if (!v91_live_activate_rx_data_locked())
+            return;
         v91_live_try_enter_data_locked();
         return;
     }
@@ -2608,54 +2607,17 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
     int pos = 0;
 
     while (pos < len && g_mod == ME_MOD_V91) {
-        if (g_state == ME_TRAINING) {
-            /* The peer may finish a few codewords before our final RTP pull.
-             * Startup is already validated; discard the short overlap until
-             * our local B1 has also been transmitted. */
-            if (g_v91_rx_stage == V91_LIVE_RX_DONE) {
-                pos = len;
-                v91_live_try_enter_data_locked();
-                continue;
-            }
+        if (g_state == ME_TRAINING && !g_v91_rx_data_live) {
             v91_live_rx_training_codeword_locked(in[pos], base + pos);
             pos++;
-            if (g_state == ME_HANGUP)
+            if (g_state == ME_HANGUP || g_mod != ME_MOD_V91)
                 return;
-            if (g_v91_rx_stage == V91_LIVE_RX_DONE)
-                pos = len;
+            /* Once B1 verifies, g_v91_rx_data_live is set and the very next
+             * codeword of this packet is already the first data frame. */
             continue;
         }
-        if (g_state == ME_DATA) {
-            uint8_t idle = v91_idle_codeword(g_v91_rx.law);
-            int copy = V91_LIVE_DATA_CODEWORDS - g_v91_data_rx_pos;
-
-            if (!g_v91_data_rx_synced) {
-                /* The gap after B1 is idle (robbed idles arrive with the LSB
-                 * cleared); the first other codeword is inside the first
-                 * data frame. */
-                bool robbed = g_v91_rx.rx_robbed_bit_detected;
-
-                while (pos < len
-                       && (robbed ? v91_live_codeword_matches(in[pos], idle)
-                                  : in[pos] == idle))
-                    pos++;
-                if (pos == len)
-                    continue;
-                g_v91_data_rx_synced = true;
-                g_v91_data_rx_pos = 0;
-                if (g_v91_rx_b1_end_abs >= 0) {
-                    /* A data frame can begin with a codeword equal to the idle
-                     * value (Ucode 0, positive), so the first non-idle
-                     * codeword may sit inside the first frame: the frame
-                     * starts on the six-codeword grid from the end of B1. */
-                    int into = (int)((base + pos - g_v91_rx_b1_end_abs) % 6);
-
-                    if (into > 0) {
-                        memset(g_v91_data_rx, idle, (size_t)into);
-                        g_v91_data_rx_pos = into;
-                    }
-                }
-            }
+        if (g_v91_rx_data_live && (g_state == ME_DATA || g_state == ME_TRAINING)) {
+            int copy;
 
             copy = V91_LIVE_DATA_CODEWORDS - g_v91_data_rx_pos;
             if (copy > len - pos)
@@ -2665,22 +2627,8 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
             pos += copy;
             if (g_v91_data_rx_pos == V91_LIVE_DATA_CODEWORDS) {
                 uint8_t data[V91_LIVE_DATA_CODEWORDS];
-                int all_idle = 1;
                 int decoded;
 
-                for (int i = 0; i < V91_LIVE_DATA_CODEWORDS; i++) {
-                    /* Robbed idles arrive with the LSB cleared. */
-                    if (g_v91_rx.rx_robbed_bit_detected
-                            ? !v91_live_codeword_matches(g_v91_data_rx[i], idle)
-                            : g_v91_data_rx[i] != idle) {
-                        all_idle = 0;
-                        break;
-                    }
-                }
-                if (all_idle) {
-                    g_v91_data_rx_pos = 0;
-                    continue;
-                }
                 uint32_t frame0 = g_v91_rx.rx_frame_index;
 
                 decoded = v91_rx_codewords(&g_v91_rx,
@@ -2700,7 +2648,10 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                     v91_live_retrain_locked("frame decode failed");
                     return;
                 }
-                ds_rx_push_bytes(&g_data_stack, data, decoded);
+                /* Until both directions are past B1 the stack is not online; the
+                 * peer is sending idle marks at that point. */
+                if (g_state == ME_DATA)
+                    ds_rx_push_bytes(&g_data_stack, data, decoded);
                 g_v91_data_rx_pos = 0;
                 if (g_v91_rx.cc_rx_cleardown) {
                     /* 8.6: the peer signalled cleardown on the control channel. */
@@ -5496,7 +5447,7 @@ static bool v34_b1_rate_check_locked(void)
        modem: the caller on a plain V.34 call, and always on a V.90 call that
        fell back to V.34 (V.90 9.2.1.1.8), whichever end placed it. */
     ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
-    supported = (int) floorf((snr + 13.0f)/6.0f*(float) baud_by_code[rx_code]/2400.0f);
+    supported = v34_rx_training_rate(g_v34, snr)/2400;
     /* B1 only measures the line when it decodes.  At a rate the line cannot
        carry it does not correlate at all and reads far below any real
        channel -- -11.3 dB at 21600 on rf-tower-fb-7, where the same line

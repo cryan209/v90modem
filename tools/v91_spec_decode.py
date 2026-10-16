@@ -319,12 +319,14 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload):
     if ok_b1:
         rep.check(all(b1), "B1: %d descrambled bits all ones through the data encoder" % len(b1))
     pos_s += 12
-    # idle gap (Ucode 0, positive == FF/D5), then data on the 6-symbol grid
+    # 8.2.1.11 / 7.1: data follows B1 directly, on the frame grid B1 ends on.
+    # (Anything else makes a conformant receiver decode our idle as data.)
     j2 = pos_s
     while j2 < N and syms[j2] == (0, 1):
         j2 += 1
-    start = pos_s + ((j2 - pos_s) // 6) * 6
-    rep.ok("data starts %d symbols after B1 (idle gap %d)" % (start - pos_s, j2 - pos_s))
+    start = pos_s
+    rep.check(j2 - pos_s < 6, "data follows B1 directly (idle symbols before the first data frame: %d)"
+              % (j2 - pos_s))
     cc_active = peer_cc_requested_cb()
     nframes = good = 0
     ccbits, cc_seq_ok, cc_bad, cc_flags = [], 0, 0, set()
@@ -335,7 +337,7 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload):
         cc = cc_active and (nframes % 64 == 0)
         out, err = decode_frame(syms[f:f + 6], cc)
         if out is None:
-            errs.append((nframes, err))
+            errs.append((nframes, err, f))
             break
         nframes += 1
         good += 1
@@ -361,8 +363,10 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload):
     tail_idle = all(s == (0, 1) for s in syms[f:])
     rep.check(not errs or tail_idle,
               "%d data frames decoded%s" % (good, "" if not errs else
-                                           " (STOPPED at frame %d: %s; %d symbols of non-idle follow)"
-                                           % (errs[0][0], errs[0][1], sum(1 for x in syms[f:] if x != (0, 1)))))
+                                           " (STOPPED at frame %d: %s; symbol %d; %d symbols of non-idle follow; next 12: %s)"
+                                           % (errs[0][0], errs[0][1], errs[0][2],
+                                              sum(1 for x in syms[f:] if x != (0, 1)),
+                                              syms[f:f + 12]) if errs else ""))
     if cc_active:
         rep.check(cc_seq_ok > 0 and cc_bad == 0,
                   "control channel: %d sequences valid (slip pattern + CRC), %d bad%s"

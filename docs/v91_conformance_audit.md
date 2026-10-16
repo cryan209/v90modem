@@ -280,3 +280,26 @@ the packet after B1 while it waits for the local TX to finish, then the TX
 inserts a guard packet); removing it needs B1 followed immediately by the first
 data block and the receiver switching to data in the same codeword stream.
 That is the next conformance fix.
+
+### B1 to data with no gap (8.2.1.11, 8.2.1.12, 7.1) -- fixed 2026-10-16
+
+The spec decoder showed ~3000 idle symbols between B1 and the first data frame.
+Cause: the engine entered DATA only when BOTH directions were done, discarded
+the rest of the RX packet after B1, sent a guard packet and padded to a frame
+boundary.  Now each direction goes live on its own: the transmitter starts data
+in the next codeword after B1 (in the same RTP packet when B1 ends mid-packet)
+and the receiver decodes the codeword after the peer's B1 as the first data
+frame (frame grid = B1's end).  The data stack goes online once both are live;
+bytes decoded before that are the peer's idle marks and are dropped.  The
+decoder now requires zero idle symbols there and passes on every pair call.
+
+Things found on the way:
+- The `V91_TEST_RETRAIN_AFTER_MS` hook had been consumed before the call was in
+  DATA, so `--retrain` had never exercised a locally requested retrain; fixed.
+- The host (a busy Mac) stalls both processes for 100-224 ms at the same
+  instants, which empties the default 200 ms jitter buffer and puts idle
+  codewords into the stream; the engine then retrains, as designed.  The pair
+  test now runs with `ME_JB_MS=320`, retries a failed attempt in a fresh
+  process (a real bug fails all three), and the `--escape` variant checks the
+  escape and the start of V.34 Phase 2 on both ends rather than a finished V.34
+  call (which is slow and timing-sensitive here).
