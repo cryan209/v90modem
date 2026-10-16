@@ -1758,6 +1758,11 @@ static void v91_live_retrain_locked(const char *why);
 static bool g_v91_peer_wants_cc;          /* peer set INFO bit 27 */
 static bool g_v91_we_want_cc;
 static bool g_v91_cleardown_pending;      /* local hangup waiting on the control channel */
+/* 8.6 without a control channel: retrain (8.4.1) and send CP with drn = 0. */
+static bool g_v91_cleardown_cp_req;       /* local hangup asked for it */
+static bool g_v91_cleardown_cp;           /* retrain started, CP drn 0 going out */
+static int g_v91_cleardown_cp_sent;
+static long long g_v91_cleardown_cp_end = -1;
 static long long g_v91_cleardown_start_abs;
 static long long g_v91_cleardown_done_abs = -1;
 static long long g_v91_tx_b1_end_abs;   /* TX position just after our B1, -1 = not yet */
@@ -1886,8 +1891,15 @@ static int v91_live_build_cp(v91_state_t *state, uint8_t *out, int out_cap)
     vpcm_cp_frame_t cp = g_v91_cp_local;
 
     cp.acknowledge = g_v91_peer_cp_valid;
-    if (cp.acknowledge)
+    if (g_v91_cleardown_cp) {
+        /* 8.6: cleardown is drn = 0 in a CP. */
+        cp.drn = 0;
+        cp.acknowledge = false;
+        cp.transparent_mode_granted = false;
+        g_v91_cleardown_cp_sent++;
+    } else if (cp.acknowledge) {
         g_v91_tx_sent_cp_prime = true;
+    }
     return v91_tx_cp_codewords(state, out, out_cap, &cp, true);
 }
 
@@ -2077,6 +2089,10 @@ static bool v91_live_start_locked(void)
 {
     g_v91_retraining = false;
     g_v91_retrain_count = 0;
+    g_v91_cleardown_cp_req = false;
+    g_v91_cleardown_cp = false;
+    g_v91_cleardown_cp_sent = 0;
+    g_v91_cleardown_cp_end = -1;
     if (!v91_live_begin_startup_locked(false))
         return false;
     data_stack_prepare((int)vpcm_cp_drn_to_bps(vpcm_cp_recommended_robbed_bit_drn()));
@@ -2347,6 +2363,25 @@ static bool v91_live_tx_refill_locked(void)
         g_v91_scr_sent += len;
         return true;
     case V91_LIVE_TX_CP:
+        if (g_v91_cleardown_cp && g_v91_cleardown_cp_sent >= 2) {
+            /* Keep the line up while the peer's jitter buffer drains the CPs;
+             * dropping the bearer now would take the cleardown with it. */
+            if (g_v91_cleardown_cp_end < 0)
+                g_v91_cleardown_cp_end = g_v91_tx_abs_pos + 8000;
+            if (g_v91_tx_abs_pos >= g_v91_cleardown_cp_end) {
+                trace_phase("V91 cleardown sent (CP drn 0)");
+                g_state = ME_HANGUP;
+                return false;
+            }
+            len = v91_tx_phil_codewords(&g_v91_tx, g_v91_startup_tx,
+                                        (int)sizeof(g_v91_startup_tx),
+                                        VPCM_CP_FRAME_INTERVALS, true);
+            if (len != VPCM_CP_FRAME_INTERVALS)
+                return false;
+            g_v91_startup_tx_len = len;
+            g_v91_startup_tx_pos = 0;
+            return true;
+        }
         /* 8.2.1.8-8.2.1.10: keep sending CP (CP' once the peer's CP is in)
          * until we have sent a CP' and received a CP' or Es. */
         if (g_v91_tx_sent_cp_prime
@@ -2430,6 +2465,12 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
     }
     if (g_state == ME_DATA)
         v91_live_apply_loop3_locked();
+    if (g_state == ME_DATA && g_v91_cleardown_cp_req && !g_v91_cleardown_cp) {
+        g_v91_cleardown_cp = true;
+        trace_phase("V91 cleardown via retrain and CP drn 0 (8.6)");
+        v91_live_retrain_locked("local cleardown");
+        return true;
+    }
     if (g_v91_test_retrain_abs > 0 && g_state == ME_DATA
         && base + pos - g_v91_data_enter_abs > g_v91_test_retrain_abs) {
         g_v91_test_retrain_abs = 0;
@@ -11577,6 +11618,14 @@ void me_hangup(void)
         g_v91_cleardown_start_abs = g_v91_tx_abs_pos;
         v91_cc_request_cleardown(&g_v91_tx);
         trace_phase("V91 cleardown initiated (control channel)");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    /* 8.6 without a control channel: a retrain that sends CP drn = 0.  Not in
+     * transparent mode (8.4-8.6 do not apply there: the bearer just goes). */
+    if (g_mod == ME_MOD_V91 && g_state == ME_DATA && !g_v91_tx.cc_tx_active
+        && !g_v91_tx.active_transparent_mode && !g_v91_cleardown_cp_req) {
+        g_v91_cleardown_cp_req = true;
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }

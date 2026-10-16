@@ -119,6 +119,10 @@ def main() -> int:
         help="answerer closes V.54 loop 3 with AT&T3 (circuit 141): the caller must get its data "
              "back and the answerer's DTE must see none; AT&T0 restores normal data (clause 9)")
     parser.add_argument(
+        "--no-control-channel", action="store_true",
+        help="neither end requests a control channel; the local hangup then clears down with a "
+             "retrain and CP drn = 0 (8.6)")
+    parser.add_argument(
         "--attempts", type=int, default=3,
         help="run again (in a fresh process) up to this many times when a call fails; the "
              "host's 100-200 ms scheduling stalls and V.8 timeouts are not V.91 defects, "
@@ -169,6 +173,10 @@ def main() -> int:
     if args.specify_dil:
         label += f", {args.specify_dil} specifies the DIL (J/PHIL/Em)"
 
+    if args.no_control_channel:
+        caller_env["ME_V91_CONTROL_CHANNEL"] = "0"
+        answerer_env["ME_V91_CONTROL_CHANNEL"] = "0"
+        label += ", no control channel"
     if args.transparent:
         val = "2" if args.transparent_cleardown else "1"
         if args.transparent in ("caller", "both"):
@@ -304,11 +312,19 @@ def main() -> int:
             else:
                 if args.transparent and "rate=64000" in alog:
                     raise RuntimeError("transparent mode granted on a robbed-bit path")
-                if "cc tx=1 rx=1" not in alog:
-                    raise RuntimeError("control channel was not negotiated on both directions")
-                if "peer cleardown (control channel)" not in alog:
-                    raise RuntimeError("peer did not see the control-channel cleardown")
-            if not (args.retrain or args.escape):
+                if args.no_control_channel:
+                    if "cc tx=0 rx=0" not in alog:
+                        raise RuntimeError("a control channel was negotiated")
+                    if "peer cleardown (CP drn 0)" not in alog:
+                        raise RuntimeError("peer did not see the CP drn = 0 cleardown")
+                else:
+                    if "cc tx=1 rx=1" not in alog:
+                        raise RuntimeError("control channel was not negotiated on both directions")
+                    if "peer cleardown (control channel)" not in alog:
+                        raise RuntimeError("peer did not see the control-channel cleardown")
+            # (the CP drn = 0 cleardown appends a retrain start-up to the data the
+            # decoder expects to end in idle, so it is not run for that case)
+            if not (args.retrain or args.escape or args.no_control_channel):
                 decode = subprocess.run(
                     [sys.executable, str(pathlib.Path(__file__).with_name("v91_spec_decode.py")),
                      str(temp / "caller-taps" / "live-tx.g711"),
@@ -327,7 +343,8 @@ def main() -> int:
                                        + decode.stdout + decode.stderr)
                 label += "; spec decoder agrees"
             print(f"v91_serial_pair_test: OK ({label}"
-                  + ("" if granted else "; control-channel cleardown") + ")")
+                  + ("" if granted else "; CP drn 0 cleardown" if args.no_control_channel
+                     else "; control-channel cleardown") + ")")
             return 0
         except Exception as exc:
             terminate(caller)

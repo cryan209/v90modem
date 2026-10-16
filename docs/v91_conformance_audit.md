@@ -357,11 +357,13 @@ audit table is open.
 ### 8.6 and the closing pass -- 2026-10-17
 
 A peer CP with drn = 0 used to be reported as a start-up receive failure, which
-escaped to V.34 and kept the call up; it is now cleardown (`ME_HANGUP`).  We do
-not send drn = 0 ourselves: a local hangup uses the control channel (bit 16) or
-drops immediately without one, both of which 8.6 allows only as "or" alternatives
-for the CP route, so a conformant peer that waits for either will see the media
-go away.  The CP-within-1.5-s rule (8.2.1.8) is our obligation, not something to
+escaped to V.34 and kept the call up; it is now cleardown (`ME_HANGUP`).  A local hangup in
+non-transparent mode without a control channel now takes the other 8.6 route:
+retrain (8.4.1), then CP with drn = 0 (sent twice, then the line is held about
+1 s so the peer's jitter buffer drains them before the bearer drops).  With a
+control channel it still uses bit 16; in transparent mode 8.4-8.6 do not apply
+and the bearer simply goes.  `v91_serial_pair_test.py --no-control-channel` checks
+the peer logs "peer cleardown (CP drn 0)".  The CP-within-1.5-s rule (8.2.1.8) is our obligation, not something to
 enforce on the peer, and is met by construction (the DIL we receive lasts about
 0.19 s).  The earlier note that our robbed-cadence request sat in reserved CP
 bits was already obsolete: it was deleted on 2026-10-16 and the spec decoder

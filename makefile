@@ -303,6 +303,7 @@ v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent answerer --robbed-phase 2
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --transparent caller --transparent-cleardown --robbed-phase 2
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --loop3
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --no-control-channel
 
 # Receive-path conformance against a downstream we did not generate.  Encodes a
 # known-open defect (docs/eicon_downstream_comparison.md, Finding 4: DIL
