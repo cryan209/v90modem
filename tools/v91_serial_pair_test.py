@@ -98,6 +98,12 @@ def main() -> int:
     parser.add_argument(
         "--robbed-phase", type=int, default=None,
         help="simulate a robbed-bit trunk on both receive paths at this cadence phase (0-5)")
+    parser.add_argument(
+        "--retrain", action="store_true",
+        help="caller starts a retrain 1.5 s into data mode (8.4); payload must flow after it")
+    parser.add_argument(
+        "--escape", action="store_true",
+        help="both ends abandon V.91 start-up after 0.7 s and escape to V.34 (8.3)")
     args = parser.parse_args()
 
     child_env = dict(os.environ)
@@ -105,6 +111,16 @@ def main() -> int:
     if args.robbed_phase is not None:
         child_env["V91_SIM_ROBBED_RX"] = str(args.robbed_phase)
         label += f", simulated robbed-bit trunk phase={args.robbed_phase}"
+
+    answerer_env = dict(child_env)
+    caller_env = dict(child_env)
+    if args.retrain:
+        caller_env["V91_TEST_RETRAIN_AFTER_MS"] = "1500"
+        label += ", caller-initiated retrain"
+    if args.escape:
+        for env in (caller_env, answerer_env):
+            env["V91_TEST_ESCAPE_AFTER_MS"] = "700"
+        label += ", escape to V.34"
 
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory(prefix="v91-serial-pair-") as temp_dir:
@@ -120,7 +136,7 @@ def main() -> int:
              "--pty-link", str(answerer_pty), "--verbose"],
             stdout=answerer_log,
             stderr=subprocess.STDOUT,
-            env=child_env,
+            env=answerer_env,
         )
         caller = subprocess.Popen(
             [binary, "--mode", "v91", "--sip-server", f"127.0.0.1:{args.answerer_port}",
@@ -128,7 +144,7 @@ def main() -> int:
              "--pty-link", str(caller_pty), "--verbose"],
             stdout=caller_log,
             stderr=subprocess.STDOUT,
-            env=child_env,
+            env=caller_env,
         )
         caller_fd = -1
         answerer_fd = -1
@@ -146,6 +162,9 @@ def main() -> int:
             os.write(caller_fd, f"ATD{args.answerer_port}\r".encode("ascii"))
             wait_connect([caller_fd, answerer_fd], args.timeout)
             drain([caller_fd, answerer_fd])
+            if args.retrain:
+                time.sleep(12.0)           # 1.5 s to the hook + a full re-startup
+                drain([caller_fd, answerer_fd])
 
             c2a = b"V91-CALLER-TO-ANSWERER-0123456789\r\n"
             a2c = b"V91-ANSWERER-TO-CALLER-9876543210\r\n"
@@ -165,6 +184,15 @@ def main() -> int:
             caller_log.close()
             answerer_log.close()
             alog = answerer_log_path.read_text(errors="replace")
+            clog = caller_log_path.read_text(errors="replace")
+            if args.retrain and ("V91 retrain complete" not in clog
+                                 or "V91 retrain complete" not in alog):
+                raise RuntimeError("retrain did not complete on both ends")
+            if args.escape:
+                if "V91 escape to V34" not in clog or "V91 escape to V34" not in alog:
+                    raise RuntimeError("V.91 did not escape to V.34 on both ends")
+                print(f"v91_serial_pair_test: OK ({label})")
+                return 0
             if "cc tx=1 rx=1" not in alog:
                 raise RuntimeError("control channel was not negotiated on both directions")
             if "peer cleardown (control channel)" not in alog:

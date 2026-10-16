@@ -1390,6 +1390,7 @@ bool v91_note_frame_sync_reacquired(v91_state_t *s)
     s->cc_tx_cleardown = false;
     s->cc_tx_retrain = false;
     s->cc_tx_cleardown_done = false;
+    s->cc_tx_retrain_done = false;
     s->cc_rx_pos = 0;
     s->cc_rx_valid = false;
     s->cc_rx_cleardown = false;
@@ -1684,6 +1685,8 @@ int v91_tx_codewords(v91_state_t *s,
             /* 8.6: cleardown is signalled once the current sequence is complete. */
             if (s->cc_tx_pos == 0 && s->cc_tx_seq[16])
                 s->cc_tx_cleardown_done = true;
+            if (s->cc_tx_pos == 0 && s->cc_tx_seq[17])
+                s->cc_tx_retrain_done = true;
         } else if (v90_map_sr0_frame((v90_law_t) s->law, &s->active_cp, d,
                                      &s->scramble_reg, &s->diff_sign, bits,
                                      g711_out + out_pos) == 0) {

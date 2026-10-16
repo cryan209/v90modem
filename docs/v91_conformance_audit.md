@@ -219,3 +219,32 @@ constellation under robbing (it is real scrambled ones now and does not).
 - Tests: `test_v91_control_channel` (data byte-exact across CC frames, flags,
   secondary bits, slip) and the live pair test, which now also hangs up and
   checks the peer saw the bit.
+
+### Escape to V.34 and retrain (8.3, 8.4, 8.5) -- added 2026-10-16
+
+- **Start-up (8.2.1.2-8.2.1.4).**  INFO now repeats until the peer's INFO has
+  been received, then INFO', Eu and the DIL follow (the old script was a fixed
+  Ez/INFO/INFO'/Eu/DIL burst, which only works when both ends start together).
+  The receiver also finds INFO by its onset (sliding 62-symbol window gated on
+  the `1111` + `0x72` opening and checked by CRC), so a peer that started first
+  or is retraining under us (8.4.2) is picked up without seeing its Ez.
+- **Escape (8.3).**  On the TX clock from the start of INFO sending: no INFO'
+  within 1.5 s, or no B1 within 10 s, or any start-up receive failure, calls
+  `start_v34_training()`; V.34's Phase 2 then supplies INFO0a/INFO0c.  Live
+  with `V91_TEST_ESCAPE_AFTER_MS` (both ends escape, V.34 connects, payload
+  flows).  The two natural timers share that code path but have no test of their
+  own yet.
+- **Retrain (8.4, 8.5).**  A frame decode failure, a control-channel slip, or a
+  peer retrain warning (bit 17) re-runs the start-up from data mode with the
+  data stack paused (not restarted, so LAPM survives) and a 10 s timer; a
+  retrain that cannot complete ends the connection, as does a fifth in one call.
+  A local request warns the peer on bit 17 first and starts once that sequence
+  is out (`V91_TEST_RETRAIN_AFTER_MS` drives it).  Reacquiring the frame grid
+  without a retrain (8.5 "by another means") is not attempted: after a slip
+  the control-channel phase is lost as well, so a retrain is the honest answer.
+- **Live evidence.**  A real media glitch (an RTP gap of idle codewords inside a
+  data block) used to hang the call up; in these runs it now shows up as
+  "retrain #1: frame decode failed" on both ends and the call survives.
+- Pair test: `make v91-serial-pair-test` now also runs `--retrain` and
+  `--escape`.  Still open: J/PHIL/Em and transparent-mode request on the live
+  path, V.54 loop 3, a spec-only decoder on our own tap.

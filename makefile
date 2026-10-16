@@ -293,6 +293,8 @@ v90-apple-line-test: v90_analogue_rx_test
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --retrain
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --escape
 
 # Receive-path conformance against a downstream we did not generate.  Encodes a
 # known-open defect (docs/eicon_downstream_comparison.md, Finding 4: DIL

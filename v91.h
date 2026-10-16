@@ -147,6 +147,7 @@ typedef struct {
     int cc_tx_pos;
     bool cc_tx_cleardown;
     bool cc_tx_retrain;
+    bool cc_tx_retrain_done;         /* a sequence carrying the retrain warning has been sent whole */
     bool cc_tx_cleardown_done;       /* a sequence carrying the cleardown bit has been sent whole */
     uint8_t cc_tx_secondary[54];
     uint8_t cc_rx_seq[96];

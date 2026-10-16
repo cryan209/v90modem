@@ -1637,7 +1637,8 @@ static v90_cp_live_rx_counters_t g_v90_cp_live_rx_baseline;
 #define V91_LIVE_SCR_FIRST_SYMBOLS 18
 #define V91_LIVE_SCR_MAX_SYMBOLS 24000
 typedef enum {
-    V91_LIVE_TX_SCRIPT = 0,
+    V91_LIVE_TX_INFO = 0,   /* INFO repeats until the peer's INFO arrives (8.2.1.2) */
+    V91_LIVE_TX_SCRIPT,
     V91_LIVE_TX_SCR,
     V91_LIVE_TX_CP,
     V91_LIVE_TX_TAIL,
@@ -1673,6 +1674,8 @@ static int g_v91_startup_tx_pos;
 static v91_live_tx_stage_t g_v91_tx_stage;
 static int g_v91_scr_sent;
 static uint8_t g_v91_rx_accum[V91_LIVE_STARTUP_MAX];
+static uint8_t g_v91_rx_win[V91_INFO_SYMBOLS];   /* rolling window for INFO onset (8.4.2) */
+static int g_v91_rx_win_n;
 static int g_v91_rx_accum_len;
 static v91_live_rx_stage_t g_v91_rx_stage;
 static uint8_t g_v91_cp_bits[VPCM_CP_MAX_BITS];
@@ -1704,6 +1707,17 @@ static int g_v91_rx_robbed_phase;   /* robbed cadence on our RX path, -1 = none 
 static int g_v91_tx_align_phase;    /* peer-requested cadence for our TX, -1 = none */
 static bool g_v91_data_tx_aligned;
 static bool me_v91_control_channel(void);
+static bool g_v91_retraining;             /* startup re-run from data mode (8.4) */
+static int g_v91_retrain_count;
+static long long g_v91_retrain_deadline;  /* TX clock: 10 s retrain timer */
+static long long g_v91_startup_t0;        /* TX clock when INFO sending begins (8.2.1.2) */
+static long long g_v91_test_escape_abs;   /* V91_TEST_ESCAPE_AFTER_MS, codewords from t0, 0 = off */
+static long long g_v91_test_retrain_abs;  /* V91_TEST_RETRAIN_AFTER_MS from entering data, 0 = off */
+static long long g_v91_data_enter_abs;
+static bool g_v91_retrain_warn_pending;   /* waiting for bit 17 to go out whole */
+static void v91_live_escape_to_v34_locked(const char *why);
+static void start_v34_training(void);
+static void v91_live_retrain_locked(const char *why);
 static bool g_v91_peer_wants_cc;          /* peer set INFO bit 27 */
 static bool g_v91_we_want_cc;
 static bool g_v91_cleardown_pending;      /* local hangup waiting on the control channel */
@@ -1725,6 +1739,17 @@ static int v91_live_append(uint8_t *dst, int cap, int pos,
 /* Fixed part of the startup script: everything through the DIL.  SCR and
  * the rate-dependent CP/Es/B1 tail are generated later, once the received
  * DIL has been analysed and the local rate selected. */
+static void v91_live_fill_info(v91_info_frame_t *info, v91_law_t law, bool ack)
+{
+    memset(info, 0, sizeof(*info));
+    info->request_default_dil = true;
+    info->request_control_channel = g_v91_we_want_cc;
+    info->acknowledge_info_frame = ack;
+    info->tx_uses_alaw = (law == V91_LAW_ALAW);
+    info->power_measured_after_digital_impairments = true;
+}
+
+/* Phase 1 silence, Ez, then the first INFO (8.1, 8.2.1.1, 8.2.1.2). */
 static int v91_live_build_startup(v91_law_t law,
                                   v91_state_t *state,
                                   uint8_t *out,
@@ -1736,11 +1761,7 @@ static int v91_live_build_startup(v91_law_t law,
     int len;
 
     v91_init(state, law, V91_MODE_TRANSPARENT);
-    memset(&info, 0, sizeof(info));
-    info.request_default_dil = true;
-    info.request_control_channel = g_v91_we_want_cc;
-    info.tx_uses_alaw = (law == V91_LAW_ALAW);
-    info.power_measured_after_digital_impairments = true;
+    v91_live_fill_info(&info, law, false);
 
 #define V91_APPEND_EXPR(expr) do { \
         len = (expr); \
@@ -1750,7 +1771,25 @@ static int v91_live_build_startup(v91_law_t law,
     V91_APPEND_EXPR(v91_tx_phase1_silence_codewords(state, tmp, sizeof(tmp)));
     V91_APPEND_EXPR(v91_tx_ez_codewords(state, tmp, sizeof(tmp)));
     V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
-    info.acknowledge_info_frame = true;
+#undef V91_APPEND_EXPR
+    return pos;
+}
+
+/* After the peer's INFO has been received (8.2.1.3, 8.2.1.4): INFO', then Eu
+ * and the default DIL. */
+static int v91_live_build_info_ack_eu_dil(v91_state_t *state, uint8_t *out, int out_cap)
+{
+    v91_info_frame_t info;
+    uint8_t tmp[2048];
+    int pos = 0;
+    int len;
+
+    v91_live_fill_info(&info, state->law, true);
+#define V91_APPEND_EXPR(expr) do { \
+        len = (expr); \
+        if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0) \
+            return 0; \
+    } while (0)
     V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
     V91_APPEND_EXPR(v91_tx_eu_codewords(state, tmp, sizeof(tmp)));
     V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &g_v91_default_dil));
@@ -1795,9 +1834,10 @@ static void v91_live_reset(void)
     memset(&g_v91_rx, 0, sizeof(g_v91_rx));
     g_v91_startup_tx_len = 0;
     g_v91_startup_tx_pos = 0;
-    g_v91_tx_stage = V91_LIVE_TX_SCRIPT;
+    g_v91_tx_stage = V91_LIVE_TX_INFO;
     g_v91_scr_sent = 0;
     g_v91_rx_accum_len = 0;
+    g_v91_rx_win_n = 0;
     g_v91_rx_stage = V91_LIVE_RX_HUNT_EZ;
     g_v91_cp_bit_pos = 0;
     g_v91_cp_total_bits = 0;
@@ -1828,15 +1868,25 @@ static void v91_live_reset(void)
     g_v91_we_want_cc = false;
     g_v91_cleardown_pending = false;
     g_v91_cleardown_done_abs = -1;
+    g_v91_retrain_warn_pending = false;
     g_v91_sim_robbed_phase = -1;
 }
 
-static bool v91_live_start_locked(void)
+/* Build a fresh startup (8.2.1.2: Ez, INFO, ...).  keep_clock leaves the TX/RX
+ * position counters running for a retrain inside a call. */
+static bool v91_live_begin_startup_locked(bool keep_clock)
 {
     v91_law_t law = (g_law == ME_LAW_ALAW) ? V91_LAW_ALAW : V91_LAW_ULAW;
     const char *sim_env;
+    const char *env;
+    long long tx_abs = g_v91_tx_abs_pos;
+    long long rx_abs = g_v91_rx_abs_pos;
 
     v91_live_reset();
+    if (keep_clock) {
+        g_v91_tx_abs_pos = tx_abs;
+        g_v91_rx_abs_pos = rx_abs;
+    }
     /* Test hook: simulate a robbed-bit trunk on our receive path by
      * clearing the LSB of every sixth incoming codeword at the given
      * cadence phase (0..5). */
@@ -1847,9 +1897,16 @@ static bool v91_live_start_locked(void)
         if (phase >= 0 && phase <= 5)
             g_v91_sim_robbed_phase = phase;
     }
-    /* Offer ceiling with a robbed-bit-safe constellation set; the actual
-     * rate is selected from the received DIL analysis and robbed-bit
-     * detection once the peer's DIL has arrived. */
+    g_v91_test_escape_abs = 0;
+    g_v91_test_retrain_abs = 0;
+    if (!keep_clock) {
+        env = getenv("V91_TEST_ESCAPE_AFTER_MS");
+        if (env && atoi(env) > 0)
+            g_v91_test_escape_abs = (long long)atoi(env) * 8;
+        env = getenv("V91_TEST_RETRAIN_AFTER_MS");
+        if (env && atoi(env) > 0)
+            g_v91_test_retrain_abs = (long long)atoi(env) * 8;
+    }
     /* All Ucodes in one constellation; robbed slots are carved out of the CP we
      * send once the DIL shows where the trunk steals bits (7.2, 5.4.4/V.90).
      * Law is carried by INFO bit 39, and CP bit 35 is reserved in V.91. */
@@ -1869,6 +1926,16 @@ static bool v91_live_start_locked(void)
         || g_v91_cp_total_bits <= 0
         || g_v91_cp_total_bits > VPCM_CP_MAX_BITS)
         return false;
+    g_v91_startup_t0 = g_v91_tx_abs_pos + V91_PHASE1_SILENCE_SYMBOLS + V91_EZ_SYMBOLS;
+    return true;
+}
+
+static bool v91_live_start_locked(void)
+{
+    g_v91_retraining = false;
+    g_v91_retrain_count = 0;
+    if (!v91_live_begin_startup_locked(false))
+        return false;
     data_stack_prepare((int)vpcm_cp_drn_to_bps(vpcm_cp_recommended_robbed_bit_drn()));
     g_mod = ME_MOD_V91;
     g_state = ME_TRAINING;
@@ -1877,6 +1944,94 @@ static bool v91_live_start_locked(void)
                 g_calling_party ? "caller" : "answerer",
                 g_v91_startup_tx_len, g_v91_cp_template.drn);
     return true;
+}
+
+/* 8.3: the modem may escape to V.34 at any time during start-up, and must if
+ * INFO' is not received within 1.5 s or B1 within 10 s of beginning 8.2.1.2.
+ * V.34's own Phase 2 then supplies INFO0a/INFO0c (8.3.1, 8.3.2). */
+static void v91_live_escape_to_v34_locked(const char *why)
+{
+    ME_LOG("[ME] V.91 start-up abandoned (%s): escaping to V.34\n", why);
+    trace_phase("V91 escape to V34: %s", why);
+    g_v91_retraining = false;
+    start_v34_training();
+}
+
+/* 8.4.1 / 8.5: re-run the start-up from data mode.  Circuit 104 stays clamped
+ * (the data stack is simply not fed) and 107/109 stay on; if the retrain does
+ * not finish in 10 s the connection is terminated. */
+static void v91_live_retrain_locked(const char *why)
+{
+    if (g_state == ME_DATA && g_mod == ME_MOD_V91 && g_v91_cleardown_pending) {
+        /* We are already clearing down (8.6): finish sending the control-channel
+         * sequence and ignore what the receive side makes of the line. */
+        g_v91_data_rx_pos = 0;
+        return;
+    }
+    if (g_state != ME_DATA || g_mod != ME_MOD_V91) {
+        g_state = ME_HANGUP;
+        return;
+    }
+    if (g_v91_retrain_count >= 4) {
+        ME_LOG("[ME] V.91 retrain limit reached (%s)\n", why);
+        trace_phase("V91 retrain limit reached: %s", why);
+        g_state = ME_HANGUP;
+        return;
+    }
+    ME_LOG("[ME] V.91 retrain (%s)\n", why);
+    trace_phase("V91 retrain #%d: %s", g_v91_retrain_count + 1, why);
+    g_v91_retrain_count++;
+    if (!v91_live_begin_startup_locked(true)) {
+        g_state = ME_HANGUP;
+        return;
+    }
+    g_v91_retraining = true;
+    g_v91_retrain_deadline = g_v91_tx_abs_pos + 10 * 8000;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+}
+
+/* Local retrain request from data mode.  With a control channel the peer is
+ * warned first (Table 3 bit 17) and the retrain starts once the sequence
+ * carrying it has gone out (8.4.1); without one it starts at once. */
+static void v91_live_request_retrain_locked(const char *why)
+{
+    if (g_state != ME_DATA || g_v91_retrain_warn_pending)
+        return;
+    if (g_v91_tx.cc_tx_active) {
+        g_v91_retrain_warn_pending = true;
+        v91_cc_request_retrain(&g_v91_tx);
+        trace_phase("V91 retrain warning sent on control channel: %s", why);
+        return;
+    }
+    v91_live_retrain_locked(why);
+}
+
+/* Start-up timers on the TX clock; true when the call left TRAINING. */
+static bool v91_live_startup_timers_locked(long long now)
+{
+    if (g_v91_retraining) {
+        if (now > g_v91_retrain_deadline) {
+            ME_LOG("[ME] V.91 retrain timer expired\n");
+            trace_phase("V91 retrain timer expired");
+            g_state = ME_HANGUP;
+            return true;
+        }
+        return false;
+    }
+    if (g_v91_test_escape_abs > 0 && now > g_v91_startup_t0 + g_v91_test_escape_abs) {
+        v91_live_escape_to_v34_locked("test hook");
+        return true;
+    }
+    if (g_v91_rx_stage <= V91_LIVE_RX_INFO_ACK && now > g_v91_startup_t0 + 12000) {
+        v91_live_escape_to_v34_locked("no INFO' within 1.5 s");
+        return true;
+    }
+    if (g_v91_rx_stage != V91_LIVE_RX_DONE && now > g_v91_startup_t0 + 80000) {
+        v91_live_escape_to_v34_locked("no B1 within 10 s");
+        return true;
+    }
+    return false;
 }
 
 static void v91_live_try_enter_data_locked(void)
@@ -1909,7 +2064,8 @@ static void v91_live_try_enter_data_locked(void)
     g_v91_data_rx_bytes = (int)g_v91_local_drn + 20;
     final_drn = (g_v91_peer_drn < g_v91_local_drn) ? g_v91_peer_drn : g_v91_local_drn;
     rate = (int)vpcm_cp_drn_to_bps(final_drn);
-    data_stack_start_online(rate, g_calling_party);
+    if (!g_v91_retraining)
+        data_stack_start_online(rate, g_calling_party);
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
@@ -1920,7 +2076,12 @@ static void v91_live_try_enter_data_locked(void)
      * non-idle primary-channel codeword instead of guessing packet counts. */
     g_v91_data_rx_synced = false;
     g_data_connect_reported = true;
-    di_on_connected(rate);
+    if (!g_v91_retraining)
+        di_on_connected(rate);
+    else
+        trace_phase("V91 retrain complete (rx drn=%u tx drn=%u)", g_v91_local_drn, g_v91_peer_drn);
+    g_v91_retraining = false;
+    g_v91_data_enter_abs = g_v91_tx_abs_pos;
     trace_phase("V91 enter DATA: rate=%d (rx drn=%u tx drn=%u robbed=%d rx_phase=%d cc tx=%d rx=%d)",
                 rate, g_v91_local_drn, g_v91_peer_drn,
                 g_v91_rx.rx_robbed_bit_detected ? 1 : 0,
@@ -1935,6 +2096,31 @@ static bool v91_live_tx_refill_locked(void)
     int len;
 
     switch (g_v91_tx_stage) {
+    case V91_LIVE_TX_INFO: {
+        if (g_v91_rx_stage >= V91_LIVE_RX_INFO_ACK) {
+            /* The peer's INFO is in: finish with INFO', Eu and the DIL. */
+            len = v91_live_build_info_ack_eu_dil(&g_v91_tx, g_v91_startup_tx,
+                                                 (int)sizeof(g_v91_startup_tx));
+            if (len <= 0)
+                return false;
+            g_v91_startup_tx_len = len;
+            g_v91_startup_tx_pos = 0;
+            g_v91_tx_stage = V91_LIVE_TX_SCRIPT;
+            return true;
+        }
+        {
+            v91_info_frame_t info;
+
+            v91_live_fill_info(&info, g_v91_tx.law, false);
+            len = v91_tx_info_codewords(&g_v91_tx, g_v91_startup_tx,
+                                        (int)sizeof(g_v91_startup_tx), &info);
+            if (len <= 0)
+                return false;
+            g_v91_startup_tx_len = len;
+            g_v91_startup_tx_pos = 0;
+            return true;
+        }
+    }
     case V91_LIVE_TX_SCRIPT:
         /* Fixed script drained: start the SCR run (GPC reset). */
         len = v91_tx_scr_codewords(&g_v91_tx, g_v91_startup_tx,
@@ -2009,6 +2195,8 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
     g_v91_tx_abs_pos = base + len;
     memset(out, v91_idle_codeword(g_v91_tx.law), (size_t)len);
     if (g_state == ME_TRAINING) {
+        if (v91_live_startup_timers_locked(base + len))
+            return false;
         while (pos < len) {
             int remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
             int copy;
@@ -2019,7 +2207,10 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
                         g_v91_tx_b1_end_abs = base + pos;
                     if (g_v91_tx_stage == V91_LIVE_TX_SCR) {
                         ME_LOG("[ME] V.91 SCR fill exhausted waiting for peer DIL\n");
-                        g_state = ME_HANGUP;
+                        if (g_v91_retraining)
+                            g_state = ME_HANGUP;
+                        else
+                            v91_live_escape_to_v34_locked("SCR fill exhausted waiting for peer DIL");
                         return false;
                     }
                     break;
@@ -2054,6 +2245,11 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
         }
         g_v91_data_tx_aligned = true;
     }
+    if (g_v91_test_retrain_abs > 0
+        && base + pos - g_v91_data_enter_abs > g_v91_test_retrain_abs) {
+        g_v91_test_retrain_abs = 0;
+        v91_live_request_retrain_locked("test hook");
+    }
     while (pos < len) {
         int available;
         int copy;
@@ -2074,6 +2270,11 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
                                  data,
                                  need) != V91_LIVE_DATA_CODEWORDS)
                 return false;
+            if (g_v91_retrain_warn_pending && g_v91_tx.cc_tx_retrain_done) {
+                g_v91_retrain_warn_pending = false;
+                v91_live_retrain_locked("local request");
+                return true;
+            }
             if (g_v91_cleardown_pending) {
                 /* Let the peer receive the whole sequence (and decode its
                  * block) before the bearer is dropped under it. */
@@ -2100,8 +2301,13 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
 static void v91_live_rx_fail_locked(const char *what)
 {
     ME_LOG("[ME] V.91 startup receive failed at %s\n", what);
-    v91_request_retrain(&g_v91_rx);
-    g_state = ME_HANGUP;
+    if (g_v91_retraining) {
+        /* 8.4: a retrain that cannot complete ends the connection. */
+        v91_request_retrain(&g_v91_rx);
+        g_state = ME_HANGUP;
+        return;
+    }
+    v91_live_escape_to_v34_locked(what);
 }
 
 /* Accumulate codewords for the current RX stage; true once `need` are held. */
@@ -2161,6 +2367,42 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         if (g_v91_ez_run == V91_EZ_SYMBOLS) {
             trace_phase("V91 RX synchronized at Ez");
             v91_live_rx_enter_stage(V91_LIVE_RX_INFO);
+            return;
+        }
+        /* 8.4.2: a peer already past Ez (it started first, or is retraining
+         * while we were in data mode) is found by the onset of INFO. */
+        if (g_v91_rx_win_n < V91_INFO_SYMBOLS) {
+            g_v91_rx_win[g_v91_rx_win_n++] = cw;
+        } else {
+            memmove(g_v91_rx_win, g_v91_rx_win + 1, V91_INFO_SYMBOLS - 1);
+            g_v91_rx_win[V91_INFO_SYMBOLS - 1] = cw;
+        }
+        if (g_v91_rx_win_n == V91_INFO_SYMBOLS) {
+            /* Cheap gate: INFO opens 1111 then frame sync 0x72 (Table 6, bits 4:11),
+             * differentially coded on the sign bit. */
+            static const uint8_t pre[12] = {1,1,1,1,0,1,0,0,1,1,1,0};   /* 0x72 sent LSB first */
+            int prev = 0;
+            bool ok = true;
+
+            for (int i = 0; i < 12 && ok; i++) {
+                int sign = (g_v91_rx_win[i] & 0x80) ? 1 : 0;
+
+                ok = ((sign ^ prev) == pre[i]);
+                prev = sign;
+            }
+            if (ok) {
+                v91_state_t scratch;
+                v91_info_frame_t info;
+
+                v91_init(&scratch, g_v91_rx.law, V91_MODE_TRANSPARENT);
+                if (v91_rx_info_codewords(&scratch, g_v91_rx_win, V91_INFO_SYMBOLS, &info)) {
+                    g_v91_peer_wants_cc = info.request_control_channel;
+                    trace_phase("V91 RX found INFO onset (ack=%d)",
+                                info.acknowledge_info_frame ? 1 : 0);
+                    v91_live_rx_enter_stage(info.acknowledge_info_frame
+                                            ? V91_LIVE_RX_EU : V91_LIVE_RX_INFO_ACK);
+                }
+            }
         }
         return;
     case V91_LIVE_RX_INFO:
@@ -2168,15 +2410,20 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         v91_info_frame_t info;
         bool want_ack = (g_v91_rx_stage == V91_LIVE_RX_INFO_ACK);
 
+
         if (!v91_live_rx_collect(cw, V91_INFO_SYMBOLS))
             return;
-        if (!v91_rx_info_codewords(&g_v91_rx, g_v91_rx_accum, V91_INFO_SYMBOLS, &info)
-            || info.acknowledge_info_frame != want_ack) {
+        if (!v91_rx_info_codewords(&g_v91_rx, g_v91_rx_accum, V91_INFO_SYMBOLS, &info)) {
             v91_live_rx_fail_locked(want_ack ? "INFO'" : "INFO");
             return;
         }
         g_v91_peer_wants_cc = info.request_control_channel;
-        v91_live_rx_enter_stage(want_ack ? V91_LIVE_RX_EU : V91_LIVE_RX_INFO_ACK);
+        /* INFO repeats (ack = 0) until the peer has ours; the first INFO' ends
+         * the exchange and Eu follows it. */
+        if (info.acknowledge_info_frame)
+            v91_live_rx_enter_stage(V91_LIVE_RX_EU);
+        else
+            v91_live_rx_enter_stage(V91_LIVE_RX_INFO_ACK);
         return;
     }
     case V91_LIVE_RX_EU: {
@@ -2450,7 +2697,7 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                                     i + 1 == V91_LIVE_DATA_CODEWORDS ? "\n" : " ");
                     }
                     v91_note_frame_sync_loss(&g_v91_rx);
-                    g_state = ME_HANGUP;
+                    v91_live_retrain_locked("frame decode failed");
                     return;
                 }
                 ds_rx_push_bytes(&g_data_stack, data, decoded);
@@ -2463,18 +2710,17 @@ static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long 
                     return;
                 }
                 if (g_v91_rx.cc_rx_retrain) {
-                    /* 8.4.1: retrain warning; we have no retrain procedure to
-                     * run yet, so end the call instead of corrupting data. */
+                    /* 8.4.1/8.4.2: the peer is about to retrain; join it. */
                     ME_LOG("[ME] V.91 control channel: peer retrain warning\n");
                     trace_phase("V91 peer retrain warning (control channel)");
-                    g_state = ME_HANGUP;
+                    v91_live_retrain_locked("peer retrain warning");
                     return;
                 }
                 if (v91_cc_slip_suspected(&g_v91_rx)) {
                     ME_LOG("[ME] V.91 control channel: frame sync loss (slip pattern/CRC failed)\n");
                     trace_phase("V91 control-channel frame sync loss");
                     v91_note_frame_sync_loss(&g_v91_rx);
-                    g_state = ME_HANGUP;
+                    v91_live_retrain_locked("control-channel frame sync loss");
                     return;
                 }
             }
