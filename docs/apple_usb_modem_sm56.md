@@ -2984,3 +2984,94 @@ register 27 (the newer sheet says not to read or write it).
 The public Si3056 map lists higher SRC modes, but that does not establish
 support through this USB implementation. 10286 samples/s remains the highest
 advertised and hardware-verified Apple USB audio rate.
+
+## SNR, dynamic range and gain sweep (2026-10-16)
+
+The older Si3016 sheet's 82–84 dB DR figures are full-scale-referenced,
+300–3400 Hz measurements under specified termination/current conditions,
+not the SNR of an arbitrarily quiet waveform. The closer Si3056/Si3018/19/10
+sheet advertises 80 dB paths; Table 4 notes 5–6 define full-scale-referenced
+noise with harmonics excluded, using a 1 kHz tone near 10300 samples/s.
+These are individual path specifications, not a guarantee for our combined
+local loopback. Source:
+https://www.skyworksinc.com/-/media/Skyworks/SL/documents/public/data-sheets/si3056.pdf
+
+New physical experiments use 1000 Hz at native 10286 samples/s, analog
+HBE-off (§5.30), and the required 12 dB transmit headroom. The new diagnostic
+`--loopback-pattern tone` generates a native sine; `--loopback-tone-level`
+sets its pre-headroom amplitude in (0,1]. `--loopback-rx-gain` selects temporary
+register-15 ARX gain of 0/3/6/9/12 dB. All five test registers including gain,
+and the original hook state, are restored and read back for every attempt.
+Auto-calibration remains enabled; no full-scale, country termination or
+protection controls were altered. Engine data paths/defaults are unchanged.
+
+### Results
+
+| analog local loop measurement | 0:13 | 0:14 |
+|---|---|---|
+| strongest test tone, 0 dB ARX: received RMS | 4745 counts | 4871 counts |
+| quiet 300–3400 Hz noise RMS | 1.86 counts | 4.00 counts |
+| active noise RMS, fitted harmonics excluded | 1.86 counts | 4.38 counts |
+| active tone SNR | 68.11 dB | 60.92 dB |
+| tone / noise plus in-band harmonics (SNDR) | 68.06 dB | 60.90 dB |
+| quiet noise below a full-scale digital sine | 81.90 dB | 75.27 dB |
+| active noise below a full-scale digital sine | 81.89 dB | 74.46 dB |
+
+The digital reference is explicitly 32767/sqrt(2) RMS counts:
+`20 log10((32767/sqrt(2))/noise_rms)`. Thus the earlier ~60/53 dB probe SNR
+was never evidence that the codec's dynamic range was limited to 60/53 dB.
+The ~82/75 dB values are digital-full-scale-referenced noise headroom, not
+an independent calibration of the chip's analog full-scale input, and do not
+prove 82 dB clean operation at full-scale signal amplitude.
+
+**Level helps SNR; receive gain does not measurably improve it here.** At
+0 dB ARX, tone levels .25/.5/1 give SNDR 55.94/62.02/68.06 dB on 0:13.
+0:14's clean/repeated corresponding points give 49.30/55.07/60.90 dB.
+Four times the transmitted amplitude produces approximately 12 dB better
+SNR without observed digital rail samples. This is a controlled tone result,
+not permission to raise real-call transmit power without dBm calibration.
+
+At the strongest test tone, 0:13 ARX 0/3/6/9/12 dB gives SNDR
+68.06/68.06/68.10/67.97/68.11 dB. Received signal and noise both rise by
+about 12 dB at ARX=12, so there is no useful improvement in input-referred
+noise. 0:14 gives about 61 dB at 0/3/6/12; its repeated 9 dB point is worse
+at 58.10 dB. Keep 0 dB receive gain as the baseline; the better-performing
+0:13 is about 7 dB cleaner in this setup. No gain/default was left changed.
+
+### Anomalies and verification
+
+All 17 bounded hardware attempts completed with register restoration,
+on-hook confirmation and no measured RX rail samples. That transport/path
+pass is not a signal-fidelity pass: two 0:14 captures were severely distorted
+(SNDR 4.89 and 5.08 dB, coherent in-band harmonic ratio approximately -5.7 dB).
+They were the low-level/0 dB and strongest-level/9 dB points. The corresponding
+transmit taps were clean (harmonic ratios -82.6 and -94.6 dB), so the measured
+corruption occurs after our recorded transmit tap. Its origin within USB,
+DAA or the loop is unresolved; a tone cannot distinguish delay mixing from
+analog nonlinearity. Neither point showed digital rail clipping. Repeats
+improved to 49.30 and 58.10 dB respectively; retain both originals rather
+than claiming a uniformly clean device or labeling the fault definitively.
+0:13's strongest 0 dB control repeated at 67.93 dB SNDR.
+
+`tools/apple_snr_report.py` fits the tone frequency, DC, linear drift and
+five coherent harmonics on a steady 0.85 s interval. Noise uses Welch power
+in nominal 300–3400 Hz after removing those components; in-band distortion
+adds the second/third harmonic powers. Quiet noise is measured independently
+before tone onset. The tone's periodic correlation cannot determine unique
+transport delay, so analysis windows do not use the loopback analyzer's lag.
+The plots retain the distorted captures as separate marked points and join
+only the other measurements. No result is a modulation BER or trained rate.
+
+Synthetic checks recover a known non-bin-centered tone, second harmonic and
+white-noise band power. Invalid level/gain inputs are rejected before opening
+USB. `make gui-apple-test`: all four tests passed. Evidence is in
+`artifacts/apple-snr-sweep-20261016/` and its `-repeat13`, `-repeat14` and
+`-repeat14-gain9` siblings, with the combined JSON and inspected plot in the
+first directory.
+
+```sh
+python3 tools/apple_snr_sweep.py --quiet-pbx root@asterisk.net.cryan.nz \
+  --out artifacts/apple-snr-check
+MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_snr_report.py \
+  --self-check artifacts/apple-snr-check
+```

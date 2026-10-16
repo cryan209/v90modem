@@ -777,6 +777,8 @@ static void engine_events(const me_diag_snapshot_t *d)
 }
 static NSDictionary *loopback_last;
 static const char *loopback_pattern = "prbs";
+static double loopback_tone_level = 1.0;
+static int loopback_rx_gain = -1;
 static NSDictionary *cid_json(void)
 {
     pthread_mutex_lock(&cid_lock); unsigned bad = cid_malformed; pthread_mutex_unlock(&cid_lock);
@@ -1703,17 +1705,19 @@ static int hardware_loopback(const char *mode)
         gui_watch = 0;
         if (gui_audio_active) gui_audio_stop();
         gui_monitor_only = 0;
-        const unsigned char regs[] = {1,2,6,10};
-        int saved[4], target[4], changed = 0, restored = 1, ready = 1;
-        for (int i = 0; i < 4; i++) { saved[i] = reg_read(regs[i]); target[i] = saved[i]; if (saved[i] < 0) ready = 0; }
+        const unsigned char regs[] = {1,2,6,10,15};
+        int saved[5], target[5], changed = 0, restored = 1, ready = 1;
+        for (int i = 0; i < 5; i++) { saved[i] = reg_read(regs[i]); target[i] = saved[i]; if (saved[i] < 0) ready = 0; }
         const char *reason = "No correlated return";
         struct apple_loop_result result = {0};
         if (ready) {
+            /* Si3056 register 15: ARX in 3 dB steps; restore per probe. */
+            if (loopback_rx_gain >= 0) target[4] = (target[4]&~7) | loopback_rx_gain/3;
             target[0] &= ~2; target[1] |= 2;
             target[2] = !strcmp(mode,"startup") ? target[2] | 16 : target[2] & ~16;
             target[3] = !strcmp(mode,"digital") ? target[3] | 1 : target[3] & ~1;
             line_event("loopback_started",@{@"mode":@(mode),@"hook_register":@(hook)});
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 changed = i+1;
                 int written = reg_write(regs[i],(unsigned char)target[i]);
                 int actual = reg_read(regs[i]);
@@ -1747,7 +1751,11 @@ static int hardware_loopback(const char *mode)
         if (ready) {
             loopback_count[0] = loopback_count[1] = 0;
             if (loopback_peer_fd < 0) apple_loop_pattern(loopback_samples[1],loopback_capacity,(unsigned)g_rate);
-            if (strcmp(loopback_pattern,"prbs")) {
+            if (!strcmp(loopback_pattern,"tone")) {
+                for (unsigned i = 0; i < loopback_capacity; i++)
+                    loopback_samples[1][i] = i >= g_rate && i < g_rate*2.5
+                        ? (int16_t)lrint(32767*loopback_tone_level*sin(2*M_PI*1000*i/g_rate)) : 0;
+            } else if (strcmp(loopback_pattern,"prbs")) {
                 uint32_t state = 0x6d56a108u;
                 for (unsigned i = 0; i < loopback_capacity; i++) {
                     state ^= state<<13; state ^= state>>17; state ^= state<<5;
@@ -1797,7 +1805,7 @@ static int hardware_loopback(const char *mode)
         else if (result.found) reason = powered ? "Line-side return measured; sample errors are not a PCM BER" : passed ? "Known pattern returned" : "Return differs from the test pattern";
         loopback_save(@{@"rate_hz":@(g_rate),@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
             @"stream":@(loopback_peer_fd >= 0),@"stream_tx_samples":@(loopback_count[1]),@"stream_rx_samples":@(loopback_count[0]),@"stream_gap_samples":@(loopback_stream_gaps),
-            @"pattern":@(loopback_pattern),@"line_side":@(powered),@"tx_scale":@(powered ? 0.25 : 1.0),
+            @"tone_level":@(loopback_tone_level),@"rx_gain_db":@(loopback_rx_gain),@"pattern":@(loopback_pattern),@"line_side":@(powered),@"tx_scale":@(powered ? 0.25 : 1.0),
             @"reason":@(reason),@"restored":@(restored),@"frames_compared":@(result.frames),
             @"lag_samples":@(result.lag),@"lag_ms":@(result.lag*1000.0/g_rate),
             @"correlation":@(result.correlation),@"gain":@(result.gain),@"dc":@(result.dc),
@@ -2180,7 +2188,9 @@ static void usage(const char *a0)
         "  --line-events FILE  append timestamped line/engine events as JSONL\n"
         "  --loopback-test digital|startup|isolation|analog  hardware loopback\n"
         "               isolation/analog seize the line briefly, then restore it\n"
-        "  --loopback-pattern prbs|ulaw|alaw  G.711 requires --rate 8000\n"
+        "  --loopback-pattern tone|prbs|ulaw|alaw  G.711 requires --rate 8000\n"
+        "  --loopback-tone-level 0..1  1 kHz probe level before line-side /4\n"
+        "  --loopback-rx-gain 0|3|6|9|12  temporary ARX gain; restored afterwards\n"
         "  --loopback-peer-fd N  stream s16le to a test peer socket (8000 Hz)\n"
         "  --devices    read-only USB/CoreAudio device inventory as JSON\n"
         "  --diagnostic-selftest  check passive raw taps without hardware\n"
@@ -2416,6 +2426,8 @@ int main(int argc, char **argv)
             if (!*value || *end || fd < 3 || fd > INT_MAX) { fprintf(stderr,"Invalid loopback peer descriptor\n"); return 2; }
             loopback_peer_fd = (int)fd;
         }
+        else if (!strcmp(argv[i], "--loopback-tone-level") && i+1 < argc) loopback_tone_level = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--loopback-rx-gain") && i+1 < argc) loopback_rx_gain = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--loopback-pattern") && i + 1 < argc) loopback_pattern = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc)        g_rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)        hold = atof(argv[++i]);
@@ -2433,8 +2445,8 @@ int main(int argc, char **argv)
     if (loopback_mode) {
         signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
         if (strcmp(loopback_mode,"digital") && strcmp(loopback_mode,"startup") && strcmp(loopback_mode,"isolation") && strcmp(loopback_mode,"analog")) { fprintf(stderr,"loopback must be digital, startup, isolation or analog\n"); return 2; }
-        if (strcmp(loopback_pattern,"prbs") && strcmp(loopback_pattern,"ulaw") && strcmp(loopback_pattern,"alaw")) { fprintf(stderr,"loopback pattern must be prbs, ulaw or alaw\n"); return 2; }
-        if (strcmp(loopback_pattern,"prbs") && g_rate != 8000) { fprintf(stderr,"G.711 symbol testing requires --rate 8000\n"); return 2; }
+        if (strcmp(loopback_pattern,"tone") && strcmp(loopback_pattern,"prbs") && strcmp(loopback_pattern,"ulaw") && strcmp(loopback_pattern,"alaw")) { fprintf(stderr,"loopback pattern must be tone, prbs, ulaw or alaw\n"); return 2; }
+        if (strcmp(loopback_pattern,"tone") && strcmp(loopback_pattern,"prbs") && g_rate != 8000) { fprintf(stderr,"G.711 symbol testing requires --rate 8000\n"); return 2; }
         if (g_gui_control || g_dial || g_answer_mode || g_replay_path || hook_arg) { fprintf(stderr,"loopback excludes calls and replay\n"); return 2; }
         if (loopback_peer_fd >= 0) {
             int type; socklen_t size = sizeof type;
@@ -2443,6 +2455,8 @@ int main(int argc, char **argv)
             int one = 1; setsockopt(loopback_peer_fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one);
 #endif
         }
+        if (!isfinite(loopback_tone_level) || loopback_tone_level <= 0 || loopback_tone_level > 1 || loopback_rx_gain < -1 || loopback_rx_gain > 12 || (loopback_rx_gain >= 0 && loopback_rx_gain%3)) return 2;
+        if (loopback_peer_fd >= 0 && (loopback_rx_gain >= 0 || !strcmp(loopback_pattern,"tone"))) return 2;
         if (usb_open_line() < 0) return 1;
         int result = hardware_loopback(loopback_mode);
         @autoreleasepool {
