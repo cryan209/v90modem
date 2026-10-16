@@ -3194,3 +3194,32 @@ supervised waveform benchmark for V.90 §8.4.1 source material, not an
 unassisted DIL decoder, G.711 codeword BER, negotiated constellation margin
 or CONNECT demonstration. `quality.json`, `quality.log` and the inspected
 `dil-quality.png` are beside the original 9668 evidence.
+
+
+### 2026-10-16: RasFinder 6311–6313 blocked before dialling
+
+Attempted each of 6311, 6312 and 6313 using the currently attached Apple
+USB modem at USB 1:2, audio UID ending `000000:3,4`, native 9600 Hz,
+`AT+MS=V34,0`. This is an analogue-to-analogue test through the RasFinder
+AudioCodes ports. The earlier USB 0:13 / UID 145430 unit was absent; its
+initial launch failed before seizure. Do not attribute these results to
+that earlier, cleaner unit.
+
+All three current-unit attempts aborted during line seizure, before DTMF
+or audio training. Register 0x13 reported OPD (0x01), with register 0x0c
+0x45 or 0x46. The guard released the line and on-hook readback succeeded.
+These are local seizure failures, not RasFinder negotiation failures.
+No CONNECT, peer training, or received data was observed.
+
+An on-hook digital PRBS loopback at 9600 Hz then passed with zero sample
+and bit errors over 9600 compared samples (unity gain, zero RMSE). One
+further 6311 attempt after this audio initialization still tripped OPD
+about 81 ms after the hook request (0x0c=0x46, 0x13=0x01). Further seizure
+attempts were stopped; overload protection was retained. A clean digital
+loopback does not validate the analogue line interface or attached line.
+
+Evidence: `artifacts/apple-rasfinder-20261016/`, including immutable coupler
+snapshot and build provenance, per-port events/logs/results, on-hook
+self-test, and `6311-warm/`. The current physical line/DAA seizure fault
+must be resolved before this run can assess any of the three RasFinder
+ports.
