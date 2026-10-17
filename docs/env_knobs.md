@@ -112,7 +112,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_UPSTREAM_MAX_BPS` | modem_engine.c |  | tsd | for the whole call. |
 | `ME_V90_UPSTREAM_STEP` | modem_engine.c |  | d | A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0 |
 | `ME_V91_CONTROL_CHANNEL` | modem_engine.c |  | sd | 6.4: optional; on by default, it gives slip detection and in-band |
-| `ME_V91_SPECIFY_DIL` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
+| `ME_V91_SPECIFY_DIL` | modem_engine.c | 0 | sd | Positive value requests the default descriptor explicitly via INFO bit 26 = 1 and J, in either call role (V.91 7.8-7.10, 8.2.1.5-8.2.1.7). The peer sends the DIL we request; our TX follows its INFO/J. |
 | `ME_V91_TRANSPARENT` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
 | `ME_V92_ENABLE` | modem_engine.c | 0 | td | under the ME_V92_ENABLE compatibility alias.  False for an unknown name. |
 | `ME_V92_JD_EXTRA_REPS` | v90.c |  | d | to move everything after Jd without changing the upstream path. |

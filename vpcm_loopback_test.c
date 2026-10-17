@@ -6813,6 +6813,53 @@ static bool test_v91_j_phil_recovery_sequences(v91_law_t law)
         fprintf(stderr, "V.91 J descriptor encode failed (len=%d)\n", j_len);
         return false;
     }
+    {
+        /* V.91 7.9, Table 12/V.90: the live receiver must find J's
+         * boundary incrementally, without consuming PHIL or Em. Keep the
+         * final INFO differential state and reset only GPC at J onset. */
+        v91_state_t streaming = rx;
+        uint8_t bits[V91_J_MAX_BITS];
+
+        streaming.rx_scramble_reg = 0;
+        for (int i = 0; i < j_len; i++) {
+            bits[i] = (uint8_t)v91_rx_diff_scrambled_bit(&streaming, j_cw[i]);
+            if (v91_j_length_from_prefix(bits, i + 1) != (i < 50 ? 0 : j_len)) {
+                fprintf(stderr, "V.91 streaming J length mismatch at bit %d\n", i);
+                return false;
+            }
+        }
+        bits[0] = 0;
+        if (v91_j_length_from_prefix(bits, 1) != -1) {
+            fprintf(stderr, "V.91 J prefix accepted invalid synchronization\n");
+            return false;
+        }
+        /* Exercise Table 12's 16-bit pattern blocks, paired training
+         * Ucodes, and Figure 3/V.91's zero-length DIL request. */
+        static const uint8_t shapes[][3] = {
+            {0, 1, 1}, {1, 16, 17}, {2, 17, 16}, {255, 128, 128}
+        };
+        for (unsigned k = 0; k < sizeof(shapes) / sizeof(shapes[0]); k++) {
+            v91_dil_desc_t varied = dil;
+            v91_state_t encoder;
+            uint8_t codewords[V91_J_MAX_BITS];
+
+            varied.n = shapes[k][0];
+            varied.lsp = shapes[k][1];
+            varied.ltp = shapes[k][2];
+            v91_init(&encoder, law, V91_MODE_TRANSPARENT);
+            v91_init(&streaming, law, V91_MODE_TRANSPARENT);
+            int count = v91_tx_j_codewords(&encoder, codewords, sizeof(codewords), &varied);
+            if (count <= 0)
+                return false;
+            for (int i = 0; i < 51; i++)
+                bits[i] = (uint8_t)v91_rx_diff_scrambled_bit(&streaming, codewords[i]);
+            if (v91_j_length_from_prefix(bits, 50) != 0
+                || v91_j_length_from_prefix(bits, 51) != count) {
+                fprintf(stderr, "V.91 J prefix length mismatch for shape %u\n", k);
+                return false;
+            }
+        }
+    }
     if (!v91_rx_j_codewords(&rx, j_cw, j_len, &dil_rx)) {
         fprintf(stderr, "V.91 J descriptor decode failed (len=%d)\n", j_len);
         return false;

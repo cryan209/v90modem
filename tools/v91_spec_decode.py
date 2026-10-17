@@ -539,13 +539,17 @@ def decode_stream(path, law, peer_cc_requested_cb, peer_cp_cb, name, payload, pe
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        sys.exit(2)
-    a_path, b_path = sys.argv[1], sys.argv[2]
-    law = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] in ("ulaw", "alaw") else "ulaw"
-    payloads = {"A": sys.argv[4] if len(sys.argv) > 4 else None,
-                "B": sys.argv[5] if len(sys.argv) > 5 else None}
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("caller_tap")
+    parser.add_argument("answerer_tap")
+    parser.add_argument("law", choices=("ulaw", "alaw"), nargs="?", default="ulaw")
+    parser.add_argument("caller_payload", nargs="?")
+    parser.add_argument("answerer_payload", nargs="?")
+    parser.add_argument("--specify-dil", choices=("neither", "caller", "answerer", "both"))
+    args = parser.parse_args()
+    a_path, b_path, law = args.caller_tap, args.answerer_tap, args.law
+    payloads = {"A": args.caller_payload, "B": args.answerer_payload}
 
     # first pass: just our own CP and INFO from each stream (no data decode)
     class Box:
@@ -567,6 +571,13 @@ def main():
         cc = bool(other_info and other_info["cc"])
         rep, _, _ = decode_stream(path, law, lambda cc=cc: cc, lambda cp=other_cp: cp,
                                   name, payloads[name], pdef[name])
+        if args.specify_dil is not None:
+            # V.91 7.8 Table 6, 8.2.1.5: check the requested test arm on
+            # the transmit tap, before accepting its J/PHIL/Em negotiation.
+            specified = args.specify_dil in ("both", "caller" if name == "A" else "answerer")
+            own_info = qi[name]
+            rep.check(own_info is not None and own_info["default_dil"] == (not specified),
+                      "INFO bit 26 matches requested %s DIL" % ("specified" if specified else "default"))
         print("== stream %s (%s) ==" % (name, path))
         print("\n".join(rep.notes))
         fails += len(rep.fails)

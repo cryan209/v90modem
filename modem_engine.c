@@ -2067,14 +2067,16 @@ static bool v91_live_begin_startup_locked(bool keep_clock)
     g_v91_cp_local = g_v91_cp_template;
     g_v91_cp_total_bits = vpcm_cp_v91_bit_length(&g_v91_cp_template);
     v91_default_dil_init(&g_v91_default_dil);
-    /* ME_V91_SPECIFY_DIL=1: request a specified DIL (INFO bit 26 = 1, J, Em).
-     * The descriptor is the default one, so the receive side stays comparable;
-     * what changes is the start-up sequence (Figures 2 and 3/V.91). */
     env = getenv("ME_V91_TRANSPARENT");
     if (env && atoi(env) > 0) {
         g_v91_want_transparent = true;
         g_v91_want_transparent_cd = (atoi(env) > 1);
     }
+    /* Both call and answer enter here after V.8 selects V.91 (8.2.1).
+     * ME_V91_SPECIFY_DIL=1 requests a specified DIL (7.8 Table 6 bit 26,
+     * 8.2.1.5-8.2.1.7: J, optional PHIL, Em).
+     * The descriptor is the default one, so the receive side stays comparable;
+     * what changes is the start-up sequence (Figures 2 and 3/V.91). */
     env = getenv("ME_V91_SPECIFY_DIL");
     if (env && atoi(env) > 0) {
         g_v91_local_specify = true;
@@ -2741,6 +2743,10 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
         g_v91_rx_j_cw[g_v91_rx_j_len] = cw;
         g_v91_rx_j_bits[g_v91_rx_j_len++] = (uint8_t)bit;
         if (g_v91_rx_j_total == 0) {
+            /* V.91 7.9 imports Table 12/V.90: N, Lsp and Ltp in the
+             * prefix determine J's end. Do not assume our own descriptor's
+             * length: the peer requests the DIL for the opposite direction.
+             * Stop exactly at J so PHIL/Em retain the 7.7/7.10 coder state. */
             int total = v91_j_length_from_prefix(g_v91_rx_j_bits, g_v91_rx_j_len);
 
             if (total < 0) {

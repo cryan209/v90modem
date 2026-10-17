@@ -193,6 +193,8 @@ bool v91_rx_phil_codewords(v91_state_t *s,
                            int g711_len,
                            bool continue_from_current);
 int v91_j_descriptor_bit_len(const v91_dil_desc_t *desc);
+/* V.91 7.9 / Table 12/V.90: unpacked, descrambled prefix bits; returns
+ * 0 until 51 bits arrive, -1 for invalid framing/length, else total J bits. */
 int v91_j_length_from_prefix(const uint8_t *bits, int nbits);
 int v91_tx_j_codewords(v91_state_t *s,
                        uint8_t *g711_out,

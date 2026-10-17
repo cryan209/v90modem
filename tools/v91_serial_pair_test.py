@@ -158,6 +158,10 @@ def main() -> int:
 
     answerer_env = dict(child_env)
     caller_env = dict(child_env)
+    # V.91 7.8 (Table 6 bit 26), 8.2.1.5: select each role explicitly;
+    # an inherited diagnostic must not turn a one-sided test into both ends.
+    caller_env["ME_V91_SPECIFY_DIL"] = "0"
+    answerer_env["ME_V91_SPECIFY_DIL"] = "0"
     if args.retrain:
         caller_env["V91_TEST_RETRAIN_AFTER_MS"] = "1500"
         label += ", caller-initiated retrain"
@@ -328,7 +332,8 @@ def main() -> int:
                      str(temp / "caller-taps" / "live-tx.g711"),
                      str(temp / "answerer-taps" / "live-tx.g711"), "ulaw",
                      "V91-CALLER-TO-ANSWERER-0123456789\r\n",
-                     "V91-ANSWERER-TO-CALLER-9876543210\r\n"],
+                     "V91-ANSWERER-TO-CALLER-9876543210\r\n",
+                     "--specify-dil", args.specify_dil or "neither"],
                     capture_output=True, text=True)
                 keep = os.environ.get("V91_KEEP_TAPS")
                 if keep:

@@ -323,6 +323,41 @@ fields), PHIL (none when the DIL is already known, some when waiting) and Em on
 our taps.  Both ends are this tree, so a foreign peer's J is still unverified;
 the decoder's J CRC span mirrors `v90_dil_crc16_bits`, not an independent read.
 
+#### Specified-DIL role tracing and regression checks -- 2026-10-18
+
+The serial pair harness puts `ME_V91_SPECIFY_DIL` in each child's environment.
+After V.8 selects V.91, both roles enter `v91_live_start_locked()` and
+`v91_live_begin_startup_locked()`. The latter resets per-call state, reads the
+option, sets `g_v91_local_specify` and selects `g_v91_rx_dil_expect`.
+`v91_live_fill_info()` advertises the request in Table 6 bit 26;
+`v91_live_build_info_ack_eu_dil()` sends J for the local request, while
+`V91_LIVE_TX_PHIL` waits for the peer's J before sending Em and that peer's DIL
+(7.7, 7.9, 7.10, 8.2.1.5-8.2.1.7). The RX J stage uses
+`v91_j_length_from_prefix()` on descrambled bits, validates the complete
+descriptor using a saved coder state, and preserves the live coder state for
+PHIL/Em. Each end's request governs its own received DIL.
+
+The harness now explicitly sets the option to zero on unselected ends, so an
+inherited environment cannot change a caller-only or answerer-only test.
+It passes the expected roles to the transmit-tap decoder, which checks INFO
+bit 26 against the test arm as well as decoding J/PHIL/Em, payload and
+cleardown. Primitive tests exercise incremental J acquisition through its exact
+end in both laws, malformed synchronization, and prefix lengths for zero,
+odd/even and maximum segment counts and pattern block boundaries. These
+changes preserve raw G.711 octets, sample accounting and the DSP constants.
+
+Validation: the rebuilt `sip_v90_modem` passed `--specify-dil caller`,
+`--specify-dil answerer` and `--specify-dil both`, each with `--attempts 1`.
+All three passed bidirectional PTY payload, transmit-tap decoding (including
+the expected INFO flags), and control-channel cleardown. The rebuilt
+`vpcm_loopback_test --primitive-tests` passed in both laws. These are local
+pair/primitive checks, not hardware or foreign-peer interoperability evidence.
+An additional caller-only run with inherited `ME_V91_SPECIFY_DIL=1` passed
+in isolation, including the tap's role assertions. Its first run alongside
+other pairs reached data mode with the intended per-role settings, then hit
+data-frame decode failures and failed the cleardown check; that failure is
+retained as a separate outcome, not a negotiation pass.
+
 ### Transparent mode and V.54 loop 3 -- 2026-10-17
 
 **Transparent (6.5, 8.7).**  `ME_V91_TRANSPARENT=1` sets INFO bit 40, `=2` also
