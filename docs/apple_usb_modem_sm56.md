@@ -3284,3 +3284,20 @@ PBX bridge details. All three attempts ended on-hook. Evidence is in
 These are successful line seizure/dial/answer tests, not successful data
 connections. The remaining V.8/V.34 interoperability problem is separate
 from the reproduced and corrected protection re-arm startup issue.
+
+
+### Direct pair with reported 5 V feed (2026-10-17)
+
+Both attached Apple modems enumerated at USB `0:3` and `1:2`, initially
+unconfigured. Setting configuration 1 exposed both CoreAudio endpoints.
+Each was briefly seized separately using the coupler's normal protected
+hook sequence. Both read register 5 = 0x09, register 12 = 0x40, register
+19 = 0x02, and line sense = 0: current code zero and dropout asserted,
+without an overload indication (Si3056 §5.8, §5.22). Thus neither trial
+established operating loop current. Idle sense varied, and its voltage
+scale is uncalibrated; these readings do not independently establish the
+supply voltage, continuity, or a failed DAA. No peer audio or training was
+attempted. Both were restored on-hook with monitoring off and hardware
+protection enabled. Final readbacks and observations are saved locally in
+`artifacts/apple-direct-line-20261017/`. Check physical feed and wiring
+under off-hook load before interpreting a modem negotiation failure.
