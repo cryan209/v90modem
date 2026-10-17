@@ -3168,6 +3168,25 @@ SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
     }
     n = (int) floor((snr_db + 13.0)/6.0
                      *baud_rate_parameters[s->rx.baud_rate].baud_rate/2400.0);
+    if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3429)
+    {
+        /* Below the calibrated table the formula over-predicts for this
+           receiver.  One million PRBS bits each way, 8 rows (both laws,
+           delays 0/1/7/23), forced rates against injected noise (TRN SNR is
+           the lowest end's reading):
+             TRN 19.0 dB: 14400 clean, 16800 fails 5/8
+             TRN 19.6-21.1: 16800 clean (1 of 8 fails at 20.6), 19200 0/8
+             TRN 21.4-22.3: 19200 clean but one row at 21.9
+           so cap N at 6 under 20.0 dB (the two ends read up to 0.7 dB apart, and
+           a 16800 offer from the higher one failed at 20 dB injected noise)
+           and at 7 under 22.0 dB. */
+        if (snr_db < 20.0f  &&  n > 6)
+            n = 6;
+        else if (snr_db < 22.0f  &&  n > 7)
+            n = 7;
+        /*endif*/
+    }
+    /*endif*/
     if (n < 1) n = 1;
     if (n > 14) n = 14;
     return n*2400;

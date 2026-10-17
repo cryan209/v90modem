@@ -918,3 +918,34 @@ behaviour).  3200 baud pair: 26.9 s / 21600 -> 12.9 s / 24000 and 21600;
 `make test-fast` 576/576.  This does not calibrate either estimator, and the
 rate that results is still the one TRN chose; a data mode that really cannot
 carry it is caught by the loss retrain.  No hardware evidence.
+
+## Calibrating the 3429 offer below 26.5 dB (2026-10-17)
+
+The training-rate table stopped at 26.5 dB and the old `(SNR+13)/6` formula
+took over, which over-predicts for the conditioned 3429 receiver at the low
+end: automatic selection at 20 dB injected noise offered 16800, and the
+qualification matrix passed 3-4 of 16 rows.  Forced-rate PRBS (both laws,
+delays 0/1/7/23, `tools/v34_rate_sweep.py`; TRN = lowest end's reading):
+
+| Injected | TRN SNR | Error-free | Fails |
+|---:|---:|---|---|
+| 20 dB | 18.8-19.6 | 14400 (1M bits, 8/8) | 16800 (5/8), 19200 (0/4, 100k) |
+| 21 dB | 19.6-20.6 | 16800 (7/8; one fail at 20.6) | 19200 (0/8) |
+| 22 dB | 20.5-21.1 | 16800 (8/8) | 19200 (0/8) |
+| 23 dB | 21.4-22.3 | 19200 (7/8; one fail at 21.9) | -- |
+| 24 dB | 22.4-23.4 | 19200 | 21600 (3/4 fail, small counts) |
+| 26 dB | 24.0-25.1 | 21600 (300k) | 24000 |
+| 28-30 dB | 25.4-28 | 24000 | 26400 under 26.4 |
+
+Everything from 22.4 dB up is already right under the formula and the
+26.5 dB table (a 26400 offer needs the 26.5 dB entry; the 26400 failures at
+28 dB were all forced rows below it).  Under 22 dB the formula is one step
+high, so `v34_rx_training_rate()` caps N at 6 (14400) below 20.0 dB and at 7
+(16800) below 22.0 dB for the duplex 3429 receiver only.  The first cut used
+19.5 dB and left 3 of 8 rows failing at 20 dB: the two ends read up to 0.7 dB
+apart, and a 16800 offer from the higher one fails.
+
+Automatic selection, 1M bits each way, 8 rows (2 laws x delays 0/1/7/23):
+20 dB 3/8 -> **8/8**, 22 dB **8/8** (16800), 24 dB **8/8** (19200); 21 dB 7/8
+(the one failure is the 16800 edge above).  `make test-fast` 576/576.
+Synthetic channel only; the rig's noise is not white.
