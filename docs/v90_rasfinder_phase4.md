@@ -1332,3 +1332,16 @@ retrains instead of sending S after our Jd. Not explained by: Ja time (+11.9..20
 solo, alternating arms: current main 4/6 V.90 data (3 with the MULTITECH login prompt) vs d99f144d 0/6.
 So V.90 data yield on this rig swings 17-67% by the hour on the same code; judge changes on 12+ interleaved calls.
 Artifacts: CT 117 `/root/ab`, `artifacts/rf{p,q,c,d,e,f,s}-*`; `tools/soak/rf_par.sh` (3 lanes) and `rf_serial.sh`.
+
+### 2026-10-17: is it our Phase 3 timing? (§9.3.2.7's 4500 ms) -- shorter TRN1d does not help
+
+Our TX tap is **byte-identical** between a call whose Jd the peer accepts and one it rejects, from Sd through the
+first 1.7 s of Jd (cur-2-6312 vs cur-1-6311, 800-byte chunk search; only the S-terminated end differs), and TX
+pacing in the first 1.6 s of Jd is the same (9.8 irregular packets mean, accepted and rejected). The peer's
+reaction times cluster in 20 ms steps: S accepted at Jd+1.70-1.82 s or +2.34-2.42 s, Tone A at +1.8-2.0 s, +3.9 s,
++4.45 s. Sd+S-bar+TRN1d (2.54 s) + the first Jd decision (1.7 s) is ~4.25 s of the 4.5 s the analogue modem has
+from the end of Ja, so a deadline was the obvious suspect. Tested: ME_V90_TRN1D_SYMBOLS 12000 / 16008 / 20004,
+three lanes in parallel, arms rotated over 6311-6313, 8 calls per arm (`tools/soak/rf_trn1d_ab.sh`):
+S accepted first 2/2/4 of 8, Tone A first 3/3/2, V.90 data 2/1/4. **More margin did not help; the default 20004T
+was best**, so the deadline hypothesis is not supported (n=8 per arm; direction, not proof). Untested: longer
+TRN1d (24000/28800), which would test the opposite reading (the peer's equaliser wants more training).
