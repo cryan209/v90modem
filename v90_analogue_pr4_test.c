@@ -41,13 +41,15 @@ static int set_fn(void *user, int64_t index, double *levels, uint8_t *cws, int m
     return n;
 }
 
-int main(void)
+static int run_case(int taps, int depth, double tracking)
 {
-    v90a_pr4_t *pr = v90a_pr4_init(16, 6, 24);
+    v90a_pr4_t *pr = v90a_pr4_init(taps, 6, depth);
     long errors = 0, got = 0;
     int fail = 0;
 
     if (pr == NULL) { printf("FAIL init\n"); return 1; }
+    rng = 7;
+    v90a_pr4_set_tracking(pr, tracking);
     for (int k = 0; k < N; k++) {
         int i = (int) (ur()*4.0), sgn = ur() < 0.5 ? -1 : 1;
 
@@ -83,11 +85,21 @@ int main(void)
             }
         }
     }
-    printf("v90a_pr4: delay %d, training fit %.1f dB, %ld codewords out of %d, %ld wrong\n",
-           v90a_pr4_delay(pr), v90a_pr4_train_snr_db(pr), got, N - START, errors);
-    if (got < N - START - 2*24 - 16) { printf("FAIL too few codewords out\n"); fail = 1; }
+    printf("v90a_pr4: taps %d depth %d tracking %.3f, delay %d, training fit %.1f dB, %ld codewords out of %d, %ld wrong\n",
+           taps, depth, tracking, v90a_pr4_delay(pr), v90a_pr4_train_snr_db(pr), got, N - START, errors);
+    if (got < N - START - 2*depth - 16) { printf("FAIL too few codewords out\n"); fail = 1; }
     if (errors != 0) { printf("FAIL decision errors\n"); fail = 1; }
     v90a_pr4_free(pr);
     printf("%s\n", fail ? "FAIL" : "PASS");
+    return fail;
+}
+
+int main(void)
+{
+    /* The slot-varying candidate sets must preserve codeword order at the
+     * longer filter/history geometries used by the physical-loop trials. */
+    int fail = run_case(16, 24, 0.0);
+    fail |= run_case(128, 24, 0.002);
+    fail |= run_case(128, 64, 0.002);
     return fail;
 }

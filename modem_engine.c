@@ -17539,11 +17539,20 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
         /* ME_V90A_PR4=0 leaves Phase 4 on the equaliser's own slicer. */
         if (parse_env_int("ME_V90A_PR4", 1) != 0)
         {
-            g_v90a_pr4 = v90a_pr4_init(V90A_PR4_TAPS, V90A_PR4_DMAX, V90A_PR4_DEPTH);
+            /* Diagnostic geometry for the physical analogue receiver only.
+             * V.90 §5.4.3's candidate sets and §8.4.5's training are unchanged.
+             * Reject bad geometry rather than silently disabling detection. */
+            int taps = parse_env_int("ME_V90A_PR4_TAPS", V90A_PR4_TAPS);
+            int depth = parse_env_int("ME_V90A_PR4_DEPTH", V90A_PR4_DEPTH);
+            if (taps < 4 || taps > 512) taps = V90A_PR4_TAPS;
+            if (depth < 1 || depth > 256) depth = V90A_PR4_DEPTH;
+            g_v90a_pr4 = v90a_pr4_init(taps, V90A_PR4_DMAX, depth);
             /* ME_V90A_PR4_MU: decision-directed tracking after TRN1d
              * (v90_analogue_pr4.c track()), in thousandths; 0 holds. */
             v90a_pr4_set_tracking(g_v90a_pr4,
                                   parse_env_int("ME_V90A_PR4_MU", V90A_PR4_MU_MILLI)/1000.0);
+            ME_LOG("[ME] V.90 analogue: PR4 taps=%d depth=%d (%.2f ms traceback)\n",
+                   taps, depth, 2.0*depth/8.0);
         }
         /*
          * FROZEN, not CMA.  The first thing on the line is §8.4.4's Sd, which

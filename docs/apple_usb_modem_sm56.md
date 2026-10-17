@@ -3619,3 +3619,96 @@ Local evidence/report/plots: `artifacts/apple-pcm-matrix-20261017/`,
 `tools/apple_pcm_matrix.py capture OUTPUT [--profile subset|sweep]`, then
 `analyze OUTPUT`; select the rate list with `--rates`. The large captures
 remain gitignored; the fixed delayed-E acquisition fixture is committed.
+
+## Receive equaliser geometry experiments (2026-10-17)
+
+The physical analogue path now accepts bounded diagnostic overrides
+`ME_V90A_PR4_TAPS` (4..512, default 64) and `ME_V90A_PR4_DEPTH`
+(1..256, default 24 per interleave). Invalid values restore the respective
+compiled default. These change the local partial-response receiver, not PCM
+codewords in the SIP bearer or the V.90 §5.4.3 constellation mapping.
+Training still uses §8.4.5 TRN1d; depth adds approximately `depth/4` ms of
+traceback latency at 8000 symbols/s, plus the fitted decision delay. The
+existing `ME_V90A_PR4_MU` controls tracking in thousandths (default 2).
+
+`tools/apple_pcm_pr4.c` additionally accepts `[traceback [taps
+[tracking-milli]]]`, retaining the previous defaults 24/128/0. It reports
+geometry and adaptation count alongside the held-out error counts.
+The recorded-input sweep is `artifacts/apple-rx-eq-20261017/sweep.json`:
+8000/9600 Hz, both directions, both laws, 32/48 signed levels, 64/128/192
+T/2 taps, depth 24/64/128, tracking 0/.002. Each run trains on 5000 known
+symbols and scores later symbols against the immutable transmit reference;
+the candidate set is the complete alphabet, never the next true symbol.
+Offline clock registration and known multilevel training make this a stronger
+measurement than live two-point TRN1d acquisition.
+
+For the 32-level alphabet, with tracking .002:
+
+| T/2 taps | Traceback/interleave | Errors / scored symbols | Error rate |
+|---:|---:|---:|---:|
+| 64 | 24 | 785 / 66581 | 1.179% |
+| 128 | 24 | 417 / 66510 | 0.627% |
+| 128 | 64 | 20 / 65870 | 0.0304% |
+| 128 | 128 | 15 / 64846 | 0.0231% |
+
+Longer tracebacks emit fewer tail symbols, so denominators differ. At 128/64,
+seven of eight cases had zero errors; the remaining 20 were 8000 Hz A-to-B
+A-law. 192 taps offered little additional training fit and worse aggregate
+32-level errors than 128. Tracking .002 did not improve this short,
+clock-registered dataset over held taps; that does not justify freezing live
+tracking, which previously prevented long-call drift. The 48-level cases
+still had roughly half their symbols wrong even with longer filters and
+history. These measurements support additional receive margin, not a claim
+that denser constellations or a higher negotiated bit rate are usable.
+
+A paired replay of the same baseline live input (first 22 s, recorded own-TX
+reference for echo cancellation) trained at 41.8 dB with 64 taps and 42.0 dB
+with 128 taps. Increasing depth did not change that fit, as expected. Only
+this pre-Phase-4 training comparison is evidence from the engine replay:
+changed detector delay changes later responses, so its later decoding cannot
+be scored as though the peer had heard those responses. The separate
+known-reference benchmark above emits no responses and can score the entire
+held-out recorded sequence.
+
+### Live equaliser comparisons
+
+All calls used one binary (SHA-256
+`c9558e2c9cfac1c24edf30f482343fe9853893758057ce49e22eada573014ef6`),
+native 9600 Hz, strict Ja, upstream N=4, normal V.42 LAPM/V.42bis and
+90-second holds. Each successful trial sent an independently generated
+4096-byte body plus markers in each direction and required the complete
+opposite payload byte-for-byte, not merely CONNECT or matching markers.
+They ran in A1/B1/A2/B2/C1 order under
+`artifacts/apple-v90-followup-20261017/rx-eq-*`.
+
+| Trial | Taps / depth | Completed outcome | TRN1d fit |
+|---|---|---|---|
+| A1 | 64 / 24 | 33333/9600, exact payload both ways | 41.8 dB |
+| B1 | 128 / 24 | V.8 negotiated no usable modulation; PR4 never started | — |
+| A2 | 64 / 24 | 33333/9600, exact payload both ways | 41.8 dB |
+| B2 | 128 / 24 | 32000/9600, exact payload both ways after three pre-PR4 training retries | 42.0 dB |
+| C1 | 128 / 64 | No data connection; Phase 4 failures/retrains with poor training fits | 21.9, 18.5, 16.7 dB |
+
+A1/A2/B2 had exact bidirectional payloads, no render errors and no TX ring
+underruns. All five trials finished before scoring; both hooks and monitors
+were released afterward and hardware protection remained enabled. The
+combined 128/64 setting is **not a validated live improvement**. Its poor
+fits occur before Phase 4 traceback starts, so failure is not proof that the
+longer history itself is harmful. Likewise B1 failed before PR4 even started.
+The alternating baseline/filter sample is only two calls per arm, with
+2/2 versus 1/2 complete data calls: it cannot establish a reliability gain.
+The default remains 64 taps/depth 24; the overrides are experimental.
+
+The next useful RX work is to identify and prevent bad TRN1d training fits
+(reference decisions, clock acquisition and residual echo), then repeat
+alternated live tests of the longer traceback on clean training. More taps
+alone add little fit on these captures. The recorded-input 39-fold reduction
+in 32-level errors is evidence of potential receive margin, not achieved
+live throughput or long-call reliability.
+
+Validation: expanded slot-varying PR4 synthetic test covers 16/24 frozen,
+128/24 tracking and 128/64 tracking, all with zero codeword errors; five
+analogue/recorded-upstream regressions and two whole-engine linear-I/O
+regressions passed, as did the coupler resampler self-test. Detailed output
+is in `artifacts/apple-rx-eq-20261017/`; no PCM bearer processing or ITU
+constants were changed (V.90 §§5.4.3, 8.4.5).

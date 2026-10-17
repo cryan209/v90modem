@@ -41,13 +41,17 @@ static void *read_file(const char *path, long *bytes)
 
 int main(int argc, char **argv)
 {
-    if (argc != 4 && argc != 5) { fprintf(stderr, "usage: %s rx-16k.s16 reference.codes levels-256.s16 [traceback]\n", argv[0]); return 2; }
-    int depth = 24;
-    if (argc == 5) {
+    if (argc < 4 || argc > 7) { fprintf(stderr, "usage: %s rx-16k.s16 reference.codes levels-256.s16 [traceback [taps [tracking-milli]]]\n", argv[0]); return 2; }
+    int depth = 24, taps = 128, tracking = 0;
+    for (int arg = 4; arg < argc; arg++) {
         char *end;
-        long value = strtol(argv[4], &end, 10);
-        if (!*argv[4] || *end || value < 1 || value > 256) return 2;
-        depth = (int)value;
+        long value = strtol(argv[arg], &end, 10);
+        int lo = arg == 4 ? 1 : arg == 5 ? 4 : 0;
+        int hi = arg == 4 ? 256 : arg == 5 ? 512 : 100;
+        if (!*argv[arg] || *end || value < lo || value > hi) return 2;
+        if (arg == 4) depth = (int)value;
+        else if (arg == 5) taps = (int)value;
+        else tracking = (int)value;
     }
     long nb = 0, nc = 0, nl = 0;
     int16_t *rx = read_file(argv[1], &nb), *lv = read_file(argv[3], &nl);
@@ -67,8 +71,9 @@ int main(int argc, char **argv)
         candidate_codes[candidate_count++] = (uint8_t)c;
     }
     free(lv);
-    v90a_pr4_t *pr = v90a_pr4_init(128, 24, depth);
+    v90a_pr4_t *pr = v90a_pr4_init(taps, 24, depth);
     if (!pr || !v90a_pr4_train(pr, 5000)) return 2;
+    v90a_pr4_set_tracking(pr, tracking/1000.0);
     long got = 0, errors = 0, counts[256] = {0}, wrong[256] = {0};
     enum { START = 8000 };
     for (long i = 0; i < nc; i++) {
@@ -84,8 +89,9 @@ int main(int argc, char **argv)
             if (levels[out[j]] != levels[truth]) { wrong[truth]++; errors++; }
         }
     }
-    printf("{\"training_fit_db\":%.6f,\"decision_delay\":%d,\"traceback\":%d,\"candidate_levels\":%d,\"symbols\":%ld,\"errors\":%ld,\"levels\":[",
-        v90a_pr4_train_snr_db(pr), v90a_pr4_delay(pr), depth, candidate_count, got, errors);
+    printf("{\"training_fit_db\":%.6f,\"decision_delay\":%d,\"traceback\":%d,\"taps\":%d,\"tracking_milli\":%d,\"updates\":%ld,\"candidate_levels\":%d,\"symbols\":%ld,\"errors\":%ld,\"levels\":[",
+        v90a_pr4_train_snr_db(pr), v90a_pr4_delay(pr), depth, taps, tracking,
+        v90a_pr4_updates(pr), candidate_count, got, errors);
     for (int c = 0; c < 256; c++)
         printf("%s{\"code\":%d,\"tx_level\":%d,\"count\":%ld,\"errors\":%ld}",
             c ? "," : "", c, levels[c], counts[c], wrong[c]);
