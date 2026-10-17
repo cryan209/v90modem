@@ -70,6 +70,16 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+/* Per-section wall time inside one media callback, printed by
+   me_media_timing_note() when the callback is slow so the step can be named
+   without a profiler.  Sections: 0 line-EC, 1 v34_rx, 2 Ja scan, 3 DIL
+   capture hypotheses. */
+static uint64_t g_cb_prof_ns[4];
+static uint64_t me_mono_ns(void);
+#define ME_CB_PROF(slot, stmt) \
+    do { uint64_t cb_t0_ = me_mono_ns(); stmt; g_cb_prof_ns[slot] += me_mono_ns() - cb_t0_; } while (0)
+
+
 /* V.34 RX/TX stage enums — copied from spandsp/private/v34.h to avoid
    pulling in SpanDSP's full internal header chain.  We access g_v34->rx.stage
    and g_v34->tx.stage by casting through a minimal struct overlay. */
@@ -3080,6 +3090,11 @@ static uint8_t        g_v90_dil_capture[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
 static int            g_v90_dil_capture_bits = 0;
 static int            g_v90_dil_capture_search = 0;
 static int            g_v90_dil_hyp_last_bits = 0;
+/* Next hypothesis of a sweep in progress, or -1 when idle.  One sweep graded
+   all 24 hypotheses inside a single media callback (16-90 ms, growing with
+   the captured Ja bits), which holds up our RTP; it is now spread over
+   callbacks, V90_DIL_HYP_PER_CALL hypotheses each, in the same order. */
+static int            g_v90_dil_hyp_cursor = -1;
 static bool           g_v90_dil_hyp_dumped = false;
 static bool           g_v90_wait_ja_tone_a_logged = false;
 /* The §9.3.1.3 escape below is measured from the FIRST suppressed attempt, so
@@ -5568,6 +5583,7 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_capture_bits = 0;
     g_v90_dil_capture_search = 0;
     g_v90_dil_hyp_last_bits = 0;
+    g_v90_dil_hyp_cursor = -1;
     g_v90_dil_hyp_dumped = false;
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
@@ -8216,13 +8232,31 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
     {
         int total_bits = v34_v90_phase3_ja_total_bits(g_v34, 0);
 
-        if (total_bits < g_v90_dil_hyp_last_bits + retry_bits)
-            return false;
-        g_v90_dil_hyp_last_bits = total_bits;
+        if (g_v90_dil_hyp_cursor < 0) {
+            if (total_bits < g_v90_dil_hyp_last_bits + retry_bits)
+                return false;
+            g_v90_dil_hyp_last_bits = total_bits;
+            g_v90_dil_hyp_cursor = 0;
+        }
     }
 
-    for (int hypothesis = 0; hypothesis < 24; hypothesis++) {
+    {
+        static int per_call;
+
+        if (per_call == 0) {
+            const char *e = getenv("ME_V90_DIL_HYP_PER_CALL");
+
+            per_call = (e && atoi(e) > 0) ? atoi(e) : 1;
+        }
+        int first_h = g_v90_dil_hyp_cursor;
+
+        for (int hypothesis = first_h; hypothesis < 24; hypothesis++) {
         int bits;
+
+        if (hypothesis - first_h >= per_call) {
+            g_v90_dil_hyp_cursor = hypothesis;
+            return false;
+        }
 
         if (hypothesis == 0) {
             bits = first_bits;
@@ -8251,6 +8285,7 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                        hypothesis);
                 trace_phase("V90 Ja descriptor recovered with V.34 hypothesis %d",
                             hypothesis);
+                g_v90_dil_hyp_cursor = -1;
                 return true;
             }
         }
@@ -8263,9 +8298,12 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
         if (v90_dil_try_repeated_frames(unpacked, bits)) {
             ME_LOG("[ME] V.90: Ja descriptor recovered by voting on V.34 hypothesis %d\n",
                    hypothesis);
+            g_v90_dil_hyp_cursor = -1;
             return true;
         }
+        }
     }
+    g_v90_dil_hyp_cursor = -1;
 
     /* The dump threshold used to be a hard 32000 bits.  Live calls against the
      * d-modem rig only ever accumulate ~19000 Ja bits before the peer gives up,
@@ -12819,12 +12857,12 @@ static void v90_p3_ja_fire_locked(const v90_p3_ja_hit_t *hit, int n)
     g_v90_p3_ja_fired = true;
     /* Keep decoding Ja either way -- it is the descriptor parse that is now
        allowed to fire J. */
-    (void)v90_dil_capture_try_v34_hypotheses();
+    ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
     accepted = v90_ja_heuristic_allowed("p3_demod")
              ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
              : false;
     if (accepted) {
-        (void)v90_dil_capture_try_v34_hypotheses();
+        ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
         v34_v90_arm_phase3_s_detector(g_v34);
     }
     fprintf(stderr,
@@ -13080,7 +13118,7 @@ static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
                         ME_LOG("[ME] V.90 WAIT_JA: energy returned after gap; treating as Ja start (accepted=%d)\n",
                                accepted ? 1 : 0);
                         if (accepted) {
-                            (void)v90_dil_capture_try_v34_hypotheses();
+                            ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                             if (g_v34)
                                 v34_v90_arm_phase3_s_detector(g_v34);
                         }
@@ -13783,9 +13821,11 @@ skip_8k_codewords:
                            sees an alias at every period. */
                         g_lec.track = g_state == ME_DATA && !getenv("ME_LEC_NO_TRACK");
 
-                        if (v34_line_ec_rx(&g_lec, filtered, len,
+                        bool lec_ret_;
+                        ME_CB_PROF(0, lec_ret_ = v34_line_ec_rx(&g_lec, filtered, len,
                                            v34_rx_line_ec_window(g_v34),
-                                           lec_msg, sizeof(lec_msg))
+                                           lec_msg, sizeof(lec_msg)));
+                        if (lec_ret_
                             && lec_msg[0])
                             ME_LOG("[ME] V.34 %s\n", lec_msg);
                         /* V34_DATA_TIMING_LOG: the canceller finds our echo by
@@ -13822,12 +13862,14 @@ skip_8k_codewords:
                                    "not fitted\n",
                                    g_v90 ? (int)v90_get_tx_phase(g_v90) : -1);
                         }
-                        if (v34_line_ec_rx(&g_lec, filtered, len, window,
-                                           lec_msg, sizeof(lec_msg))
+                        bool lec_ret2_;
+                        ME_CB_PROF(0, lec_ret2_ = v34_line_ec_rx(&g_lec, filtered, len, window,
+                                           lec_msg, sizeof(lec_msg)));
+                        if (lec_ret2_
                             && lec_msg[0])
                             ME_LOG("[ME] V.90 %s\n", lec_msg);
                     }
-                    v34_rx(g_v34, filtered, len);
+                    ME_CB_PROF(1, v34_rx(g_v34, filtered, len));
                     me_rx_accounting_check();
                     /* The T/3 interpolator is exact-rational 6/5 and begins
                      * counting input samples at the arm, so which of its five
@@ -13868,7 +13910,7 @@ skip_8k_codewords:
                    receiver processes samples first.  The scanner reads the
                    raw companion ring filled beside g_rx_ref_buf, not from
                    v34_rx's internal state, so ordering is safe. */
-                v90_p3_scan_ja_locked(len);
+                ME_CB_PROF(2, v90_p3_scan_ja_locked(len));
                 if (g_training_fail_retrain_pending) {
                     g_training_fail_retrain_pending = false;
                     v34_reneg_clear_locked();
@@ -13923,7 +13965,7 @@ skip_8k_codewords:
                     && (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S
                         || rx_stage == V34_RX_STAGE_PHASE3_TRAINING))
                 {
-                    (void)v90_dil_capture_try_v34_hypotheses();
+                    ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                 }
 
                 if (g_mod == ME_MOD_V90
@@ -13997,6 +14039,7 @@ skip_8k_codewords:
                         g_v90_dil_capture_bits = 0;
                         g_v90_dil_capture_search = 0;
                         g_v90_dil_hyp_last_bits = 0;
+                        g_v90_dil_hyp_cursor = -1;
                         ME_LOG("[ME] V.90: peer retrain detected; following it back to Phase 2 "
                                "(accepted=%d)\n", accepted ? 1 : 0);
                         trace_phase("V90 peer retrain detected, following (accepted=%d)",
@@ -14090,13 +14133,13 @@ skip_8k_codewords:
                            before Sd may start.  Decode first, then fire. */
                         bool accepted;
 
-                        (void)v90_dil_capture_try_v34_hypotheses();
+                        ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                         accepted = v90_ja_heuristic_allowed("v34rx")
                                  ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
                                  : false;
 
                         if (accepted) {
-                            (void)v90_dil_capture_try_v34_hypotheses();
+                            ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                             v34_v90_arm_phase3_s_detector(g_v34);
                         }
 
@@ -14492,7 +14535,7 @@ skip_8k_codewords:
                      * the standards-driven timing event; the profile is only a
                      * fallback if the frame cannot be recovered. */
                     if (!g_v90_dil_parse_logged)
-                        (void)v90_dil_capture_try_v34_hypotheses();
+                        ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                 }
                 /* RX PCM dump during training */
                 {
@@ -18806,9 +18849,11 @@ static void me_media_timing_note(const char *dir, uint64_t ns)
         limit_ns = (e && atoi(e) > 0) ? 1000ULL*(uint64_t) atoi(e) : 20000000ULL;
     }
     if (ns > limit_ns)
-        ME_LOG("[ME] slow media callback: %s took %.1f ms (state=%d mod=%d v34_rx=%d v34_tx=%d)\n",
+        ME_LOG("[ME] slow media callback: %s took %.1f ms (state=%d mod=%d v34_rx=%d v34_tx=%d) [lec %.1f v34_rx %.1f ja %.1f dil %.1f ms]\n",
                dir, (double) ns/1e6, (int) g_state, (int) g_mod,
-               g_v34 ? v34_get_rx_stage(g_v34) : -1, g_v34 ? v34_get_tx_stage(g_v34) : -1);
+               g_v34 ? v34_get_rx_stage(g_v34) : -1, g_v34 ? v34_get_tx_stage(g_v34) : -1,
+               (double) g_cb_prof_ns[0]/1e6, (double) g_cb_prof_ns[1]/1e6,
+               (double) g_cb_prof_ns[2]/1e6, (double) g_cb_prof_ns[3]/1e6);
 }
 
 static uint64_t me_mono_ns(void)
@@ -18821,6 +18866,7 @@ static uint64_t me_mono_ns(void)
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
+    memset(g_cb_prof_ns, 0, sizeof g_cb_prof_ns);
     if (codewords && count > 0)
         lm_feed_g711(LM_RX, codewords, count, g_law == ME_LAW_ALAW);
     me_rx_g711_impl(codewords, count);

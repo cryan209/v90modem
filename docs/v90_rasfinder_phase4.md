@@ -1307,3 +1307,21 @@ or 0/3 in triplicate): old defaults 8/12, angle only 11/12, angle + adapt
 **12/12**.  Resetting the equalizer instead of adapting fails.  Live on the
 new defaults the first call accepted CPt 1.28 s into Ri -- and then retrained
 at TRN2d + 2241 ms like every other.
+
+## 2026-10-17: Phase 3 media-callback stalls were the DIL hypothesis sweep
+
+Three RasFinder calls in parallel from CT 117 on vmhost (`tools/soak/rf_par.sh`-style: own SIP/RTP port, PTY and
+account per lane, 6311-6313) logged 20-150 ms media callbacks in `v34_rx` stage 10 (PHASE3_WAIT_S), which move
+the AudioCodes playout (see 2026-10-16 above). `modem_engine.c` now times four sections of `me_rx_audio` and
+appends them to the "slow media callback" line (`[lec .. v34_rx .. ja .. dil ..]`). Result: the Ja scan was
+already on its worker (0 ms); **`v90_dil_capture_try_v34_hypotheses()` ran its 24-hypothesis search inline,
+16-90 ms, growing with the captured Ja bits**, every 512 new bits. It now does `ME_V90_DIL_HYP_PER_CALL`
+(default 1) hypotheses per callback, same order and logic, cursor reset per call. Replays (hypothesis 8 recovered,
+same downstream outcome on four taps) are identical; live worst callback 90 -> 28 ms, 6 of 9 calls with none over
+20 ms. Traps hit on the way: `v90_engine_replay` forces `ME_V90_P3_JA_SCAN_SYNC=1`, so it shows an inline Ja scan
+the live server does not have (override with `=0`); the clang-only `-O2` for v34rx.c needs `make CC=clang`
+(CT 117 builds with gcc by default and had no `.v34-opt-cflags`); CT 117's checkout had local edits that made
+`git pull` abort silently for the whole session (the build looked fresh).
+
+Still open: with the stalls gone, 5 of 9 calls never connect - the peer retrains with Tone A in Phase 3
+(our detector rejects it: `band2400 >= 0.350`) or no S arrives after ~24800 Jd symbols. That is not callback timing.
