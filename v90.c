@@ -4680,6 +4680,19 @@ void v90_start_phase3(v90_state_t *s, int u_info)
 {
     if (u_info > 0 && u_info < 128)
         s->u_info = u_info;
+    /* Diagnostic: ME_V90_P3_UINFO_DELTA lowers the Phase 3 Ucode below the
+     * analogue modem's INFO1a U_INFO (16 Ucodes = one u-law segment = 6 dB);
+     * a negative value raises it.
+     * Against the RasFinder our Sd/TRN1d/Jd are ~12 dB hotter than the Eicon
+     * reference (docs/v90_rasfinder_phase4.md); this lets the level be A/B'd
+     * on a live call.  Not a setting: §9.3.1.3 transmits U_INFO. */
+    {
+        const char *e = getenv("ME_V90_P3_UINFO_DELTA");
+        int delta = e ? atoi(e) : 0;
+
+        if (delta != 0 && s->u_info - delta >= 1 && s->u_info - delta <= 127)
+            s->u_info -= delta;
+    }
 
     fprintf(stderr, "[V90] Starting Phase 3 TX (U_INFO=%d, law=%s)\n",
             s->u_info, s->law == V90_LAW_ALAW ? "A-law" : "u-law");

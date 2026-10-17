@@ -1351,3 +1351,18 @@ Longer TRN1d, same method (24000 / 28800 / 20004, 8 calls per arm): S accepted f
 20004 7/16, 24000 5/8, 28800 4/8. A weak upward trend to 24000 (25% -> 62%) but every arm is within one binomial SD
 (~17 points at n=8) of its neighbours, so this is **not** a demonstrated lever; it would need ~30 calls per arm to
 separate 44% from 62%. Raw per-call results: CT 117 `/root/trn`, `/root/trn2`.
+
+### 2026-10-17: Phase 3 transmit level A/B -- lowering it is clearly worse
+
+Our Sd/S-bar/TRN1d/Jd run at the peer's INFO1a U_INFO (78, RMS ~3772), ~12 dB hotter than the Eicon reference
+(W=64 / TRN1d 48, RMS 924). New diagnostic `ME_V90_P3_UINFO_DELTA` (Ucodes subtracted from U_INFO; 16 = one u-law
+segment = 6 dB). Three lanes in parallel, arms rotated over 6311-6313, 12 calls per arm, CT 117 `/root/lvl`:
+
+| delta | U_INFO | S accepted first | Tone A first | no S/Tone A at all | V.90 data |
+|---|---|---|---|---|---|
+| 0 | 78 | 4 | 2 | 6 | 4 |
+| 16 (-6 dB) | 62 | 1 | 9 | 2 | 1 |
+| 30 (-12 dB) | 48 | 0 | 1 | 11 | 0 |
+
+Monotonic and well outside noise at n=12 (S accepted 33% / 8% / 0%): **the peer wants the level it asked for or
+more, and the Eicon-style low TRN1d does not carry over to the RasFinder.** Next lever: negative deltas (hotter).
