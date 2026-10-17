@@ -1345,3 +1345,9 @@ three lanes in parallel, arms rotated over 6311-6313, 8 calls per arm (`tools/so
 S accepted first 2/2/4 of 8, Tone A first 3/3/2, V.90 data 2/1/4. **More margin did not help; the default 20004T
 was best**, so the deadline hypothesis is not supported (n=8 per arm; direction, not proof). Untested: longer
 TRN1d (24000/28800), which would test the opposite reading (the peer's equaliser wants more training).
+
+Longer TRN1d, same method (24000 / 28800 / 20004, 8 calls per arm): S accepted first 5 / 4 / 3 of 8, Tone A first
+1 / 2 / 2, V.90 data 3 / 1 / 1. Pooled over both sweeps, S accepted first by TRN1d length: 12000 2/8, 16008 2/8,
+20004 7/16, 24000 5/8, 28800 4/8. A weak upward trend to 24000 (25% -> 62%) but every arm is within one binomial SD
+(~17 points at n=8) of its neighbours, so this is **not** a demonstrated lever; it would need ~30 calls per arm to
+separate 44% from 62%. Raw per-call results: CT 117 `/root/trn`, `/root/trn2`.
