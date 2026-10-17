@@ -3301,3 +3301,18 @@ attempted. Both were restored on-hook with monitoring off and hardware
 protection enabled. Final readbacks and observations are saved locally in
 `artifacts/apple-direct-line-20261017/`. Check physical feed and wiring
 under off-hook load before interpreting a modem negotiation failure.
+
+Follow-up after the wiring was clarified: green is continuous between the
+modems; red is interrupted by the USB supply (one modem to negative,
+positive to the other modem). This is a series loop, so the individual
+seizure results above cannot assess the feed: the other on-hook modem
+opens the circuit. With BOTH hooks asserted, both modems report register
+12 = 0x41 (current code 1, approximately 3.3 mA), register 19 = 0x00
+(no dropout), and protection enabled, without overload. This supports
+continuity but not adequate operating current; Si3056/Si3018/19/10
+Table 4 specifies a minimum operating loop current of at least 10 mA
+(configuration dependent). The reported 5 V feed is therefore a likely
+limitation, not a demonstrated working modem bearer. No audio/training
+test was performed at this undercurrent. Both hooks and monitors were
+released afterward. Evidence: `both-offhook.json` in the same artifact
+directory. A DC feed alone supplies neither dial tone nor ringing.
