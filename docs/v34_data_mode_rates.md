@@ -949,3 +949,26 @@ Automatic selection, 1M bits each way, 8 rows (2 laws x delays 0/1/7/23):
 20 dB 3/8 -> **8/8**, 22 dB **8/8** (16800), 24 dB **8/8** (19200); 21 dB 7/8
 (the one failure is the 16800 edge above).  `make test-fast` 576/576.
 Synthetic channel only; the rig's noise is not white.
+
+## The "TRN ones-lock fade" at the first renegotiation is equalizer re-convergence (2026-10-17)
+
+New `V34_TRN_RX_DUMP` (one line per Phase 4 TRN symbol, as `V34_MP_RX_DUMP`
+does for MP) on the `rf-bbs-7` replay, angle rms from the 45-degree family per
+400 symbols:
+
+* startup TRN (4800 symbols): 19, 5.4, 1.5, 1.1, 0.9 ... **0.8 deg** from symbol
+  ~1200;
+* first renegotiation TRN (4817): 19, 25, 25, 12, then **~6 deg** and flat to
+  the end -- the receiver answers in `trn-retain` mode, so the TRN starts on the
+  dense data-mode equalizer, spends ~1600 symbols converging and settles at 6
+  degrees where the same line gives 0.8 at startup.
+
+Neither a 4-point descrambler sweep nor the MP tool finds ones in the TRN dump
+at any domain/order/tap (all ~0.5), so the "81% -> 53%" lock figure was never a
+measure this dump can reproduce; the angle trace is the usable one.  It is not
+what failed the first renegotiation: the MP behind that TRN decodes (96 of 97
+CRC-valid frames, see above) and the failed live reneg coincides with the
+callback stall fixed in 164f9dfe.  What remains is a modest inefficiency (a 6
+degree TRN plateau after a retained-equalizer start) with no known cost, since B1
+refits afterwards and data resumes at 0.02 from the grid on the successful
+renegotiations.  Left as is.

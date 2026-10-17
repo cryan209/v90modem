@@ -232,6 +232,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_DUMP_INFO_RX` | v34rx.c |  | - | V34_DUMP_INFO_RX (diagnostic, 2026-07-19): dumps the info_rx |
 | `V34_EQ_TAP_DUMP` | v34rx_data.c |  | - | The equalizer's own frequency response, so the question "is |
 | `V34_MP_RX_DUMP` | v34rx.c |  | sdh |  |
+| `V34_TRN_RX_DUMP` | v34rx.c |  | d | diagnostic: one line per Phase 4 TRN symbol (duration, diff/abs dibit, magnitude, angle) |
 | `V34_P4TRN_RX_DUMP` | v34rx_phase4_trn.c |  | sdh |  |
 | `V34_P4TRN_TX_DUMP` | v34tx.c |  | sdh |  |
 | `V34_PHASE3_S_DEBUG` | v34rx.c |  | - |  |

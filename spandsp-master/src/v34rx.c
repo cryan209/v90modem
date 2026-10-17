@@ -9135,6 +9135,39 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         break;
 
     case V34_RX_STAGE_PHASE4_TRN:
+        /* V34_TRN_RX_DUMP (diagnostic): one line per Phase 4 TRN symbol --
+           duration, differential and absolute dibit, magnitude, absolute angle
+           -- so a TRN of scrambled ones can be descrambled outside the
+           receiver, as V34_MP_RX_DUMP does for MP. */
+        {
+            static int trn_dump_checked = 0;
+            static FILE *trn_dump = NULL;
+
+            if (!trn_dump_checked)
+            {
+                const char *path = V34_DIAG_GETENV("V34_TRN_RX_DUMP");
+
+                if (path  &&  *path)
+                    trn_dump = fopen(path, "w");
+                /*endif*/
+                trn_dump_checked = 1;
+            }
+            /*endif*/
+            if (trn_dump)
+            {
+                int32_t a1 = arctan2(sym->im, sym->re);
+                int32_t a2 = arctan2(s->last_sample.im, s->last_sample.re);
+
+                fprintf(trn_dump, "%d %d %d %.4f %.2f\n",
+                        s->duration,
+                        (int) (((a1 - a2 + DDS_PHASE(45.0f)) >> 30) & 0x3),
+                        (int) (((a1 + DDS_PHASE(45.0f)) >> 30) & 0x3),
+                        sqrtf(sym->re*sym->re + sym->im*sym->im),
+                        (double) (180.0f/3.14159265f)*atan2f(sym->im, sym->re));
+                fflush(trn_dump);
+            }
+            /*endif*/
+        }
         v34_rx_phase4_trn_symbol(s, sym);
         break;
 
