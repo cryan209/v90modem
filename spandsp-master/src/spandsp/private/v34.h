@@ -58,53 +58,20 @@
    about 3.2 rms.  21 taps spans seven symbols and is still well determined
    by B1's 128 symbols (42 unknowns, 256 equations). */
 #define V34_V90_T3_FSE_TAPS                 21
-/* Big enough to hold the whole E->B1 era plus the lag of the CP-bitstream E
-   detector that anchors the search (about 3.4 s at 9.6 kHz).  B1 is only
-   90 ms long and had been passing before the capture even started.
+/* Retain the B1 waveform until the CP-bitstream E detector catches up
+   (V.90 9.4.2.4-.5). The SmartLink corpus needed only ~5100 T/3 samples,
+   but the direct Apple pair (2026-10-17) detected E over six seconds late:
+   8192 samples discarded B1 before the first search. The identical native
+   recording acquires at 99.8% fit with an early replay handover.
 
-   This is TWO complexf_t rings, so it dominates sizeof(v34_rx_state_t): at the
-   old 131072 they were 1 MB each and the receive state was 5229 KB, which is
-   ten times an ESP32-S3's whole SRAM.  131072 is 13.65 s -- four times the
-   3.4 s the paragraph above derives -- and the margin was never measured.
+   131072 samples retain 13.65 s at 3200 baud, covering the existing 120000
+   sample search-back window plus its forward/processing margin. These two
+   complex rings cost 2 MiB together; they retain observations only and do
+   not delay, insert or remove bearer samples. See docs/apple_usb_modem_sm56.md.
 
-   Swept through v90_engine_replay, which has a single handover like a live
-   call.  On artifacts/reneg-eq/reneg-r1: 32768, 16384 and 8192 all produce
-   output IDENTICAL to 131072, line for line; 4096 (0.42 s) breaks acquisition
-   (B1 acq 3 -> 0).  Widened to every recording in artifacts/ whose engine
-   replay reaches B1 -- reneg-eq/reneg-r1, reneg-ab-225015Z/{control-r2,
-   reneg-r1, reneg-r2, reneg-r3} and renegviab-ab-010014Z/gated-r3, 13
-   acquisitions and 175793 receiver lines -- and 8192 is identical to 32768 on
-   all six.
-
-   Sized from the measurement.  The B1 fits land at samples 2941, 2951 and 5099
-   back from the anchor, so the deepest lookback the corpus actually uses is
-   ~5100 -- which is why 4096 breaks and 8192 does not.  8192 is 1.6x that
-   depth.
-
-   KNOW WHAT THAT MARGIN IS AND IS NOT.  Every recording behind it is the same
-   SmartLink peer on one rig; a peer that anchors its E detector deeper would
-   need more.  The failure mode is silent and total: a call that does not
-   acquire carries no upstream for its whole life and says so in one log line
-   ("V.90 T/3 B1 acquisition failed"), so if that line starts appearing against
-   a new peer, this constant is the first thing to raise -- 16384 is equally
-   verified here and doubles the depth for another 64 KB per ring.
-
-   Shipped at 8192 deliberately: the embedded target this was sized for has
-   ~512 KB of SRAM in total, and two 64 KB rings is a different proposition
-   from two 128 KB ones.
-
-   Do NOT sweep this with v90_upstream_replay: it searches the handover
-   instant, so changing the lookback changes which candidate it settles on and
-   the logs differ for a reason that has nothing to do with the receiver.  Its
-   medians do agree (0.039 and 0.660 at both sizes).
-
-   And rebuild EVERYTHING when changing it.  The spandsp objects under
-   spandsp-master/src (.o, .libs, .lo alike) do not rebuild on a header
-   change any more than the repo objects
-   do; a partial rebuild here segfaults in v34_rx_phase3_wait_s_symbol reading
-   s->last_sample at a stale offset, which looks exactly like a DSP failure and
-   is not one. */
-#define V34_V90_T3_RAW_SIZE                 8192
+   Rebuild ALL SpanDSP and repository objects after changing this geometry:
+   a partial rebuild uses stale private-structure offsets. */
+#define V34_V90_T3_RAW_SIZE                 131072
 
 /* Ja capture geometry.  A RING of V34_JA_CAPTURE_BITS bits, packed 8 to a
    byte.  The *_len counters keep counting TOTAL bits appended -- they are not

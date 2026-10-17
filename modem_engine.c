@@ -6501,6 +6501,24 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
             ME_LOG("[ME] V.90 upstream RX data prepare FAILED (rate %d)\n", rate);
         }
     }
+    /* V.90 9.4.2.4-.5: after an accepted data-mode CP', E is immediately
+     * followed by B1. The independent B1 correlator validates a complete
+     * frame before releasing bits, so start its search now rather than
+     * waiting indefinitely for the CP demodulator's 20-bit E run. On the
+     * direct Apple pair that run arrived 102 seconds late, long after both
+     * V.42 detection timers expired. This path does not report an E event. */
+    /* This recovery is for a linear waveform frontend. Byte-exact DS0
+     * peers retain their existing E handover and optional blind fallback. */
+    if (accepted && g_state == ME_TRAINING && g_g711_rx_octets == 0
+        && frame->v90_compatibility && frame->acknowledge
+        && !frame->silence_request && !g_v92_active && g_v34
+        && g_v34_upstream_data_armed && !g_v34_upstream_data_started
+        && v34_v90_begin_b1_search(g_v34) == 0) {
+        g_v34_upstream_data_started = true;
+        g_v90_upstream_e_run = 0;
+        ME_LOG("[ME] V.90 upstream: CRC-valid CP' starts B1 search; carrier remains gated on B1 validation\n");
+        trace_phase("V90 upstream CP' -> validated B1 search");
+    }
     return accepted;
 }
 
@@ -16470,12 +16488,17 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                 prepare_v90_phase3_locked();
 
                 if (g_v90_phase3_started && g_v90) {
-                    /* V.90 Phase 3: generate PCM codewords for actual RTP output */
-                    v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
-                    v90_phase3_tx(g_v90, amp, len);
-                    if (phase_before < V90_TX_RI
-                        && v90_get_tx_phase(g_v90) >= V90_TX_RI)
-                        enter_v90_phase4_rx_locked();
+                    /* V.90 9.4.1.5: the linear analogue frontend needs the
+                     * same exact B1d->DATA handover as the raw DS0 path.
+                     * Calling only v90_phase3_tx() left the controller in
+                     * DATA while the engine remained in TRAINING, emitting
+                     * idle until its 60-second timeout despite a clean B1.
+                     * Share the codeword generator and decode only for this
+                     * physical waveform output; the SIP bearer is unchanged. */
+                    uint8_t pcm_out[len];
+                    if (generate_v90_raw_codewords_locked(pcm_out, len))
+                        for (int i = 0; i < len; i++)
+                            amp[i] = pcm_to_linear(pcm_out[i]);
                 } else if (g_mod == ME_MOD_V90
                            && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
                     /* tx_stage only reaches FIRST_S after SpanDSP has accepted
@@ -16869,16 +16892,24 @@ static void me_v90a_calibrate_locked(void)
      * Calibrate the ladder as soon as TRN1d has been acquired.
      *
      * CMA pins the equaliser's output modulus to §8.4.5's TRN1d level, and the
-     * receiver has just learned which Ucode that is off the wire -- so the
-     * absolute scale of the whole ladder follows, without measuring a peak and
-     * without trusting the U_INFO we asked for on the waveform-fit path.
-     * The line-recovery path instead uses requested U_INFO for sign slicing;
-     * it cannot establish an absolute DIL level from blind CMA alone.
+     * byte-exact receiver learns that Ucode off the wire. A waveform receiver
+     * cannot recover an absolute codeword from CMA's normalized modulus, so
+     * anchor that path to the negotiated U_INFO instead of its first,
+     * unconverged magnitude estimate.
      * That is what §8.4.1's DIL and
      * §8.6's Phase 4 need: the training signals are one level with a sign on
      * them and survive an arbitrary scale, and nothing after them does.
      */
     if (!g_v90a_ladder_set) {
+        /* V.90 8.4.5: CMA fixes TRN1d's modulus, not its absolute Ucode.
+         * The first sample after barred Sd is still unconverged: on the
+         * direct Apple pair it read 65 while our TX tap carried U_INFO=78.
+         * Treating that sample as a measured codeword mis-scaled every DIL
+         * and Phase 4 candidate. Only the waveform path needs this anchor;
+         * an actual DS0 retains the codeword it received. The receiver setter
+         * refuses the update before TRN1d has been reached. */
+        if (g_v90a_16k_path)
+            v90_analogue_phase3_set_trn1d_reference(g_v90a, g_v90a_u_info);
         const v90_analogue_rx_t *rx = v90_analogue_phase3_rx_state(g_v90a);
         int trn1d = (rx != NULL) ? v90_analogue_rx_trn1d_ucode(rx) : 0;
         /*
@@ -16973,7 +17004,7 @@ static void me_v90a_calibrate_locked(void)
             }
             ME_LOG("[ME] V.90 analogue: TRN1d reference Ucode %d (%s), "
                    "equaliser mode %d (dispersion %.4f)\n",
-                   trn1d, g_v90a_sd_line_rx ? "requested, sign slicing" : "measured",
+                   trn1d, g_v90a_16k_path ? "negotiated waveform reference" : "measured",
                    (int)v90a_fse_mode(g_v90a_fse), v90a_fse_dispersion(g_v90a_fse));
         }
     }

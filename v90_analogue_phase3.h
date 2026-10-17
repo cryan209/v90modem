@@ -98,6 +98,7 @@ v90_analogue_tx_stage_t v90_analogue_phase3_tx_stage(const v90_analogue_phase3_t
 v90_analogue_rx_stage_t v90_analogue_phase3_rx_stage(const v90_analogue_phase3_t *s);
 const v90_analogue_tx_t *v90_analogue_phase3_tx_state(const v90_analogue_phase3_t *s);
 const v90_analogue_rx_t *v90_analogue_phase3_rx_state(const v90_analogue_phase3_t *s);
+bool v90_analogue_phase3_set_trn1d_reference(v90_analogue_phase3_t *s, int ucode);
 
 /* True once §9.3.2.10 has been answered and Phase 4 is next. */
 bool v90_analogue_phase3_complete(const v90_analogue_phase3_t *s);

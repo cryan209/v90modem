@@ -259,7 +259,7 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps]\n",
+                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps] [handover-sec [history-sec [cp-prime]]]\n",
                 argv[0]);
         return 2;
     }
@@ -297,7 +297,16 @@ int main(int argc, char *argv[])
                history);
         feed(rx, t - (int) (history*8000.0), t);
         printf("replay: handover forced at %.1f s\n", t/8000.0);
-        (void) v34_begin_rx_data(rx);
+        bool cp_prime = argc > 7 && strcmp(argv[7], "cp-prime") == 0;
+        int event_before = v34_get_rx_event(rx);
+        int started = cp_prime ? v34_v90_begin_b1_search(rx) : v34_begin_rx_data(rx);
+        if (started != 0 || (cp_prime && v34_get_rx_event(rx) != event_before))
+        {
+            fprintf(stderr, "replay: handover refused or CP' fabricated E\n");
+            return 2;
+        }
+        if (cp_prime)
+            printf("replay: CP' B1 search started without an E event\n");
         feed(rx, t, sample_count);
         printf("replay: acquired=%d\n", v34_v90_upstream_rx_acquired(rx));
         return 0;

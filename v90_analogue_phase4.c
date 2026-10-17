@@ -1519,10 +1519,14 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
         return false;
     }
 
-    /* V.90 §9.3.2.8 explicitly permits N=0.  No line measurement then exists,
-     * so use eight lowest nonzero levels in every interval.  Their product
-     * is 8^6 = 2^18: enough for CP drn=1 (K=15+Sr) at every Sr, while their
-     * power is below even Table 15's -16 dBm0 limit in both G.711 laws. */
+    /* V.90 §9.3.2.8 explicitly permits N=0. No measurement then exists, so
+     * retain the minimum rate with eight widely separated levels. Ucodes
+     * 1..8 were only 8 linear counts apart in mu-law: below the 32-count
+     * voice-band noise measured on the direct Apple pair (2026-10-17).
+     * Ucodes 32,36,...60 give at least 128 counts separation in either law;
+     * every point is below Table 15's strictest 2540 amplitude limit, so
+     * every mapped frame meets -16 dBm0 without assuming equal usage.
+     * Their product remains 8^6 = 2^18, enough for K=15+Sr at every Sr. */
     vpcm_cp_init(&cp);
     cp.v90_compatibility = true;
     cp.drn = 1;                       /* Table 14: 28 kbit/s, minimum V.90 rate */
@@ -1533,7 +1537,7 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
     cp.upstream_rate_mask = 0x0FFF;   /* mandatory 4800..28800 plus 31200 */
     /* V.90 5.4.5 / V.92 5: every point carries a sign. The two mu-law
      * zero codewords collapse at the D/A, so Ucode 0 cannot carry that bit. */
-    for (int ucode = 1; ucode <= 8; ucode++)
+    for (int ucode = 32; ucode <= 60; ucode += 4)
         vpcm_cp_mask_set(cp.masks[0], ucode, true);
     /* One field per interval, identical masks, rather than six intervals
      * sharing field 0.  8.5.2 allows sharing ("only the number of different

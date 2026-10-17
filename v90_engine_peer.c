@@ -12,7 +12,10 @@
  * HSF coupler (hsf_fxo_probe.c) is: after the length n come n int16 samples
  * at 8 kHz for me_rx_audio() and then 2n at 16 kHz for me_rx_v90a_16k(),
  * and n int16 samples from me_tx_audio() go back.  Native byte order; the
- * driver is engine_pair_test --fdm-call-linear on the same machine. */
+ * driver is engine_pair_test --fdm-call-linear on the same machine.
+ * ENGINE_PEER_LINEAR_TX=1 tests just the me_tx_audio transmit API, encoding
+ * its output onto the ordinary deterministic G.711 test bearer.
+ * ENGINE_PEER_LINEAR_RX=1 expands that bearer into the me_rx_audio API. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,10 +23,15 @@
 #include <unistd.h>
 #include "modem_engine.h"
 #include "data_interface.h"
+#include "spandsp.h"
 static void dial(const char *uri, void *p) {(void)uri;(void)p;}
 static void control(void *p) {(void)p;}
 int main(int argc,char **argv) {
  const char *pty="/tmp/x2-loop-pty"; int call=0, linear=0; me_law_t law=ME_LAW_ULAW;
+ const char *linear_tx_env=getenv("ENGINE_PEER_LINEAR_TX");
+ int linear_tx=linear_tx_env && !strcmp(linear_tx_env,"1");
+ const char *linear_rx_env=getenv("ENGINE_PEER_LINEAR_RX");
+ int linear_rx=linear_rx_env && !strcmp(linear_rx_env,"1");
  const char *source_path=NULL; unsigned long source_at=120000;
  uint8_t source[4096]; size_t source_len=0,source_pos=0;
  for(int i=1;i<argc;i++){
@@ -69,6 +77,10 @@ int main(int argc,char **argv) {
    /* hsf_fxo_probe.c's order: the T/2 stream first, then the 8 kHz one */
    me_rx_v90a_16k(rx16,2*n);
    me_rx_audio(rx8,n);
+  } else if(linear_rx){
+   if(n>1024)return 3;
+   for(int i=0;i<n;i++)rx8[i]=law==ME_LAW_ALAW ? alaw_to_linear(rx[i]) : ulaw_to_linear(rx[i]);
+   me_rx_audio(rx8,n);
   } else me_rx_g711(rx,n);
   /* Diagnostic source injection through the normal byte ring. This does
    * not synthesize CONNECT or lift any protocol qualification gate. */
@@ -81,7 +93,16 @@ int main(int argc,char **argv) {
    me_tx_audio(tx8,n);
    if(fwrite(tx8,sizeof(int16_t),n,output)!=(size_t)n || fflush(output))return 3;
   } else {
-   (void)me_tx_g711(tx,n); me_flush_g711_taps();
+   /* Exercise a hardware frontend's linear TX API while retaining the
+      deterministic G.711 test bearer. V.90 9.4.1.5 must enter DATA at B1d
+      completion through this API too, before any upstream status callback. */
+   if(linear_tx){
+    if(n>1024)return 3;
+    me_tx_audio(tx8,n);
+    for(int i=0;i<n;i++)tx[i]=law==ME_LAW_ALAW ? linear_to_alaw(tx8[i]) : linear_to_ulaw(tx8[i]);
+   }else{
+    (void)me_tx_g711(tx,n); me_flush_g711_taps();
+   }
    if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
   }
   count+=n;

@@ -64,6 +64,7 @@ hsf_fxo_probe
 hsf_rom_image.bin
 apple_usb_modem_probe
 apple_usb_modem_audio
+apple_pcm_pr4
 apple_usb_modem_coupler
 *.dSYM/
 

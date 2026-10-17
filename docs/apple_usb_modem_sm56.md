@@ -3416,3 +3416,206 @@ TX/RX taps, engine dumps, manifests, summary and report are local under
 `artifacts/apple-direct-training-20261017/`. Coupler build, diagnostic
 self-test, resampler self-test and conflicting dial/answer argument
 check pass.
+
+### Direct-pair V.90 calibration and delayed upstream E (2026-10-17)
+
+Follow-up evidence is under `artifacts/apple-v90-followup-20261017/`.
+Use `ME_V90_JA_HEURISTIC_FALLBACK_MS=0` for this own-engine pair: the
+default energy-gap heuristic advanced before decoding Ja, leaving
+`dil_requested=false`. The digital end then sent Ri where the analogue
+receiver expected its requested measurement DIL. Waiting for the CRC-valid
+descriptor recovers the exact 1260-bit N=120/LSP=12/LTP=11 frame and sends
+the real DIL. This is a peer-specific diagnostic setting; the default was
+not changed because older SmartLink interop depends on the heuristic.
+
+The waveform receiver also latched the first unconverged TRN1d magnitude
+as an absolute Ucode (e.g. 65), although the digital TX tap carried the
+negotiated U_INFO=78 (V.90 8.4.5). CMA normalizes modulus and cannot establish
+that absolute level. Anchor the waveform path to negotiated U_INFO only
+after TRN1d is observed; retain measured codewords on a byte-exact DS0.
+On the same zero-DIL recording/CP, independent TX/RX codeword comparison
+improves from 4.354% to 99.374% exact TRN2d codewords. This replay establishes
+the calibration effect only up to the first divergent transmission.
+
+The completed live `strict-reference-1` trial subsequently receives all
+48/48 B1d frames with zero bit errors/demap failures and enters analogue
+DATA, 33333 downstream / 31200 upstream. It is **not a working bidirectional
+V.90 connection**: the digital receiver fails upstream B1, and later falls
+back to V.22bis. A historical CONNECT at each DTE therefore falsely joins
+two different modes. The bench runner now requires both V.90 startup flags
+before sending payload. No payload delivery has been established.
+
+Capping the upstream to N=4 in `strict-reference-9600up-1` is verified in
+both CP/MP selection and handover at 9600 bit/s; it does not fix acquisition.
+The own native TX tap acquires B1 offline at 100.0% fit. The same hardware
+RX recording acquires at 99.8% when replayed with a timely E handover, but
+fails with the live handover: the CP-bitstream E detector fires more than
+six seconds after B1 (V.90 9.4.2.4-.5). The 8192-sample T/3 history retains
+only 0.85 seconds, so its nominal 120000-sample search-back cannot find B1.
+Restoring 131072 samples retains 13.65 seconds without changing playout or
+sample accounting; the two complex observation rings occupy 2 MiB together.
+With a fixed late handover/history, the retained RX fixture now acquires at
+100.0% fit. `artifacts/apple-direct-v90-b1/README.md` records its provenance.
+The first two live history-build retries fail earlier in Phase 3, so they
+do not establish live validation of that B1 fix.
+
+The optional zero-DIL fallback also no longer offers mu-law levels 1..8,
+whose spacing is 8 counts against the measured ~32-count voice-band noise.
+It offers Ucodes 32,36,...60 in both laws, with at least 128 counts spacing;
+every point individually meets Table 15's strictest 2540 amplitude limit.
+Its eight-point product, CP/CPt K and rates remain unchanged. Both laws and
+Sr=0..3 pass the power/spacing checks; this change alone did not complete
+live training. It is separate from the normal measurement-DIL success.
+
+#### Native 8 kHz waveform path and the linear TX handover
+
+The direct-pair level measurements below refute the earlier blanket claim
+that native 8000 Hz cannot support PCM recovery: a 16-level 8 ksymbol/s
+alphabet decodes without errors in both laws/directions through the real
+hardware using the existing PR4 detector. Added opt-in
+`APPLE_MODEM_8K_PCM=1`: interpolate the native analogue RX waveform 2/1 for
+the existing T/2 receiver, retaining direct 8 kHz engine RX/TX. This creates
+no bandwidth above 4 kHz and does not resample a network G.711 bearer.
+The normal 9600 Hz path and default 8000 Hz V.34-only path remain available.
+The experiment does not add the 9600-Hz frontend's loop-clock correction
+to native 8 kHz; these direct peers measured sub-ppm relative offsets.
+
+The same echo-canceller window is scaled in samples for the 8 kHz
+experiment: 750-sample first delay, 640 taps, 4000-sample solve interval.
+Own TX/local RX correlations measured 143/149 ms echo peaks at 8 kHz,
+versus 120/124 ms at 9600 Hz, inside the existing 94–174 ms coverage.
+With the recorded live TX echo reference and pinned CP, the new replay
+recovers a CRC-valid MP where the uncancelled 8 kHz live run stalled in
+TRN2d. This does not judge later replay protocol actions after TX diverges.
+
+The next live 8 kHz trial receives all B1d frames and acquires upstream B1
+at 100.0% fit, but still times out: `me_tx_audio()` called only
+`v90_phase3_tx()`, leaving the controller in DATA and the engine in TRAINING.
+It never entered the engine's data stack or real data mapper. The linear
+frontend now uses the same codeword generator as the byte-exact path and
+expands its result only for physical waveform output. This preserves the
+exact B1d-to-data boundary (V.90 9.4.1.5), including the remainder of the
+output block, instead of emitting idle until the 60-second timeout.
+`ENGINE_PEER_LINEAR_TX=1` exercises that API through the deterministic
+whole-engine peer; both G.711 laws pass CONNECT and DTE payload regression.
+
+Completed live `strict-history-8k-linear-v14-1` reaches V.90 DATA at both
+ends: 28000 downstream, 9600 upstream. All four upstream marker lines
+arrive intact; two of four downstream lines arrive intact and later
+downstream output is corrupted. This is the first verified bidirectional
+V.90 payload on the direct pair, **not reliable bulk transfer**. The
+analogue B1d itself has 39 bit errors and 11 demap failures. No B1 acceptance
+threshold was loosened. Both processes exit normally, without TX ring
+underruns; device frame counts balance at 719872 in/out on the answerer
+and 720384 in/out on the caller.
+
+The first corrected native-9600 trial, `strict-linear-9600-lapm-1`, reaches
+32000 downstream / 9600 upstream, establishes V.42 LAPM and V.42bis at both
+ends, and delivers all four marker lines intact in both directions. A bulk
+repeat exposes a separate timing failure: E is detected at +102078 ms,
+after V.42 detection has already timed out and fallen back to V.14.
+
+For the linear RX frontend, a CRC-valid accepted data-mode CP' now starts
+the independent buffered B1 search (V.90 9.4.2.4-.5), without claiming an E
+event. The early entry suppresses the optional blind/non-reset fallback:
+the complete B1 template's >=95% fit and out-of-sample validation remain
+mandatory before bits are published. Byte-exact DS0 reception retains its
+existing E-triggered handover/fallback, and in-DATA rate renegotiation is
+outside this startup recovery. The fixture also tests that early entry
+does not change the receiver's event slot. Whole-engine tests exercise
+both linear RX/TX APIs through `ENGINE_PEER_LINEAR_RX=1` and
+`ENGINE_PEER_LINEAR_TX=1` in both laws.
+
+Completed final-build `strict-cpprime-9600-lapm-bulk-2` confirms that path
+live: CP' starts B1 search at +16923 ms, the upstream B1 fits at 100.0%,
+both ends establish LAPM/V.42bis, and each sends a separately generated
+4096-byte printable body with framing (4185 bytes total per direction).
+The complete received blocks match byte-for-byte in both directions,
+with no extra payload bytes (the caller also records the normal teardown
+NO CARRIER result). Both engines remain in DATA until normal disconnect.
+The 90-second call exits normally;
+both device counts balance at 863744 in/out, with zero TX ring underruns.
+Both hooks/monitors finish cleared and hardware protection enabled.
+This proves a working 32000/9600 V.90 data connection in this configuration;
+it is not a long soak or proof of every startup succeeding. An earlier
+CP'-search hardware retry failed in Phase 3 before exercising the change.
+The upstream N=4 cap remains part of this verified bench configuration.
+
+### Exhaustive native PCM level/rate measurements (2026-10-17)
+
+`apple_usb_modem_audio list` now enumerates each CoreAudio stream's
+available physical formats. Both modems offer signed 16-bit mono input
+and output at exactly 7200, 8000, 8229, 8400, 9000, 9600 and 10286 Hz.
+No other native bit depth is advertised; host float conversion would not
+establish a different physical converter resolution.
+
+Added native `play RATE INPUT.s16 CAPTURE.s16`, which emits the supplied
+int16 samples without amplitude scaling, companding, live resampling or
+engine processing. `tools/apple_pcm_matrix.py` generates and captures the
+bench stimuli, and refuses to replace different reference waveforms when
+resuming. Capture manifests retain the generated waveform hash, playback
+logs, USB status/protection checks and final hook/monitor releases.
+
+The exhaustive matrix contains 14 direction/rate captures. Each transmits
+every signed int16 value twice, in independent random orders; every mu-law
+and A-law codeword 64 times at 8 ksymbol/s; quiet; and 1 kHz tones from 64
+to 32000 counts peak. A DC staircase would not identify this AC-coupled
+path, so the model includes channel memory. A separate 14-capture matrix
+tests a fixed 16-level, roughly 2100-count-RMS alphabet, with zero source
+construction clipping. A two-direction 8229 Hz repeat checks an outlier.
+
+Measured voice-band quiet noise is 26.6–29.7 received counts RMS. Full-scale
+1 kHz SNDR is 49.9–51.1 dB, with nearly constant gain across the amplitude
+sweep. Random full-range PCM nevertheless hits clipping plateaus:
+negative extrema are -30069, -31703, -32157, -32489, then -32768 at the
+three highest native rates. Hundreds of samples can land on the identical
+below-full-scale extrema. Counting int16 rails alone misses that clipping.
+The measurements describe the combined DAC/line/ADC path, not an isolated
+converter or an independently metered supply.
+
+Offline clock registration uses separate high-level tones and a 129-tap
+windowed-sinc interpolator; raw hardware extrema and registration overshoot
+are counted separately. A 129-tap forward channel fit is validated on
+different samples; voice-band validation SNDR is 37.2–39.8 dB. The raw
+int16 arrays retain all 65536 TX values, raw/registered RX, and predictions.
+There are only two observations per individual int16 code, so those alone
+are not per-code noise distributions. Per-G.711-code estimate/noise tables
+use many more observations. The true-predecessor PR4 estimate is explicitly
+an oracle bound, separate from actual trellis decisions.
+
+`make apple_pcm_pr4` builds the offline known-reference PR4 grader, using
+the production detector, with 128 T/2 forward taps (the live frontend uses
+64). It trains on 5000 known symbols, starts decoding
+at symbol 8000, and scores only unseen later symbols with a fixed known
+alphabet. The fixed 16-level probes decode zero errors over about 8312
+held-out symbols in each law/direction at 8000, 8400, 9000, 9600 and
+10286 Hz. 7200 fails badly. One 8229 B-to-A capture degrades to 14–15 dB fit;
+its separate repeat has zero errors in all four law/direction combinations.
+Do not attribute that intermittent failure to an invariant rate limit.
+
+The full alphabet is not reliable. At non-8000 rates its offline waveform
+construction itself clips 24–72 resampled native values, recorded in the
+manifest, so its errors cannot all be blamed on hardware. The smaller
+constellation probes do not have that construction clipping. All bench
+captures so far are one-way with the opposite transmitter silent; live
+full-duplex echo and startup remain additional requirements.
+
+A further 8000/9600 Hz matrix in both directions sweeps 8,16,24,32,48,64,96
+and 128 signed levels in each law. Greedy spacing maximises the minimum
+separation subject to uniform RMS <=2540 (V.90 Table 15); it is a test
+alphabet, not the six-slot CP mapper's power-shaping calculation. Default
+24-step traceback first shows errors around 32 signed levels. Offline
+256-step traceback recovers the 32-level mu-law sets without errors in
+both directions at both rates; one 8000 A-to-B A-law set has 15/7848 errors,
+the other 32-level cases have none. 48+ levels still fail heavily with that
+longer traceback. These observations bracket this detector's tested
+capability, not a proof of Shannon capacity or a negotiated V.90 rate.
+No live traceback or DSP constants were changed for the size experiment.
+
+Local evidence/report/plots: `artifacts/apple-pcm-matrix-20261017/`,
+`artifacts/apple-pcm-subset-20261017/`,
+`artifacts/apple-pcm-subset-repeat-20261017/` and
+`artifacts/apple-pcm-sweep-20261017/`. Reproduce with numpy/scipy using
+`tools/apple_pcm_matrix.py capture OUTPUT [--profile subset|sweep]`, then
+`analyze OUTPUT`; select the rate list with `--rates`. The large captures
+remain gitignored; the fixed delayed-E acquisition fixture is committed.

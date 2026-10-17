@@ -86,6 +86,10 @@ static double tx_amp = 0.15;     /* per tone, so a pair is about -16.5 dBFS */
 static double tx_rate = 9600.0;
 static long tx_done;             /* total samples emitted */
 static int tx_underruns;
+/* Native s16le playback for measured TX/RX transfer functions. No gain,
+ * companding or resampling is applied to these samples. */
+static int16_t *tx_pcm;
+static long tx_pcm_count;
 
 static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
                           const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
@@ -94,6 +98,11 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
     int16_t *out = io->mBuffers[0].mData;
 
     (void)ref; (void)flags; (void)ts; (void)bus;
+    if (tx_pcm) {
+        for (UInt32 i = 0; i < nframes; i++)
+            out[i] = tx_done < tx_pcm_count ? tx_pcm[tx_done++] : 0;
+        return noErr;
+    }
     for (UInt32 i = 0; i < nframes; i++) {
         double v = 0;
         while (tx_seg < tx_nseg && tx_pos >= tx_script[tx_seg].n) {
@@ -238,6 +247,30 @@ static AudioObjectID find_device(int verbose)
                     ch += bl->mBuffers[k].mNumberChannels;
                 printf("  %s channels: %u\n", scope ? "output" : "input", ch);
                 free(bl);
+                a.mSelector = kAudioDevicePropertyStreams;
+                if (AudioObjectGetPropertyDataSize(d[i], &a, 0, NULL, &z) != noErr) continue;
+                AudioStreamID *streams = malloc(z);
+                UInt32 ns = z / sizeof *streams;
+                if (!streams || AudioObjectGetPropertyData(d[i], &a, 0, NULL, &z, streams) != noErr) {
+                    free(streams); continue;
+                }
+                for (UInt32 si = 0; si < ns; si++) {
+                    AudioObjectPropertyAddress fa = { kAudioStreamPropertyAvailablePhysicalFormats,
+                        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+                    UInt32 fz = 0;
+                    if (AudioObjectGetPropertyDataSize(streams[si], &fa, 0, NULL, &fz) != noErr) continue;
+                    AudioStreamRangedDescription *fs = malloc(fz);
+                    if (fs && AudioObjectGetPropertyData(streams[si], &fa, 0, NULL, &fz, fs) == noErr)
+                        for (UInt32 fi = 0; fi < fz / sizeof *fs; fi++) {
+                            AudioStreamBasicDescription f = fs[fi].mFormat;
+                            printf("  %s physical: %.0f-%.0f Hz %u-bit %u-channel format=0x%08x flags=0x%x bytes/frame=%u\n",
+                                scope ? "output" : "input", fs[fi].mSampleRateRange.mMinimum,
+                                fs[fi].mSampleRateRange.mMaximum, f.mBitsPerChannel,
+                                f.mChannelsPerFrame, f.mFormatID, f.mFormatFlags, f.mBytesPerFrame);
+                        }
+                    free(fs);
+                }
+                free(streams);
             }
         }
         free(name);
@@ -467,8 +500,9 @@ static int run_duplex(double rate, double secs, const char *outpath, int transmi
     printf("captured %ld frames (%.2f s at %.0f Hz), render errors %d\n",
            acc_n, acc_n / got, got, render_errors);
     if (transmit) {
-        long want_n = 0;
-        for (int i = 0; i < tx_nseg; i++) want_n += tx_script[i].n;
+        long want_n = tx_pcm_count;
+        if (!tx_pcm)
+            for (int i = 0; i < tx_nseg; i++) want_n += tx_script[i].n;
         printf("transmitted %ld of %ld scripted samples (%.2f s)%s\n",
                tx_done, want_n, tx_done / got,
                tx_done < want_n ? "   <- CUT SHORT, raise the duration" : "");
@@ -529,6 +563,7 @@ int main(int argc, char **argv)
             "       %s capture <rate> <seconds> [out.s16]\n"
             "       %s tone    <rate> <hz> <seconds> [out.s16]\n"
             "       %s dial    <rate> <digits> [out.s16]\n"
+            "       %s play    <rate> <input.s16> [capture.s16]\n"
             "\n"
             "rate must be one the device offers: 7200 8000 8229 8400 9000 9600 10286\n"
             "Run tools/apple_usb_modem_probe --configure first if the device is new\n"
@@ -538,8 +573,33 @@ int main(int argc, char **argv)
             "digits: 0-9 A-D * #, a comma or space for a 500 ms pause.\n"
             "APPLE_MODEM_TX_AMP sets the per-tone amplitude (default 0.15),\n"
             "APPLE_MODEM_DTMF_MS the on/off times (default 100/100).\n",
-            argv[0], argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "play")) {
+        if (argc < 4) { fprintf(stderr, "play <rate> <input.s16> [capture.s16]\n"); return 1; }
+        double rate = atof(argv[2]);
+        FILE *f = fopen(argv[3], "rb");
+        if (!f || !isfinite(rate) || rate <= 0) {
+            if (f) fclose(f);
+            fprintf(stderr, "cannot open PCM input or invalid rate\n"); return 1;
+        }
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+        long bytes = ftell(f);
+        if (bytes <= 0 || bytes % 2 || bytes > 64*1024*1024) {
+            fclose(f); fprintf(stderr, "PCM input must be nonempty, even-sized, at most 64 MiB\n"); return 1;
+        }
+        rewind(f);
+        tx_pcm = malloc((size_t)bytes);
+        if (!tx_pcm || fread(tx_pcm, 1, (size_t)bytes, f) != (size_t)bytes) {
+            fclose(f); free(tx_pcm); return 1;
+        }
+        fclose(f);
+        tx_pcm_count = bytes / 2;
+        int rc = run_duplex(rate, tx_pcm_count/rate + 0.5,
+                            argc > 4 ? argv[4] : NULL, 1);
+        free(tx_pcm);
+        return rc;
     }
     {   /* transmit knobs, read once */
         const char *a = getenv("APPLE_MODEM_TX_AMP");

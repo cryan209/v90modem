@@ -17971,7 +17971,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     return true;
 }
 
-SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
+static int begin_rx_data(v34_state_t *s, bool report_e)
 {
     int prior;
 
@@ -18050,7 +18050,8 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
             (state == 0)  ?  0U  :  0x3FFFFFFFU;
     }
     /*endfor*/
-    s->rx.received_event = V34_EVENT_E;
+    if (report_e)
+        s->rx.received_event = V34_EVENT_E;
     s->rx.mp_seen = 2;
     s->rx.b1_acquisition_active = false;
     s->rx.b1_observed_symbols = 0;
@@ -18083,6 +18084,32 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
+{
+    return begin_rx_data(s, true);
+}
+
+SPAN_DECLARE(int) v34_v90_begin_b1_search(v34_state_t *s)
+{
+    /* V.90 9.4.2.4-.5: a CRC-valid CP' establishes the data parameters;
+       B1 follows E. A missed E on the CP demodulator must not prevent the
+       independent, already-buffered B1 correlator from looking. This does
+       NOT report an E event or admit user bits: the complete B1 fit and
+       out-of-sample validation in v90_t3_try_acquire() remain mandatory. */
+    if (!s || !s->rx.v90_mode || !s->rx.v90_t3_prepared
+        || !s->rx.v90_t3_active || s->rx.stage != V34_RX_STAGE_V90_CP)
+        return -1;
+    int result = begin_rx_data(s, false);
+    if (result == 0)
+    {
+        /* No E was observed: do not use the optional 4-point/blind
+           fallback for a non-reset peer. This entry requires the actual
+           complete B1 template and its out-of-sample validation. */
+        s->rx.v90_t3_blind_tried = true;
+    }
+    return result;
+}
 
 SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
                                                int16_t bits[16])

@@ -185,6 +185,9 @@ int v90_analogue_rx_w(const v90_analogue_rx_t *s);
  * absolute transmitted Ucode. That path must not claim a measured DIL gain.
  */
 int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s);
+/* V.90 8.4.5: calibrate an analogue waveform's CMA-normalized TRN1d to
+ * the negotiated U_INFO, once TRN1d has actually been reached. */
+bool v90_analogue_rx_set_trn1d_reference(v90_analogue_rx_t *s, int ucode);
 /* Polarity resolved by §8.4.5's known plaintext, for the Phase-4 seam. */
 bool v90_analogue_rx_inverted(const v90_analogue_rx_t *s);
 

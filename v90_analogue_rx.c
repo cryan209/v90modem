@@ -1294,6 +1294,14 @@ int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s)
     return s ? s->trn1d_ucode : 0;
 }
 
+bool v90_analogue_rx_set_trn1d_reference(v90_analogue_rx_t *s, int ucode)
+{
+    if (!s || s->stage != V90A_RX_TRN1D || ucode <= 0 || ucode > 127)
+        return false;
+    s->trn1d_ucode = ucode;
+    return true;
+}
+
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s)
 {
     return s ? s->jd_trn16 : false;

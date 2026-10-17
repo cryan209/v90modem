@@ -799,6 +799,9 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 
 /*! Enter receive DATA mode after externally validated E/B1 timing. */
 SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s);
+/* V.90 9.4.2.4-.5: search the buffered upstream B1 after a CRC-valid CP',
+   without claiming reception of E. Complete B1 validation still gates bits. */
+SPAN_DECLARE(int) v34_v90_begin_b1_search(v34_state_t *s);
 
 /*! Configure the receive data parameters (rate/trellis/parms) for the V.90
     answerer's upstream V.34 data channel WITHOUT touching the Phase 4

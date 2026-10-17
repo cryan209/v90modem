@@ -493,6 +493,11 @@ const v90_analogue_rx_t *v90_analogue_phase3_rx_state(const v90_analogue_phase3_
     return s ? s->rx : NULL;
 }
 
+bool v90_analogue_phase3_set_trn1d_reference(v90_analogue_phase3_t *s, int ucode)
+{
+    return s && v90_analogue_rx_set_trn1d_reference(s->rx, ucode);
+}
+
 bool v90_analogue_phase3_complete(const v90_analogue_phase3_t *s)
 {
     /* Once CPt is armed the transmitter immediately leaves the boundary

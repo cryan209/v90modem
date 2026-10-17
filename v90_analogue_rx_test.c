@@ -1809,6 +1809,39 @@ static void test_phase4_receive(int sr)
     free(stream);
 }
 
+/* V.90 9.3.2.8 / Table 15: an unmeasured fallback must leave useful
+ * analogue spacing without relying on an equiprobable power estimate. */
+static void test_zero_dil_signal_headroom(void)
+{
+    for (int law = V90_LAW_ULAW; law <= V90_LAW_ALAW; law++) {
+        for (int sr = 0; sr <= 3; sr++) {
+            vpcm_cp_frame_t cpt, cp;
+            CHECK(v90_analogue_phase4_build_zero_dil_cp(law, sr, 0, &cpt, &cp),
+                  "law=%d Sr=%d: zero-DIL build failed", law, sr);
+            for (int kind = 0; kind < 2; kind++) {
+                const vpcm_cp_frame_t *set = kind ? &cp : &cpt;
+                for (int slot = 0; slot < 6; slot++) {
+                    int previous = 0, count = 0;
+                    for (int u = 0; u < 128; u++) {
+                        if (!vpcm_cp_mask_get(set->masks[set->dfi[slot]], u))
+                            continue;
+                        uint8_t cw = v90_codeword_compose(law, u, 1);
+                        int level = law == V90_LAW_ULAW ? ulaw_to_linear(cw)
+                                                       : alaw_to_linear(cw);
+                        CHECK(level > 0 && (double)level*level <= v90_dil_power_limit(-16.0),
+                              "law=%d: fallback point %d exceeds Table 15", law, u);
+                        CHECK(count == 0 || level - previous >= 128,
+                              "law=%d: fallback gap %d is below analogue noise margin", law, level - previous);
+                        previous = level;
+                        count++;
+                    }
+                    CHECK(count == 8, "law=%d: fallback has %d points", law, count);
+                }
+            }
+        }
+    }
+}
+
 /*
  * §8.5.2: does a measurement turn into a CPt/CP pair the digital modem could
  * act on?  The trap Table 14 sets is that CP's rate field is (drn + 20) and
@@ -2258,6 +2291,8 @@ static void test_line_jd_alignment(void)
     cfg.zero_slot_fraction = 0.25; cfg.w_slot_tolerance = 0.35;
     for (int invert = 0; invert < 2; invert++) {
         v90_analogue_rx_t *rx = v90_analogue_rx_init(&cfg);
+        CHECK(!v90_analogue_rx_set_trn1d_reference(rx, cfg.u_info),
+              "waveform reference cannot calibrate the ladder before TRN1d");
         CHECK(v90_analogue_rx_line_stage(rx, 2) == 0,
               "TRN1d cannot bypass measured Sd reversal");
         CHECK(v90_analogue_rx_line_stage(rx, 0) == V90A_RX_EVENT_SD,
@@ -2266,6 +2301,13 @@ static void test_line_jd_alignment(void)
               "line reversal releases Ja");
         CHECK(v90_analogue_rx_line_stage(rx, 2) == V90A_RX_EVENT_TRN1D,
               "line enters CMA training");
+        CHECK(!v90_analogue_rx_set_trn1d_reference(rx, 0)
+              && !v90_analogue_rx_set_trn1d_reference(rx, 128),
+              "waveform reference rejects invalid Ucodes");
+        CHECK(v90_analogue_rx_set_trn1d_reference(rx, 65)
+              && v90_analogue_rx_set_trn1d_reference(rx, cfg.u_info)
+              && v90_analogue_rx_trn1d_ucode(rx) == cfg.u_info,
+              "negotiated reference replaces an unconverged magnitude before Jd");
         for (long i = trn; i < jd + 6*72 && i < len; i++) {
             uint8_t c = wire[i] ^ (invert ? 0x80 : 0);
             if (i == jd || i == jd + 30 || i == jd + 50) c ^= 0x80;
@@ -2445,6 +2487,7 @@ int main(int argc, char *argv[])
         test_phase4_receive(sr);
     test_phase4_foreign_downstream();
     test_phase4_cp_from_measurement();
+    test_zero_dil_signal_headroom();
     test_tone_b_retrain_detector();
 
     if (failures) {

@@ -354,6 +354,7 @@ static long   tx_pos;
 static double tx_ph1, tx_ph2;
 static double tx_amp = 0.15;   /* per tone; a pair lands near -16.5 dBFS */
 static double g_rate = 9600.0;   /* see the header: not 8000 */
+static int g_pcm8k;             /* opt-in native-8k waveform experiment */
 static double g_tx_gain = 1.0;
 static volatile int tx_dtmf_done;
 static _Atomic int dial_control_active, dial_control_tone;
@@ -936,16 +937,21 @@ static void ec_setup(void)
     int on = (role && !strcmp(role, "analogue"));
 
     if (force && *force) on = strcmp(force, "0") != 0;
-    if (!on || g_ec || g_rate != 9600.0) return;
+    if (!on || g_ec || (g_rate != 9600.0 && !(g_rate == 8000.0 && g_pcm8k))) return;
     /* Delays 900..1667 samples (94-174 ms): the measured onsets are 1121-1165
      * and the response needs ~384 taps to reach the line's floor.  A live
      * call solves on a worker (a 768-tap solve is ~75 M operations, far too
      * long for this callback); a replay solves inline so it stays
      * deterministic. */
-    g_ec = near_echo_init(900, 768, 4800);
+    /* Keep the same physical delay coverage on native 8k. Direct-pair
+     * captures measured self-echo peaks at 143/149 ms there, versus
+     * 120/124 ms at 9600 Hz; both lie inside this existing window. */
+    int lag = (int)lrint(900*g_rate/9600.0);
+    int taps = (int)lrint(768*g_rate/9600.0);
+    g_ec = near_echo_init(lag, taps, (int)lrint(4800*g_rate/9600.0));
     if (g_ec && !g_replay_path) near_echo_set_threaded(g_ec, 1);
-    fprintf(stderr, "[APPLE] near-end echo canceller: %s (delays 94-174 ms, 768 taps, echo-only blocks)\n",
-            g_ec ? "on" : "FAILED to allocate");
+    fprintf(stderr, "[APPLE] near-end echo canceller: %s (delays %.0f-%.0f ms, %d taps, echo-only blocks)\n",
+            g_ec ? "on" : "FAILED to allocate", lag*1000/g_rate, (lag+taps)*1000/g_rate, taps);
 }
 
 static void ec_rx(int16_t *s, long n)
@@ -1222,7 +1228,7 @@ static void engine_feed(int16_t *s, long n)
     ec_rx(s, n);
     loop_timing_feed(s, n);
 
-    if (g_rate == 8000.0) {                      /* no receive resampler at all */
+    if (g_rate == 8000.0 && !g_pcm8k) {           /* no waveform experiment */
         engine_block_8k(s, n);
         return;
     }
@@ -1237,7 +1243,7 @@ static void engine_feed(int16_t *s, long n)
             for (int j = 0; j < got; j++) w[j] = clip16(o[j]);
             me_rx_v90a_16k(w, got);
         }
-        got = rs_put(&rs_8k, s[i], o, 8);
+        got = g_rate == 8000.0 ? (o[0] = s[i], 1) : rs_put(&rs_8k, s[i], o, 8);
         for (int j = 0; j < got; j++) {
             fb8[fb8_n++] = clip16(o[j]);
             if (fb8_n == 80) { engine_block_8k(fb8, 80); fb8_n = 0; }
@@ -2049,7 +2055,20 @@ static int replay(const char *path)
 /* 9600 -> 8000 is 5/6, 9600 -> 16000 is 5/3, 8000 -> 9600 is 6/5.  All exact. */
 static void rs_setup(void)
 {
-    if (g_rate == 8000.0) return;
+    if (g_rate == 8000.0) {
+        const char *pcm = getenv("APPLE_MODEM_8K_PCM");
+        g_pcm8k = pcm && !strcmp(pcm, "1");
+        /* This interpolates a native ANALOGUE waveform for the existing
+         * T/2 detector, not a G.711 bearer. It creates no bandwidth above
+         * 4 kHz. The 2026-10-17 direct-pair PR4 probe decodes a 16-level
+         * alphabet at native 8 kHz without the 9600-Hz TX interpolator. */
+        if (g_pcm8k) {
+            rs_init(&rs_16k, 2, 1);
+            fprintf(stderr, "[APPLE] native 8000 Hz PCM experiment: 2/1 T/2 waveform interpolation enabled\n");
+            ec_setup();
+        }
+        return;
+    }
     if (g_rate != 9600.0) {
         fprintf(stderr, "[APPLE] %.0f Hz has no small exact ratio to 8000 or "
                         "16000; use 9600 (or 8000 for V.34 only)\n", g_rate);
@@ -2083,8 +2102,9 @@ static int selftest(void)
         { "9600 -> 8000  (me_rx_audio)",     5, 6, 8000.0  },
         { "9600 -> 16000 (me_rx_v90a_16k)",  5, 3, 16000.0 },
         { "8000 -> 9600  (transmit)",        6, 5, 9600.0  },
+        { "8000 -> 16000 (PCM experiment)",  2, 1, 16000.0 },
     };
-    const double in_rate[3] = { 9600.0, 9600.0, 8000.0 };
+    const double in_rate[4] = { 9600.0, 9600.0, 8000.0, 8000.0 };
     int bad = 0;
 
     /* Loop timing scales every ratio by the codec's offset, so the off-nominal
@@ -2093,7 +2113,7 @@ static int selftest(void)
      * past the -165 ppm this hardware measures. */
     static const double ppms[] = { 0.0, +200.0, -200.0 };
     for (unsigned pi = 0; pi < sizeof ppms / sizeof ppms[0]; pi++)
-    for (int t = 0; t < 3; t++) {
+    for (int t = 0; t < 4; t++) {
         /* 3673 Hz is V.34's worst case: 3429 baud at fc 1959 reaches it, and it
          * is 327 Hz from the 8 kHz grid's Nyquist, so it is the frequency that
          * decides whether this bearer can carry the top symbol rate. */
@@ -2233,6 +2253,7 @@ static void usage(const char *a0)
         "APPLE_MODEM_TX_AMP per-tone DTMF amplitude (default 0.15)\n"
         "APPLE_MODEM_DTMF_MS on/off times in ms (default 100/120)\n"
         "APPLE_MODEM_TX_GAIN engine transmit gain into the DAA (default 1.0)\n"
+        "APPLE_MODEM_8K_PCM=1 opt in to native-8k T/2 waveform interpolation\n"
         "APPLE_MODEM_RX_TAP    record the raw device receive stream at --rate;\n"
         "                      this is exactly what --rx-replay consumes\n"
         "APPLE_MODEM_TX_TAP    record what went on the line, for telling our own\n"
@@ -2584,7 +2605,7 @@ int main(int argc, char **argv)
      * made from the digital side needs. */
     setenv("ME_V90_ROLE", "analogue", 0);
     rs_setup();
-    if (g_rate == 8000.0)
+    if (g_rate == 8000.0 && !g_pcm8k)
         fprintf(stderr, "[APPLE] 8000 Hz: no receive resampler, and NO T/2 path "
                         "-- the V.90 analogue role cannot run\n");
 

@@ -58,6 +58,11 @@
 ./near_echo_test
 ./v34_line_ec_test
 ./v90_analogue_pr4_test
+# Apple direct pair: B1 precedes the CP-bitstream E anchor by six seconds.
+# Fixed handover/history; the former 8192-sample ring cannot retain B1.
+sh -c './v90_upstream_replay artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.2 6.2 2>&1 | grep -q "^replay: acquired=1$"'
+# CP' can start the independent B1 search even when the CP decoder misses E.
+sh -c './v90_upstream_replay artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.2 0.2 cp-prime 2>&1 | grep -q "^replay: acquired=1$"'
 ./at_test_test
 ./clear_channel_test
 # The rows that recover payload without a single bit error.  Every rate that
@@ -502,6 +507,9 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # Our V.90 analogue role against our digital side, whole engines (docs/v90_analogue_role.md).
 ./engine_pair_test --expect V90 --call-expect "CONNECT 31200" --answer-expect "CONNECT 56000" --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
 ./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
+# Hardware-facing digital TX must complete B1d through me_tx_audio as well.
+./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ENGINE_PEER_LINEAR_TX=1 --answer-env ENGINE_PEER_LINEAR_RX=1
+./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ENGINE_PEER_LINEAR_TX=1 --answer-env ENGINE_PEER_LINEAR_RX=1
 # 10 KB of back-to-back V.14 characters upstream, no V.42 to retransmit: the
 # 31200 upstream takes a hard symbol error every few hundred mapping frames,
 # and only the 16-state trellis's parity (V.34 9.6.3, V0 epoch tracked from
