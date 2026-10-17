@@ -1366,3 +1366,18 @@ segment = 6 dB). Three lanes in parallel, arms rotated over 6311-6313, 12 calls 
 
 Monotonic and well outside noise at n=12 (S accepted 33% / 8% / 0%): **the peer wants the level it asked for or
 more, and the Eicon-style low TRN1d does not carry over to the RasFinder.** Next lever: negative deltas (hotter).
+
+Hotter, same method (delta 0 / -8 / -16 = U_INFO 78 / 86 / 94, 12 calls per arm, CT 117 `/root/lvl2`):
+
+| delta | U_INFO | S accepted first | Tone A first | no event | V.90 data |
+|---|---|---|---|---|---|
+| 0 | 78 | 8 | 1 | 3 | 3 |
+| -8 | 86 | 6 | 2 | 4 | 3 |
+| -16 | 94 | 6 | 1 | 5 | 0 |
+
+**No gain above the requested level**: the default sits on a plateau (lower is monotonically worse, hotter is flat
+within noise; V.90 data drops to 0/12 at +12 dB, probably Phase 4 headroom, not examined). The same arm (delta 0)
+scored S-first 4/12 in the earlier batch and 8/12 here, 1.5 hours apart: **the rig's Phase 3 pass rate drifts by
+2x between batches on identical code**, so only interleaved arms within one batch are comparable. Phase 3 level is
+closed as a lever; the transmit side has now been shown identical, conformant, pace-neutral, and level-neutral
+above U_INFO.
