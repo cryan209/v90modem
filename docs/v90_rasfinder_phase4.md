@@ -1323,5 +1323,12 @@ the live server does not have (override with `=0`); the clang-only `-O2` for v34
 (CT 117 builds with gcc by default and had no `.v34-opt-cflags`); CT 117's checkout had local edits that made
 `git pull` abort silently for the whole session (the build looked fresh).
 
-Still open: with the stalls gone, 5 of 9 calls never connect - the peer retrains with Tone A in Phase 3
-(our detector rejects it: `band2400 >= 0.350`) or no S arrives after ~24800 Jd symbols. That is not callback timing.
+Phase 3 "peer retrains with Tone A" (same day, no stalls): a rejected S is a real Tone A, not a mis-read S. On
+connecting calls the peer's S arrives near sample 102-105k at rx_rms 1.4-2.5k with band2400 0.01-0.03; on failing
+calls a loud signal (rx_rms 4.7-5.2k, band2400 0.43) arrives at the same moment, i.e. the peer abandons Phase 3 and
+retrains instead of sending S after our Jd. Not explained by: Ja time (+11.9..20.6 s on both), TX pacing
+(rtp-tx.csv gaps identical good vs bad), TX clock (-4..-74 ppm on both), parallel vs solo (2/6 solo, ~1/3 of
+45 parallel), host (Mac mini 1/6, CT 117 2/6 same hour). **Not a regression:** interleaved A/B on CT 117,
+solo, alternating arms: current main 4/6 V.90 data (3 with the MULTITECH login prompt) vs d99f144d 0/6.
+So V.90 data yield on this rig swings 17-67% by the hour on the same code; judge changes on 12+ interleaved calls.
+Artifacts: CT 117 `/root/ab`, `artifacts/rf{p,q,c,d,e,f,s}-*`; `tools/soak/rf_par.sh` (3 lanes) and `rf_serial.sh`.
