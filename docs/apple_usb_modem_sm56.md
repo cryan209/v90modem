@@ -3316,3 +3316,22 @@ limitation, not a demonstrated working modem bearer. No audio/training
 test was performed at this undercurrent. Both hooks and monitors were
 released afterward. Evidence: `both-offhook.json` in the same artifact
 directory. A DC feed alone supplies neither dial tone nor ringing.
+
+After the user changed the feed (following discussion of 12 V), the first
+simultaneous-hook check showed sense about 6 on each DAA, current codes
+2/3 and receive overload. A subsequent seizure for the audio test read
+current codes 7/6 (nominal 23.1/19.8 mA), sense 7/6, no dropout, receive
+overload or overcurrent, with hardware protection enabled. These are
+coarse per-device current readings on a series circuit, not independent
+precision measurements. The actual supply voltage was not metered; the
+reason for the change between trials is not established.
+
+A low-level 1 kHz tone (CoreAudio TX amplitude 0.05, 9600 Hz native)
+passed in both directions. The peer captures contain strong tone windows
+with amplitudes about 1382 and 1349 native counts, compared with near-zero
+1 kHz bins outside the bursts; local returns were only tens of counts.
+Both audio tools returned success, with fresh captures in
+`artifacts/apple-direct-line-20261017/audio-new-feed/`. This demonstrates
+bidirectional physical audio and adequate indicated current during that
+trial, not V.34 training, CONNECT or user data. Both hooks and monitors
+were released afterward.
