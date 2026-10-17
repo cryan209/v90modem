@@ -2220,6 +2220,7 @@ static void usage(const char *a0)
         "               off-hook and run the engine as the answering modem.\n"
         "               Answering needs no DTMF, so it works on a line too poor\n"
         "               to dial out on\n"
+        "  --answer-now answer immediately without ringing on a powered direct pair\n"
         "  --rx-replay  run the analogue side offline against a recorded tap;\n"
         "               needs no line and no device\n"
         "  --hook       line control only, then exit\n"
@@ -2414,6 +2415,7 @@ int main(int argc, char **argv)
     const char *hook_arg = NULL, *cid_replay_path = NULL, *loopback_mode = NULL;
     double hold = 60.0, on_ms = 100.0, off_ms = 120.0, ring_wait = 60.0;
     int rc = 1;
+    int answer_now = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--diagnostic-selftest")) return gui_diagnostic_selftest();
@@ -2426,6 +2428,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--control-link") && i+1 < argc) g_control_link = argv[++i];
         else if (!strcmp(argv[i], "--data-link") && i+1 < argc)    g_data_link = argv[++i];
         else if (!strcmp(argv[i], "--answer"))                          g_answer_mode = 1;
+        else if (!strcmp(argv[i], "--answer-now")) { g_answer_mode = 1; answer_now = 1; }
         else if (!strcmp(argv[i], "--answer-rings") && i+1 < argc) {
             char *end; long count = strtol(argv[++i],&end,10);
             if (*end || count < 1 || count > 9) { fprintf(stderr,"answer rings must be 1..9\n"); return 2; }
@@ -2609,7 +2612,9 @@ int main(int argc, char **argv)
         g_di_open = g_control_link != NULL || g_pty_link != NULL;
         gui_monitor_start();
     }
-    if (g_answer_mode && !(g_gui_control && gui_recent_ring())) {
+    /* V.250 6.3.5: manual answering need not wait for a ring indication.
+     * A powered direct pair has no FXS device to generate that indication. */
+    if (g_answer_mode && !answer_now && !(g_gui_control && gui_recent_ring())) {
         if (gui_onhook_start() < 0 || wait_for_ring(ring_wait) < 0) {
             gui_onhook_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 1;
         }

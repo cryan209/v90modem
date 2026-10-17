@@ -3373,3 +3373,46 @@ interior burst windows; the fitter passes a synthetic offset/noise/THD
 control. Both devices finish on-hook with monitoring off and hardware
 protection enabled (Si3056 §5.8, §5.22). This is an analogue-path quality
 measurement, not V.34/V.90 training, CONNECT or a BER/data-rate result.
+
+
+### V.90/V.91 over the direct powered pair (2026-10-17)
+
+Rebuilt the coupler against the current engine (the prior binary predated
+recent V.91 work). Added `--answer-now` for the ringless direct-pair case
+(V.250 §6.3.5); this bypasses only ring waiting, keeping the protected hook
+sequence. Both hooks are initially asserted to complete the series circuit.
+USB/audio mapping from IORegistry: 0:3 is the modem at 00110000, audio UID
+000000; 1:2 is at 01130000, audio UID 1130000.
+
+Two completed 45-second V.90 trials at native 9600 Hz exchange the physical
+digital-answerer/analogue-caller roles. Both negotiate V.90 and reach
+Phase 4: the digital end accepts a CRC-valid CPt and transmits TRN2d/MP.
+`crc=0` in that log is the CRC remainder, not a failure flag. The analogue
+receiver enters TRN2d but fails its B1d/constellation deadline and retrains
+(V.90 §9.4.2, §9.5.2). No CONNECT or user data in either orientation.
+Earlier Ja acquisition uses the existing heuristic fallback rather than
+a CRC-valid descriptor, so do not score every earlier detector event as
+independently established interoperability. The analogue-side logs also
+report no constellation at their 3-sigma margin before forming the offer.
+
+V.91 at 9600 Hz fails in V.8, exercising no V.91 startup. A 30-second
+retry at native 8000 Hz removes the resamplers: BOTH ends select V.91
+and enter startup, but neither reports Ez/INFO acquisition, and both
+escape to V.34 after no INFO' within 1.5 s (V.91 §8.3). No V.91 rate,
+constellation, CONNECT or data is established. This identifies the
+current implementation's first failure, not a proof that every possible
+analogue PCM recovery method must fail.
+
+The native V.91 own TX taps contain the intended Ucode-66 magnitudes
+(±2236) for 1.495 s, with both signs present. All eight processes exit
+normally with zero TX ring underruns and balanced device frame counts;
+no TX tap clips at int16 rails. One swapped V.90 RX capture rails only
+in its last 0.62 s as the peer releases the series loop first. Both hooks
+and monitors finish cleared, protection enabled. No DSP constants,
+training thresholds or G.711 bearer logic were altered for these trials.
+
+Full evidence, tested executable snapshot/hash, launches, logs, device
+TX/RX taps, engine dumps, manifests, summary and report are local under
+`artifacts/apple-direct-training-20261017/`. Coupler build, diagnostic
+self-test, resampler self-test and conflicting dial/answer argument
+check pass.
