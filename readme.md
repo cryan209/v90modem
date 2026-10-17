@@ -399,7 +399,7 @@ modem log, raw RX/TX G.711 taps, hashes, build revision, and parsed timeline:
   --pty-link /tmp/v90modem
 ```
 
-Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and
+Each run is stored under `reference-data/artifacts/v90-hardware/` with `manifest.json` and
 `summary.json`. Password arguments are redacted from the manifest. Use
 `--dry-run` to verify the command without starting the modem or writing files.
 

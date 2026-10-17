@@ -22,7 +22,7 @@ firmware is Eicon's. It is used as an **oracle** — a second implementation who
 observable behaviour disambiguates the Recommendation — not as a source.
 
 The fixtures and their provenance are in
-[`../artifacts/eicon-digital-downstream/`](../artifacts/eicon-digital-downstream/README.md).
+[`../reference-data/artifacts/eicon-digital-downstream/`](../reference-data/artifacts/eicon-digital-downstream/README.md).
 
 ## The headline
 
@@ -519,7 +519,7 @@ where `eicon_rx_conformance.py`'s expected offsets come from and it must not be
 able to share a bug with the code under test:
 
 ```bash
-python3 tools/v90_downstream_segment.py artifacts/eicon-digital-downstream/*.ulaw
+python3 tools/v90_downstream_segment.py reference-data/artifacts/eicon-digital-downstream/*.ulaw
 ```
 
 ```text
@@ -539,7 +539,7 @@ No build needed — it is a property of the bytes:
 
 ```python
 import pathlib
-d = pathlib.Path("artifacts/eicon-digital-downstream/call1-connect-32000.ulaw").read_bytes()
+d = pathlib.Path("reference-data/artifacts/eicon-digital-downstream/call1-connect-32000.ulaw").read_bytes()
 signs = [((b ^ 0xFF) >> 7) & 1 for b in d]
 mags  = [(b ^ 0xFF) & 0x7F for b in d]
 

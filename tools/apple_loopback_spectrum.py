@@ -16,13 +16,13 @@ import matplotlib.pyplot as plt
 FS=8000
 ROOT=Path(__file__).resolve().parents[1]
 CASES={
- 'digital-13':('artifacts/apple-pcm-loopback-20261016-r2/0-13-digital-ulaw','digital'),
- 'isolation-13':('artifacts/apple-pcm-loopback-20261016-r2/0-13-isolation-ulaw','isolation'),
- 'analog-13':('artifacts/apple-pcm-loopback-20261016-quiet/0-13-analog-ulaw','analog'),
- 'digital-14':('artifacts/apple-pcm-loopback-20261016-r2/0-14-digital-ulaw','digital'),
- 'isolation-14':('artifacts/apple-pcm-loopback-20261016-r2/0-14-isolation-ulaw','isolation'),
- 'analog-14':('artifacts/apple-pcm-loopback-20261016-quiet/0-14-analog-ulaw','analog'),
- 'packet-fault-14':('artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw','packet fault'),
+ 'digital-13':('reference-data/artifacts/apple-pcm-loopback-20261016-r2/0-13-digital-ulaw','digital'),
+ 'isolation-13':('reference-data/artifacts/apple-pcm-loopback-20261016-r2/0-13-isolation-ulaw','isolation'),
+ 'analog-13':('reference-data/artifacts/apple-pcm-loopback-20261016-quiet/0-13-analog-ulaw','analog'),
+ 'digital-14':('reference-data/artifacts/apple-pcm-loopback-20261016-r2/0-14-digital-ulaw','digital'),
+ 'isolation-14':('reference-data/artifacts/apple-pcm-loopback-20261016-r2/0-14-isolation-ulaw','isolation'),
+ 'analog-14':('reference-data/artifacts/apple-pcm-loopback-20261016-quiet/0-14-analog-ulaw','analog'),
+ 'packet-fault-14':('reference-data/artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw','packet fault'),
 }
 COLORS={'digital':'#2166ac','isolation':'#d88710','analog':'#12836c','packet fault':'#c23d51'}
 

@@ -21,7 +21,7 @@ FSK exports are mono. Speaker output can be resampled by the browser; it never
 feeds back into either modem or the virtual bearer.
 
 For a single offline file, run `python3 tools/package_modem_demo.py` and open
-`artifacts/modem-lab.html` or `web/modem-lab/dist/standalone.html`. The packager
+`reference-data/artifacts/modem-lab.html` or `web/modem-lab/dist/standalone.html`. The packager
 refreshes both copies together. Each embeds the worker, DSP, WASM, style, and interface;
 there are no external scripts, fonts, audio files, or network requests.
 
@@ -63,7 +63,7 @@ node web/modem-lab/test-offline.mjs
 ```
 
 The builder uses only vendored sources, scalar WASM, and a separate portable
-header configuration. It stores objects under `artifacts/wasm-build/`, checks
+header configuration. It stores objects under `reference-data/artifacts/wasm-build/`, checks
 source/header hashes before reuse, and never changes native objects or native
 SpanDSP configuration. `dist/build-info.json` records compiler and source hashes.
 The browser adapter is intentionally a browser-only translation unit, included
@@ -261,7 +261,7 @@ runner also passes actual 33600/33600 transfer. These are software tests,
 not physical modem interoperability measurements.
 
 The packager now refreshes both existing offline entry points together,
-`artifacts/modem-lab.html` and `web/modem-lab/dist/standalone.html`; the
+`reference-data/artifacts/modem-lab.html` and `web/modem-lab/dist/standalone.html`; the
 offline regression requires their contents to match. An HTML file already
 open in a browser needs reloading to use the refreshed embedded engine.
 

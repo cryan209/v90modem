@@ -542,7 +542,7 @@ So the delay marches us uselessly into DIL/Phase 4 over a peer that has already
 abandoned V.90 — a secondary S-detector false-positive worth gating (do not accept S
 while the peer is mid-V.34-retrain).
 
-Captures: `artifacts/v90-hardware/20260722T015126Z-dmodem_v90/` (baseline, no delay),
+Captures: `reference-data/artifacts/v90-hardware/20260722T015126Z-dmodem_v90/` (baseline, no delay),
 `.../20260722T020129Z-dmodem_v90_sddelay1/` (the false-S delay call). Grep the
 per-call `/tmp/slm-current.log` (not the stale `/tmp/slm.log`) for
 `trn1 second update|trn1Sigma|alternate rbs|drop to V34`; identify a call by its
@@ -587,7 +587,7 @@ and yet the peer reported the **identical** uniform `trn1 second update` `3775 �
 unshaped baseline (~1.9× spread, i.e. channel noise) — so even the first-stage
 measurement does not reflect our deliberate per-phase content.
 
-Capture with the TX-tap proof: `artifacts/v90-hardware/20260722T022359Z-dmodem_v90_dither9/`
+Capture with the TX-tap proof: `reference-data/artifacts/v90-hardware/20260722T022359Z-dmodem_v90_dither9/`
 (offset run: `.../20260722T021305Z-dmodem_v90_trn1dshape3/`).
 
 ### 15.3 Conclusion
@@ -659,7 +659,7 @@ the V.90 long-startup path:
 The SmartLink peer consequently stayed in `getV92Decision()` and waited for QTs,
 while the server sent its V.90 Phase 3 waveform. Setting `ME_V92_ENABLE=0` removed
 both advertisements. The resulting hardware capture,
-`artifacts/v90-hardware/20260722T045937Z-smartlink_v90_no_v92_advertise/`, showed:
+`reference-data/artifacts/v90-hardware/20260722T045937Z-smartlink_v90_no_v92_advertise/`, showed:
 
 - INFO0d V.92 capability bit 27 clear;
 - peer INFO0a V.92 capability bit 26 clear;
@@ -678,7 +678,7 @@ plain V.90 is the default.
 ## 17. Tone A gated (2026-08-12), and the DIL blocker is not the S detector
 
 Two live Courier calls this session against the Cisco VG224 path (ext 8405,
-`artifacts/v90-hardware/20260812T073702Z-*` and `20260812T075230Z-*`).
+`reference-data/artifacts/v90-hardware/20260812T073702Z-*` and `20260812T075230Z-*`).
 
 **The third false-S source named earlier is now gated.** §9.5.2.1 Tone A is a
 real, loud, non-echo far-end signal, so the silence floor, the RX/TX ratio test
@@ -804,7 +804,7 @@ than re-deriving the modulation offline.
 
 Replayed both captures through the *same* receiver offline, using a
 parametrised copy of `tmp/v34_phase3_replay.c` (kept as
-`artifacts/courier-ja-3200low/streams/ja_replay.c`): it forces Phase 3 RX, feeds
+`reference-data/artifacts/courier-ja-3200low/streams/ja_replay.c`): it forces Phase 3 RX, feeds
 linear PCM, then dumps all 24 hypothesis streams and tries the descriptor parse
 at every 17-ones+0 preamble. **Note the two captures use different RTP codecs —
 July negotiated PCMA, August PCMU — while both log `law=ULAW`, which is the
@@ -856,7 +856,7 @@ v34rx's J event — can each fire first and start Sd early.
 
 Next change to try: gate Sd on the parsed descriptor, letting the heuristics only
 arm a bounded fallback, so we never cut off the frame that carries DIL. Fixtures:
-`artifacts/courier-ja-3200low/streams/{july-dilgate3,aug-jastage}-hyp8.bits`.
+`reference-data/artifacts/courier-ja-3200low/streams/{july-dilgate3,aug-jastage}-hyp8.bits`.
 
 ## 20. Sd is now gated on the descriptor (2026-08-12)
 
@@ -1167,7 +1167,7 @@ CRC-valid Jd for 4.7 s and does not answer it.
 ## 26. Why does the Courier ignore a valid Jd? Not the frame — proven
 
 Compared our Jd frame against the only foreign V.90 digital modem we have: the
-Eicon Diva Server downstream in `artifacts/eicon-digital-downstream/`, which a
+Eicon Diva Server downstream in `reference-data/artifacts/eicon-digital-downstream/`, which a
 USR Courier V.Everything answered with `CONNECT 32000/ARQ/V90/LAPM`. Same modem
 model as the one refusing us.
 
@@ -1267,7 +1267,7 @@ It still receives 4.7 s of that Jd and does not answer.
 
 **Proposed decisive next test: replay the Eicon downstream at the peer.** We hold
 27 s of a downstream that a Courier V.Everything answered with
-`CONNECT 32000/ARQ/V90/LAPM` (`artifacts/eicon-digital-downstream/`). Feeding it
+`CONNECT 32000/ARQ/V90/LAPM` (`reference-data/artifacts/eicon-digital-downstream/`). Feeding it
 to *this* Courier in place of our own Phase 3 splits the remaining space in one
 call: if it answers the recording, the difference is still something in our
 signal that all the above checks have missed; if it ignores the recording too,
@@ -1394,7 +1394,7 @@ Two smaller defects fell out beside it:
   reads "After receiving Ja, the digital modem **may wait for up to 500 ms** and shall
   then transmit signal Sd for 384T"; both clamps are now 500.
 
-Measured over the live captures in `artifacts/sd-*`, before and after:
+Measured over the live captures in `reference-data/artifacts/sd-*`, before and after:
 
 | run | S events accepted | p3 rejects | `no S after 42304` | Phase 2 retrains |
 |---|---|---|---|---|
@@ -1421,7 +1421,7 @@ tx_phase=15`" as open, and separate from S detection. It is, and it is ours.
 does:
 
 ```bash
-./v90_engine_replay artifacts/sd-jd-gate-fix-r2-013643Z/live-rx.g711 ulaw --fast
+./v90_engine_replay reference-data/artifacts/sd-jd-gate-fix-r2-013643Z/live-rx.g711 ulaw --fast
 ```
 
 The peer's retrain is a real 2400 Hz Tone A — there are exactly six pure-tone
@@ -1577,7 +1577,7 @@ Both halves of that now have a sample.
 `tools/soak/v90_trn1d_ab.sh` runs the two arms **alternated rather than blocked**,
 one call per run, with `ME_V90_TRN1D_SYMBOLS` the only variable, and
 `tools/trn1d_ab_summary.py` scores them. Four calls a side, kept as
-`artifacts/trn1d-ab-063857Z/`:
+`reference-data/artifacts/trn1d-ab-063857Z/`:
 
 | call | TRN1d | attempt 1 | attempt-1 study | downstream | retrains | U-lines |
 |---|---|---|---|---|---|---|
@@ -1629,7 +1629,7 @@ like a negotiation failure. **It is not one. The peer does not decline V.90; it
 gives up on it, and our log reports the giving-up rather than the cause.**
 
 The chain, read off the peer's log and ours on the same call
-(`artifacts/trn1d-knee-075140Z/control-r1`):
+(`reference-data/artifacts/trn1d-knee-075140Z/control-r1`):
 
 1. The peer enters Phase 3 and sets `V90Phase3Demodulator: initial state set to
    WaitForSd` — it is waiting for **our** Sd.
@@ -1792,7 +1792,7 @@ captures nothing and holds the differential chain unstarted
 perturbed offset. Default 0 leaves the receiver exactly as it was.
 
 Swept over a recording that recovers the descriptor
-(`artifacts/trn1d-ab-063857Z/control-r1`), K = 0, 1, 2, 3, 5, 8, 13, 21, 50,
+(`reference-data/artifacts/trn1d-ab-063857Z/control-r1`), K = 0, 1, 2, 3, 5, 8, 13, 21, 50,
 100, 400, 1000: **six recoveries at every one of the twelve.** And the captured
 bits are not merely still parseable, they are the *same bits*:
 
@@ -2309,7 +2309,7 @@ says what happened, when it happened, and why.
 ### 35m. The attempt count runs on the peer's clock; a deadline does not (2026-08-26)
 
 The concession shipped counting Phase 3 attempts. **Live, at the corpus-priced
-threshold of 3, it never fired once** — `artifacts/concede-ab-t3-111704Z`, 11
+threshold of 3, it never fired once** — `reference-data/artifacts/concede-ab-t3-111704Z`, 11
 calls over two arms:
 
 | arm | V.90 data mode | gave up on V.90 | by whom |
@@ -2366,7 +2366,7 @@ and loses no V.90 data mode (it reached none), the successful one concedes
 
 ### 35n. The deadline live: safe, and inert against this peer (2026-08-27)
 
-`artifacts/deadline-ab-115632Z`, 9 calls, arms alternated, the attempt count
+`reference-data/artifacts/deadline-ab-115632Z`, 9 calls, arms alternated, the attempt count
 disabled in both so the deadline is the only variable
 (`ME_V90_JA_DEADLINE_SEC=20` against `0`, confirmed in each run's log).
 
@@ -2411,7 +2411,7 @@ table above checkable rather than asserted.
 §33 measured 16008T (2001 ms) against the 2496T default and found the first
 Phase 4 attempt reaching data mode 3 times in 4 against 0 in 4, at a real cost
 in rate and stability. This fills in between them:
-`artifacts/trn1d-knee-122741Z`, 4 repeats of control / 4008 / 8004, interleaved,
+`reference-data/artifacts/trn1d-knee-122741Z`, 4 repeats of control / 4008 / 8004, interleaved,
 **with both give-up triggers pinned off in every arm** (`34406f6`) so TRN1d
 length is the only variable and the run stays comparable to §33's.
 
@@ -2453,7 +2453,7 @@ somewhere between 8004T and 16008T, and not gradually.
 
 §36 noted that its control arm won once and that §33's clean 3/4 vs 0/4 had
 weakened to 3/4 vs 1/8 (p = 0.067). A six-repeat rerun
-(`artifacts/trn1d-16008b-131324Z`) settles it. Pooled over all three runs by
+(`reference-data/artifacts/trn1d-16008b-131324Z`) settles it. Pooled over all three runs by
 `tools/trn1d_pool.py`, which groups by the TRN1d length each log **reports**
 rather than by directory name, so a mislabelled run cannot pool into the wrong
 arm:
@@ -2567,7 +2567,7 @@ MP instead. §9.4.1.2/§9.4.1.3 allow up to 2000 ms, and §9.4.2 puts no bound o
 the analogue side, so lengthening it is free of spec risk; and because TRN2d is
 transmitted *after* CPt has fixed the constellation, it cannot move the rate.
 
-`tools/soak/v90_trn2d_ab.sh`, `artifacts/trn2d-ab-212417Z`, one call per arm
+`tools/soak/v90_trn2d_ab.sh`, `reference-data/artifacts/trn2d-ab-212417Z`, one call per arm
 (the peer being deterministic):
 
 | TRN2d | first study | ratio | level | Ucodes |
@@ -2591,7 +2591,7 @@ a property of 16008T,** and the sweep had stopped exactly there.
 
 §37 established that the peer's first Phase 4 study verdict is deterministic per
 TRN1d length, so one call characterises a length. Sweeping past 16008T
-(`artifacts/trn1d-long-*`, one call each):
+(`reference-data/artifacts/trn1d-long-*`, one call each):
 
 | TRN1d | ms | first study | level factor | Ucodes | downstream | retrains |
 |---|---|---|---|---|---|---|
@@ -2616,7 +2616,7 @@ constellation.
 ### The A/B
 
 `tools/soak/v90_trn1d_ab.sh`, arms alternated, one call per run,
-`artifacts/trn1d-long-ab-*`, four repeats:
+`reference-data/artifacts/trn1d-long-ab-*`, four repeats:
 
 | arm | first Phase 4 attempt reaches data | downstream | intact upstream U-lines |
 |---|---|---|---|
@@ -2673,7 +2673,7 @@ separable and the rate cost was never the price of the fix.
 
 §38's A/B ran the standard 105 s schedule, which proves the path exists. Six
 calls at **600 s** with **no `ME_*` overrides at all** — the defaults as shipped
-— `artifacts/v90-longsoak-233217Z`, `tools/soak/v90_long_soak.sh`:
+— `reference-data/artifacts/v90-longsoak-233217Z`, `tools/soak/v90_long_soak.sh`:
 
 | call | rate | restarts before / after data | carried | downstream | upstream |
 |---|---|---|---|---|---|

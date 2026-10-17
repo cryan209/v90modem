@@ -105,7 +105,7 @@ void v90a_fse_set_mu(v90a_fse_t *s, double mu);
  * error is y*(R2 - y*y) -- cubic in the output, and not the normalised
  * projection MU_TRAIN describes -- so the step that is right for a
  * decision-directed loop on two far-apart points is wildly wrong here.  Swept
- * against §8.4.5's own confirmation on artifacts/hsf-v90/call-085428Z, which
+ * against §8.4.5's own confirmation on reference-data/artifacts/hsf-v90/call-085428Z, which
  * reads 49.2% at MU_TRAIN:
  *
  *   0.5 (MU_TRAIN)  49.2%      0.01   70.7%
@@ -135,7 +135,7 @@ void v90a_fse_decide(v90a_fse_t *s, double decision, double tolerance);
  *
  * Why: a two-wire loop has a null at 4000 Hz, and a linear equaliser inverting
  * a null amplifies whatever noise is there -- measured on the Apple modem's
- * Phase 4 (artifacts/apple-pve-20261015/v90-lt6, echo cancelled), the best
+ * Phase 4 (reference-data/artifacts/apple-pve-20261015/v90-lt6, echo cancelled), the best
  * linear T/2 equaliser reaches 13.8 dB at 64 taps and 16.9 at 256, while
  * adding 16 feedback taps reaches 45 dB.  Feedback cancels the postcursor ISI
  * from decisions instead of inverting it.  The decisions must be given for

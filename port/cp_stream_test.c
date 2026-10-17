@@ -1,7 +1,7 @@
 /* Feeds a V90_RENEG_SYM_DUMP capture through the standalone streamed CP
  * decoder and reports the frames the Table 14 framer accepts.
  *
- * Reference: artifacts/reneg-eq/reneg-r1, whose in-engine §9.6 CP window
+ * Reference: reference-data/artifacts/reneg-eq/reneg-r1, whose in-engine §9.6 CP window
  * reports  valid=6 cp_ack=1  with the streamed path on, and
  *          valid=0 cp_ack=0  with it off (91 syncs, all structural rejects).
  */

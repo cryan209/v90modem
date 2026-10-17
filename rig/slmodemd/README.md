@@ -337,7 +337,7 @@ change what the peer measures on a real TRN2d window; the strict transmit
 reading is the default as of 2026-07-23.
 
 **RESOLVED 2026-07-23 evening — transmit metric CONFIRMED on a real window.**
-Batch-2 call 5 (`artifacts/v90-hardware/20260723T021036Z-trn2d_ref_transmit_metric/`,
+Batch-2 call 5 (`reference-data/artifacts/v90-hardware/20260723T021036Z-trn2d_ref_transmit_metric/`,
 `pairs-call5.s16` + `slm-call5.log`, with `ME_V90_DIL_PROFILE=smartlink-adi-qc`
 forcing DIL past the Ja-parse lottery): full DIL study → peer designed and
 TRANSMITTED CPt {91,87,83,79,72,65,53,33} → our `CPt accepted; TRN2d
@@ -407,7 +407,7 @@ dominates a batch).  Batch calls with `tools/trn2d_call_batch.sh`.
 
 6-call batch at HEAD 8b06612 (fresh `docker restart d-modem`, sinc resampler,
 standard env recipe, `ME_V90_SD_DELAY_MS=750`), artifacts in
-`artifacts/v90-hardware/20260723T045437Z-phase2_tones_ratecap/`:
+`reference-data/artifacts/v90-hardware/20260723T045437Z-phase2_tones_ratecap/`:
 
 - **Calls 1/2/5: complete V.90 handshake to data mode** (upstream V.34
   31200 / downstream PCM 52000) in ~26 s, `[V90] MP upstream rate cap:
@@ -433,7 +433,7 @@ standard env recipe, `ME_V90_SD_DELAY_MS=750`), artifacts in
 
 Soak harness in `tools/soak/` (PTY pump + far-DTE socket pump + orchestrator
 with early abort + integrity analyzer).  Result (final/v2attempt8 in
-`artifacts/v90-hardware/20260723T055443Z-pty_soak/`): **99.98% of bytes
+`reference-data/artifacts/v90-hardware/20260723T055443Z-pty_soak/`): **99.98% of bytes
 delivered downstream** (351177/351232), 38825 pattern lines in perfect
 sequence (0 dup / 0 out-of-order, 0.5% line loss at teardown), ~40 kbps
 sustained at the offered load over the full 110 s three-phase schedule,

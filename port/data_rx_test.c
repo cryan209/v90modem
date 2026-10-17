@@ -1,7 +1,7 @@
 /* Drives port/data_rx.c with a ME_V90_UPSTREAM_SYM_DUMP capture and reports
  * the same quantities the engine logs, so the two can be compared.
  *
- * Reference: artifacts/reneg-eq/reneg-r1, whose engine run reports
+ * Reference: reference-data/artifacts/reneg-eq/reneg-r1, whose engine run reports
  *   "decision error 0.1803 per symbol (mean symbol power 738.04) over 3200"
  * for the first window, and a sym-err series with median 0.168.
  */

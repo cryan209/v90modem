@@ -184,7 +184,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     sits inside the normal operating range and the restore fires on a working
     receiver -- after which it puts back taps from 3200 symbols ago, which
     raises the error, which triggers the next restore.  Measured on
-    artifacts/goal-v90-073744Z: 287 restores, the first at 4.2 s with the
+    reference-data/artifacts/goal-v90-073744Z: 287 restores, the first at 4.2 s with the
     error at a healthy 0.213, and the error never below 0.3 again in the
     remaining 107 seconds of the call. */
 #define V34_V90_T3_FSE_KEEP_MULT            1.30f
@@ -263,7 +263,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     sweep score is worse off still -- on white symbols every candidate reads
     the same, so stepping is a walk, and each step resets the Viterbi state.
 
-    Measured on artifacts/goal-matrix-115515Z/rate28800-r1: the receiver ran
+    Measured on reference-data/artifacts/goal-matrix-115515Z/rate28800-r1: the receiver ran
     19 s at 0.10-0.12 from the lattice with 0% bad shell frames, met a
     transient that took it to 0.28, released the lock on the 4% bad frames
     that transient produced, and then swept -- stepping the phase every
@@ -286,7 +286,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     The plain V.34 data mode needed exactly this gate -- there the DD-LMS is a
     ratchet that turns one disturbance into a permanent collapse -- so it is
     the obvious thing to reach for, and on this path it is wrong.  Swept on
-    artifacts/goal-matrix-115515Z/rate28800-r1, whose settled error is 0.096:
+    reference-data/artifacts/goal-matrix-115515Z/rate28800-r1, whose settled error is 0.096:
     the absolute gate alone holds the call clean for 19.7 s, while multiples
     of 3.0, 2.0 and 1.5 all collapse it after 2.0 s.  The adaptation between
     two and four times the settled error is not the receiver walking off -- it
@@ -402,7 +402,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     The peer really does slip whole samples: tools/measure_timing_slips.py
     reads the transmitter's symbol epoch straight off the wire, out of the
     phase of the symbol-rate line in the squared analytic envelope, and on
-    artifacts/dmodem-soak-0821-rounds/round1 it steps by exactly one sample
+    reference-data/artifacts/dmodem-soak-0821-rounds/round1 it steps by exactly one sample
     28 times in 290 s -- a net 7.2 ppm, and in bursts of three a second
     apart.  A receiver that takes a second to answer one of those has two
     more on top of it before it has finished, and two slips corrected as one
@@ -432,7 +432,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     is one 8 kHz sample, and at 3200 baud that is 1.2 of these T/3 samples --
     a third-of-a-sample grid has no point within 0.13 of it.
 
-    Measured on artifacts/dmodem-soak-0821-rounds/round1: with the search
+    Measured on reference-data/artifacts/dmodem-soak-0821-rounds/round1: with the search
     running to +/-3 samples, 46 of 81 corrections on one call were an
     equivalent offset a whole symbol out -- 36 of them "+2.67", which is
     -0.33 plus one symbol.  Each moved the shell decoder's position within
@@ -1566,7 +1566,7 @@ typedef struct
         all gated on the eye being open -- which is right, since adapting onto
         wrong decisions is how a filter gets walked off -- but it leaves the
         receiver with no way back once the eye HAS shut: measured on
-        artifacts/goal-matrix-115515Z, a 26400 call collapsed at 10.6 s and a
+        reference-data/artifacts/goal-matrix-115515Z, a 26400 call collapsed at 10.6 s and a
         28800 call at 19.5 s, and neither recovered in the 90-130 s that
         followed, with the wire provably still carrying the peer's signal.
         CMA needs no decisions, so it is the one thing that can reopen an eye

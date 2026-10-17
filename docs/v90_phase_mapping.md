@@ -304,7 +304,7 @@ Phase 4 is not "CP/CP' in disguise".
   plateau, then `retrain requested`/`drop to V34`.  The new T/3 branch therefore
   never armed and the calls neither validate nor invalidate its hardware data
   decode.  Logs are under
-  `artifacts/dmodem-t3-live/20260811T070448Z-correct-env/`.
+  `reference-data/artifacts/dmodem-t3-live/20260811T070448Z-correct-env/`.
 
   Follow-up A/B work found one concrete cause of the Phase 3 lottery.  The
   400 ms `p3_demod` Ja scanner accepted a J-labelled segment anywhere near the
@@ -319,7 +319,7 @@ Phase 4 is not "CP/CP' in disguise".
   at 0, 250 and 500 ms.  A delay-only A/B moved one attempt from zero energy to
   79.7, but not to CPt; the corrected Ja gate likewise has not yet produced a
   complete call.  Artifacts are under
-  `artifacts/dmodem-t3-live/20260811T072246Z-adaptive-sd/`.
+  `reference-data/artifacts/dmodem-t3-live/20260811T072246Z-adaptive-sd/`.
 
   A later live run showed that a fixed 85% threshold was the opposite failure
   on the negotiated 3200-low path: SmartLink's real Ja is only 63% against our
@@ -333,7 +333,7 @@ Phase 4 is not "CP/CP' in disguise".
   available.  Live, SmartLink moved from zero error energy to about 9, built a
   428-bit CPt, and this receiver entered `V90_CP`; it retrained before CP
   validation.  Evidence:
-  `artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`.
+  `reference-data/artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`.
 
   The reason for this branch was isolated before implementation.  A direct
   reset-state mapper→demapper check at N=13/16-state trellis carried 77,688

@@ -24,7 +24,7 @@ Validated on two independent Eicon Diva Server PRI calls that a USR Courier
 answered with CONNECT: 72-bit period at 98%, all three of Table 13's fixed
 fields exact, CRC valid, and the identical frame on both.
 
-    python3 tools/v90_jd_decode.py artifacts/eicon-digital-downstream/*.ulaw
+    python3 tools/v90_jd_decode.py reference-data/artifacts/eicon-digital-downstream/*.ulaw
 
 Raw G.711 mu-law codewords at 8 kHz, no header.
 """

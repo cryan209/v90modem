@@ -91,9 +91,9 @@ that bin.
 
 ```sh
 .venv/bin/python tools/g711_transition_compare.py \
-  artifacts/rf-maxpow-c1/live-rx.g711 \
-  artifacts/rf-maxpow-c1/live-tx.g711 \
-  --rtt-ms 187 --output artifacts/rf-maxpow-c1/transition-analysis
+  reference-data/artifacts/rf-maxpow-c1/live-rx.g711 \
+  reference-data/artifacts/rf-maxpow-c1/live-tx.g711 \
+  --rtt-ms 187 --output reference-data/artifacts/rf-maxpow-c1/transition-analysis
 ```
 
 The tool writes JSON measurements, frequency-by-frequency PSD CSV, and a

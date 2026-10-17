@@ -9,7 +9,7 @@ our transmitter and receiver both get the same way -- is invisible to that
 harness by construction: both ends agree, the test goes green, and the peer
 still fails.
 
-`artifacts/eicon-digital-downstream/` holds DS0 captures of the Eicon card's
+`reference-data/artifacts/eicon-digital-downstream/` holds DS0 captures of the Eicon card's
 own shipped V.90 firmware transmitting to a USR Courier that connected. This
 harness points our analogue-side receive path at them.
 

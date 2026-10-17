@@ -946,7 +946,7 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
              * codec reconstruction filter passes 4000 Hz.  Take it away and
              * what remains is 2/3, 4/3, 2/3 of the level across each run of
              * three -- measured on the Apple modem's Ri
-             * (artifacts/apple-pve-20261015/v90-lt6) as Ucodes 64, 82, 68,
+             * (reference-data/artifacts/apple-pve-20261015/v90-lt6) as Ucodes 64, 82, 68,
              * linear 527, 1151, 623 around a sent Ucode 78 (943), fixed by
              * slot for ten seconds.  Twelve symbols "at one level" therefore
              * never happen and this hunted for the whole of Phase 4 on every
@@ -1443,7 +1443,7 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
      * 2^39), so a CPt that only relabels drn to K <= 24 while keeping those
      * masks is self-inconsistent: the mask capacity still says K = 31.  The
      * Eicon card builds TRN2d at the masks' capacity, not at drn -- measured
-     * on artifacts/eicon-phase4-downstream/run79: its TRN2d modulus values
+     * on reference-data/artifacts/eicon-phase4-downstream/run79: its TRN2d modulus values
      * reach 2^31.6 (K = 31) against the drn=22/K=24 we declared, so no K=24
      * receiver can demap it, and the whole call stalls in TRN2d.  Reduce the
      * set to prod(Mi) ~= 2^K by dropping the lowest-amplitude points first --

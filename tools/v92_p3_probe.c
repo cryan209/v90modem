@@ -7,7 +7,7 @@
  * call that acquires Ru, enters TRN1u and then rejects it is indistinguishable
  * in the server log from a call on which no upstream arrived at all.  Feeding
  * VPCM_G711_TAP_DIR's live-rx.g711 back through the same code reproduces the
- * live outcome exactly (verified on artifacts/apple-v92-sip-r4, which fails
+ * live outcome exactly (verified on reference-data/artifacts/apple-v92-sip-r4, which fails
  * offline at the same sample and with the same reject as it did live) and
  * makes a hypothesis a one-command experiment instead of a call.
  *

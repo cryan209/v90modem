@@ -4,10 +4,10 @@
  *
  * Every other V.92 receive test is fed a byte-exact DS0, so ISI, a fractional
  * sampling phase and a clock offset are invisible to them.  This one feeds
- * artifacts/v92-loop-upstream/live-rx.g711: the digital side's own receive
+ * reference-data/artifacts/v92-loop-upstream/live-rx.g711: the digital side's own receive
  * tap from a live call in the real topology (Apple USB modem as the V.92
  * analogue modem -> 2-wire loop -> VG224 -> SIP G.711 -> sip_v90_modem), cut
- * from artifacts/apple-v92-sip-r4.  The analogue side transmitted Ru, Ru-bar,
+ * from reference-data/artifacts/apple-v92-sip-r4.  The analogue side transmitted Ru, Ru-bar,
  * 2040T of TRN1u (V.92 8.5.7, scrambler zero-initialised) and then repeated
  * Ja for 1.5 s; the Ja carries the DIL descriptor it built,
  * "measurement-120x66" (N=120, LSP=12, LTP=11).
@@ -38,7 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FIXTURE_DEFAULT   "artifacts/v92-loop-upstream/live-rx.g711"
+#define FIXTURE_DEFAULT   "reference-data/artifacts/v92-loop-upstream/live-rx.g711"
 #define FIXTURE_BYTES     20000
 /* The engine armed the live receiver at G.711 sample 81440; the fixture
  * starts at 80000. */

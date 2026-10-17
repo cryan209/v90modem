@@ -665,7 +665,7 @@ static bool valid_v34_bps(int bps)
 
 /* V.90 data-mode character bit order.  V.14 mandates data bits LSB-first
  * within each start/stop-framed character, ds_tx_load follows that, and
- * live A/B against SmartLink (2026-07-23, artifacts/v90-hardware/
+ * live A/B against SmartLink (2026-07-23, reference-data/artifacts/v90-hardware/
  * 20260723T055443Z-pty_soak) confirmed the spec order is CORRECT: with the
  * experimental msb setting the far DTE receives every byte bit-reversed
  * ('D' 0x44 arrives as 0x22) in otherwise perfect sequence, i.e. SmartLink
@@ -781,7 +781,7 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
            data channel, so its verdict is only worth anything if the data
            channel was carrying bits.  When the physical receiver has stopped
            decoding, it was not: measured live against the RasFinder
-           (artifacts/rf-v34-d2) the V.34 data mode came up at 31200 bit/s at
+           (reference-data/artifacts/rf-v34-d2) the V.34 data mode came up at 31200 bit/s at
            0.619 from the grid, where 2/3 is white, and detection reported an
            unsupported peer 4.5 s later and tore the call down -- in the middle
            of the 11.6 rate renegotiation that exists to fix exactly that.
@@ -828,7 +828,7 @@ static void data_stack_prepare(int bit_rate)
    connection.  On V.90 our transmitter enters data mode well before the
    upstream receiver has found B1 and delivers a bit, and against slmodemd the
    default 750 ms ran out before its ODP -- which starts 0.19 s after our first
-   upstream data bit -- had been decoded at all (artifacts/slm-v90-lapm3).  So
+   upstream data bit -- had been decoded at all (reference-data/artifacts/slm-v90-lapm3).  So
    T400 restarts on that first bit. */
 static v90_state_t *g_v90;   /* defined below; the digital role's V.90 state */
 static bool g_data_rx_first_bit_seen;
@@ -3805,7 +3805,7 @@ static bool     g_v90a_ladder_set = false;
  */
 /* The 1333 Hz line fraction a window must reach before Sd is acquired from
  * the line alone.  Measured over the Phase 3 era of
- * artifacts/apple-v90-sip-r7: the Sd burst reads 0.994-1.000 and the other
+ * reference-data/artifacts/apple-v90-sip-r7: the Sd burst reads 0.994-1.000 and the other
  * 335 windows read at most 0.0377, so 0.50 sits in an empty gap with 13x of
  * margin on the false-positive side.  ME_V90_ANALOGUE_SD_LINE_MIN moves it. */
 static double v90a_sd_line_min(void)
@@ -4017,8 +4017,8 @@ static bool me_v90a_load_dil(v90_dil_desc_t *desc)
    The stale default was not merely slow: 10.1.2.3.4's INFO1c rows are gated
    on it, so a 2400-baud profile declared 2743..3429 unusable, and the
    RasFinder answers that offer with nothing at all -- it holds Tone A until
-   the call dies (artifacts/rf-v34-a1, -b1).  At 3200 the same peer returns
-   INFO1a and the call runs Phase 3 and Phase 4 (artifacts/rf-v34-c3).
+   the call dies (reference-data/artifacts/rf-v34-a1, -b1).  At 3200 the same peer returns
+   INFO1a and the call runs Phase 3 and Phase 4 (reference-data/artifacts/rf-v34-c3).
    3200 rather than 3429 because 3429 is the one row the symbol-rate matrix
    has never trained.  ME_V34_BAUD overrides. */
 static int        g_v34_start_baud = 3200;
@@ -4255,7 +4255,7 @@ static bool           g_v90_dil_capture_start_logged = false;
  * starts its own Phase 2 timetable from the moment it detects CJ.  The peer's
  * INFO0a therefore begins BEFORE our V.34 receiver is created, and the
  * receiver's first bits land two bits into its sync (measured on the
- * RasFinder, artifacts/rasfinder-flow-192655Z: the engine's bit stream is the
+ * RasFinder, reference-data/artifacts/rasfinder-flow-192655Z: the engine's bit stream is the
  * frame from `110010...`, i.e. missing its fill and the leading `01` of
  * 01110010).  With INFO0a lost, far_capabilities stays zero and Phase 2 runs
  * on the Tone A reversal fallback.
@@ -5286,7 +5286,7 @@ static void v90_retire_phase2_cc_notch(void)
        re-armed it at V.8 and could never retire it again.  The call that
        reaches data mode is rarely the first, so the notch was live in the
        receive path for exactly the calls that mattered: measured on
-       artifacts/v90-cap-20260822T130820Z-9600, the one call that reached data
+       reference-data/artifacts/v90-cap-20260822T130820Z-9600, the one call that reached data
        mode never logged a retirement and ran its whole upstream at 0.139 from
        the lattice -- the same signature the plain-V.34 notch left. */
     if (!g_notch.active)
@@ -5639,7 +5639,7 @@ static int g_v90_upstream_e_run = 0;
  * In a renegotiation the peer cannot send CP until it has seen Rd, R̄d and
  * MP, so each side waited for the other.  Demodulated out of the transmit
  * taps of the very two calls the default was set from
- * (artifacts/goal-v90-reneg-112546Z and -b-113038Z, via
+ * (reference-data/artifacts/goal-v90-reneg-112546Z and -b-113038Z, via
  * tools/v90_rd_verify.py): 89120T and 24160T of unterminated Rd -- 11.1 s and
  * 3.0 s -- and not one barred symbol.  The peer was never given the signal
  * §9.6.1.2 requires it to detect, so those calls say nothing about whether it
@@ -5690,7 +5690,7 @@ static int me_v90_reneg_enabled(void)
  * backwards, because the receiver whose eye is shut is at OUR end and the
  * downstream is fine:
  *
- *   artifacts/lossretrain-ab-*, arms alternated, three 600 s calls each,
+ *   reference-data/artifacts/lossretrain-ab-*, arms alternated, three 600 s calls each,
  *   ME_V90_RETRAIN_ON_LOSS the only variable --
  *     cap 4:  1/0/4 retrains, carried 373/629/629 s,
  *             downstream 490775 lines with 491 missing, upstream 185229
@@ -5760,7 +5760,7 @@ static int me_loss_retrain_dwell_ms(void)
  * both recoveries it leads to -- 11.6's rate renegotiation and 11.5's retrain
  * -- rebuild Phase 4 from the same MP offer that produced the failure.  On a
  * line that simply will not carry the rate, that can only reproduce it: live
- * against the RasFinder (artifacts/rf-v34-d2) we asked for 31200 bit/s at
+ * against the RasFinder (reference-data/artifacts/rf-v34-d2) we asked for 31200 bit/s at
  * 3200 baud, measured 0.619 from the grid (2/3 is white), renegotiated, were
  * given 31200 again and went white again, twice, inside 4.5 s.
  *
@@ -5965,7 +5965,7 @@ static bool retrain_on_loss_due(int cap)
  * than inherited.  The V.90 §9.6 note -- "this rig's analogue modem answers
  * Rd with nothing" -- does NOT transfer: that is a different procedure with a
  * different signal, and asked the §11.6 way this same peer answers.  Two live
- * calls, 2026-08-26 (artifacts/reneg-live-r1, -r2): it responded to our S in
+ * calls, 2026-08-26 (reference-data/artifacts/reneg-live-r1, -r2): it responded to our S in
  * both.  In r1 the exchange completed, the rate moved 9600 -> 12000, B1
  * re-acquired at correlation 1.000, and 1203 numbered lines reached its DTE
  * with ZERO gaps across the renegotiation.  In r2 its MP never CRC-validated
@@ -6171,7 +6171,7 @@ static bool g_v90_reneg_cp_ack_seen = false;
 /* Blocks of digital silence handed to the receiver while the CP window was
  * armed.  A lost packet is concealed as silence, and 192 symbols of it takes
  * the constellation and does not give it back -- measured on
- * artifacts/reneg-ab-225015Z/reneg-r1, whose RTP trace carries exactly one
+ * reference-data/artifacts/reneg-ab-225015Z/reneg-r1, whose RTP trace carries exactly one
  * loss in 32868 packets, three packets, on the frame where §9.6.1.2.3's CP'
  * is due.  A recording cannot show this on its own: the tap is written before
  * the feed, so the count has to be taken here. */
@@ -6455,7 +6455,7 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
          * is what separates an attempt that completes from one that takes
          * §9.6.1's timeout.  Reported per window, and deliberately NOT acted
          * on: gating further attempts on it was tried and refuted live --
-         * artifacts/renegviab-ab-010014Z/ungated-r3 took the timeout with no
+         * reference-data/artifacts/renegviab-ab-010014Z/ungated-r3 took the timeout with no
          * CP', and its NEXT attempt completed. */
         if (g_v90_reneg_cp_rx_marked && frame->acknowledge)
             g_v90_reneg_cp_ack_seen = true;
@@ -7868,7 +7868,7 @@ static bool v90_ja_heuristic_allowed(const char *source)
      * this gate once they already have a Ja candidate to offer, so on a call
      * where none of them produces one the clock never starts and the bound
      * never applies.  Measured on two consecutive calls of the same binary
-     * against the Apple USB modem's analogue role (artifacts/apple-v90-sip-r6
+     * against the Apple USB modem's analogue role (reference-data/artifacts/apple-v90-sip-r6
      * and -r7): in r7 the clock started early enough that the fallback fired
      * at 11.1 s and the digital side transmitted Sd, S-bar-d and TRN1d -- the
      * +1919/0/+1919/-1919/0/-1919 of §8.4.4 is on its own transmit tap from
@@ -8474,7 +8474,7 @@ static void me_data_rx_first_bit(void)
 
 /* x2 runs without error control (CONNECT .../NONE), so a receiver that has
    stopped decoding hands noise straight to the DTE: 71 KB of it after the
-   Courier's upstream changed under us at 12.7 s (artifacts/x2-rates-20261010).
+   Courier's upstream changed under us at 12.7 s (reference-data/artifacts/x2-rates-20261010).
    Squelch on the receiver's own fast decision error against the operating
    point it settled at after B1, with hysteresis; on recovery the V.14
    assembler re-hunts for a start bit.  Losing those bits is the honest
@@ -12219,7 +12219,7 @@ void me_on_sip_disconnected_status(int sip_status)
  * (§8.6.4 signal R at U_INFO).  Leaked back through the SIP/FXS/ATA hybrid it
  * reads as a textbook far-end S.
  *
- * Measured on artifacts/v90-hardware/20260724T094048Z-courier-uscan-21210-
+ * Measured on reference-data/artifacts/v90-hardware/20260724T094048Z-courier-uscan-21210-
  * firegate, over the stuck-Ri window t=14..16 s: RX was 1333.5 Hz at -29.4 dB
  * relative to our TX, cross-correlating 0.868 with our own TX at 2 samples
  * lag, while the Courier transmitted nothing at all.  Both "far-end S" events
@@ -12255,7 +12255,7 @@ enum {
  * throughout DIL, so this is a state we are guaranteed to sit in on every call.
  *
  * Measured over the Cisco FXS path
- * (artifacts/v90-hardware/20260725T015104Z-courier-echogate-novad): far-end RX
+ * (reference-data/artifacts/v90-hardware/20260725T015104Z-courier-echogate-novad): far-end RX
  * is RMS **8** through both DIL cycles while the Courier is silent, versus
  * **625–634** during TRN1d/Jd when it is genuinely transmitting — ~38 dB of
  * separation.  On the AudioCodes path a real far-end signal ran ~3671.  The
@@ -12651,7 +12651,7 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * frames (4 s) in the middle of Phase 3: the RasFinder's Ja reached the
  * receiver in 80 ms pieces out of order and never CRC-validated, and the
  * peer retrained on 9.3.2.4's 1500 ms.  With the scanner off the same call
- * completes Phase 3 (artifacts/rf-tower-4 vs rf-tower-nop3-1).  On this Mac
+ * completes Phase 3 (reference-data/artifacts/rf-tower-4 vs rf-tower-nop3-1).  On this Mac
  * the old form still cost ~0.8x real time.  So the default now scans only
  * the INFO1a-selected rate on the carrier the receiver is actually on
  * (v34_rx_watch_phase3_carrier() has already retuned it to the peer's), every
@@ -12671,7 +12671,7 @@ static bool g_v90_p3_ja_fired = false;
  * that thread our RTP stopped and then burst.  Against the Eicon card through
  * the Cisco the burst made its adaptive playout buffer insert 30 ms during
  * Phase 3 and later delete 30 ms out of our DIL (card Audio1 vs our TX tap,
- * artifacts/eicon-v90a-trn1d-ab-native{3,4}-r1-20261009).  A DS0 the far D/A
+ * reference-data/artifacts/eicon-v90a-trn1d-ab-native{3,4}-r1-20261009).  A DS0 the far D/A
  * sees must be a steady 8 kHz stream, so the media thread now only copies the
  * window and hands it over; the next tick acts on the answer.
  * ME_V90_P3_JA_SCAN_SYNC=1 keeps the old inline scan, which v90_engine_replay
@@ -14708,7 +14708,7 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
      * every INFO1d we send has that row at zero), and our Phase 4/data upstream
      * receivers only exist for 3000/3200.  The Intel/Conexant V.92 modem selects
      * 3429 on some attempts anyway; following it put the whole of Phase 4 on a
-     * baud rate nothing here can decode (artifacts/serial-x0-2052: repeated CPt
+     * baud rate nothing here can decode (reference-data/artifacts/serial-x0-2052: repeated CPt
      * at 3429, no frame ever accepted, the modem retrained 2.8 s into Ri).  It
      * picks 3200 on the retrain that follows. */
     if (received.upstream_symbol_rate_code == 5) {
@@ -15266,7 +15266,7 @@ static void prepare_v90_analogue_phase3_locked(void)
     /*
      * This role is fed by a two-wire analogue line, not by a DS0, so §8.4.4's
      * slots have to be recognised by level.  Measured on the equalised stream
-     * of artifacts/hsf-v90/call-062754Z: the zero slots sit at 9.6% of W over
+     * of reference-data/artifacts/hsf-v90/call-062754Z: the zero slots sit at 9.6% of W over
      * 20 clean repetitions with a perfect sign structure, and their Ucode
      * median is 64 -- so "ucode == 0" rejects a textbook Sd every time.  A
      * quarter of W separates the two populations with a wide margin either
@@ -16244,7 +16244,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                  * once and startup Phase 4 contains no S at all -- but here
                  * it leaves the receiver hunting CP through the peer's S, so
                  * the S-to-S-bar transition that re-anchors the frame goes by
-                 * unnoticed.  Measured (artifacts/reneg-mp): the peer's S is
+                 * unnoticed.  Measured (reference-data/artifacts/reneg-mp): the peer's S is
                  * on the wire 258 ms after our R-bar-d and 40 ms long -- 128T
                  * at 3200 baud, §9.6.2.1.1 to the symbol -- with 98.7% of the
                  * block energy in §10.1.3.7's three bins, and we logged no S
@@ -16979,7 +16979,7 @@ static void me_v90a_calibrate_locked(void)
                  * a decision-directed loop here instead left the modulus never
                  * driven to TRN1d's level at all.
                  *
-                 * Measured on artifacts/hsf-v90/call-062754Z at the old
+                 * Measured on reference-data/artifacts/hsf-v90/call-062754Z at the old
                  * 256-symbol confirmation point: DD 53.6% ones, frozen 61.2%,
                  * against the 90% §8.4.5 wants -- neither converges, because
                  * the Sd fit that precedes them is constrained only at Sd's
@@ -17077,7 +17077,7 @@ static void me_v90a_calibrate_locked(void)
  * V90A_LS_PASSES passes of V90A_LS_SYMBOLS decisions train the forward and
  * feedback taps together by least squares (v90a_fse_train_ls() says why not
  * by gradient, and why in passes) -- done by TRN1d 13000T of the ~20000T
- * sent.  Measured offline on artifacts/apple-pve-20261015/v90-lt6: a 32+16
+ * sent.  Measured offline on reference-data/artifacts/apple-pve-20261015/v90-lt6: a 32+16
  * equaliser fitted on TRN1d alone reaches 49.7 dB there and holds 40 dB on
  * Phase 4's MP.  The taps are then held for the rest of the attempt.
  */
@@ -17097,7 +17097,7 @@ static void me_v90a_trn1d_handover_locked(void)
          * And then hold the taps.  The line is static within a call and the
          * solve is at the TRN1d optimum (49-51 dB measured); decision-directed
          * tracking afterwards only adds its own misadjustment.  Measured on
-         * artifacts/apple-pve-20261015/v90-dfe3 replayed with its live CP:
+         * reference-data/artifacts/apple-pve-20261015/v90-dfe3 replayed with its live CP:
          * tracking at MU_TRACK left Ri at 36.9 dB and no attempt demapped
          * TRN2d; holding left Ri at 43.7 dB and attempt 2 demapped TRN2d into
          * MP.  ME_V90A_TRACK_MU=<step> tracks instead, for experiments.
@@ -17281,7 +17281,7 @@ static bool me_v90a_pr4_locked(double decision)
  * On a periodic sequence the feedback taps can PREDICT the next symbol from
  * the past decisions (d[k-6] = d[k], d[k-3] = -d[k]), and decision-directed
  * adaptation duly learns that rather than the channel: measured on
- * artifacts/apple-pve-20261015/v90-dfe2, Ri was received at 45 dB and the
+ * reference-data/artifacts/apple-pve-20261015/v90-dfe2, Ri was received at 45 dB and the
  * random TRN2d straight after it at 26 dB, three times the error from its
  * first symbol, where a fit on TRN2d itself reaches 41.  The stretch between
  * the end of the DIL measurement and Ri is worse: the far end is still
@@ -17660,7 +17660,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                  * it fits.  So how much Sd is left for the codeword receiver
                  * depends entirely on where the slide happens to stop, and
                  * measured across live calls it is anything from 33
-                 * repetitions down to NONE: artifacts/hsf-v90/call-085143Z and
+                 * repetitions down to NONE: reference-data/artifacts/hsf-v90/call-085143Z and
                  * call-085428Z both fit at 0.917 and 0.995 and then contain no
                  * 6-periodic structure anywhere in 46000 symbols, because the
                  * fit had eaten all of it.  Every stage after this -- the

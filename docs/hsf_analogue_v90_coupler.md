@@ -11,7 +11,7 @@ G.711 one, and most of what follows is a consequence of that single difference.
     ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 \
         --password 6001 --pty-link /tmp/v90server --verbose
 
-    MODE=v22 SECS=90 SETTLE=40 RUN=artifacts/hsf-v90/callN \
+    MODE=v22 SECS=90 SETTLE=40 RUN=reference-data/artifacts/hsf-v90/callN \
         ./tools/hsf_v34_call.sh
 
 `tools/hsf_v34_call.sh` places one call and grades DTE traffic across both
@@ -36,7 +36,7 @@ ringing, which reads exactly like a rig that has stopped working.
   moves, and the recording carries the 6-symbol Sd signature -- 45-50% of the
   band energy at 1333 Hz, which is 8000/6).  The analogue-role receiver never
   finds it.  That receiver is a *codeword* state machine validated only
-  against `artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, so
+  against `reference-data/artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, so
   it slices codewords it expects to arrive as themselves and never normalises
   the gain, sampling phase and band-limiting a line imposes.  **That is the
   gap, and it is ours.**  An earlier wording here -- "over a line with unknown
@@ -200,7 +200,7 @@ amplitudes are what make it one.  `tools/hsf_probe_response.py` finds it
 without needing the call's log or its clock (nothing else on this line has
 substantial energy at both 150 Hz and 3750 Hz) and reports magnitude and phase.
 
-Measured on `artifacts/hsf-v90/call-c1`, and **identical to 0.1 dB in all nine
+Measured on `reference-data/artifacts/hsf-v90/call-c1`, and **identical to 0.1 dB in all nine
 recorded calls that got far enough to carry a probe**:
 
 | Hz | dB | phase | Hz | dB | phase |
@@ -506,7 +506,7 @@ measures 42345 +/- 200 across every capture that contains it.
 
 Run against off-hook dial tone as planned (`--call-seq --feed --stream 8
 --rx-out`, no `--dial`; the ATA's own generator, so no call is needed).
-`artifacts/hsf-gainsweep-000922Z/`.  Amplitude is read from the **slope at the
+`reference-data/artifacts/hsf-gainsweep-000922Z/`.  Amplitude is read from the **slope at the
 zero crossing** -- `A = median|v[i+1]-v[i]| / (2*pi*399/16000)` -- which is
 unaffected by clipping, where the duty-ratio estimate goes to pieces above 85%
 clipped.  The two agree at the baseline (42422 vs 42406) and the baseline
@@ -653,7 +653,7 @@ Dialling out works and always did.  Extension **9099 is an echo test**, and
 one call to it answers the level question completely -- with a known transmit
 amplitude and a return path, no assumption about anybody's nominal level is
 needed.  `--dial 9099 --echo-tone 1000 --echo-on-ms 60 --tx-out`, transmit
-amplitude 8000 (`artifacts/hsf-echo9099-010721Z`).  Four bursts arrive per
+amplitude 8000 (`reference-data/artifacts/hsf-echo9099-010721Z`).  Four bursts arrive per
 second and `--tx-out` pins which is which:
 
 | burst | delay after our own | peak |
@@ -705,7 +705,7 @@ server's `RMS 4.8, peak 16` was a faithful recording of nothing being sent.
 
 Run the same call with a tone instead (`--dial 6001 --echo-tone 1000
 --echo-on-ms 60`, transmit amplitude 8000, server restarted with
-`VPCM_G711_TAP_DIR`, `artifacts/hsf-6001-audio-011539Z`):
+`VPCM_G711_TAP_DIR`, `reference-data/artifacts/hsf-6001-audio-011539Z`):
 
 * **HSF to server**: our 1 kHz bursts arrive in `live-rx.g711` at **peak 5884-6140**,
   `dom=1000.0Hz`, once per second, for the whole call.
@@ -737,7 +737,7 @@ the line off-hook.
 ### A real coupler call to 6001, with the level question settled
 
 `RUN=... SECS=90 SETTLE=20 tools/hsf_v34_call.sh`, server restarted with
-`VPCM_G711_TAP_DIR` so both taps are kept (`artifacts/hsf-v90/call-012705Z`).
+`VPCM_G711_TAP_DIR` so both taps are kept (`reference-data/artifacts/hsf-v90/call-012705Z`).
 
 **The clipping is not in the call.**  Over the whole 90 s the only clipped
 samples are the ringback bursts at t=3 and t=6 (464 and 465 per 4000) and the
@@ -767,7 +767,7 @@ the call are on disk, so it can be worked offline.
 
 ## The "empty modulation list" is the CI, and the real fault is a CM/JM race
 
-Worked entirely off the two G.711 taps of `artifacts/hsf-v90/call-012705Z`, with
+Worked entirely off the two G.711 taps of `reference-data/artifacts/hsf-v90/call-012705Z`, with
 a 60-line V.21 demodulator and 10-bit framer that prints **every** octet
 sequence a receiver could have framed, so the wire is read independently of
 either modem's own state.
@@ -1197,7 +1197,7 @@ Against 0 reps before `072303ad`, on every call ever recorded on this path.
 falls back to hunting rather than reaching S̄d — the §9.3.2.4 transition is the
 next thing, and it is a different stage rather than a repeat of the same fault.
 
-Everything below was found by replaying `artifacts/hsf-v90/call-062754Z`
+Everything below was found by replaying `reference-data/artifacts/hsf-v90/call-062754Z`
 (`--rx-replay`, `--replay-from 18.2`), which reproduces a live call to three
 decimals and costs no rig time.  Four defects, each hiding the next; the
 commit message on `072303ad` carries the detail.  The two worth repeating:
@@ -1369,7 +1369,7 @@ itself reports as 96.5%, so that path does not reproduce the receiver's
 post-requantisation codeword sign, and every statistic taken from it is
 meaningless.  The receiver's own numbers are the only trustworthy ones here
 (the same trap as the offline descrambler earlier in this file, which was only
-caught because `artifacts/eicon-digital-downstream` was there to validate it).
+caught because `reference-data/artifacts/eicon-digital-downstream` was there to validate it).
 
 **The better shape, unimplemented: let the CRC find the boundary.**  Table 13's
 structure and CRC are ground truth and `try_jd_frame()` already exists.  Rather

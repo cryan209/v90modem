@@ -145,13 +145,13 @@ measured it.
 **Every live plain-V.34 call had `ME_V34_BPS=9600` set.**  The rate this modem
 asks for in MP is `min(configured start profile, L1/L2 probe projection)`, and
 the profile was the binding term, so 9600 is what we asked for and 9600 is
-what the peer sent.  Its own log says so: in `artifacts/v34-21600-20260822T-c65`
+what the peer sent.  Its own log says so: in `reference-data/artifacts/v34-21600-20260822T-c65`
 the peer measured **its** receive direction at `equerr 1593`, chose data rate 6
 (14400) for what it would accept from us, and then transmitted 9600 -- our
 number, not its own.  The 16.8 dB figure was a correct measurement of a
 channel nobody had asked to work harder.
 
-Asking for more, at 3000 baud, three calls kept under `artifacts/v34-rate-*`
+Asking for more, at 3000 baud, three calls kept under `reference-data/artifacts/v34-rate-*`
 and driven by the new `tools/soak/v34_rate_call.sh`:
 
 | asked | peer transmitted | distance to grid, our receive | outcome |
@@ -225,7 +225,7 @@ equalizer -- non-causal, as long as you like, solved exactly rather than
 adapted -- and reports the residual.  That is an upper bound on every linear
 receiver, ours included.
 
-On the 14400 call (`artifacts/v34-rate-20260822T081433Z-b3000-14400`):
+On the 14400 call (`reference-data/artifacts/v34-rate-20260822T081433Z-b3000-14400`):
 
 | measured on | best possible linear receiver |
 |---|---|
@@ -276,7 +276,7 @@ works -- and would fit inside 19.5 dB with room to spare.  It does not train.
 Live at 3429 the peer sets up its modulator and demodulator at 3429/1959,
 reaches `XMITMP`, sits there and then `going into retrain in Handshake`: our
 Phase 4 never completes the MP exchange, at 16800
-(`artifacts/v34-rate-20260822T083436Z-b3429-16800`) and at 9600
+(`reference-data/artifacts/v34-rate-20260822T083436Z-b3429-16800`) and at 9600
 (`...-b3429-9600`) alike, so there is not even an SNR reading for that symbol
 rate.  3429 is the same row that is weakest on the loopback -- 3429/19200 does
 not train there either, and 3429 has been the one row outside `make test`'s
@@ -531,7 +531,7 @@ work has us originating, where the call-modem canceller already existed.
 Plain V.34 calls to the RasFinder hunt group (ext **3999**; 3099 is not it --
 whatever answers there sends T.30 CNG) reach V.42 LAPM with V.42bis at
 21600/24000 bit/s, ~32 dB, and then lose the data mode ~21 s in, every time.
-Recordings `artifacts/rf-bbs-2`, `-4`, `-5` (local to the machine that made
+Recordings `reference-data/artifacts/rf-bbs-2`, `-4`, `-5` (local to the machine that made
 them); `v90_engine_replay <rx> ulaw --fast --dial --split` with `ME_MODE=v34`
 reproduces each call window for window.  Two separate causes.
 
@@ -859,7 +859,7 @@ operation and does not establish physical modem interoperability.
 
 ## The first failed renegotiation is a callback stall, not MP decoding (2026-10-17)
 
-Re-replaying `artifacts/rf-bbs-7` (`ME_MODE=v34 v90_engine_replay ... --fast
+Re-replaying `reference-data/artifacts/rf-bbs-7` (`ME_MODE=v34 v90_engine_replay ... --fast
 --dial --split`, current tree) does **not** reproduce the "scattered bit errors"
 in the first §11.6 MP.  `V34_MP_RX_DUMP` for that window (9488 symbols, 6 deg
 rms from the 4-point grid) decodes by `tools/v34_mp_offline.py` as 96 of 97

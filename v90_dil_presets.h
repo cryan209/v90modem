@@ -44,7 +44,7 @@ typedef enum {
 
     /*
      * Modelled on what the Eicon card transmitted to a Courier that connected
-     * (artifacts/eicon-digital-downstream/): 66T segments, REFc = 0, and a
+     * (reference-data/artifacts/eicon-digital-downstream/): 66T segments, REFc = 0, and a
      * descending ladder interleaved with low-Ucode probes.  Shape observed,
      * values reconstructed -- this is not a decode of the Courier's actual
      * descriptor.

@@ -287,7 +287,7 @@ That interpretation remains open. A longer offline equalizer yields 231 valid
 frames and zero verified user bytes. These are candidate bits, not payload
 recovery. The experimental receiver is kept out of the production audio path;
 no DSP constants or live behavior changed. Measurements, scripts, raw records
-and candidate bits are in `artifacts/gough-payload-recovery-20261005/report.md`.
+and candidate bits are in `reference-data/artifacts/gough-payload-recovery-20261005/report.md`.
 
 
 The reusable offline record tool is now available:

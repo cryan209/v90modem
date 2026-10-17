@@ -63,7 +63,7 @@ def main() -> int:
     binary = ROOT / "pcm_ber_test"
     if not binary.is_file():
         p.error("build first: make pcm_ber_test")
-    out = args.output or ROOT / "artifacts/pcm" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    out = args.output or ROOT / "reference-data/artifacts/pcm" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out.mkdir(parents=True, exist_ok=False)
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("ME_", "V34_", "V90_", "V92_", "VPCM_"))}

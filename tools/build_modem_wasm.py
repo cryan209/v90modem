@@ -13,7 +13,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / 'web/modem-lab'
-BUILD = ROOT / 'artifacts/wasm-build'
+BUILD = ROOT / 'reference-data/artifacts/wasm-build'
 EMCC = os.environ.get('EMCC', shutil.which('emcc') or '/private/tmp/v90modem-emsdk/upstream/emscripten/emcc')
 
 def main():

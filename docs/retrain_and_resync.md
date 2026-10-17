@@ -58,8 +58,8 @@ set from, with `tools/v90_rd_verify.py`:
 
 | capture | startup Ri | renegotiation Rd |
 | --- | --- | --- |
-| `artifacts/goal-v90-reneg-112546Z` | 3804T + **24T** barred | **89120T (11.1 s), no barred symbol** |
-| `artifacts/goal-v90-reneg-b-113038Z` | 3822T + **24T** barred | **24160T (3.0 s), no barred symbol** |
+| `reference-data/artifacts/goal-v90-reneg-112546Z` | 3804T + **24T** barred | **89120T (11.1 s), no barred symbol** |
+| `reference-data/artifacts/goal-v90-reneg-b-113038Z` | 3822T + **24T** barred | **24160T (3.0 s), no barred symbol** |
 
 The startup Ri in the same files terminates correctly, which is what makes
 the renegotiation rows unambiguous.  The peer was never given the signal
@@ -264,7 +264,7 @@ same timeout entered INFO0.
 recording, which is what makes the chain visible end to end:
 
 ```
-./v90_engine_replay artifacts/goal-matrix-115515Z/rate28800-r1/live-rx.g711 ulaw --fast
+./v90_engine_replay reference-data/artifacts/goal-matrix-115515Z/rate28800-r1/live-rx.g711 ulaw --fast
 ```
 
 produces, in order: seven acquisition windows instead of one, `B1 giving up
@@ -455,7 +455,7 @@ modem.
 
 Two calls, plain V.34 at 3000 baud / 9600 bps with V.42 LAPM, our side
 initiating a renegotiation 20 s into data mode via `ME_V34_RENEG_AFTER_MS`.
-Kept as `artifacts/reneg-live-r1` and `-r2`.
+Kept as `reference-data/artifacts/reneg-live-r1` and `-r2`.
 
 **The peer implements §11.6.1.2.**  It detected our S and responded with its
 own MP in both calls.  This is worth stating plainly because the assumption
@@ -525,7 +525,7 @@ answers.  The analogue role has had the same knob for the same reason.
 Provoked with `ME_V34_RETRAIN_AFTER_MS`, a test hook that initiates a §11.5
 retrain n ms into data mode (the engine's own trigger is a receiver that has
 stopped decoding, which a healthy call never produces).  Kept as
-`artifacts/retrain-live-b2`, `-c1`, `-c2`.
+`reference-data/artifacts/retrain-live-b2`, `-c1`, `-c2`.
 
 **The peer recognises our retrain, and says so in its own log:**
 
@@ -639,7 +639,7 @@ of its own that this tree has hit before and cannot fix from this end.**
 ### Live retest: peer-initiated V.34 now returns to data mode
 
 The first peer-response result in
-`artifacts/v34-peer-retrain-response-20260825T224623Z` was invalid.  The
+`reference-data/artifacts/v34-peer-retrain-response-20260825T224623Z` was invalid.  The
 `ME_TX_DISRUPT_*` hook that removed the data carrier kept running for its full
 1.5 s even after Tone B moved the engine from DATA to TRAINING.  Internal TX
 logs showed Tone A and its reversal, but the hook zeroed them afterwards in
@@ -657,7 +657,7 @@ is active, with no transcode on the normal path, and both V.90 DATA handovers
 set the epoch.
 
 The corrected plain-V.34 run is
-`artifacts/v34-peer-retrain-data-20260825T225827Z`:
+`reference-data/artifacts/v34-peer-retrain-data-20260825T225827Z`:
 
 * The call reached V.42 LAPM at 3000 baud / 9600 bit/s.
 * Twenty seconds into DATA, 1.5 s of deliberate carrier loss made the peer go
@@ -678,7 +678,7 @@ to DATA, not merely a waveform check.
 
 ### V.90 live status
 
-`artifacts/v90-peer-retrain-data-20260825T230105Z` establishes that V.90 can
+`reference-data/artifacts/v90-peer-retrain-data-20260825T230105Z` establishes that V.90 can
 also get through retrains to data on this peer: two peer-initiated Phase-3/4
 retrains ran through `V90_RETRAIN_SILENCE` and Phase 2, the second attempt then
 completed Phases 3/4 and entered DATA at 19200 bit/s upstream / 50666 bit/s
@@ -702,14 +702,14 @@ call". Over the 105 s soak schedule that was untestable. Over 600 s it is
 and the downstream is fine.
 
 The six-call long soak of the shipping defaults
-(`artifacts/v90-longsoak-233217Z`, `docs/v90_phase3_s_and_rbs_false_positive.md`
+(`reference-data/artifacts/v90-longsoak-233217Z`, `docs/v90_phase3_s_and_rbs_false_positive.md`
 §39) connected cleanly every time — first Phase 4 attempt 6/6 — but only one
 call *held*, and in four of the five that did not, the first disruption after
 data mode was our own detector firing on the upstream while the downstream was
 delivering perfectly.
 
 `tools/soak/v90_loss_retrain_ab.sh`, arms alternated, three 600 s calls each,
-`ME_V90_RETRAIN_ON_LOSS` the only variable (`artifacts/lossretrain-ab-*`):
+`ME_V90_RETRAIN_ON_LOSS` the only variable (`reference-data/artifacts/lossretrain-ab-*`):
 
 | | retrains after data | carried | downstream lines / missing | upstream lines |
 |---|---|---|---|---|
@@ -754,7 +754,7 @@ each other, and the fresh equalizer was the second of them.
 problem turned out to have.**
 
 ```bash
-ME_V90_RENEG_AFTER_MS=20000 ME_V90_RENEG=1 ./v90_engine_replay artifacts/reneg-eq/reneg-r1/live-rx.g711 ulaw
+ME_V90_RENEG_AFTER_MS=20000 ME_V90_RENEG=1 ./v90_engine_replay reference-data/artifacts/reneg-eq/reneg-r1/live-rx.g711 ulaw
 ```
 
 runs V.8, Phases 2–4, data mode and the renegotiation off the recording and
@@ -852,7 +852,7 @@ and decode them outside the receiver before changing anything inside it.
 
 Three calls against the rig with `tools/soak/v90_reneg_probe.sh`, our side
 opening a renegotiation 20 s into data mode
-(`artifacts/reneg-cpstream-222512Z`). **All three printed `Rate renegotiation
+(`reference-data/artifacts/reneg-cpstream-222512Z`). **All three printed `Rate renegotiation
 1 complete; data mode resumed after B1d`**, against a standing record of 0 for
 4 before this change, every one of which ended in §9.6.1's timeout.
 
@@ -879,7 +879,7 @@ ways.
 receives nothing for about 30 s in the middle of every one of these calls,
 identically to the byte, which looks exactly like a renegotiation cost. It is
 not: two control calls with no renegotiation at all
-(`artifacts/reneg-control-223605Z`) show the **same 30 s freeze at the same
+(`reference-data/artifacts/reneg-control-223605Z`) show the **same 30 s freeze at the same
 byte count** (174591), and the renegotiation arm actually froze slightly later
 than the control. It is a pre-existing property of the rig's DTE path. A
 deterministic outage sitting near a change is not evidence about the change.
@@ -899,7 +899,7 @@ The §9.6 fix above makes initiating a renegotiation a real option again, so the
 experiment §39 used for the retrain on the *same* trigger was run for it:
 `tools/soak/v90_reneg_ab.sh`, three repeats a side, **600 s calls, arms
 alternated**, one binary, `ME_V90_RENEG` the only variable, no other overrides
-(`artifacts/reneg-ab-225015Z`). Note what the control arm is: with
+(`reference-data/artifacts/reneg-ab-225015Z`). Note what the control arm is: with
 `ME_V90_RETRAIN_ON_LOSS` at 0 since §39, the control does *nothing* on upstream
 loss, so this is "cheap resync vs leave it alone", not "resync vs retrain".
 
@@ -979,7 +979,7 @@ attempts across three calls into 3, halving the Rd/R̄d/TRN2d/MP the downstream
 spends on attempts already known to be futile.
 `ME_V90_RENEG_VIABILITY=0` restores retries.
 
-Verified both ways offline on `artifacts/reneg-eq/reneg-r1`, three runs each:
+Verified both ways offline on `reference-data/artifacts/reneg-eq/reneg-r1`, three runs each:
 the completing path reports `valid=6 cp_ack=1` and the gate stays silent, and
 the forced-failure path (`ME_V90_RENEG_CP_STREAM=0`, `valid=0` in 3 of 3)
 reports `cp_ack=0` and the gate fires. The CP-window report now carries
@@ -1009,7 +1009,7 @@ boundaries differ. Score an A/B inside one harness, or state the units.
 The gate above was tested with the experiment it deserved —
 `tools/soak/v90_reneg_viability_ab.sh`, `ME_V90_RENEG_VIABILITY` the only
 variable, **both** arms with `ME_V90_RENEG=1`, 600 s calls, arms alternated
-(`artifacts/renegviab-ab-010014Z`) — and **the first informative call refuted
+(`reference-data/artifacts/renegviab-ab-010014Z`) — and **the first informative call refuted
 it**:
 
 ```
@@ -1064,7 +1064,7 @@ modulation — so CMA is legitimate across the whole of it. Changed;
 
 **It changes nothing, and this is the first time this question has had a
 harness that could say so.** Replaying a live *loss-triggered* call
-(`artifacts/reneg-ab-225015Z/reneg-r1`) reaches the same renegotiation and the
+(`reference-data/artifacts/reneg-ab-225015Z/reneg-r1`) reaches the same renegotiation and the
 same window offline — `valid=4 cp_ack=0` against its own live `valid=4
 cp_ack=0` — so the failing case is now reproducible on the desk. Three runs
 each way:
@@ -1191,7 +1191,7 @@ the first CP frame ~1.9 s after it. §9.6.1 permits the earlier exit —
 renegotiation according to 9.5.1.1" — and its five seconds is a ceiling on how
 long to wait, not a floor.
 
-Measured on the offline reproduction (`artifacts/reneg-ab-225015Z/reneg-r1`,
+Measured on the offline reproduction (`reference-data/artifacts/reneg-ab-225015Z/reneg-r1`,
 which carries three attempts), one binary, before and after:
 
 | attempt | peer answer | before | after |
@@ -1225,7 +1225,7 @@ collapsed. **At the seam that explanation does not hold: the line is steady
 right through the window, and the loss is in our receiver.**
 
 Method: `V90_RENEG_BIT_DUMP` on the offline reproduction
-(`ME_V90_RENEG=1 ./v90_engine_replay artifacts/reneg-ab-225015Z/reneg-r1/live-rx.g711 ulaw --fast`),
+(`ME_V90_RENEG=1 ./v90_engine_replay reference-data/artifacts/reneg-ab-225015Z/reneg-r1/live-rx.g711 ulaw --fast`),
 then read the stream *outside* the receiver — the same method that found the
 framer defect earlier in this document. The window's first 42624 bits contain,
 in order:

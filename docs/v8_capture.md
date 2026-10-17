@@ -3,7 +3,7 @@
 ## V.8 extracted and running
 
 Extracted the V.8 bootpage (overlay `0x025f V8.F34`, page 6) to
-`artifacts/eicon-dsp/v8/`. It is a full overlay that replaces DIAL (953 PM /
+`reference-data/artifacts/eicon-dsp/v8/`. It is a full overlay that replaces DIAL (953 PM /
 613 DM conflicts with DIAL -- it overwrites the DIAL code region, as expected
 for a page swap). Same structure as DIAL:
 - PM `0x08f0` entry (flag-conditional dispatch)

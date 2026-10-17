@@ -370,7 +370,7 @@ the playout moved by about (callback - 13 ms), so callbacks need to stay well
 under one packet on the slowest host that runs calls.  Plain V.34 fallbacks on
 the same rig reached LAPM and the login prompt too (16800).
 
-Two calls from this Mac over the VPN (vmhost down, `artifacts/rf-mac-20261016/`)
+Two calls from this Mac over the VPN (vmhost down, `reference-data/artifacts/rf-mac-20261016/`)
 could not test it.  The far end reports 0.3-0.4% of OUR packets lost, in
 80 ms bursts, and nothing lost in our receive direction.  Call 1 lost V.8:
 ANSam, then the pure 2250 Hz tone at ~8 s, then V.32 AC (600 + 3000 Hz), so
@@ -412,7 +412,7 @@ data's own measured power, and start the Viterbi decoder with no state
 preference.  B1 is only needed to train; the scrambler self-synchronises and
 the quadrant is differential.  Only tried after the template search fails, so
 peers that do reset (slmodemd) are unaffected; `ME_V90_T3_NO_BLIND=1` turns it
-off.  `tests/fast.list` replays `artifacts/rf-mt5634-v90-b1` (the cap9600
+off.  `tests/fast.list` replays `reference-data/artifacts/rf-mt5634-v90-b1` (the cap9600
 call) and requires B1 to decode as 100% ones.
 
 Replays: 6311-1/6312-1/6313-1 at 31200 decode B1 at 91-99% ones; cap9600
@@ -444,7 +444,7 @@ around the event on a 9600 call (which survives it: 0.008 -> 0.07).
 
 The RasFinder is back on three AudioCodes MP-114 lines, ext 6311/6312/6313
 (calls placed from vmhost CT 117, wired; tower was down; recipe in
-`artifacts/rf-pve-20261015/run.sh`). On HEAD (c2262d89), one call per line:
+`reference-data/artifacts/rf-pve-20261015/run.sh`). On HEAD (c2262d89), one call per line:
 V.8, Phase 2, 3 and 4 complete on the first attempt every time, and the
 peer sends data-mode CP and E. **V.90 data mode at 45333 / 45333 / 49333
 downstream, 31200 upstream** is the first V.90 data mode against this peer.
@@ -459,7 +459,7 @@ back to plain V.34 21600, where the symbol-domain B1 finder locks (correlation
 hangs up at about 90 s, before LAPM comes up.
 
 Ruled out (each on the offline replay, which reproduces the failure in
-3.5 s: `v90_engine_replay artifacts/rf-pve-20261015/v90-6313-1/live-rx.g711
+3.5 s: `v90_engine_replay reference-data/artifacts/rf-pve-20261015/v90-6313-1/live-rx.g711
 ulaw --fast --dial`):
 
 - **Carrier.** The CPt batch log's `carrier=high` only means
@@ -520,7 +520,7 @@ reliably recovered a data-mode CP from this peer.
 
 The previous claim that an independent demodulator reads the failing region
 at 5.75 degrees was measured at RX-file 28–30.4 seconds in
-`artifacts/rf-maxpow-c1/live-rx.g711`. That is **after** this call's Phase 4
+`reference-data/artifacts/rf-maxpow-c1/live-rx.g711`. That is **after** this call's Phase 4
 retrain. It cannot exonerate the wire or condemn the live equalizer.
 
 `tools/v90_phase4_capture_check.py` now locates Table-14 frames using the CRC,
@@ -547,8 +547,8 @@ Reproduction (Python with NumPy, PCMU taps):
 
 ```sh
 python3 tools/v90_phase4_capture_check.py \
-  artifacts/rf-maxpow-c1/live-rx.g711 21 25.4 \
-  --tx artifacts/rf-maxpow-c1/live-tx.g711 --echo-window 23.5 25.2
+  reference-data/artifacts/rf-maxpow-c1/live-rx.g711 21 25.4 \
+  --tx reference-data/artifacts/rf-maxpow-c1/live-tx.g711 --echo-window 23.5 25.2
 ```
 
 ## Echo is measurable, but cancellation is not yet a connection fix
@@ -573,7 +573,7 @@ removed 0.284% on train and **minus 0.306%** on held-out data.
 
 ## Live experiments in this session
 
-Captures are under `artifacts/rf-cp-investigation/` and remain local evidence,
+Captures are under `reference-data/artifacts/rf-cp-investigation/` and remain local evidence,
 not cloneable test fixtures. Calls were spaced at least 60 seconds apart.
 
 * `live-baseline`: the first Phase 3 attempt failed; the retrain reached DIL
@@ -659,7 +659,7 @@ within half a second of it.
 
 ## Our Phase 4 transmit is conformant on the failing call itself
 
-`v90_analogue_rx_test --phase4-trace artifacts/rf-maxpow-c1/live-tx.g711
+`v90_analogue_rx_test --phase4-trace reference-data/artifacts/rf-maxpow-c1/live-tx.g711
 <accepted-cp.bits> 186000` — our own transmit tap from the failing call, fed
 to the analogue-role receiver configured by the CPt the peer actually sent —
 reads Ri → barred Ri → **4074T of TRN2d descrambling to 11356 ones** → **MP
@@ -814,7 +814,7 @@ SCR is binary ones (§8.3.5, through §10.1.3.9/V.34's modulation with GPA), so
 the descrambled ones fraction over the SCR era is a known-content reference
 for our own receiver, needing no CP frame from the peer. Scored on the startup
 Phase 4 bit stream (`V90_CP_BIT_DUMP` under `v90_engine_replay --dial --fast`
-on `artifacts/rf-maxpow-c1/live-rx.g711`), SCR windows being those reading
+on `reference-data/artifacts/rf-maxpow-c1/live-rx.g711`), SCR windows being those reading
 over 0.45 ones:
 
 | configuration | bits emitted | SCR ones (mean) | best window |
@@ -1112,7 +1112,7 @@ This does not rescue the preserved bad capture (residual improves only to
 all 48 PP target phases and the initial pulse-shaper phase does not produce a
 healthy TRN lock; do not turn either into a peer-specific setting.
 
-Live confirmation is `artifacts/rf-pp-carrier-20260929-r1`: with no stored DIL
+Live confirmation is `reference-data/artifacts/rf-pp-carrier-20260929-r1`: with no stored DIL
 descriptor and no peer-specific Ja timer, the receiver parsed a CRC-valid
 RasFinder descriptor (`N=192, LSP=120, LTP=120`) and started Sd from that event.
 The peer later retrained while we were waiting for S during Jd, so this proves
@@ -1127,7 +1127,7 @@ same position in the working calls' taps).  Located properly, every call --
 working and failing, early Sd or late -- shows the peer's Phase 3 burst, then
 ~3.7-4.2 s of silence after Ja: it DID detect Sd.  The change is reverted
 (500 ms again); it had no evidence left.  Live at 1000 ms, two calls reached
-Phase 3 (`artifacts/rf-jafb1000-20260929-r2`, `-r3`) with Sd after the parse
+Phase 3 (`reference-data/artifacts/rf-jafb1000-20260929-r2`, `-r3`) with Sd after the parse
 and neither completed Phase 3, which agrees.
 
 What the five RasFinder Phase 3 calls actually separate on, read from the RX
@@ -1158,7 +1158,7 @@ live under this jitter does not -- that is the first thing to instrument.
 `me_tx_g711()` call (kind, count, CLOCK_MONOTONIC ns; 16 bytes through a
 buffered FILE, safe on a live call), and `v90_engine_replay --schedule <path>`
 feeds a tap back in that exact interleaving, paced on the recorded clock.
-Replayed with its own schedule, `artifacts/rf-iosched-20260929-r3` reproduces
+Replayed with its own schedule, `reference-data/artifacts/rf-iosched-20260929-r3` reproduces
 the live call to within a few ms (Sd +18604 vs +18611).  What it showed: live
 pjmedia hands RX over as **two 80-sample calls per 20 ms tick** and TX as one
 160-sample call; the plain replay feeds 160/160.

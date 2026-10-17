@@ -77,7 +77,7 @@
  * of Jd -- and a renegotiation gets none of that: §9.6.1.1.1 is Rd, R̄d,
  * TRN2d, MP and nothing else, so TRN2d is the ONLY training material the
  * peer's Phase 4 study has.  Measured against the SmartLink rig
- * (artifacts/jafb-500): its "linear mapping study in TRN2" needs ~2.76 s to
+ * (reference-data/artifacts/jafb-500): its "linear mapping study in TRN2" needs ~2.76 s to
  * complete -- the §33 fingerprint, unchanged here -- and against 4000T
  * (500 ms) of renegotiation TRN2d it gave up after 0.54 s and retrained, on
  * all of the renegotiations tried.  So default to the clause's ceiling.
@@ -164,7 +164,7 @@ static int v90_trn2d_symbols(void)
  * data-aided, rather than Jd, which it cannot.  At 312 ms it was 8.7%.
  *
  * 20004T = 2500 ms.  Live A/B, arms alternated, one call per run
- * (artifacts/trn1d-long-ab-*): the first Phase 4 attempt reaches data mode
+ * (reference-data/artifacts/trn1d-long-ab-*): the first Phase 4 attempt reaches data mode
  * 4/4 at 20004T and 4/4 at 30000T against 0/4 for the old default, at the
  * SAME 52000 bps (53333 at 30000T) -- and the default arm delivered 0 intact
  * upstream lines across its four calls against 48187 and 61408.
@@ -1560,7 +1560,7 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
  * have an average power above the appropriate limit are a national matter".
  * Nothing here checked, so whatever CPt asked for is what went on the DS0.
  *
- * Measured on artifacts/sd-jd-gate-fix-r2-013643Z: the peer's FIRST CPt
+ * Measured on reference-data/artifacts/sd-jd-gate-fix-r2-013643Z: the peer's FIRST CPt
  * selected Ucodes 46 68 81 88 95 99 103 107 and the second, after the
  * retrain, 33 53 65 72 79 83 87 91 -- the same ladder shape one G.711 chord
  * higher, which is exactly the self-similarity trap DIL alignment falls into
@@ -2904,7 +2904,7 @@ static void v90_build_jd(v90_state_t *s)
      *
      * This was hardcoded to 1 as "the minimum mandatory" value.  1 is legal,
      * but the only foreign V.90 digital modem we have -- the Eicon Diva Server,
-     * captured in artifacts/eicon-digital-downstream/, whose downstream a USR
+     * captured in reference-data/artifacts/eicon-digital-downstream/, whose downstream a USR
      * Courier V.Everything answered with CONNECT -- sends **3**, and that is the
      * *only* field in which its Jd frame differs from ours.  Both frames are
      * otherwise bit-identical: same 17-ones sync, same rate masks, same 4-point
@@ -4125,7 +4125,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * CPt that §9.6 gives the peer no way to send yet: it responds with
          * CP only after seeing Rd, R̄d and MP.  Each side waited for the
          * other.  Measured on the two captures the "this peer does not
-         * answer Rd" default was set from (artifacts/goal-v90-reneg-*): we
+         * answer Rd" default was set from (reference-data/artifacts/goal-v90-reneg-*): we
          * transmitted 24160T and 89120T of unterminated Rd -- 3.0 s and
          * 11.1 s -- and never one barred symbol, against the 384T + 24T the
          * clause asks for.  The peer was never given the signal it is
@@ -6149,7 +6149,7 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
      * renegotiation opens on MP' -- the acknowledged form -- before this
      * procedure has seen a single CP, and the peer is offered the answer to a
      * question it has not asked.  Measured against the SmartLink rig
-     * (artifacts/reneg-trn2d): its Phase 4 study SUCCEEDS on our TRN2d and it
+     * (reference-data/artifacts/reneg-trn2d): its Phase 4 study SUCCEEDS on our TRN2d and it
      * then retrains 0.80 s later, which is where that lands.  Same family as
      * the Rd defect above -- startup state carried into §9.6. */
     s->cp_ack_received = false;

@@ -71,7 +71,7 @@ scrambler polynomial or pulse-shaping constant was changed.
 ## Hardware follow-up
 
 A forced native V.34 call used the rebuilt modem against Eicon endpoint
-7910; evidence is `artifacts/eicon-native-v34-tx-fix-20261008-u1/`.
+7910; evidence is `reference-data/artifacts/eicon-native-v34-tx-fix-20261008-u1/`.
 It sends INFO1c at +7490 ms and remains waiting for INFO1a until the call
 ends. No B1/data handover, menu, or checked echo occurs. This hardware
 trial never exercises either correction and therefore cannot establish
@@ -102,12 +102,12 @@ continuously from local TX 18.000 to 36.3975 seconds (147180 samples; 46
 changes between the two zero codewords). Downstream is byte-exact from local
 RX 20.000 to 38.080 seconds. Each direction uses a separately verified sample
 offset; the tap origins are independent. Comparison JSON files are saved in
-`artifacts/eicon-direct-fixed-audio-20261008-r3/`. Later upstream mismatches
+`reference-data/artifacts/eicon-direct-fixed-audio-20261008-r3/`. Later upstream mismatches
 require separate alignment analysis before attributing a bearer fault.
 
 ## Simultaneous card capture: an altered-audio burst precedes CRC errors
 
-`artifacts/eicon-card-encoder-20261008/` captures one additional PCMU V.90
+`reference-data/artifacts/eicon-card-encoder-20261008/` captures one additional PCMU V.90
 call with Eicon Audio1 and eye tracing. It passes one 201-byte echo, fails
 its second, and the card eventually initiates retraining. The independent
 encoder matches all 58640 raw symbols at 31200 bit/s, coefficients (24,0),
@@ -183,8 +183,8 @@ with zero payload errors in both directions after each correction.
 
 ## Hardware confirmation after both Phase 4 fixes
 
-`artifacts/eicon-lan-jpower-20261008/` (PCMA) and
-`artifacts/eicon-lan-jpower-ulaw-20261008/` (PCMU) each pass all ten exact
+`reference-data/artifacts/eicon-lan-jpower-20261008/` (PCMA) and
+`reference-data/artifacts/eicon-lan-jpower-ulaw-20261008/` (PCMU) each pass all ten exact
 201-byte echoes. Both negotiate a2c=21600 and c2a=31200 bit/s, establish
 V.42 LAPM/V.42bis, and finish with Eicon DSP aborted/CRC 0/0. Neither logs
 a retrain. Both directions report zero RTP loss. These runs exercise the

@@ -14,17 +14,17 @@ The CP files below contain one byte per bit and are preserved with the
 ```sh
 OPENBLAS_NUM_THREADS=1 .venv/bin/python tools/vpcm_record_recover.py \
   gough-lui-v90-v92-modem-sounds/USR-Message-V92QC-bong-bong-bong.wav \
-  --cpt artifacts/gough-v92-payload-acquisition-20261005/USR-Message-V92QC-bong-bong-bong-crc0b91.bits \
-  --cp artifacts/gough-v92-payload-acquisition-20261005/USR-Message-V92QC-bong-bong-bong-crce681.bits \
+  --cpt reference-data/artifacts/gough-v92-payload-acquisition-20261005/USR-Message-V92QC-bong-bong-bong-crc0b91.bits \
+  --cp reference-data/artifacts/gough-v92-payload-acquisition-20261005/USR-Message-V92QC-bong-bong-bong-crce681.bits \
   --training-start 172810 --b1-start 194338 \
-  --output artifacts/gough-v92-payload-acquisition-20261005/reusable-usr
+  --output reference-data/artifacts/gough-v92-payload-acquisition-20261005/reusable-usr
 
 OPENBLAS_NUM_THREADS=1 .venv/bin/python tools/vpcm_record_recover.py \
   gough-lui-v90-v92-modem-sounds/Motorola-SM56-V92QC-extDILlaserbeam.wav \
-  --cpt artifacts/gough-v92-payload-acquisition-20261005/Motorola-SM56-V92QC-extDILlaserbeam-crc6997.bits \
-  --cp artifacts/gough-v92-payload-acquisition-20261005/Motorola-SM56-V92QC-extDILlaserbeam-crc3759.bits \
+  --cpt reference-data/artifacts/gough-v92-payload-acquisition-20261005/Motorola-SM56-V92QC-extDILlaserbeam-crc6997.bits \
+  --cp reference-data/artifacts/gough-v92-payload-acquisition-20261005/Motorola-SM56-V92QC-extDILlaserbeam-crc3759.bits \
   --training-start 183637 --b1-start 208729 \
-  --output artifacts/gough-v92-payload-acquisition-20261005/reusable-motorola
+  --output reference-data/artifacts/gough-v92-payload-acquisition-20261005/reusable-motorola
 ```
 
 CP acquisition and timing search are still separate experiments, not automatic

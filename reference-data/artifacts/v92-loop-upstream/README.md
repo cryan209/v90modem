@@ -20,7 +20,7 @@ sha256  e36bac83d80d2d731d3d8293785ee9d1c35e97cebfe030530eaddbef06b9267f  live-r
 
 ## Provenance
 
-Bytes 80000..99999 of `artifacts/apple-v92-sip-r4/server/live-rx.g711`
+Bytes 80000..99999 of `reference-data/artifacts/apple-v92-sip-r4/server/live-rx.g711`
 (local only, recorded 2026-10-01 by that directory's `run.sh`). Sample `n` here
 is sample `n + 80000` there.
 

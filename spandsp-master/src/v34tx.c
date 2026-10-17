@@ -1406,9 +1406,9 @@ static int v34_configured_rate_n(const v34_state_t *s, int baud_idx)
  
    With the default 2400-baud profile that zeroed five of the six rows, and
    the RasFinder answers such an INFO1c with nothing at all: it holds Tone A
-   until the call dies (artifacts/rf-v34-a1, -b1, both 45 s of Tone A after a
+   until the call dies (reference-data/artifacts/rf-v34-a1, -b1, both 45 s of Tone A after a
    CRC-clean INFO1c).  The same call with rows out to 3200 baud gets INFO1a
-   back and runs Phase 3 and Phase 4 (artifacts/rf-v34-c3).
+   back and runs Phase 3 and Phase 4 (reference-data/artifacts/rf-v34-c3).
  
    The per-row rate cap in v34_configured_rate_n() is kept, so a configured
    maximum bit rate still bounds every row.  Scoped to plain V.34: V.90's
@@ -3814,7 +3814,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
    reversed at 10.148 s and put L1/L2 in front of a modem that had not
    reversed, after which no INFO1a came (artifacts/rf-v34-h1); the call that
    reached data mode differs only in that the flat timer happened to expire
-   late enough (artifacts/rf-v34-d2).  One live call in five failed this way.
+   late enough (reference-data/artifacts/rf-v34-d2).  One live call in five failed this way.
  
    Alternated live against the RasFinder, one variable: off, three calls, none
    received INFO1a (artifacts/rf-v34-h1, -j1, -j2); on, two calls, both
@@ -4311,7 +4311,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                then put L1/L2 in front of a modem that had not yet reversed,
                after which no INFO1a ever came (artifacts/rf-v34-h1).  The call
                that did reach data mode differs only in that the timer happened
-               to expire late enough (artifacts/rf-v34-d2).
+               to expire late enough (reference-data/artifacts/rf-v34-d2).
                The timeout keeps the old behaviour, and is 11.2.2.1.4's own
                recovery: "waits 40 ms, then transmits a Tone B phase reversal
                ... then signal L1 followed by signal L2". */
@@ -4782,7 +4782,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                            working through the probe and is not conditioned to
                            receive INFO1c at all.  Sending it here put INFO1c
                            on the line ~440 ms before the RasFinder raised Tone
-                           A (artifacts/rf-v34-a1: our L2 ends 11.905 s, its
+                           A (reference-data/artifacts/rf-v34-a1: our L2 ends 11.905 s, its
                            Tone A starts 12.34 s), after which the peer held
                            Tone A for the remaining 47 s of the call waiting
                            for an INFO1c that had already gone by.
@@ -5435,7 +5435,7 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
    11.2.2.1.5's own bound is 650 ms plus a round trip delay measured from the
    BEGINNING of L2, which at our 160 ms L1 / 400 ms L2 leaves only ~250 ms
    after the probe ends -- and the RasFinder measures 440 ms from the end of
-   our L2 to the start of its Tone A (artifacts/rf-v34-a1).  The recommended
+   our L2 to the start of its Tone A (reference-data/artifacts/rf-v34-a1).  The recommended
    response to that bound expiring is a retrain, which against a peer that is
    about to raise Tone A anyway is strictly worse than waiting, so the default
    is deliberately generous and the expiry falls through to the pre-existing
@@ -6705,7 +6705,7 @@ static void v34_rotate_180(complex_sig_t *p)
    which puts S at 0/90 -- 45 degrees off the constellation's own axes --
    and, outside 12.5.1, also starts S on its second point so S-bar begins
    one symbol early.  A Diva card's own half-duplex source transmits exactly
-   the sequence above (artifacts/eicon-v34fax-native-20261009), and a
+   the sequence above (reference-data/artifacts/eicon-v34fax-native-20261009), and a
    recipient that takes its carrier phase from S or times PP from the
    S-to-S-bar reversal is misled by either error, while an offline decoder
    trained on PP sees neither. */
@@ -7630,7 +7630,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                    recipient, whose phase reference is the PP just before
                    TRN, does not: measured against PP the Diva card's
                    half-duplex TRN is this table negated, symbol for
-                   symbol (artifacts/eicon-v34fax-native-20261009). */
+                   symbol (reference-data/artifacts/eicon-v34fax-native-20261009). */
                 point.re = -point.re;
                 point.im = -point.im;
             }
@@ -11096,7 +11096,7 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
    the peer is still transmitting S, so the S/S-bar transition that re-anchors
    the frame goes by unnoticed and no CP is ever decoded.
 
-   Measured against the SmartLink rig (artifacts/reneg-mp): the peer's S is
+   Measured against the SmartLink rig (reference-data/artifacts/reneg-mp): the peer's S is
    there on the wire 258 ms after our R-bar-d, 40 ms long -- 128T at 3200 baud,
    exactly §9.6.2.1.1 -- with 98.7% of the block energy in §10.1.3.7's three
    bins, and our log recorded no S detection of any kind.
@@ -11151,7 +11151,7 @@ SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s)
  * restart re-enters Phase 2 at INITIAL_PREAMBLE/INFO0, which puts a MODULATED
  * control-channel carrier in front of a peer that is waiting for a tone.
  * Measured live against the SmartLink rig, 2026-08-26
- * (artifacts/retrain-live-b2): it detected our retrain request and started
+ * (reference-data/artifacts/retrain-live-b2): it detected our retrain request and started
  * its own -- "V34RETRAIN, retrain request detected" then "Retrain started" --
  * and then dropped the call 3.1 s later, DP_DISC and NO CARRIER, while we
  * were sending INFO0 at it.  The V.90 side has known this since 2026-07-22

@@ -84,14 +84,14 @@ invalidates modem measurements. Use an existing build image, or explicitly
 
 PPP completed IPCP and 30/30 ICMP replies with zero loss in both laws,
 with normal LCP teardown. Mean RTT was 398.277 ms for PCMA and 389.972 ms
-for PCMU. Evidence is in `artifacts/eicon-ppp-v90-alaw-20261008/` and
-`artifacts/eicon-ppp-v90-ulaw-20261008/`.
+for PCMU. Evidence is in `reference-data/artifacts/eicon-ppp-v90-alaw-20261008/` and
+`reference-data/artifacts/eicon-ppp-v90-ulaw-20261008/`.
 
 The first transfer attempt crossed the answerer deployment restart. A second
 attempt was invalidated by the Docker snapshot pause and deliberately stopped.
 Neither is counted as a sustained-transfer result. The fresh runs are
-`artifacts/eicon-soak-v90-ulaw-20261008-r3/` and
-`artifacts/eicon-soak-v90-alaw-20261008/`; both passed all three phases
+`reference-data/artifacts/eicon-soak-v90-ulaw-20261008-r3/` and
+`reference-data/artifacts/eicon-soak-v90-alaw-20261008/`; both passed all three phases
 on one uninterrupted call per law.
 Each call lasted about 26 minutes 37 seconds. Every payload frame was checked
 exactly, and both ends agreed on all byte counts. Neither modem log records
@@ -115,8 +115,8 @@ negotiated bit rates. The soak and PPP calls negotiated V.90 56000
 downstream / 31200 upstream with LAPM and V.42bis.
 
 The local artifacts include the full modem logs, DS0 taps, schedule,
-progress and summaries. `artifacts/eicon-answerer-soak-20261008.log`
-preserves the peer journal; `artifacts/eicon-soak-build-20261008.sha256`
+progress and summaries. `reference-data/artifacts/eicon-answerer-soak-20261008.log`
+preserves the peer journal; `reference-data/artifacts/eicon-soak-build-20261008.sha256`
 identifies the tested modem binary and core sources.
 
 The final source was loaded at an idle interval after all tests. The temporary
@@ -172,8 +172,8 @@ Tower route evidence records `ppp1` for 10.254.93.1 and `ppp0` for
 addresses. Neither HTTP call logs a modem retrain, and final RTP reports
 zero packet loss both ways.
 
-Evidence is preserved in `artifacts/eicon-http-ppp-v90-ulaw-20261008/` and
-`artifacts/eicon-http-ppp-v90-alaw-20261008/`, including downloaded binaries,
+Evidence is preserved in `reference-data/artifacts/eicon-http-ppp-v90-ulaw-20261008/` and
+`reference-data/artifacts/eicon-http-ppp-v90-alaw-20261008/`, including downloaded binaries,
 upload receipts, route records, modem/PPP logs and DS0 taps. The temporary
 HTTP listeners and PPP runner were removed after the test.
 
@@ -215,8 +215,8 @@ transmitter; it does not directly measure the Eicon's downstream window stalls.
 Statistics must be separated by test phase; averages across download,
 upload and duplex periods are not continuous-direction throughput.
 
-Evidence: `artifacts/eicon-throughput-baseline-20261008/` and
-`artifacts/eicon-throughput-jb40-20261008/`. This is one call per arm and
+Evidence: `reference-data/artifacts/eicon-throughput-baseline-20261008/` and
+`reference-data/artifacts/eicon-throughput-jb40-20261008/`. This is one call per arm and
 shorter than the earlier 26-minute soaks. The 40 ms setting is verified on
 the wired Tower LAN path; the engine's general 200 ms default is unchanged.
 
@@ -227,7 +227,7 @@ was **6,212.5 B/s in 84.392 s**, versus the earlier 200 ms HTTP result of
 unchanged. HTTP download therefore reached **88.8%** of the raw downstream
 rate, close to 90%; it must not be reported as exceeding 90%. The comparison
 uses different payload lengths and includes HTTP connection/setup time.
-Evidence: `artifacts/eicon-http-ppp-jb40-20261008/`.
+Evidence: `reference-data/artifacts/eicon-http-ppp-jb40-20261008/`.
 
 ```sh
 python3 tools/eicon_soak_test.py artifacts/lan-http \

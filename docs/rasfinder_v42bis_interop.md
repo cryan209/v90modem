@@ -106,7 +106,7 @@ None grades the new XID exchange or application roundtrip against SmartLink.
 Modern and legacy peer dialogue/transfer regressions pass offline, and the
 previous successful SmartLink captures remain in the earlier interop report.
 
-Ignored artifacts are under `artifacts/tower-interop-20261001/`:
+Ignored artifacts are under `reference-data/artifacts/tower-interop-20261001/`:
 `rf-readable-analysis.json`, `rf-readable-decoded.bin`,
 `actual-banner-reconstruction.json`, `rf-xid-three-analysis.json`, and the
 corresponding raw bit streams, G.711 taps, callback schedules and PTY captures.

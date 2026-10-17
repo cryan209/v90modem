@@ -540,7 +540,7 @@ all currently validated only against themselves.  The Eicon downstream fixture
 is in this tree precisely because it is the one recording we did not generate,
 and it immediately caught two conventions loopback could never have shown.
 
-Evidence: `artifacts/v90-hardware/20260901T045727Z-canon-v8-cm-fixed`.
+Evidence: `reference-data/artifacts/v90-hardware/20260901T045727Z-canon-v8-cm-fixed`.
 
 ## Stage 2: the Canon accepts V.34 half-duplex, and three defects follow
 
@@ -729,7 +729,7 @@ side), then build INFOh from the intersection rather than from our own
 configuration.  The CRC at bits 31:46 has not been verified either and is the
 other candidate.
 
-Evidence: `artifacts/v90-hardware/20260901T054120Z-canon-hdx-r5`.
+Evidence: `reference-data/artifacts/v90-hardware/20260901T054120Z-canon-hdx-r5`.
 
 ### Why the Canon could not have accepted that INFOh: it was sent before the post-L2 Tone B
 
@@ -799,7 +799,7 @@ still open is the fax layer: connect T.30 Annex F HDLC to the 1200 bit/s
 control-channel byte interface, implement the primary/control turnarounds, and
 route the image through the negotiated 21600 bit/s primary channel.
 
-Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
+Evidence: `reference-data/artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
 `-051717Z-canon-hdx-r2`.
 
 ## Primary-channel resynchronization and payload — 30 September 2026

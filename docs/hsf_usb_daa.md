@@ -1473,7 +1473,7 @@ ended; how much of `hsfusbcd2265_`'s stop pair matters is not measured.
 The instrument the previous entry asked for now exists.  The Linux vendor stack
 runs, binds and completes a call under a Debian 7 guest on `tower`, and
 `usbmon` has the whole thing.  See `tools/linux-capture/README.md` for the
-recipe; the captures are `artifacts/hsf-usbmon/`.
+recipe; the captures are `reference-data/artifacts/hsf-usbmon/`.
 
 **Kernel 3.2 was the fix, exactly as predicted.**  The 3.13 attempt oopsed in
 `hsfengine1901_` during probe, and its last line was the shim's own
@@ -1592,7 +1592,7 @@ rate cannot be the blocker.  This confirms "the playback consumer never starts
 
 ### What the stall actually is, from usbmon on our own probe
 
-Captured the same way as the vendor (`artifacts/hsf-usbmon/probe-txstall.pcap`)
+Captured the same way as the vendor (`reference-data/artifacts/hsf-usbmon/probe-txstall.pcap`)
 the asymmetry is stark:
 
 * **bulk IN runs, and runs FASTER than the vendor's** -- 827 good completions

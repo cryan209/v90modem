@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-const html=await fs.readFile(new URL('../../artifacts/modem-lab.html',import.meta.url),'utf8');
+const html=await fs.readFile(new URL('../../reference-data/artifacts/modem-lab.html',import.meta.url),'utf8');
 assert.equal(await fs.readFile(new URL('./dist/standalone.html',import.meta.url),'utf8'),html,'Standalone HTML contains a different engine build');
 const embedded=html.match(/<script id="modem-worker" type="text\/plain">([\s\S]*?)<\/script>/)[1];
 const source=html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];

@@ -184,7 +184,7 @@ fed back in.
 ## 2026-09-30: the failures track network jitter on this Mac's Wi-Fi, and Te does not help
 
 **Live Te A/B, arms alternated, 90 s between calls:** `ME_V8_TE_MS=1000` 0/6,
-control 0/6 (`artifacts/rf-te-ab-{te,ctl}-{1..6}`); a default probe call the
+control 0/6 (`reference-data/artifacts/rf-te-ab-{te,ctl}-{1..6}`); a default probe call the
 same morning also failed (`rf-0930-probe-1`). Every failure is the known shape:
 the peer's ANSam runs its full ~5.4 s and 2250 Hz (V.22 USB1) follows, so the
 peer never recognised a CM.
@@ -241,7 +241,7 @@ a burst, i.e. a stalling link; the 09-28 calls sit flat at 1-12 ms.
 
 The same commit, unchanged defaults, run from **tower** (wired, 0.08-0.25 ms to
 Asterisk, which it hosts) instead of this Mac's Wi-Fi: **V.8 status=2 on 6 of
-6 valid calls** (`artifacts/rf-tower-{1,3,4,5,6,7}`), against 0/13 from the Mac
+6 valid calls** (`reference-data/artifacts/rf-tower-{1,3,4,5,6,7}`), against 0/13 from the Mac
 that morning. RX transit p95 0.1 ms. The peer ends ANSam **2.1-2.2 s** after
 it starts on every call -- the healthy signature of catching our first CMs --
 and every call negotiates V.90 (peer offers V.22bis, V.34, V.90, LAPM).

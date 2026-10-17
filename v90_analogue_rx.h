@@ -95,7 +95,7 @@ typedef struct {
      *
      * On a two-wire analogue line nothing hands us codewords, only the levels
      * they produced, and re-slicing those gives a zero slot at a few per cent
-     * of W -- measured on artifacts/hsf-v90/call-062754Z, 9.6% of W with a
+     * of W -- measured on reference-data/artifacts/hsf-v90/call-062754Z, 9.6% of W with a
      * perfect sign structure over 20 repetitions, which is Sd beyond doubt and
      * which "ucode == 0" rejects every time, since Ucode 0 is the very bottom
      * of a logarithmic ladder and 9.6% of W is Ucode 64.
@@ -107,7 +107,7 @@ typedef struct {
      * read as the §9.3.2.4 Sd -> S-bar_d transition being rung through by
      * the receive equaliser, rather than as Sd having stopped.  Only used
      * with zero_slot_fraction > 0.  0 keeps one repetition (6), which is what
-     * artifacts/hsf-v90/call-062754Z measured.  A front end whose equaliser
+     * reference-data/artifacts/hsf-v90/call-062754Z measured.  A front end whose equaliser
      * spans more than a repetition must set its span here: a discontinuity
      * corrupts every output whose window straddles it, so anything shorter
      * makes seeing S-bar_d depend on where Sd fell relative to the taps.

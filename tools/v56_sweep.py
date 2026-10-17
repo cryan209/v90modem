@@ -65,7 +65,7 @@ def main() -> int:
     binary = ROOT / "v56_loopback_test"
     if not binary.is_file():
         p.error("build first with make v56_loopback_test")
-    out = args.output or ROOT / "artifacts/v56" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    out = args.output or ROOT / "reference-data/artifacts/v56" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out.mkdir(parents=True, exist_ok=False)
     # The DSP has diagnostic ME_/V34_ switches. A sweep must not unknowingly
     # inherit a previous experiment and call it the declared line profile.

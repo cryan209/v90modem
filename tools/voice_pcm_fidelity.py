@@ -268,8 +268,8 @@ def main() -> int:
     common = dict(dev="/dev/cu.usbserial-21240", vsm=130)
 
     p = sub.add_parser("modem-tx", help="modem AT+VTX -> our RTP capture")
-    p.add_argument("--reference", type=Path, default=ROOT / "artifacts/voice-pcm-fidelity/reference.alaw")
-    p.add_argument("--out-dir", type=Path, default=ROOT / "artifacts/voice-pcm-fidelity/modem-tx")
+    p.add_argument("--reference", type=Path, default=ROOT / "reference-data/artifacts/voice-pcm-fidelity/reference.alaw")
+    p.add_argument("--out-dir", type=Path, default=ROOT / "reference-data/artifacts/voice-pcm-fidelity/modem-tx")
     p.add_argument("--dev", default=common["dev"])
     p.add_argument("--vsm", type=int, default=common["vsm"])
     p.add_argument("--dial-number", default="6001", help="extension the modem dials to reach us")
@@ -277,8 +277,8 @@ def main() -> int:
     p.set_defaults(func=run_modem_tx)
 
     p = sub.add_parser("our-tx", help="our TX file -> modem AT+VRX capture")
-    p.add_argument("--reference", type=Path, default=ROOT / "artifacts/voice-pcm-fidelity/reference.alaw")
-    p.add_argument("--out-dir", type=Path, default=ROOT / "artifacts/voice-pcm-fidelity/our-tx")
+    p.add_argument("--reference", type=Path, default=ROOT / "reference-data/artifacts/voice-pcm-fidelity/reference.alaw")
+    p.add_argument("--out-dir", type=Path, default=ROOT / "reference-data/artifacts/voice-pcm-fidelity/our-tx")
     p.add_argument("--dev", default=common["dev"])
     p.add_argument("--vsm", type=int, default=common["vsm"])
     p.add_argument("--dial-number", default="6312", help="extension we dial to reach the modem")

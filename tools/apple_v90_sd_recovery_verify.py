@@ -50,7 +50,7 @@ def jd_bits(signs, start):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--capture', type=pathlib.Path,
-                        default=pathlib.Path('artifacts/apple-v90-sip-r7'))
+                        default=pathlib.Path('reference-data/artifacts/apple-v90-sip-r7'))
     parser.add_argument('--receiver', default='./v90_analogue_rx_test')
     # These are measured anchors for r7, not a shared RX/TX time origin.
     parser.add_argument('--rx-start', type=float, default=19.4)

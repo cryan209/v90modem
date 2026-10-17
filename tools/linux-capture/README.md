@@ -5,7 +5,7 @@ give us: **the bulk-OUT byte sequence the vendor driver uses to make this part
 transmit.**
 
 **This now works.**  The stack loads, binds, dials and streams under Debian 7,
-and the captures are in `artifacts/hsf-usbmon/`.  Findings are written up in
+and the captures are in `reference-data/artifacts/hsf-usbmon/`.  Findings are written up in
 `docs/hsf_usb_daa.md` ("The vendor driver, captured on real hardware").
 
 ## Recipe

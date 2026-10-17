@@ -27,7 +27,7 @@
  *
  * FORMATS, DERIVED FROM MEASURED DATA rather than chosen
  *
- * Taken from V90_T3_SYMBOL_PROBE on artifacts/reneg-eq/reneg-r1, one real
+ * Taken from V90_T3_SYMBOL_PROBE on reference-data/artifacts/reneg-eq/reneg-r1, one real
  * data symbol, 21 complex taps:
  *
  *     |tap| max 0.005743, min 0.000069   -> 7 bits of range, but the small
@@ -131,7 +131,7 @@ typedef struct { int64_t re, im; } v34_fx_acc_t;
  * v90_t3_solve() is Gauss-Jordan with partial pivoting over n=42 (21 complex
  * taps as real/imag), and it is the piece most likely to break in fixed point,
  * so it was measured before it was written.  Over 24 real solves from
- * artifacts/reneg-eq/reneg-r1:
+ * reference-data/artifacts/reneg-eq/reneg-r1:
  *
  *     input |a| max 4.2e8, and max/min across the matrix 1.2e3 .. 1.1e7
  *     pivots: first ~4.0e8, LAST ~2.9e5 (min seen 2.6e5)

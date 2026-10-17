@@ -88,7 +88,7 @@ Eicon aborted/CRC 0/0 on both calls. Details and artifact paths are in
 
 ### Menu ZMODEM upload and download
 
-`artifacts/eicon-zmodem-20261008/` tests both transfers on one Tower LAN
+`reference-data/artifacts/eicon-zmodem-20261008/` tests both transfers on one Tower LAN
 V.90 PCMU call using the corrected isolated build. Menu option 2/Z receives
 65536 binary bytes (including every byte value) with an exact SHA-256 match,
 in 20.61 s measured by the card menu, approximately 3179 bytes/s. Option 3/Z

@@ -3,7 +3,7 @@
 # peer's CP' correctly stop this call from opening another?
 #
 # BOTH arms run with ME_V90_RENEG=1 -- this is not about whether to initiate
-# (measured separately, artifacts/reneg-ab-*: 6 requested, 0 completed, and
+# (measured separately, reference-data/artifacts/reneg-ab-*: 6 requested, 0 completed, and
 # the knob stays default off).  It is about what an ENABLED renegotiation
 # costs.  The variable is ME_V90_RENEG_VIABILITY: 0 is the old behaviour, up
 # to ME_V90_MAX_RENEGOTIATIONS attempts a call, and the default gates further

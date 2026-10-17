@@ -21,12 +21,12 @@ or long-term stability claim.
 
 Final captures:
 
-- `artifacts/eicon-isdn-v120-7900-longwait-20261008-r2/`
-- `artifacts/eicon-isdn-v120-7910-longwait-20261008-r6/`
-- `artifacts/eicon-isdn-v110-7900-data-20261008-r2/`
-- `artifacts/eicon-isdn-v110-7910-data-20261008-r2/`
-- `artifacts/eicon-isdn-clear-7900-20261008-r1/`
-- `artifacts/eicon-isdn-clear-7910-20261008-r1/`
+- `reference-data/artifacts/eicon-isdn-v120-7900-longwait-20261008-r2/`
+- `reference-data/artifacts/eicon-isdn-v120-7910-longwait-20261008-r6/`
+- `reference-data/artifacts/eicon-isdn-v110-7900-data-20261008-r2/`
+- `reference-data/artifacts/eicon-isdn-v110-7910-data-20261008-r2/`
+- `reference-data/artifacts/eicon-isdn-clear-7900-20261008-r1/`
+- `reference-data/artifacts/eicon-isdn-clear-7910-20261008-r1/`
 
 ## Setup and traps found
 
@@ -97,8 +97,8 @@ The Asterisk-routed comparison still negotiated PCMU.
 
 V.110 at 9600 was tested directly on both extensions:
 
-- `artifacts/eicon-v110-clearmode-udi-20261008-r3/` (7910)
-- `artifacts/eicon-v110-clearmode-udi-7900-20261008-r4/` (7900)
+- `reference-data/artifacts/eicon-v110-clearmode-udi-20261008-r3/` (7910)
+- `reference-data/artifacts/eicon-v110-clearmode-udi-7900-20261008-r4/` (7900)
 
 Both receive valid framing, with zero reported bad or unsupported frames,
 but fail the clause 7.1 startup guard after ten seconds. Independent decode
@@ -111,7 +111,7 @@ A direct acknowledged V.120 trial on 7910 likewise negotiates CLEARMODE but
 never produces the menu (`eicon-v120-clearmode-udi-20261008-r8`). No successful
 data transfer over true UDI/CLEARMODE is claimed. The remaining fault has not
 been localized to the Cisco, Eicon configuration, or our implementation.
-`artifacts/eicon-clearmode-bchannel-20261008.txt` records the UDI SETUP and
+`reference-data/artifacts/eicon-clearmode-bchannel-20261008.txt` records the UDI SETUP and
 Eicon's queued menu bytes; these are application-side B-channel records,
 not a byte-exact wire comparison of the DS0.
 
@@ -136,17 +136,17 @@ transmit packets lost (80 ms), with zero received packets lost. This is
 consistent with digital data damage from packet loss; it is not proof of
 where that loss occurred. The standalone repeat was clean.
 
-Evidence: `artifacts/eicon-v110-clearmode-asterisk-7910-r2/` and
-`artifacts/eicon-v110-clearmode-asterisk-7900-r3/`; failed concurrent run
-`artifacts/eicon-v110-clearmode-asterisk-7900-r2/`.
+Evidence: `reference-data/artifacts/eicon-v110-clearmode-asterisk-7910-r2/` and
+`reference-data/artifacts/eicon-v110-clearmode-asterisk-7900-r3/`; failed concurrent run
+`reference-data/artifacts/eicon-v110-clearmode-asterisk-7900-r2/`.
 7910's successful RX tap now contains 2153 instances of DS0 codeword 7F,
 which was absent from the earlier corrupted PCMU comparison. No V.90
 improvement is established by these ISDN rate-adaptation tests.
 
 Acknowledged V.120 at 64 kbit/s also passes three exact 201-byte echo lines
 on each extension through Asterisk CLEARMODE:
-`artifacts/eicon-v120-clearmode-asterisk-7900-r1/` and
-`artifacts/eicon-v120-clearmode-asterisk-7910-r1/`.
+`reference-data/artifacts/eicon-v120-clearmode-asterisk-7900-r1/` and
+`reference-data/artifacts/eicon-v120-clearmode-asterisk-7910-r1/`.
 The temporary ISDN service was stopped and the normal Eicon answerer
 restored (confirmed active) after validation. CLEARMODE module and endpoint
 configuration remain enabled on Asterisk.

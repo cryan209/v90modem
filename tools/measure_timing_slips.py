@@ -10,7 +10,7 @@ so a slip is a step in that phase and nothing else in the call looks like
 one.
 
 This is what says whether a collapse in the receiver is the wire or us.
-Measured on artifacts/dmodem-soak-0821-rounds/round1 (tower d-modem,
+Measured on reference-data/artifacts/dmodem-soak-0821-rounds/round1 (tower d-modem,
 PCMU, 3200 baud): the phase sits at -119 degrees, steps to -263 at
 t=129.6 s, and steps back a second later.  Both are one sample.
 

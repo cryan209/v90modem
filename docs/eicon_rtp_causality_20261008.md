@@ -1,6 +1,6 @@
 # Eicon upstream corruption: packet-boundary isolation
 
-In `artifacts/eicon-rtp-boundary-20261008/`, simultaneous Asterisk Ethernet
+In `reference-data/artifacts/eicon-rtp-boundary-20261008/`, simultaneous Asterisk Ethernet
 RTP and Eicon Audio1 capture accompanies a V.90 PCMU call. One 201-byte echo
 passes; the second fails and the Eicon initiates retraining.
 
@@ -41,7 +41,7 @@ rebuilds SpanDSP cleanly, and builds the modem from copied current sources.
 SHA-256 matches were checked for modem_engine.c, sip_modem.c, data_stack.c,
 v90_analogue_tx.c and v34tx.c. Existing modem processes were left running.
 
-`artifacts/eicon-lan-20261008/` passes all ten exact 201-byte echoes, a total
+`reference-data/artifacts/eicon-lan-20261008/` passes all ten exact 201-byte echoes, a total
 2010 payload bytes, at 56000 downstream / 31200 upstream. The RTP route is
 192.168.88.3 -> Asterisk 192.168.88.122 -> Cisco 192.168.88.62. All 4257
 upstream packets arrive at Asterisk, with no sequence/timestamp gaps and no
@@ -57,7 +57,7 @@ It does not establish native V.34 interop or every rate/law combination.
 
 ## Two-ended tunnel capture confirms post-send loss
 
-`artifacts/eicon-tunnel-boundary-20261008/` contains a raw-IP capture from
+`reference-data/artifacts/eicon-tunnel-boundary-20261008/` contains a raw-IP capture from
 Mac utun8 and simultaneous Asterisk Ethernet capture for another failed
 PCMU V.90 call. All 2071 upstream packets appear on utun8 with no gaps;
 maximum send interval is 25.837 ms. Only 2063 arrive at Asterisk. Missing
@@ -69,7 +69,7 @@ drops. Thus these packets were lost after entering the tunnel, rather than
 merely recorded before an unsuccessful UDP send. The precise dropping
 component within the tunnel/network path remains unmeasured.
 
-The PCMA LAN follow-up `artifacts/eicon-lan-alaw-20261008/` completes 30 exact
+The PCMA LAN follow-up `reference-data/artifacts/eicon-lan-alaw-20261008/` completes 30 exact
 201-byte echoes (6030 payload bytes), at 56000 downstream / 31200 upstream.
 Final RTP statistics report zero packet loss both ways, and no retrain is
 logged. Together, the two LAN calls carry 8040 checked payload bytes in both

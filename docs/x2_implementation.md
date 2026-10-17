@@ -327,7 +327,7 @@ not retained because it did not recover the known waveform payload.
 at blocks 17/160 with silence rejection, all 402 exact-symbol V.34 data cases,
 and production builds pass. `x2_b1_test <tap> <start> <E>` accepts explicit
 bearer-clock anchors for fresh captures. Evidence, commands and source-clock
-qualifications are in `artifacts/x2-handoff-20261006/README.md`.
+qualifications are in `reference-data/artifacts/x2-handoff-20261006/README.md`.
 
 ## Offline call evidence
 
@@ -455,7 +455,7 @@ National ISDN-1, S58=48 and A2. Reproduce fresh calls with:
 ../courier-emu/.venv/bin/python tools/probe_x2_symmetric_imodem.py imodem --law alaw --fast --instructions 150000000 --output artifacts/x2-sym-a-fresh
 ```
 
-Evidence is in `artifacts/x2-symmetric-20261006`. `call.json` contains checked
+Evidence is in `reference-data/artifacts/x2-symmetric-20261006`. `call.json` contains checked
 results, environment and executable/profile hashes; raw RX/TX and both DTE
 transcripts are preserved. These native runs qualify our **answering** role.
 The exploratory reverse-call native test fell to V.32bis during V.8 and did
@@ -485,7 +485,7 @@ message after `COURIER-X2-HOS`, independently of those waveform errors. This
 narrows the next investigation to common framing/source handoff and the native
 AFC9/B006-to-AF6F caller change; it does not prove a native defect, because
 both experiments still use our frame decoder. Evidence and commands:
-`artifacts/x2-host-analog-20261006/README.md`.
+`reference-data/artifacts/x2-host-analog-20261006/README.md`.
 
 
 ## Analog Courier downstream mask correction, 6 October 2026
@@ -514,7 +514,7 @@ The gate requires accepted MP/E, PAYLOAD stage and acquired upstream B1.
 This does not qualify LAPM, higher upstream rates, or later native rate changes;
 the long capture still becomes noisy after the initial complete message.
 
-Evidence: `artifacts/x2-downstream-20261006/`, with fresh calls in the sibling
+Evidence: `reference-data/artifacts/x2-downstream-20261006/`, with fresh calls in the sibling
 `x2-downstream-20261006-mask-fixed`, `-long-fixed` and `-pty-fixed` directories.
 
 The unclamped Courier control (`-pty-auto`) also receives the complete host
@@ -551,7 +551,7 @@ Two open x2 results turned out not to be x2 defects.
 
 **The 940-byte downstream burst was a DTE overrun in the test, not a
 modem fault.** Decoding our own transmit tap
-(`artifacts/x2-rx-improve-20261006-long-fixed/engine-tx.g711`, inverse mapper
+(`reference-data/artifacts/x2-rx-improve-20261006-long-fixed/engine-tx.g711`, inverse mapper
 from tx sample 111005, GPC descrambler, 8N1) recovers all 940 bytes exactly.
 The call has no error control (`CONNECT 53333/x2/NONE`), so nothing can hold
 off the far end. It sends 32000 bit/s into a Courier whose emulated DTE is
@@ -560,7 +560,7 @@ clean 42-byte omission and then a missing tail, which is an overrun pattern,
 not line errors. A/B with `tools/probe_x2_host_courier.py --host-pace-samples`:
 an unpaced burst loses data again (454 bytes reach the Courier DTE), while
 one byte per 16 samples delivers all 940
-(`artifacts/x2-ds-pace-20261010-{burst,paced}`).
+(`reference-data/artifacts/x2-ds-pace-20261010-{burst,paced}`).
 
 **The upstream opening message was being discarded by V.42 detection.**
 Since `ef7b5464` the factory `+ES` attempts V.42 detection on every call. The
@@ -579,7 +579,7 @@ judge it.
 
 A fresh native call with the fix and the paced 940-byte source passes all
 seven checks, with both directions complete through the real PTYs
-(`artifacts/x2-ds-pace-20261010-fixed`).
+(`reference-data/artifacts/x2-ds-pace-20261010-fixed`).
 
 ## Upstream above 4800, 10 October 2026
 
@@ -621,7 +621,7 @@ exposed three things:
   it sends marks only.
 
 Fresh call against committed courier-emu, with both directions exact:
-`artifacts/x2-strict-20261010`.
+`reference-data/artifacts/x2-strict-20261010`.
 
 ## In-data fall forward, 10 October 2026
 
@@ -656,7 +656,7 @@ FINAL_TRAINING/DATA_STARTUP into the bank the MP selects. The engine re-arms
 the T/3 upstream (`v34_v90_upstream_rearm()`), so the next prepare and E
 acquire a fresh B1 at the new rate, and it resets the squelch baseline.
 
-Live (committed courier-emu, `artifacts/x2-ff3-20261010`):
+Live (committed courier-emu, `reference-data/artifacts/x2-ff3-20261010`):
 `X2 rate change complete: index=14 downstream=54666 upstream=31200`. B1 is
 re-acquired at 31200 with 100% fit. The call runs on for more than 150 s, and
 the Courier starts a second rate change at 182 s. **Upstream carries 498 of 500
@@ -706,8 +706,8 @@ both real PTYs (no extra data):
 
 | call | Courier -> host | host -> Courier | evidence |
 |---|---:|---:|---|
-| short control | 28 bytes | 20 bytes | `artifacts/x2-codex-20261012-control-socket/` |
-| numbered lines | 3710 bytes / 70 lines | 1000 bytes / 20 lines | `artifacts/x2-codex-20261012-long/` |
+| short control | 28 bytes | 20 bytes | `reference-data/artifacts/x2-codex-20261012-control-socket/` |
+| numbered lines | 3710 bytes / 70 lines | 1000 bytes / 20 lines | `reference-data/artifacts/x2-codex-20261012-long/` |
 
 Each run clocks exactly 260000 received and transmitted bearer samples
 (32.5 seconds). Initial selection is index 1, 32000 downstream / 24000
@@ -719,7 +719,7 @@ not payload delivery after that handoff or long-term reliability.
 
 `make x2-test x2-session-test x2-sym-test` passes. The initial sandboxed
 attempt could not bind the local Unix socket and was interrupted before a
-call; its directory `artifacts/x2-codex-20261012-control/` is not evidence
+call; its directory `reference-data/artifacts/x2-codex-20261012-control/` is not evidence
 of an interop failure. The completed tests used permission to open the local
 socket and PTY.
 
@@ -732,7 +732,7 @@ the engine's completed-rate-change trace before injection, and records the
 first source sample and that gate in `call.json`. Pacing starts when the gate
 actually releases, avoiding a backlog burst if the change occurs late.
 
-`artifacts/x2-codex-20261012-after-change/` completes the index-14 handoff
+`reference-data/artifacts/x2-codex-20261012-after-change/` completes the index-14 handoff
 (54666 downstream / 31200 upstream) and B1 reacquisition with 100% fit.
 All 1080 source bytes are queued after the change. Initial Courier -> host
 payload is exact, but host -> Courier complete/exact checks FAIL: the native
@@ -761,7 +761,7 @@ index 14 per Draft 0.33 sections 20 and 22). At that Courier 403 ROM
 instruction ACC is the output-bank ready bit and data 0320 holds the next
 descrambled word; ACC=0 returns without publishing it.
 
-On `artifacts/x2-codex-20261012-output-capture/` (the 1080-byte after-change
+On `reference-data/artifacts/x2-codex-20261012-output-capture/` (the 1080-byte after-change
 payload):
 
 | stage | result |

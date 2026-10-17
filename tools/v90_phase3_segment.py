@@ -5,7 +5,7 @@ Classifies each 50 ms window by Ucode-0 density, distinct magnitudes and
 from TRN1d (constant magnitude, scrambled signs) from the multi-level data
 stages, without assuming where any of them start.
 
-    python3 tools/v90_phase3_segment.py artifacts/eicon-digital-downstream/*.ulaw
+    python3 tools/v90_phase3_segment.py reference-data/artifacts/eicon-digital-downstream/*.ulaw
 
 Raw G.711 mu-law codewords at 8 kHz, no header.
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Live A/B of §9.5.1.1 retrain-on-upstream-loss over a LONG call.
 #
-# The 600 s soak of the shipping defaults (artifacts/v90-longsoak-*) connected
+# The 600 s soak of the shipping defaults (reference-data/artifacts/v90-longsoak-*) connected
 # cleanly every time -- first Phase 4 attempt 5/5 after §38 -- but only one of
 # five calls HELD.  In three of the four that did not, the first disruption
 # after data mode is OUR OWN detector:

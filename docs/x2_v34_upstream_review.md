@@ -41,7 +41,7 @@ ME_X2_UPSTREAM_MAX_RATE=9600 ../courier-emu/.venv/bin/python \
   tools/probe_x2_host_courier.py --fast --fixed-native-rate --pty-source \
   --capture-native --host-message HOST-X2-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ \
   --message COURIER-X2-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ \
-  --output artifacts/x2-v34-review-20261006-9600
+  --output reference-data/artifacts/x2-v34-review-20261006-9600
 ```
 
 The selected upstream rate is 9600. Native B1 acquires at 100% fit with
@@ -89,11 +89,11 @@ A fresh native call also delivers all 3500 upstream bytes through the real
 engine PTY. Its simultaneous 940-byte downstream burst is incomplete at the
 native serial interface (since shown to be a Courier DTE overrun in the test, not a modem fault; see
 `docs/x2_implementation.md`, 10 October 2026), so that run is not a complete bidirectional pass.
-A second fresh call (`artifacts/x2-rx-improve-20261006-long-rx-fixed`)
+A second fresh call (`reference-data/artifacts/x2-rx-improve-20261006-long-rx-fixed`)
 passes all seven checks: the full 3500-byte upstream source and a short
 downstream message both reach their real PTYs. The final output-clamp build
-repeats this pass in `artifacts/x2-rx-improve-20261006-final`.
-Evidence: `artifacts/x2-rx-improve-20261006-*`.
+repeats this pass in `reference-data/artifacts/x2-rx-improve-20261006-final`.
+Evidence: `reference-data/artifacts/x2-rx-improve-20261006-*`.
 
 Receive sampling was checked rather than changed speculatively:
 
@@ -129,7 +129,7 @@ interop remain separate from the verified initial 4800 transfer.
 Fresh original Courier runs with `ME_X2_UPSTREAM_MAX_RATE` set to 7200,
 9600 and 12000 use the same 3500-byte source (70 complete lines) and short
 host message as the passing 4800 control. No fixed native `&U26&N39` clamp
-is applied. Results are preserved under `artifacts/x2-higher-20261006-*`.
+is applied. Results are preserved under `reference-data/artifacts/x2-higher-20261006-*`.
 
 | Selected upstream rate | B1 / engine DATA | Foreign source through engine PTY | Host message at native DTE |
 |---|---|---|---|
@@ -205,7 +205,7 @@ established. Sampling at T/3 instead of T/2 does not establish that boundary.
 pre-resampler sample/clock capture in `tools/x2_courier_capture.py`.
 It preserves generation offsets across DSP resets in `native-codec.json`
 and the signed DAC samples in `native-codec.s16`. The fresh failing 9600
-call is `artifacts/x2-codec-path-20261006-9600`.
+call is `reference-data/artifacts/x2-codec-path-20261006-9600`.
 
 The independent native/B1 correlation puts B1 at sample 254360 in the
 concatenated codec stream. Its clock is 9600 Hz throughout this interval.
@@ -249,7 +249,7 @@ output store. The data-ring write at 80E7 is `SACH *+,1` in a delayed branch.
 
 A temporary core copy adds ONLY trace provenance to the capture header.
 Its instruction behavior is unchanged; the patch is preserved with
-`artifacts/x2-pm-origin-20261006-9600`. It records PM=1, last explicitly
+`reference-data/artifacts/x2-pm-origin-20261006-9600`. It records PM=1, last explicitly
 set by ADBC (`SPM #1`) in the native receiver routine, or preserved by the
 interrupt context restore. This is not a spurious extra multiply invented by
 the emulator: TI SPRU056D, SPM instruction (6-252), defines PM=01 as a
@@ -273,7 +273,7 @@ native interop qualification and not a production receiver repair.
 The initial 130-million-instruction diagnostic runs end before the entire
 3500-byte source can be transmitted; do not count their incomplete-source
 check as a decode error or a full-transfer pass. Full-length repeats are under
-`artifacts/x2-headroom-full-20261006-*`. The 7200, 9600 and 12000 repeats pass all seven
+`reference-data/artifacts/x2-headroom-full-20261006-*`. The 7200, 9600 and 12000 repeats pass all seven
 checks, with all 3500 bytes and the host message exact at each rate. B1 fit
 is 100% in all three; at 7200 it improves from 94.2% without relaxing
 acquisition thresholds. At 12000 the B1 lattice distance falls from 0.119
@@ -289,7 +289,7 @@ upstream bytes and the short downstream message through the real PTY.
 B1 chooses 64-state expanded shaping, fits 100%, and grades the following
 256 symbols at lattice distance 0.003. Its working parameters are b=36,
 p=16, w=0, j=7, k=24 at 3200 baud. Capture:
-`artifacts/x2-headroom-full-20261006-14400`.
+`reference-data/artifacts/x2-headroom-full-20261006-14400`.
 
 This does not resolve the later native MP/data discontinuity: the 14400 call
 also eventually asks for resynchronization. Initial payload qualification and
@@ -310,14 +310,14 @@ The 19200 diagnostic repeat passes all seven checks as well, with the whole
 3500-byte source exact and the host message received by the Courier.
 Its B1 fit is 100%; the independent following-symbol check measures lattice
 distance 0.009, and working parameters are b=48, p=16, w=0, j=7, k=28.
-`artifacts/x2-headroom-full-20261006-19200` preserves this run.
+`reference-data/artifacts/x2-headroom-full-20261006-19200` preserves this run.
 
 
 The 24000 diagnostic repeat passes all seven checks, including the entire
 3500-byte upstream source and short host message. B1 fit remains 100%; the
 following-symbol lattice distance is 0.028, with working parameters b=60,
 p=16, w=0, j=7, k=24. Capture:
-`artifacts/x2-headroom-full-20261006-24000`.
+`reference-data/artifacts/x2-headroom-full-20261006-24000`.
 
 The six successful higher-rate runs are on the harness's default mu-law
 bearer. They establish receive capability at 7200/9600/12000/14400/19200/24000
@@ -362,11 +362,11 @@ PTY, and a short downstream message. Every rate passes all seven checks, with
 
 | upstream | result | evidence |
 |---|---|---|
-| 7200, 9600, 12000, 14400 | all 70 lines exact, host message complete | `artifacts/x2-s39q-20261010-{7200,9600,12000,14400}` |
-| 19200, 24000 | same | `artifacts/x2-s39q-20261010-{19200,24000}` |
-| 26400, 28800 offered | Courier selects 24000 (its MP mask 03FE tops out at N=10); passes | `artifacts/x2-s39q-20261010-{26400,28800}` |
-| default build, no environment | offers 33600, Courier selects 24000, passes | `artifacts/x2-final-20261010-default` |
-| default build, unmodified NVRAM (S39=0) | 24000 selected, B1 100%, **11 of 70 lines intact** | `artifacts/x2-final-20261010-nvram` |
+| 7200, 9600, 12000, 14400 | all 70 lines exact, host message complete | `reference-data/artifacts/x2-s39q-20261010-{7200,9600,12000,14400}` |
+| 19200, 24000 | same | `reference-data/artifacts/x2-s39q-20261010-{19200,24000}` |
+| 26400, 28800 offered | Courier selects 24000 (its MP mask 03FE tops out at N=10); passes | `reference-data/artifacts/x2-s39q-20261010-{26400,28800}` |
+| default build, no environment | offers 33600, Courier selects 24000, passes | `reference-data/artifacts/x2-final-20261010-default` |
+| default build, unmodified NVRAM (S39=0) | 24000 selected, B1 100%, **11 of 70 lines intact** | `reference-data/artifacts/x2-final-20261010-nvram` |
 
 The engine therefore offers every V.34 rate by default, and the peer's W2
 decides (Draft 0.33 section 20). `ME_X2_UPSTREAM_MAX_RATE` remains as a cap.

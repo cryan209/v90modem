@@ -98,7 +98,7 @@ static void dil_decompose(const uint8_t *codewords, int len, v90_law_t law,
  * §8.4.4 Sd is {+W, +0, +W, -W, -0, -W} repeated 64 times, which is exactly
  * periodic at 6 symbols and carries two magnitudes, so it satisfies every
  * structural test for a DIL cycle and gets decoded as a 6-symbol,
- * single-segment DIL.  On artifacts/eicon-digital-downstream/call1 that made
+ * single-segment DIL.  On reference-data/artifacts/eicon-digital-downstream/call1 that made
  * the 384-symbol Sd at 8366.9 ms the reported "codeword-exact DIL run".
  *
  * Sd's shape is fixed by the Recommendation, so it can be excluded exactly:
@@ -1258,7 +1258,7 @@ static bool dil_decode_run(const dil_sym_t *x, int rs, int re, int c,
      * therefore not DIL, whatever descriptor can be fitted to its signs.
      *
      * §8.6.4 Ri is exactly such a run: U_INFO at a period-6 sign pattern.  On
-     * artifacts/eicon-digital-downstream/call1 the 4548-symbol Ri run at
+     * reference-data/artifacts/eicon-digital-downstream/call1 the 4548-symbol Ri run at
      * 14261 ms was decoded as "N=1 LSP=6 LTP=6, training Ucodes: 1 unique"
      * and reported as the DIL run, 2 s after the real DIL had started.
      *

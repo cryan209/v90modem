@@ -60,8 +60,9 @@ supported interface; `--mode`/`ME_MODE` set the power-on offer. The `ME_*`,
 - `*_rrc.h`, `*_godard.h`, `v34_*_tables.h` are generated tables.
 - Each module's header comment states its role and spec clauses; read it first.
 - `docs/` has one note per topic; read the relevant one before changing a phase.
-  `artifacts/` and `captures/` are local and gitignored except the three fixture
-  directories `make test` reads (`git add -f` a new fixture).
+  `artifacts/` and `captures/` hold disposable local runs. Retained fixtures and
+  cited evidence live in `reference-data/`; see `docs/artifact_storage.md`.
+  Force-add only new regression fixtures, not whole evidence directories.
 
 ## Method -- traps that have each cost more than one session
 

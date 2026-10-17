@@ -109,7 +109,7 @@ python3 tools/v56_sweep.py --cases 3200:21600 --laws ulaw \
   --snr 40,34,30,26,22 --delays 0 --seeds 1,7 --require-clean
 ```
 
-Each sweep creates a new `artifacts/v56/<UTC timestamp>/` directory with
+Each sweep creates a new `reference-data/artifacts/v56/<UTC timestamp>/` directory with
 `results.jsonl`, individual stdout files, and DSP logs. `--output <new-dir>`
 chooses a destination; an existing directory is not overwritten. Every row
 records the command, line configuration, seed, settled MP rates, elapsed
@@ -185,7 +185,7 @@ The full 32-case sweep (seed 1; one million bits per direction) produced:
 
 Both peers' MP rate views were checked against the requested rate in every
 passing row. The retained report is
-`artifacts/v56/20261005T091944648376Z/results.jsonl`.
+`reference-data/artifacts/v56/20261005T091944648376Z/results.jsonl`.
 Additional negative checks verified simulated no-acquisition timeout,
 strict-sweep exit 1, wall-clock-timeout exit 2, and invalid-option rejection.
 These are offline regression results; they establish neither analog
@@ -214,7 +214,7 @@ EDD curves, no noise or bulk delay, 16,000 checked bits per direction and a
 | 1, 6, 7, 8 with EDD-2 | 8 | carrier loss before synchronization |
 
 Report and calibration evidence:
-`artifacts/v56/20261005T093458560193Z/results.jsonl` and
+`reference-data/artifacts/v56/20261005T093458560193Z/results.jsonl` and
 `filter-calibration.json` in the same directory. These are startup outcomes;
 zero checked bits do not establish a BER. A filter-free 256-sample one-way
 delay control passed with zero errors. The failing AD/EDD rows are retained
@@ -255,8 +255,8 @@ No post-acquisition re-lock is allowed. Sweeps also remove inherited
 Verification: all 28 rows (five V.32bis rates and two V.22bis rates, both G.711
 laws, no noise and 40 dB SNR) passed with 16,000 checked bits and zero errors
 in each direction, seed 1, no added delay. Evidence is retained in
-`artifacts/v56/20261005T095005502684Z/results.jsonl` (V.32bis) and
-`artifacts/v56/20261005T095008027486Z/results.jsonl` (V.22bis). The existing
+`reference-data/artifacts/v56/20261005T095005502684Z/results.jsonl` (V.32bis) and
+`reference-data/artifacts/v56/20261005T095008027486Z/results.jsonl` (V.22bis). The existing
 V.34 `make v56-test` passed as well. These are finite offline measurements,
 not V.56 certification or hardware interoperability results.
 

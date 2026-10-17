@@ -6,7 +6,7 @@
  * the whole of Phase 4 (§9.4.2: CPt, then CP) while it receives the digital
  * modem's Ri/TRN2d/MP, and its own transmit comes back through the hybrid
  * 118 ms later (the USB round trip) at -16.7 dB against the downstream.
- * Nothing cancelled it.  Measured on artifacts/apple-pve-20261015/v90-lt6, the
+ * Nothing cancelled it.  Measured on reference-data/artifacts/apple-pve-20261015/v90-lt6, the
  * best equaliser the TRN2d era supports (128 T/2 taps plus 24 of ideal
  * decision feedback, fitted against the digital side's own tap) reaches
  * 20.0 dB with the echo in and 25.1 dB with a 64-tap fit of it subtracted --

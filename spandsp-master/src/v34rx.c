@@ -504,7 +504,7 @@ static int phase3_rx_dump_count = 0;
 /* Data-mode receive SNR to the rate the line will carry, in bits per symbol:
    bits = (snr_db + offset)/slope. This historical single-channel model is
    not a general QAM law; the offset was calibrated so the channel whose behaviour is
-   known -- 18 dB, artifacts/v34-rate-* -- accepts 14400 at 3000 baud and
+   known -- 18 dB, reference-data/artifacts/v34-rate-* -- accepts 14400 at 3000 baud and
    refuses 16800, which is what those three calls did. */
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
@@ -1622,7 +1622,7 @@ static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
    own terms: a decision taken on white symbols is noise, and adapting to it
    walks the filter off.  Together they are a trap.  Once the eye shuts there
    is no decision to adapt on, so nothing adapts, so the eye stays shut: on
-   artifacts/goal-matrix-115515Z/rate28800-r1 the receiver ran 19 s at 0.10
+   reference-data/artifacts/goal-matrix-115515Z/rate28800-r1 the receiver ran 19 s at 0.10
    from the lattice, met a disturbance, and spent the remaining 95 s at 0.66
    -- the value for symbols bearing no relation to the lattice -- while the
    wire went on carrying the peer's signal.  Neither a rotation nor a gain
@@ -5817,7 +5817,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
            carrier onset, and on a real line they are not reliable -- the
            RasFinder's INFO0a reads `0011 01110010` to an independent
            block demodulator and `1101 01110010` to this one
-           (artifacts/rasfinder-flow-192655Z), so the two-ones match below
+           (reference-data/artifacts/rasfinder-flow-192655Z), so the two-ones match below
            never fired and INFO0a was lost on every originated call.  The
            CRC, not the fill, is what rejects a false sync.  The digital
            modem still waiting for INFO0a takes the sync with no fill at all:
@@ -6952,7 +6952,7 @@ static int v90_reneg_cp_adapt_through_burst(void)
    the receiver is put straight into V34_RX_STAGE_V90_CP, where CMA is frozen
    for the good reason that at STARTUP the taps arriving there were trained by
    Phase 3 moments earlier.  Measured on a replay of a live renegotiation
-   (artifacts/reneg-eq/reneg-r1): with the freeze in force the equalizer
+   (reference-data/artifacts/reneg-eq/reneg-r1): with the freeze in force the equalizer
    output sat at |z| = 18-22 against the slicer's unit circle for the whole
    window, descrambled SCR read 68% ones instead of ~100%, and the Table-14
    framer took 381 false syncs and not one CRC-valid frame. */
@@ -9291,7 +9291,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                lock again -- and every one of those re-locks RE-SEEDS the
                derotator, which snaps the current symbol onto the 45-degree
                family and then drags the taps there through v34_rx_tune_equalizer().
-               Measured on artifacts/reneg-ab-225015Z/reneg-r3, whose first CP
+               Measured on reference-data/artifacts/reneg-ab-225015Z/reneg-r3, whose first CP
                window decodes 3 of 5 frames on a steady line: the unwrapped
                residual carrier phase is FLAT to 0.002 deg/symbol between
                events and steps by +25, +24, +27, +25, -20 and +23 degrees at
@@ -9888,7 +9888,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                  * to 2000 ms of SCR in front of CP, SCR descrambles to a solid
                  * run of ones, so the 17-one preamble gate reads 18/18 for the
                  * whole of it: measured on a replay of a live renegotiation
-                 * (artifacts/reneg-eq/reneg-r1) the search locked and was
+                 * (reference-data/artifacts/reneg-eq/reneg-r1) the search locked and was
                  * rejected 91 times inside the window, the framer was handed
                  * only the fragments those locks covered, and not one frame
                  * ever synced -- 91 rejects, all structural, no CRC reject at
@@ -10914,7 +10914,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
            Against slmodemd that was 19 symbols ahead of B1: every mapping
            frame after them grouped three symbols late (19 mod 8), a clean eye
            decoding to white bits, and no V.42 ODP ever seen
-           (artifacts/slm-v90-lapm3).  No data-frame phase can fix that,
+           (reference-data/artifacts/slm-v90-lapm3).  No data-frame phase can fix that,
            which is why the frame-phase sweep never found one. */
         if (!v34_rx_t2_data_path(s)  &&  !s->v90_t3_in_emit)
             break;
@@ -11007,7 +11007,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    LEVEL.  The DA loop is decision-directed and its decisions
                    are meaningless at 27x the slicer's unit circle, which is
                    where a renegotiation's fresh equalizer starts: measured on
-                   artifacts/reneg-eq/reneg-r1 it seeded on the third symbol
+                   reference-data/artifacts/reneg-eq/reneg-r1 it seeded on the third symbol
                    and stood CMA down for the whole window, leaving |z| at 27
                    and the descrambled SCR at 68% ones.  Level first, then
                    phase. */
@@ -11276,7 +11276,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        instant alone until Ja has been accepted.  PP trains the equalizer at the
        instant it ran on, and a move afterwards lands on that equalizer --
        the harm the plain-V.34 note below already measured.  Against the
-       RasFinder over a clean wired path (artifacts/rf-tower-scan1-1, -4:
+       RasFinder over a clean wired path (reference-data/artifacts/rf-tower-scan1-1, -4:
        low carrier, PP locked late) the chooser moved the instant just after
        PP (off 351.8 vs on 332.4, a 6% call), the Ja that followed never
        demodulated, Sd went out on the 6 s fallback and the peer retrained;
@@ -11328,7 +11328,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        next one comes from the analogue modem's 9.3.2.7 S itself.  S is 128T,
        half a 256-symbol eye window, so whether that late flip lands in time
        to see S depended on where the window boundaries fell.  Measured on
-       artifacts/rf-jafb1000-20260929-r2 (RasFinder, 3200 baud high
+       reference-data/artifacts/rf-jafb1000-20260929-r2 (RasFinder, 3200 baud high
        carrier): replayed in 160-sample blocks the flip landed one window
        before S and S was detected; in the two 80-sample blocks per 20 ms a
        live pjmedia call delivers (ME_IO_SCHEDULE) it landed after, the
@@ -12053,7 +12053,7 @@ static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
 /*! Recover from a whole-sample slip in the received stream.
 
     Measured offline against a recorded five-minute call (v90_upstream_replay
-    on artifacts/dmodem-soak-0821-goalproper): the upstream decodes the peer
+    on reference-data/artifacts/dmodem-soak-0821-goalproper): the upstream decodes the peer
     perfectly -- distance to the lattice 0.002 -- for 42.1 s, and then loses
     it inside three symbols and never gets it back.  The wire is unchanged
     across that instant: same level, same 201-3439 Hz band, same carrier, no
@@ -12877,7 +12877,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    same candidate afterwards; and a restore fires as often as
                    every V34_V90_T3_FSE_BAD_RUN symbols, so resetting the
                    counter here starved the sweep completely.  Measured on
-                   artifacts/dmodem-soak-0821-rounds/round1: 300-odd restores
+                   reference-data/artifacts/dmodem-soak-0821-rounds/round1: 300-odd restores
                    in one call and the sweep never once passed step 1 of 112,
                    sitting on the same phase for five minutes. */
                 s->v90_t3_sf_locked = false;
@@ -12888,7 +12888,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    compensate -- manufacturing, on the recovery path, exactly
                    the fault the search below is there to undo.  Keeping the
                    frequency instead was measured slightly worse (30 clean
-                   windows against 50, artifacts/goal-v90-073744Z). */
+                   windows against 50, reference-data/artifacts/goal-v90-073744Z). */
                 s->v90_t3_gardner.freq = 0.0f;
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
@@ -13419,7 +13419,7 @@ static int64_t v90_t3_4point_end(const v34_rx_state_t *s,
    The RasFinder's MT5634SMI does not reset its scrambler (nor, as plain V.34
    already showed, its trellis encoder) in V.90 mode.  Its B1 is scrambled
    ones on the selected constellation -- at 9600 bit/s
-   (artifacts/rf-pve-20261015/v90-6313-cap9600) every mapping frame of it is
+   (reference-data/artifacts/rf-pve-20261015/v90-6313-cap9600) every mapping frame of it is
    reproduced exactly by our own mapper from the scrambler state 0x18e679,
    which no reset reaches -- so no template fits it, and the search scored
    17-27%, the noise floor of 42 parameters fitted to 128 symbols.
@@ -13509,7 +13509,7 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     if (qend < 0)
         return -1;
     /* B1 starts nine symbols after it, on every call measured
-       (artifacts/rf-pve-20261015: v90-6311-1, v90-6313-1, diag-6313-21600,
+       (reference-data/artifacts/rf-pve-20261015: v90-6311-1, v90-6313-1, diag-6313-21600,
        and v90-6313-cap9600 where B1 decodes to the mapping frame): one
        transition symbol and eight symbols of near-silence -- the same eight
        the plain V.34 B1 search finds this peer puts between E and B1.  Where
@@ -15148,7 +15148,7 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
    9.3.1.4/9.3.1.5 have the digital modem transmit Jd "and condition its
    receiver to detect signal S", and 9.3.2.7 has the analogue modem send S
    (and hold it until J'd) up to 5000 ms after it went silent.  Against the
-   RasFinder, from a clean wired path (artifacts/rf-tower-scan1-*), that S
+   RasFinder, from a clean wired path (reference-data/artifacts/rf-tower-scan1-*), that S
    starts ~1.9 s into our Jd -- in time -- but on the HIGH carrier (1920 Hz at
    3200 baud: 0.98 of the band energy on the 320/1920/3520 Hz lines, held for
    seconds) while the Phase 3 upstream before it was on the LOW carrier, which
@@ -15234,7 +15234,7 @@ static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
                     /* 3429 baud has ONE carrier (1959.2 Hz), so both line sets are the same three
                        lines and "this set high, the other low" can never hold.  An Intel/Conexant
                        V.92 modem chose 3429 in INFO1a and its S, 0.4 s of 0.5-0.6 of the energy on
-                       those lines, went unseen for the whole of Jd (artifacts/serial-flex-a2). */
+                       those lines, went unseen for the whole of Jd (reference-data/artifacts/serial-flex-a2). */
                     if (line[0] > 0.45f*denom)
                         on = 0;
                     /*endif*/
@@ -15655,7 +15655,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 
     /* V.90 9.6: re-acquire the CP conditioning after a dead stretch of line.
      *
-     * Measured on artifacts/reneg-ab-225015Z/reneg-r1, which is the failing
+     * Measured on reference-data/artifacts/reneg-ab-225015Z/reneg-r1, which is the failing
      * renegotiation this work reproduces offline.  Its RTP trace carries
      * exactly one loss in 32868 packets -- three packets, 480 samples -- and
      * it lands on the frame where 9.6.1.2.3's terminating CP-prime is due.
@@ -16865,7 +16865,7 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
        v90_t3_put_sample() calls v90_t3_emit_ready() whenever it has acquired,
        and that calls process_primary_symbol() directly.  So every symbol the
        CP stage saw during a renegotiation came from the data receiver --
-       instrumented on artifacts/reneg-eq/reneg-r1, all 42496 of them -- with
+       instrumented on reference-data/artifacts/reneg-eq/reneg-r1, all 42496 of them -- with
        |z| pinned at 26.8 against the 4-point slicer's unit circle whatever
        the T/2 equalizer did, which is why resetting that equalizer and
        unfreezing its CMA changed nothing at all.  The upstream re-acquires

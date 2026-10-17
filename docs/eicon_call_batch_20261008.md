@@ -5,7 +5,7 @@ Eight sequential calls alternated forced V.34 and V.90 across PCMU endpoint
 were present throughout. No peer or gateway configuration changed. The harness
 waited at least 65 seconds between calls to the same controller and preserved
 byte-exact TX/RX G.711, RTP arrival records, engine I/O schedules, PTY bytes,
-and logs in `artifacts/eicon-batch-20261008-r1/`.
+and logs in `reference-data/artifacts/eicon-batch-20261008-r1/`.
 
 | Call | Mode/law | Observed result |
 |---|---|---|
@@ -18,7 +18,7 @@ and logs in `artifacts/eicon-batch-20261008-r1/`.
 | 07 | V.90 / PCMU | 56000/31200, LAPM and menu; first echo fails |
 | 08 | V.34 / PCMA | INFO1c, no INFO1a before disconnect |
 
-A replacement for call 04, `artifacts/eicon-batch-20261008-recheck/`,
+A replacement for call 04, `reference-data/artifacts/eicon-batch-20261008-recheck/`,
 reaches INFO1a/Phase 4, fails training three times, then sends an all-zero
 INFO1c. It delivers no menu. The harness now tolerates a nonblocking read
 race and scopes raw PCM dump files per call; earlier shared `/tmp` raw dumps
@@ -87,7 +87,7 @@ PCMA trained at 56000/21600, PCMU at 50666/21600. **Each carried one exact
 201-byte echo, failed its second, and received peer Tone B retrain.** The
 PCMA call had no local RTP sequence/timestamp gaps in either direction;
 the PCMU call had one RX gap and no TX gaps. Evidence is in
-`artifacts/eicon-batch-20261008-cap21600-a/` and `...-cap21600-u/`.
+`reference-data/artifacts/eicon-batch-20261008-cap21600-a/` and `...-cap21600-u/`.
 Reducing the upstream ceiling does not remove the failure on these trials.
 The total is eleven placed calls, including the invalid PTY trial and its
 replacement. No sustained ten-line echo test passed.
@@ -97,7 +97,7 @@ replacement. No sustained ten-line echo test passed.
 ```
 python3 tools/eicon_call_batch.py artifacts/eicon-new-batch --repeats 2 --lines 10
 .venv/bin/python tools/v34_mp_tap_check.py \
-  artifacts/eicon-batch-20261008-r1/01-v34-ulaw/live-tx.g711 12 18
+  reference-data/artifacts/eicon-batch-20261008-r1/01-v34-ulaw/live-tx.g711 12 18
 ```
 
 The MP checker deliberately supports caller/PCMU/4-point MP only. Every

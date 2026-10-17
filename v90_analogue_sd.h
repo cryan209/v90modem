@@ -96,7 +96,7 @@ bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
  * Sd sequence fitted byte-exact (what the SIP G.711 bearer delivers, where the
  * DS0 passes through untouched) scores 1.000 and is accepted; low-passed at
  * 3.4 kHz and nothing else changed, the same sequence scores 0.456; and the
- * real thing off the Apple modem's loop (artifacts/apple-v90-sip-r7, tap
+ * real thing off the Apple modem's loop (reference-data/artifacts/apple-v90-sip-r7, tap
  * t = 19.625 s) scores 0.396.  FIT_SCORE_MIN is 0.80.  So on an analogue
  * bearer this detector cannot fire, for a reason that is in §8.4.4 rather than
  * in the line, the level or the tuning -- and every window of every such call

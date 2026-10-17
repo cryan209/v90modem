@@ -595,7 +595,7 @@ the Tc branch has no row).
 
 First calls from this side to a foreign modem in V.22bis, dialling hunt group
 3999 from tower (`RF_EXT=3999 ME_MODE=... tools/soak/rasfinder_call.sh`).
-Kept as `artifacts/rf-v22-*` on tower and here.
+Kept as `reference-data/artifacts/rf-v22-*` on tower and here.
 
 - **V.8 with V.22bis as the only offer** (`ME_MODE=v22`, rf-v22-v8-3):
   `CONNECT 2400` and the BBS's banner and `login:` prompt, clean for the

@@ -188,7 +188,7 @@ bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
          * and one looking at the wrong signal.  Thousands of those lines
          * across every analogue-role capture in artifacts/ say nothing, and
          * believing them would conclude no Sd had arrived when it was on the
-         * wire at 99.3% of the block energy (artifacts/apple-v90-sip-r7, tap
+         * wire at 99.3% of the block energy (reference-data/artifacts/apple-v90-sip-r7, tap
          * t = 19.625 s).
          *
          * reported_score is for the log only.  best_score/best_off are the

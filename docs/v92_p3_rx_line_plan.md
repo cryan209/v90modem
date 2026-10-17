@@ -12,7 +12,7 @@ produces the instrument the next one is graded by.
 
 ## What is known (measured, not assumed)
 
-Fixture: `artifacts/apple-v92-sip-r4` (Apple USB modem as the V.92 analogue
+Fixture: `reference-data/artifacts/apple-v92-sip-r4` (Apple USB modem as the V.92 analogue
 modem dialling our digital side, `ME_V92_PCM_UPSTREAM=1`, MD=0, U_INFO=78,
 u-law). The receiver is armed at G.711 sample 81440.
 
@@ -70,7 +70,7 @@ u-law). The receiver is armed at G.711 sample 81440.
 
 ### 1. A tracked fixture and a failing test -- DONE 2026-10-01
 
-- **Fixture.** `artifacts/v92-loop-upstream/live-rx.g711` is r4 bytes
+- **Fixture.** `reference-data/artifacts/v92-loop-upstream/live-rx.g711` is r4 bytes
   80000..99999 (2.5 s), tracked with `git add -f`. Its README gives the
   provenance, the rebased positions (arm 1440, Ru 5008, Ru-bar 5272) and the
   descriptor the analogue side sent (`measurement-120x66`: N=120, LSP=12,
@@ -626,7 +626,7 @@ handed-on equaliser.
 
 ### 9. Live verification, and the next blocker
 
-- Re-run `artifacts/apple-v92-sip-r4/run.sh` into a new directory, with the
+- Re-run `reference-data/artifacts/apple-v92-sip-r4/run.sh` into a new directory, with the
   server on tower as before.
 - **Success:** the server log shows the Ja descriptor parsed and `Sd`
   started within 9.5.1.1.3's 500 ms, with Sd present in the server's own

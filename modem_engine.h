@@ -229,7 +229,7 @@ int  me_cr_get_adjustment(void);
  * the receiver's timing loop absorbs a repeated or missing sample and
  * nothing is lost" -- is measurably false, and it cost every long call.
  *
- * Measured on artifacts/goal-matrix-115515Z/rate24000-r1, the one call in
+ * Measured on reference-data/artifacts/goal-matrix-115515Z/rate24000-r1, the one call in
  * the recorded rate matrix that ran 115.4 s at 100% clean -- and the only
  * one of the twelve whose log contains no cr_get_adjustment at all, the
  * other eleven injecting 8 to 81 of them and all eleven collapsing.

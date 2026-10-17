@@ -22,7 +22,7 @@ the live ordering into the probe before generating any mapping frames.
 
 The Eicon's captured 7910 Type-1 MP selects nonlinear encoding, expanded
 shaping and Q14 coefficients `(56,-6), (-32,2), (38,-13)`; see
-`artifacts/eicon-v90-asterisk-after-clearmode-7910-r1/server.log`.
+`reference-data/artifacts/eicon-v90-asterisk-after-clearmode-7910-r1/server.log`.
 At N=5 with these coefficients, the old probe measured average energy
 10.7160196 instead of 10.7189458 and produced scale 1.262977 instead of
 1.26279899. This is a small correction, about 0.0012 dB of amplitude scale;
@@ -56,15 +56,15 @@ not reported as passing.
 
 ## Hardware follow-up
 
-`artifacts/eicon-v90-power-probe-20261008-u1/` is a sandbox socket-bind
+`reference-data/artifacts/eicon-v90-power-probe-20261008-u1/` is a sandbox socket-bind
 failure, not a modem outcome.
 
-The permitted PCMU call, `artifacts/eicon-v90-power-probe-20261008-u2/`,
+The permitted PCMU call, `reference-data/artifacts/eicon-v90-power-probe-20261008-u2/`,
 reaches the analogue B1/data handover at +17028 ms but expires the B1d
 deadline at +23565 ms, retrains, and never supplies the menu. No checked
 echo lines pass. This call does not establish a hardware improvement.
 
-The PCMA call, `artifacts/eicon-v90-power-probe-20261008-a1/`, expires
+The PCMA call, `reference-data/artifacts/eicon-v90-power-probe-20261008-a1/`, expires
 the Ja/Sd Phase 3 deadline at +10957 ms, retrains, and also never supplies
 the menu. It never exercises the changed B1/data calibration path, so its
 failure cannot grade this correction. Neither hardware trial is a pass.

@@ -41,8 +41,8 @@ reliable first-attempt startup or sustained V.34 operation.
 
 ## Evidence and reproduction
 
-`artifacts/eicon-other-modes-20261008-r1/` contains the twelve-call matrix.
-`artifacts/eicon-other-modes-20261008-recheck/` contains the V.22 repeats and
+`reference-data/artifacts/eicon-other-modes-20261008-r1/` contains the twelve-call matrix.
+`reference-data/artifacts/eicon-other-modes-20261008-recheck/` contains the V.22 repeats and
 V.34 PCMU repeat. Each call preserves the summary, PTY transcript, modem log,
 G.711 TX/RX taps and engine I/O schedule. Rate claims above use CONNECT and
 engine negotiation records, not the requested mode alone.
@@ -80,8 +80,8 @@ at 2400 baud, and reached data with MP rates of 16800 bit/s toward us and
 reach CONNECT. The higher starting profile therefore did not produce a
 higher working rate on these calls.
 
-Evidence: `artifacts/eicon-v34-33600-20261008-r1/` and
-`artifacts/eicon-v34-maxoffer-20261008-r1/`. The temporary strict-rate runner
+Evidence: `reference-data/artifacts/eicon-v34-33600-20261008-r1/` and
+`reference-data/artifacts/eicon-v34-maxoffer-20261008-r1/`. The temporary strict-rate runner
 is preserved with the local evidence as `strict_runner.py`. No persistent
 DSP defaults or peer settings changed. Live Eicon configuration could not be
 read because SSH authentication failed; card settings and the reason for
@@ -98,7 +98,7 @@ and recovered over 16000 bits per direction with zero errors. At 3429 /
 714/485 errors. A linear PCM control at 33600 counted 564/0 errors, so the
 high-rate failure is not explained by G.711 quantization alone. These are
 single zero-delay loopback runs on the Mac, not Tower hardware calls or an
-acquisition-delay sweep. Logs are in `artifacts/v34-3429-check-20261008/`.
+acquisition-delay sweep. Logs are in `reference-data/artifacts/v34-3429-check-20261008/`.
 
 Thus 3429 baud demonstrably works at 21600 in the current duplex harness;
 33600 payload is not clean in these runs. None of the Eicon calls above
@@ -136,7 +136,7 @@ linear test (28909/22357 errors). Disabling carrier tracking or freezing
 timing did not make both directions clean. No DSP constants or defaults
 were changed to obtain a pass; a corrective DSP change remains open.
 Diagnostic logs, symbol dumps, analysis scripts and the delay sweep summary
-are preserved in `artifacts/v34-3429-diagnosis-20261008/`.
+are preserved in `reference-data/artifacts/v34-3429-diagnosis-20261008/`.
 
 ## Completed 3429/33600 receiver repair
 

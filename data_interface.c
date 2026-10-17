@@ -1715,7 +1715,7 @@ static void *pty_reader_thread(void *arg)
          * there is room for it.  Unread bytes stay in the pty, which fills
          * and blocks the DTE's writes -- the alternative, reading and then
          * truncating in ring_write(), lost whole runs of a bulk transfer
-         * (artifacts/slm-v90-pay1: 521 gaps downstream at 54666 bit/s). */
+         * (reference-data/artifacts/slm-v90-pay1: 521 gaps downstream at 54666 bit/s). */
         bool payload_room = payload_has_room(sizeof(buf));
 
         FD_ZERO(&fds);

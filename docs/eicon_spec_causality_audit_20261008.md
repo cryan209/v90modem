@@ -83,7 +83,7 @@ The failed echo and card CRC reports belong to this paired capture; their
 individual event origins have not yet been mapped onto the sample interval.
 
 The reproducible result is saved in
-`artifacts/eicon-direct-fixed-audio-20261008-r3/received-audio-comparison.json`.
+`reference-data/artifacts/eicon-direct-fixed-audio-20261008-r3/received-audio-comparison.json`.
 Thus bearer distortion is excluded for this exact interval, while our
 generated waveform/data stream remains suspect. This does not establish
 that the known-working card is wrong.

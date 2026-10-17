@@ -37990,7 +37990,7 @@ static int codeword_to_ucode(v91_law_t law, uint8_t codeword)
  * working digital modem does not honour the distinction: the Eicon card
  * transmits +0 (mu-law 0xFF) in *every* zero slot of both Sd and S-bar-d, on
  * two independently captured calls the peer Courier answered with CONNECT
- * (artifacts/eicon-digital-downstream/, docs/eicon_downstream_comparison.md).
+ * (reference-data/artifacts/eicon-digital-downstream/, docs/eicon_downstream_comparison.md).
  *
  * Requiring a polarity on a zero-level symbol therefore rejects real Sd.  The
  * information in §8.4.4 lives in the W slots -- match the level on the zero
@@ -38055,7 +38055,7 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
      * this scan used to start at 67 on that authority.  That clause binds the
      * *analogue* modem populating INFO1a; it is not a fact about the line, and
      * enforcing it here makes the receiver blind to real traffic.  Both
-     * captures in artifacts/eicon-digital-downstream/ -- calls that the peer
+     * captures in reference-data/artifacts/eicon-digital-downstream/ -- calls that the peer
      * Courier answered with CONNECT 32000 and CONNECT 42666 -- run at
      * U_INFO = 48, confirmed independently by W = 16 + UINFO = 64 holding
      * exactly across Sd (§8.4.4).  Accept what is on the wire and let the
@@ -38539,7 +38539,7 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
              * mixed line recording the magnitudes are not trustworthy).  But
              * §8.6.4 Ri is the U_INFO codeword with +++--- signs, so a
              * sign-only test cannot tell it from §8.4.4 Sd, and Ri is far
-             * longer.  On artifacts/eicon-digital-downstream/call1 that is
+             * longer.  On reference-data/artifacts/eicon-digital-downstream/call1 that is
              * exactly what happened: 758 reps of Ri at 14261 ms were reported
              * as Sd, and the TRN1d descrambler was then started ~5.9 s past
              * the real TRN1d and found nothing.

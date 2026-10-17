@@ -487,7 +487,7 @@ Three knobs, each default at current behaviour, each withholding one thing:
 | --- | --- | --- |
 | `ME_V90_CP_STREAM_STARTUP=1` | the 24-hypothesis search at *startup* CP, streaming instead as §9.6 does | §11.6 row 2400/9600/ulaw returns **24 post-renegotiation bit errors** on the answerer against 0, reproducibly; caller resync restarts 5 → 12 |
 | `ME_V34_TRN_HINT=0` | `phase4_trn_lock_*`, produced by `PHASE4_TRN` | plain V.34 **does not train at all** -- `trained=0/0`, zero bits, 60 s timeout, at 3200/21600 as well as 2400/9600 |
-| `ME_V34_J_HINT=0` | `phase3_j_lock_hyp`, produced by `PHASE3_WAIT_S` | no change anywhere available: `make test` green, `v90_engine_replay` of `artifacts/reneg-eq/reneg-r1` line-for-line identical, both duplex rows unchanged |
+| `ME_V34_J_HINT=0` | `phase3_j_lock_hyp`, produced by `PHASE3_WAIT_S` | no change anywhere available: `make test` green, `v90_engine_replay` of `reference-data/artifacts/reneg-eq/reneg-r1` line-for-line identical, both duplex rows unchanged |
 
 The MP stage chooses between the two hints with
 

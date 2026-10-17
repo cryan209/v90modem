@@ -25,7 +25,7 @@ def ulaw(code):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/modem-showcase')
+    parser.add_argument('--output', type=Path, default=ROOT / 'reference-data/artifacts/modem-showcase')
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)

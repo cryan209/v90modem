@@ -13,7 +13,7 @@ error.  It bounds every linear T-spaced receiver, ours included.
   v92_trn1u_bound.py <live-rx.g711> <approx-trn1u-sample>
                      [--alaw] [--len 1800] [--taps 1,5,11,21,41] [--span 60]
 
-Measured on artifacts/apple-v92-sip-r4 (Apple analogue modem on a 2-wire loop
+Measured on reference-data/artifacts/apple-v92-sip-r4 (Apple analogue modem on a 2-wire loop
 -> VG224 -> SIP -> our digital side), rough start 85323 where v92_p3_rx
 entered TRN1u: 1 tap 14% sign error at offset -31 (i.e. TRN1u really began
 ~30 symbols earlier than the receiver thought); 21 taps 0.7%; 41 taps 0.2%;

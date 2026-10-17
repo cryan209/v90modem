@@ -15,7 +15,7 @@ older section text are superseded by the next section. Moved and renamed on
 2026-10-10: `k56flex_feedback_*` -> `mica_qam_*`, `k56flex_response_rx_*` ->
 `mica_qam_word_rx_*`, `k56flex_startup_tx_*` -> `mica_v32bis_tx_*`, and
 `tools/k56flex_*_oracle.py` -> `tools/mica_qam_*_oracle.py`. Artifact paths
-(`artifacts/k56flex-response-20261009/`) are unchanged.
+(`reference-data/artifacts/k56flex-response-20261009/`) are unchanged.
 
 ## Overlay 8E is MICA's V.32/V.32bis datapump, not K56flex (2026-10-10)
 
@@ -74,7 +74,7 @@ The report records the firmware hash and isolated emulator build identity:
 
 ```sh
 python3 tools/mica_qam_word_rx_oracle.py \
-  --output artifacts/k56flex-response-20261009/oracle.json
+  --output reference-data/artifacts/k56flex-response-20261009/oracle.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -126,7 +126,7 @@ Reproduce with the retained isolated MicaEmu core:
 
 ```sh
 python3 tools/mica_qam_gate_oracle.py \
-  --output artifacts/k56flex-response-20261009/gates.json
+  --output reference-data/artifacts/k56flex-response-20261009/gates.json
 ```
 
 Next firmware work: trace callers of DF45 and E169/E1AB, identify the B31D
@@ -155,7 +155,7 @@ exercise all four points, all sixteen differential transitions and tie rules.
 
 ```sh
 python3 tools/mica_qam_coordinate_oracle.py \
-  --output artifacts/k56flex-response-20261009/coordinates.json
+  --output reference-data/artifacts/k56flex-response-20261009/coordinates.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -203,9 +203,9 @@ Evidence records the production source and firmware hashes and emulator build.
 
 ```sh
 python3 tools/mica_qam_rotation_oracle.py \
-  --output artifacts/k56flex-response-20261009/rotation.json
+  --output reference-data/artifacts/k56flex-response-20261009/rotation.json
 python3 tools/mica_qam_fir_oracle.py \
-  --output artifacts/k56flex-response-20261009/fir.json
+  --output reference-data/artifacts/k56flex-response-20261009/fir.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -235,7 +235,7 @@ ordering as well as isolated adaptation arithmetic.
 
 ```sh
 python3 tools/mica_qam_adapt_oracle.py \
-  --output artifacts/k56flex-response-20261009/adapt.json
+  --output reference-data/artifacts/k56flex-response-20261009/adapt.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -277,9 +277,9 @@ firmware, production source, table and emulator-build identities.
 
 ```sh
 python3 tools/mica_qam_resampler_oracle.py \
-  --output artifacts/k56flex-response-20261009/resampler.json
+  --output reference-data/artifacts/k56flex-response-20261009/resampler.json
 python3 tools/mica_qam_resampler_oracle.py --saturation \
-  --output artifacts/k56flex-response-20261009/resampler-saturation.json
+  --output reference-data/artifacts/k56flex-response-20261009/resampler-saturation.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -318,9 +318,9 @@ preservation; the K56flex core test passes.
 
 ```sh
 python3 tools/mica_qam_timing_oracle.py \
-  --output artifacts/k56flex-response-20261009/timing.json
+  --output reference-data/artifacts/k56flex-response-20261009/timing.json
 python3 tools/mica_qam_phase_oracle.py \
-  --output artifacts/k56flex-response-20261009/phase.json
+  --output reference-data/artifacts/k56flex-response-20261009/phase.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -353,9 +353,9 @@ steps and three-sample blocks; the K56flex core suite passes.
 
 ```sh
 python3 tools/mica_qam_init_oracle.py \
-  --output artifacts/k56flex-response-20261009/init.json
+  --output reference-data/artifacts/k56flex-response-20261009/init.json
 python3 tools/mica_qam_block_oracle.py \
-  --output artifacts/k56flex-response-20261009/block.json
+  --output reference-data/artifacts/k56flex-response-20261009/block.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -399,7 +399,7 @@ by observed writes, not inferred from pointer names.
 
 ```sh
 python3 tools/mica_qam_input_setup_oracle.py \
-  --output artifacts/k56flex-response-20261009/input-setup.json
+  --output reference-data/artifacts/k56flex-response-20261009/input-setup.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -459,7 +459,7 @@ consumed by the predictor-mixing stage's reverse-carry index four.
 
 ```sh
 python3 tools/mica_qam_predictor_fir_oracle.py \
-  --output artifacts/k56flex-response-20261009/predictor-fir.json
+  --output reference-data/artifacts/k56flex-response-20261009/predictor-fir.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -484,7 +484,7 @@ choice of DSP constants.
 with production C and composes its result with the original phase tail.
 All 2,048 full-width randomized cases match the increment, integrator,
 scratch word, phase and phasor. Evidence is in
-`artifacts/k56flex-response-20261009/predictor-controller.json`.
+`reference-data/artifacts/k56flex-response-20261009/predictor-controller.json`.
 The enclosing mode-15 4AF3 path is now recovered below. The alternate
 error-acquisition mode is also recovered in the section below; this does not
 establish carrier acquisition or CONNECT.
@@ -497,7 +497,7 @@ the arithmetic five-bit shift; retained accumulators also wrap.
 `tools/mica_qam_predictor_correlation_oracle.py` checks all four accumulator
 words against original instructions in 2,048 full-width randomized cases,
 including overflow. All match; evidence is in
-`artifacts/k56flex-response-20261009/predictor-correlation.json`.
+`reference-data/artifacts/k56flex-response-20261009/predictor-correlation.json`.
 The subsequent timer, 6D4E angle conversion and accumulator reset are not
 included in this helper; the complete mode-15 helper below composes them.
 
@@ -520,9 +520,9 @@ controller when this word is zero. The K56flex core suite passes.
 
 ```sh
 python3 tools/mica_qam_predictor_phase_oracle.py \
-  --output artifacts/k56flex-response-20261009/predictor-phase.json
+  --output reference-data/artifacts/k56flex-response-20261009/predictor-phase.json
 python3 tools/mica_qam_input_setup_oracle.py \
-  --output artifacts/k56flex-response-20261009/input-setup.json
+  --output reference-data/artifacts/k56flex-response-20261009/input-setup.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -562,9 +562,9 @@ the C pair operation leaves carrier-phase evolution to its caller.
 
 ```sh
 python3 tools/mica_qam_capture_copy_oracle.py \
-  --output artifacts/k56flex-response-20261009/capture-copy.json
+  --output reference-data/artifacts/k56flex-response-20261009/capture-copy.json
 python3 tools/mica_qam_source_pair_oracle.py \
-  --output artifacts/k56flex-response-20261009/source-pair.json
+  --output reference-data/artifacts/k56flex-response-20261009/source-pair.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -615,9 +615,9 @@ remain open.
 
 ```sh
 python3 tools/mica_qam_predictor_angle_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-angle.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-angle.json
 python3 tools/mica_qam_predictor_control_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-control15.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-control15.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -656,7 +656,7 @@ hashes. `make mica_qam_test && ./mica_qam_test` also passes.
 
 ```sh
 python3 tools/mica_qam_predictor_normal_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-control-normal.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-control-normal.json
 ```
 
 Both 4AF3 controller branches are now lifted and independently checked.
@@ -706,7 +706,7 @@ being tested. Evidence retains firmware, source and emulator-build hashes.
 
 ```sh
 python3 tools/mica_qam_predictor_adapt_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-adapt.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-adapt.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -754,7 +754,7 @@ hashes are recorded in the report.
 
 ```sh
 python3 tools/mica_qam_predictor_block_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-block.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-block.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -798,7 +798,7 @@ source/raw rings are supplied; no live input or adaptive convergence is claimed.
 
 ```sh
 python3 tools/mica_qam_predictor_run_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/predictor-run.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/predictor-run.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -850,7 +850,7 @@ production-source and emulator-build hashes.
 
 ```sh
 python3 tools/mica_qam_source_emit_oracle.py \
-  --mica ../MicaEmu --output artifacts/k56flex-response-20261009/source-emit.json
+  --mica ../MicaEmu --output reference-data/artifacts/k56flex-response-20261009/source-emit.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -892,9 +892,9 @@ helper but has not been independently exercised by these fixtures.
 
 ```sh
 python3 tools/mica_qam_startup_symbol_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-symbol.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-symbol.json
 python3 tools/mica_qam_startup_source_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-source.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-source.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -922,7 +922,7 @@ history remain open, as do pulse shaping and live integration.
 
 ```sh
 python3 tools/mica_qam_startup_bits_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-bits.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-bits.json
 ```
 
 ### Word extraction joined to startup source generation
@@ -955,11 +955,11 @@ History is initialized at the start of each profile in both implementations.
 
 ```sh
 python3 tools/mica_qam_extended_bits_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/extended-bits.json
+  --output reference-data/artifacts/k56flex-response-20261009/extended-bits.json
 python3 tools/mica_qam_startup_take_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-take.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-take.json
 python3 tools/mica_qam_startup_pipeline_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-pipeline.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-pipeline.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -988,7 +988,7 @@ the profile-selected carrier tables or 9367's output/sample behavior.
 
 ```sh
 python3 tools/mica_qam_startup_rotate_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-rotate.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-rotate.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1013,9 +1013,9 @@ handoff rather than imposing the writer's mode separately.
 
 ```sh
 python3 tools/mica_qam_startup_output_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-output.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-output.json
 python3 tools/mica_qam_startup_rotate_output_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-rotate-output.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-rotate-output.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1044,7 +1044,7 @@ the count pattern is 3, 3, 4; the fractional part must be retained.
 
 ```sh
 python3 tools/mica_qam_startup_count_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-count.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-count.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1072,7 +1072,7 @@ sequence, not the surrounding 8270 coefficient dispatch or sample loop.
 
 ```sh
 python3 tools/mica_qam_startup_fir_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-fir.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-fir.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1106,7 +1106,7 @@ otherwise the bit-reversed advances act on the wrong auxiliary register.
 
 ```sh
 python3 tools/mica_qam_startup_phase_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-phase.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-phase.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1141,7 +1141,7 @@ in the FIR store, and rejection without mutation.
 
 ```sh
 python3 tools/mica_qam_startup_samples_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-samples.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-samples.json
 make mica_qam_test && ./mica_qam_test
 ```
 
@@ -1215,7 +1215,7 @@ property of the shipped filter, not explained here.
 
 ```sh
 python3 tools/mica_qam_v32bis_tx_oracle.py --mica ../MicaEmu \
-  --output artifacts/k56flex-response-20261009/startup-tx.json
+  --output reference-data/artifacts/k56flex-response-20261009/startup-tx.json
 make mica_qam_test && ./mica_qam_test
 ```
 

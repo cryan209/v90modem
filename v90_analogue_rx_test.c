@@ -2,7 +2,7 @@
  * v90_analogue_rx_test.c — does the analogue Phase 3 receiver find the four
  * moments §9.3.2 turns on, in a downstream we did not generate?
  *
- * The fixtures in artifacts/eicon-digital-downstream/ are the point of this
+ * The fixtures in reference-data/artifacts/eicon-digital-downstream/ are the point of this
  * test.  They are transmit-side DS0 captures of the Eicon card's own V.90
  * firmware on calls a USR Courier answered with CONNECT — the only downstream
  * in this tree that our own transmitter did not produce.  A convention error
@@ -70,8 +70,8 @@ typedef struct {
 
 /* From tools/eicon_rx_conformance.py, which derived them independently. */
 static const fixture_t fixtures[] = {
-    {"artifacts/eicon-digital-downstream/call1-connect-32000.ulaw", 48, 64, 8, 30000},
-    {"artifacts/eicon-digital-downstream/call3-connect-42666.ulaw", 48, 64, 8, 30000},
+    {"reference-data/artifacts/eicon-digital-downstream/call1-connect-32000.ulaw", 48, 64, 8, 30000},
+    {"reference-data/artifacts/eicon-digital-downstream/call3-connect-42666.ulaw", 48, 64, 8, 30000},
 };
 
 static uint8_t *read_file(const char *path, long *len_out)
@@ -507,7 +507,7 @@ static void test_linear_bearer(const fixture_t *fx)
  * equal amplitude from 150 Hz to 3750 Hz -- so a recorded call contains a
  * complete channel sounding, and tools/hsf_probe_response.py pulls it out.  The
  * table below is what the real HSF path does, taken off
- * artifacts/hsf-v90/call-c1 and identical to 0.1 dB in the nine recorded calls
+ * reference-data/artifacts/hsf-v90/call-c1 and identical to 0.1 dB in the nine recorded calls
  * that got far enough to carry a probe.  It covers everything between the two
  * modems: the far end's G.711 transmit and its D/A reconstruction, the SIP leg,
  * the ATA, the two-wire line and the HSF codec's own receive filter.
@@ -528,7 +528,7 @@ static void test_linear_bearer(const fixture_t *fx)
  * their neighbours, which the smoothness of everything around them justifies.
  */
 
-/* Measured on artifacts/hsf-v90/call-c1/hsf-rx.raw, probe at 16.440 s. */
+/* Measured on reference-data/artifacts/hsf-v90/call-c1/hsf-rx.raw, probe at 16.440 s. */
 static const struct { int freq; double db; double phase; }
     hsf_measured_response[] = {
         { 150,   -0.38,  -0.0168},
@@ -1907,7 +1907,7 @@ static void test_phase4_cp_from_measurement(void)
          * must itself fit Table 17's K <= 24, not merely its drn field.  A CPt
          * that keeps CP's full masks (prod(Mi) ~ 2^31) while declaring K=24 is
          * what let the Eicon card build a K=31 TRN2d that no K=24 receiver can
-         * demap (artifacts/eicon-phase4-downstream/run79).  CPt must therefore
+         * demap (reference-data/artifacts/eicon-phase4-downstream/run79).  CPt must therefore
          * be a *reduced subset* of CP: every CPt point is in CP (so §8.5.2's
          * "CP no more than 3 dB above CPt" holds in the safe direction, CPt
          * keeping the higher-amplitude points), and prod(Mi) is commensurate
@@ -2107,7 +2107,7 @@ static void test_tone_b_retrain_detector(void)
 /*
  * §9.4.2 against the one foreign Phase 4 downstream we have.
  *
- * artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw is 30 s of an
+ * reference-data/artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw is 30 s of an
  * Eicon Diva Server's own §9.4 downstream, captured on the analogue side of a
  * live call.  Every other Phase 4 test in this file is fed by v90.c, so both
  * halves share any wrong assumption and agree anyway; this one cannot.
@@ -2146,7 +2146,7 @@ static void test_tone_b_retrain_detector(void)
 static void test_phase4_foreign_downstream(void)
 {
     static const char path[] =
-        "artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw";
+        "reference-data/artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw";
     /* Independently derived from the capture, not from this decoder: the
      * Ucode-22 run starts at sample 3567 and its +++--- grid reverses to
      * ---+++ after 2544 symbols, running 24 more.  See the fixture README. */

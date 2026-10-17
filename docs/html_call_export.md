@@ -71,7 +71,7 @@ retracted. The
 48 upstream hypotheses across the three Quick Connect recordings recovered
 no CRC-valid CPt/CPu/CPus/SUVu frames on that PAM hypothesis. This does not
 establish that PCM upstream was selected. Results and commands are in
-`artifacts/gough-v92-recovery-20261005/`.
+`reference-data/artifacts/gough-v92-recovery-20261005/`.
 
 A separate CP-constrained recovery tool subsequently decoded V.34 upstream
 control records and all 48 downstream B1d frames on the Motorola and USR QC
@@ -79,7 +79,7 @@ recordings. USR yields 946 V.42 detection octets (`EC` repeated), independently
 confirmed by the native detector; no application bytes are recovered. These
 results are not yet incorporated into HTML events. See
 [offline PCM payload recovery](offline_pcm_payload_recovery.md) and
-`artifacts/gough-v92-payload-acquisition-20261005/`.
+`reference-data/artifacts/gough-v92-payload-acquisition-20261005/`.
 
 ## x2 and K56flex receive evidence
 
@@ -163,7 +163,7 @@ without a valid parameter record. Its fixed-stage timeline is not sufficient
 to claim those stages from the waveform.
 
 Reports, logs, hashes, process results and the corpus matrix are preserved in
-`artifacts/gough-legacy-decode-20261005-qualified/report.md`. All processes,
+`reference-data/artifacts/gough-legacy-decode-20261005-qualified/report.md`. All processes,
 JavaScript syntax/data checks, per-channel text/HTML event-count checks and
 mocked viewer-control execution for all 50 reports passed. Browser layout
 remains unverified.
@@ -191,4 +191,4 @@ levels for independent B1d checks. It does not add an inferred boundary or
 payload event to HTML. Swann's tested single-constellation B1d hypotheses fail
 a held-out fit; this is not proof its waveform lacks data. Full logs, binary
 hashes, coverage, CRC evidence and the independent fit are retained in
-`artifacts/gough-v90-payload-20261005/report.md`.
+`reference-data/artifacts/gough-v90-payload-20261005/report.md`.

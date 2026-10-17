@@ -417,7 +417,7 @@ With the carrier right the card transmits a textbook downstream:
 and its states run on past `0x007a` for the first time — `0x007b → 0x007c →
 0x0080 → 0x00b0` — reporting `SNRatio 31.5 dB` and `upstream quality 0x0067` on
 what we send it. 30005T of TRN1d is the same 94% of the §9.3.1.5 budget the
-`artifacts/eicon-digital-downstream/` fixtures spend, against our own 2496T.
+`reference-data/artifacts/eicon-digital-downstream/` fixtures spend, against our own 2496T.
 
 **Then we still could not see it, for a second reason: W.** §8.4.4 puts Sd at
 W = Ucode(16 + U_INFO), and U_INFO is the analogue modem's choice, announced in
@@ -683,7 +683,7 @@ six sign bits carrying data.
 
 and on the wire, which is where it should be read rather than from the detector
 under test — 30 s of the card's downstream is kept as
-[`../artifacts/eicon-phase4-downstream/`](../artifacts/eicon-phase4-downstream/):
+[`../reference-data/artifacts/eicon-phase4-downstream/`](../reference-data/artifacts/eicon-phase4-downstream/):
 
 ```text
   15.446 s .. 15.767 s   2568 symbols, Ucode 22, + + + − − −      Ri
@@ -757,7 +757,7 @@ codebase.
 1. **Decode the card's TRN2d.** R̄i now follows, so the constellation the CPt
    named is the next thing to settle: 13% of the symbols after the seam are
    outside it. Offline, against
-   [`../artifacts/eicon-phase4-downstream/`](../artifacts/eicon-phase4-downstream/).
+   [`../reference-data/artifacts/eicon-phase4-downstream/`](../reference-data/artifacts/eicon-phase4-downstream/).
 2. **A noise-margin floor.** `v90_dil_measure_plan_rate()` returns false rather
    than backing off when 3σ leaves nothing, and run 77 lost a call to it with a
    line that carried drn = 8 at 0σ. A modem should offer the lowest rate it can

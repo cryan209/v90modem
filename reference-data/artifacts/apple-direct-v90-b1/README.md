@@ -13,7 +13,7 @@ detector triggers about six seconds later (V.90 9.4.2.4-.5). With the
 131072-sample ring acquires the same recording at 100.0% fit:
 
 ```sh
-./v90_upstream_replay artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.2 6.2
+./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.2 6.2
 ```
 
 The handover and history are fixed. Do not use the tool's handover sweep to
@@ -21,7 +21,7 @@ compare ring sizes, because that sweep changes the experiment's anchor.
 The early-search API is separately tested with a fixed pre-B1 anchor:
 
 ```sh
-./v90_upstream_replay artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.2 0.2 cp-prime
+./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.2 0.2 cp-prime
 ```
 
 That mode asserts that starting the search does not manufacture an E event.
@@ -31,4 +31,4 @@ whole-engine tests supply the actual CRC-valid CP' qualification.
 
 The fixture checks acquisition history, not successful V.90 negotiation or
 DTE payload delivery. Full call evidence remains local under
-`artifacts/apple-v90-followup-20261017/`.
+`reference-data/artifacts/apple-v90-followup-20261017/`.

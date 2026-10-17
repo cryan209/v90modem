@@ -131,7 +131,7 @@ Acquisition is now multi-evidence rather than one fixed Table-18 threshold:
 - a CRC-valid Ja descriptor remains authoritative whenever it arrives first.
 
 Live evidence in
-`artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`
+`reference-data/artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`
 selected 3200-low, drove SmartLink's error energy from zero to about 9, caused
 it to build its 428-bit CPt, and moved this receiver into `V90_CP`.  It then
 retrained before CP validation, so the next foreign-modem blocker is CPt
@@ -165,5 +165,5 @@ downstream.  The default is therefore 4000T.  This proves the complete physical
 startup through B1; FCS-valid LAPM traffic remains the hardware qualification
 criterion.  Evidence:
 
-- CPt/TRN2 oracle: `artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`
-- successful 4000T DATA entry: `artifacts/dmodem-3000-3200-live/v90-dmodem-trn2-4000b-20260812T002922Z/`
+- CPt/TRN2 oracle: `reference-data/artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`
+- successful 4000T DATA entry: `reference-data/artifacts/dmodem-3000-3200-live/v90-dmodem-trn2-4000b-20260812T002922Z/`

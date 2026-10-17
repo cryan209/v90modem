@@ -302,7 +302,7 @@ receive this L1/L2 *first* and raise Tone A only then.  Measured on the two
 taps, our L2 ended at 11.905 s and the RasFinder's Tone A began at 12.34 s, so
 INFO1c went out 435 ms before the peer was conditioned to receive it -- after
 which it held Tone A for the remaining 47 s of the call
-(`artifacts/rf-v34-a1`).  New `V34_TX_STAGE_POST_L2_WAIT_TONE_A` holds silence
+(`reference-data/artifacts/rf-v34-a1`).  New `V34_TX_STAGE_POST_L2_WAIT_TONE_A` holds silence
 until Tone A appears, bounded by `ME_V34_POST_L2_TONE_A_WAIT_MS` and falling
 through to the old behaviour on expiry.  **The evidence has to be the 2400 Hz
 bin fraction, not an event flag**: by this point the receiver has consumed the
@@ -321,11 +321,11 @@ a constraint that stopped existing on 2026-08-22 (see
 capping the live rate and `v34_update_echo_policy()` learned to drop it
 whenever the transmit carrier falls inside the receive band, which at 3200
 baud it does.  So a default call offered the answer modem one row and five
-zeros, and this peer answers that with nothing (`artifacts/rf-v34-b1`: a
+zeros, and this peer answers that with nothing (`reference-data/artifacts/rf-v34-b1`: a
 CRC-clean INFO1c, then 45 s of Tone A).  Default is now 3200 -- not 3429,
 which is the one row the symbol-rate matrix has never trained.  With it the
 same peer returns INFO1a and the call runs S, S-bar, PP, TRN, J, Phase 4 and
-**data mode at 31200 bit/s** (`artifacts/rf-v34-d2`).
+**data mode at 31200 bit/s** (`reference-data/artifacts/rf-v34-d2`).
 `ME_V34_INFO1C_ALL_RATES=1` offers every row independently of the profile,
 which is the more faithful reading of 10.1.2.3.4, and is default off because
 it lets the answerer select 3429 and costs the 2743/9600 u-law duplex row its
@@ -339,7 +339,7 @@ that constant into a constant -- a near-perfect "ones" score on a signal that
 is not TRN at all.  The two outcomes are separated by the histogram and not by
 the score: the call that reached data mode read **57% ones over dibits
 997/1217/1037/1212**, and the call that never validated an MP frame read
-**88% over 442/3440/437/144** (`artifacts/rf-v34-d2` and `-c3`).  The failing
+**88% over 442/3440/437/144** (`reference-data/artifacts/rf-v34-d2` and `-c3`).  The failing
 one is 77% on one dibit, a residual carrier of 571 Hz -- which is 2400 minus
 the 3200-baud low carrier to three figures.  That score gates
 `PHASE4_TRN_READY_MIN_SCORE`, so a diverged receiver walked into the MP search.

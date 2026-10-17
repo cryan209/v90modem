@@ -87,7 +87,7 @@ bool v92_line_channel_init(v92_line_channel_t *c,
 int v92_line_channel_put(v92_line_channel_t *c, const double *in, int n,
                          double *out, int max);
 
-/* The r4 loop channel (artifacts/v92-loop-upstream), fitted by
+/* The r4 loop channel (reference-data/artifacts/v92-loop-upstream), fitted by
  * tools/v92_fit_line_channel.py; see v92_line_channel_r4.h. */
 extern const double v92_line_channel_r4_taps[];
 extern const int v92_line_channel_r4_ntaps;

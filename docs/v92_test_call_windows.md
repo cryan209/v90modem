@@ -37,7 +37,7 @@ sweep recovered no valid CPu/SUVu there; the later QAM evidence means those
 intervals must not be treated as established PCM-upstream fixtures. Earlier
 claims of connected data after 15.3/23.3/21.7 s were likewise unverified.
 
-The failed sweep remains in artifacts/gough-v92-recovery-20261005/.
+The failed sweep remains in reference-data/artifacts/gough-v92-recovery-20261005/.
 The positive control and downstream recovery evidence is in
-artifacts/gough-v92-payload-acquisition-20261005/. These results establish
+reference-data/artifacts/gough-v92-payload-acquisition-20261005/. These results establish
 recovered modem negotiation, not a V.92 PCM-upstream data connection.

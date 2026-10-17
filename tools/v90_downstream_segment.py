@@ -18,7 +18,7 @@ Zero-slot polarity is not checked. §8.4.4 writes "-0", but G.711 Ucode 0 has tw
 codewords for one level and a working digital modem sends +0 in both slots --
 see docs/eicon_downstream_comparison.md, Finding 3(a).
 
-    python3 tools/v90_downstream_segment.py artifacts/eicon-digital-downstream/*.ulaw
+    python3 tools/v90_downstream_segment.py reference-data/artifacts/eicon-digital-downstream/*.ulaw
 """
 
 import argparse

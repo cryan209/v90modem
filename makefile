@@ -283,8 +283,8 @@ test-fast: test-build
 test-slow: test-build
 	$(RUN_TESTS) tests/slow.list
 
-# Local preserved analogue capture, deliberately outside make test: artifacts/
-# are gitignored. Missing evidence is a hard error in the verifier.
+# Local preserved analogue capture, deliberately outside make test: reference-data/
+# bulk evidence is gitignored. Missing evidence is a hard error in the verifier.
 V90_LINE_PYTHON ?= python3
 .PHONY: v90-apple-line-test
 v90-apple-line-test: v90_analogue_rx_test
@@ -315,7 +315,7 @@ eicon-rx-test: vpcm_decode
 	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
 
 # The V.92 Phase 3 upstream receiver against an analogue modem on a real 2-wire
-# loop (artifacts/v92-loop-upstream/) and a modelled one.  Part of `test` since
+# loop (reference-data/artifacts/v92-loop-upstream/) and a modelled one.  Part of `test` since
 # docs/v92_p3_rx_line_plan.md step 6 made Ja decode; kept as its own target too.
 v92-loop-rx-test: v92_p3_rx_line_test
 	./v92_p3_rx_line_test

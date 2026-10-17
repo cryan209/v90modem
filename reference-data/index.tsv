@@ -1,0 +1,350 @@
+path	files	bytes	retention_reason
+reference-data/artifacts/apple-9667-20261016	8	1932525	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-atdp-20261016	5	48221	artifacts/apple-atdp-20261016/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-cid-20261016	12	2464165	artifacts/apple-cid-20261016/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-cid-20261016-r2	11	2462710	artifacts/apple-cid-20261016-r2/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-cid-answer-20261016	7	935509	artifacts/apple-cid-answer-20261016/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-direct-line-20261017	11	293207	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-direct-quality-20261017	134	5707446	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-direct-training-20261017	73	22025073	artifacts/apple-direct-training-20261017/run-pair.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-direct-v90-b1	3	70481	artifacts/apple-direct-v90-b1/README.md; docs/apple_usb_modem_sm56.md; git-tracked fixture; tests/fast.list
+reference-data/artifacts/apple-events-answer-20261016	6	1129531	artifacts/apple-events-answer-20261016/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-line-characterize-20261016	7	2473188	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-loopback-20261016	34	597908	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-loopback-spectrum-20261016-verified	12	833531	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-native-rates-20261016	51	3508842	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-native-rates-20261016-device14	32	2095886	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-native-rates-20261016-repeat13	21	1606497	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-native-rates-20261016-repeat14	42	3239781	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pcm-loopback-20261016	40	711472	docs/apple_usb_modem_sm56.md; tools/apple_loopback_spectrum.py
+reference-data/artifacts/apple-pcm-loopback-20261016-quiet	12	207540	artifacts/apple-pcm-loopback-20261016-quiet/reproduce.py; docs/apple_usb_modem_sm56.md; tools/apple_loopback_spectrum.py
+reference-data/artifacts/apple-pcm-loopback-20261016-r2	43	819437	artifacts/apple-pcm-loopback-20261016-r2/reproduce.py; docs/apple_usb_modem_sm56.md; tools/apple_loopback_spectrum.py
+reference-data/artifacts/apple-pcm-matrix-20261017	289	83113211	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pcm-subset-20261017	252	10537258	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pcm-subset-repeat-20261017	40	1456892	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pcm-sweep-20261017	364	15547430	artifacts/apple-rx-eq-20261017/sweep.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pulse-dial-20261016	5	83946	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pulse-dial-20261016-r4	6	386908	artifacts/apple-pulse-dial-20261016-r4/reproduce.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-pve-20261015	355	203522002	artifacts/apple-pve-20261015/run.sh; docs/apple_usb_modem_sm56.md; modem_engine.c; near_echo.h; v90_analogue_fse.h; v90_analogue_phase4.c; v90_analogue_pr4.h
+reference-data/artifacts/apple-rasfinder-20261016	140	16519171	artifacts/apple-rasfinder-20261016/run.py; artifacts/apple-rasfinder-20261016/run_diagnostic.py; artifacts/apple-rasfinder-20261016/run_fast_counter.py; artifacts/apple-rasfinder-20261016/run_fixed.py; artifacts/apple-rasfinder-20261016/run_high_impedance.py; artifacts/apple-rasfinder-20261016/run_streaming.py; artifacts/apple-rasfinder-20261016/run_warm.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-registers-20261016	2	11150	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-rx-eq-20261017	27	1767373	artifacts/apple-rx-eq-20261017/live-summary.py; artifacts/apple-rx-eq-20261017/replay.py; artifacts/apple-rx-eq-20261017/summarize.py; artifacts/apple-rx-eq-20261017/sweep.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-snr-sweep-20261016	87	1951829	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-v34-loopback-20261016	74	7161878	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-v90-followup-20261017	2044	529579044	artifacts/apple-direct-v90-b1/README.md; artifacts/apple-rx-eq-20261017/live-series.py; artifacts/apple-rx-eq-20261017/live-summary.py; artifacts/apple-rx-eq-20261017/replay.py; artifacts/apple-v90-followup-20261017/compare-pr4.py; docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-v90-sip-r6	8	4630946	modem_engine.c
+reference-data/artifacts/apple-v90-sip-r7	10	3000895	docs/apple_usb_modem_sm56.md; docs/project_history.md; modem_engine.c; tools/apple_v90_sd_recovery_verify.py
+reference-data/artifacts/apple-v92-r2	7	3075742	docs/apple_usb_modem_sm56.md; docs/project_history.md
+reference-data/artifacts/apple-v92-r3	7	3030294	docs/apple_usb_modem_sm56.md
+reference-data/artifacts/apple-v92-sip-r4	10	5343324	artifacts/v92-loop-upstream/README.md; docs/apple_usb_modem_sm56.md; docs/v92_p3_rx_line_plan.md; tools/v92_trn1u_bound.py; v92_p3_rx_line_test.c
+reference-data/artifacts/branch-cleanup-20261013	4	493560304	unique Git backup snapshots not present locally
+reference-data/artifacts/concede-ab-t3-111704Z	112	57196882	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/courier-ja-3200low	5	64127	artifacts/courier-ja-3200low/README.md; docs/v90_phase3_s_and_rbs_false_positive.md; tools/v90_dil_lab.html
+reference-data/artifacts/deadline-ab-115632Z	112	56417639	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/det-live3-104534Z	61	31863953	docs/v90_upstream_data_path.md
+reference-data/artifacts/dmodem-3000-3200-live	24	14006294	docs/v90_phase_mapping.md; docs/v90_upstream_3000_3200_plan.md
+reference-data/artifacts/dmodem-soak-0821-goalproper	19	16488386	docs/v90_upstream_data_path.md
+reference-data/artifacts/dmodem-soak-0821-rounds	13	12693080	docs/project_history.md; docs/v90_upstream_data_path.md; tools/measure_timing_slips.py
+reference-data/artifacts/dmodem-soak-0821-shellfix	90	24941360	docs/v90_upstream_data_path.md
+reference-data/artifacts/dmodem-t3-live	58	8685980	docs/v90_phase_mapping.md
+reference-data/artifacts/eicon-answerer-soak-20261008.log	1	56321	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-batch-20261008-cap21600-a	10	1592283	docs/eicon_call_batch_20261008.md
+reference-data/artifacts/eicon-batch-20261008-r1	66	10694605	docs/eicon_call_batch_20261008.md
+reference-data/artifacts/eicon-batch-20261008-recheck	11	3356597	docs/eicon_call_batch_20261008.md
+reference-data/artifacts/eicon-card-encoder-20261008	19	5181983	docs/v34_tx_eicon_audit.md
+reference-data/artifacts/eicon-clearmode-bchannel-20261008.txt	1	5190	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-digital-downstream	3	408778	docs/apple_usb_modem_sm56.md; docs/eicon_downstream_comparison.md; docs/hsf_analogue_v90_coupler.md; docs/project_history.md; docs/v90_analogue_role.md; docs/v90_phase3_s_and_rbs_false_positive.md; git-tracked fixture; tools/eicon_rx_conformance.py; tools/v90_dil_lab.html; tools/v90_downstream_segment.py; tools/v90_jd_decode.py; tools/v90_phase3_segment.py; v90.c; v90_analogue_rx.c; v90_analogue_rx_test.c; v90_dil_presets.h; v90_dil_rx.c; vpcm_decode.c
+reference-data/artifacts/eicon-direct-fixed-audio-20261008-r3	10	1010689	docs/eicon_live_20261008.md; docs/eicon_spec_causality_audit_20261008.md; docs/v34_tx_eicon_audit.md
+reference-data/artifacts/eicon-direct-fixed-audio-20261008.txt	1	2406307	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-direct-fixed-retry-20261008-r2	8	1428269	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-direct-retry-20261008-r1	8	744789	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-direct-retry-native-7910.txt	1	108904	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-dsp	333	23231170	docs/v8_capture.md
+reference-data/artifacts/eicon-fax-20261008	250	145759728	docs/eicon_v34_fax_20261008.md
+reference-data/artifacts/eicon-fix-7910-fixed200-r1	8	1745350	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-fix-7910-native-audio-r3	8	576640	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-fix-7910-native-v90-r2	8	962855	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-http-ppp-jb40-20261008	14	12357801	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-http-ppp-v90-alaw-20261008	14	24120312	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-http-ppp-v90-ulaw-20261008	14	24137815	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-isdn-clear-7900-20261008-r1	8	341999	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-isdn-clear-7910-20261008-r1	8	343877	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-isdn-v110-7900-data-20261008-r2	8	821402	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-isdn-v110-7910-data-20261008-r2	8	498525	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-isdn-v120-7900-longwait-20261008-r2	8	1050700	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-isdn-v120-7910-longwait-20261008-r6	8	1074391	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-lan-20261008	28	23802888	docs/eicon_rtp_causality_20261008.md
+reference-data/artifacts/eicon-lan-alaw-20261008	10	9367647	docs/eicon_rtp_causality_20261008.md
+reference-data/artifacts/eicon-lan-jpower-20261008	12	9254826	docs/v34_tx_eicon_audit.md
+reference-data/artifacts/eicon-lan-jpower-ulaw-20261008	12	9592732	docs/v34_tx_eicon_audit.md
+reference-data/artifacts/eicon-native-audio-7910.txt	1	1346992	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-native-fixed200-7910.txt	1	87707	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-native-v34-tx-fix-20261008-u1	8	1314060	docs/v34_tx_eicon_audit.md
+reference-data/artifacts/eicon-native-v90-7910.txt	1	54708	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-other-modes-20261008-r1	103	12262495	docs/eicon_other_modes_20261008.md
+reference-data/artifacts/eicon-other-modes-20261008-recheck	27	4884636	docs/eicon_other_modes_20261008.md
+reference-data/artifacts/eicon-phase4-downstream	2	247430	docs/project_history.md; git-tracked fixture; v90_analogue_phase4.c; v90_analogue_rx_test.c
+reference-data/artifacts/eicon-ppp-v90-alaw-20261008	11	2043182	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-ppp-v90-ulaw-20261008	11	2031018	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-rtp-boundary-20261008	23	7993177	docs/eicon_rtp_causality_20261008.md
+reference-data/artifacts/eicon-soak-build-20261008.sha256	1	318	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-soak-v90-alaw-20261008	12	66834402	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-soak-v90-ulaw-20261008-r3	12	66686225	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-throughput-baseline-20261008	12	11384382	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-throughput-jb40-20261008	12	10991256	docs/eicon_soak_ppp.md
+reference-data/artifacts/eicon-tunnel-boundary-20261008	25	5738607	docs/eicon_rtp_causality_20261008.md
+reference-data/artifacts/eicon-v110-clearmode-asterisk-7900-r2	8	857451	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v110-clearmode-asterisk-7900-r3	8	822100	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v110-clearmode-asterisk-7910-r2	8	829432	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v110-clearmode-udi-20261008-r3	8	291737	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v110-clearmode-udi-7900-20261008-r4	8	277141	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v120-clearmode-asterisk-7900-r1	8	873284	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v120-clearmode-asterisk-7910-r1	8	964495	docs/eicon_isdn_20261008.md
+reference-data/artifacts/eicon-v34-33600-20261008-r1	22	1338203	docs/eicon_other_modes_20261008.md
+reference-data/artifacts/eicon-v34-33600-fixed-20261008-r1	21	1298786	docs/v34_3429_dense_data.md
+reference-data/artifacts/eicon-v34-maxoffer-20261008-r1	21	4953645	docs/eicon_other_modes_20261008.md
+reference-data/artifacts/eicon-v34fax-native-20261009	10	3318650	docs/eicon_v34_fax_20261009.md
+reference-data/artifacts/eicon-v34fax-r19	18	9857518	docs/eicon_v34_fax_20261009.md
+reference-data/artifacts/eicon-v90-asterisk-after-clearmode-7900-r1	8	2644564	docs/eicon_live_20261008.md
+reference-data/artifacts/eicon-v90-asterisk-after-clearmode-7910-r1	8	744391	docs/eicon_live_20261008.md; docs/eicon_v90_upstream_power.md
+reference-data/artifacts/eicon-v90-power-probe-20261008-a1	8	1549746	docs/eicon_v90_upstream_power.md
+reference-data/artifacts/eicon-v90-power-probe-20261008-u1	4	1844	docs/eicon_v90_upstream_power.md
+reference-data/artifacts/eicon-v90-power-probe-20261008-u2	8	1321346	docs/eicon_v90_upstream_power.md
+reference-data/artifacts/eicon-v90a-audio-20261009	10	3569042	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-dil2-20261009	4	831801	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-gates-20261009	5	1028166	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-self-20261009	6	1991465	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-trn1d-ab-30k-r1-20261009	8	5789742	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-trn1d-ab-def-r1-20261009	8	5674149	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-trn1d-ab-native3-r1-20261009	8	5028709	modem_engine.c
+reference-data/artifacts/eicon-v90a-trn1d-ab-native4-r1-20261009	8	7493031	modem_engine.c
+reference-data/artifacts/eicon-v90a-x4-20261009	7	1803684	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-v90a-zero-20261009	4	918627	docs/eicon_v90a_20261009.md
+reference-data/artifacts/eicon-zmodem-20261008	13	1911780	docs/v90_hardware_interop.md
+reference-data/artifacts/eqoff-28800-r1	13	6188107	docs/project_history.md; docs/v90_upstream_data_path.md
+reference-data/artifacts/gate-ab-28800-073139Z	158	39434547	docs/v90_upstream_data_path.md
+reference-data/artifacts/goal-matrix-115515Z	204	109809970	docs/project_history.md; docs/retrain_and_resync.md; docs/v90_upstream_data_path.md; modem_engine.h
+reference-data/artifacts/goal-v90-073744Z	13	8423612	docs/v90_upstream_data_path.md
+reference-data/artifacts/goal-v90-p2cap-r2-103404Z	15	15538746	docs/v90_upstream_data_path.md
+reference-data/artifacts/goal-v90-reneg-112546Z	13	4866733	docs/retrain_and_resync.md; modem_engine.c; v90.c
+reference-data/artifacts/goal-v90-reneg-112546Z.out	1	1086	v90.c
+reference-data/artifacts/goal-v90-reneg-b-113038Z	13	1123120	docs/retrain_and_resync.md; v90.c
+reference-data/artifacts/goal-v90-reneg-b-113038Z.out	1	1060	v90.c
+reference-data/artifacts/gough-legacy-decode-20261005-qualified	108	55260118	docs/html_call_export.md
+reference-data/artifacts/gough-payload-recovery-20261005	71	7379447	artifacts/gough-payload-recovery-20261005/experiment-sources/flex-combined-fit.py; artifacts/gough-v92-payload-acquisition-20261005/payload_attempt.py; docs/k56flex_implementation.md
+reference-data/artifacts/gough-v90-payload-20261005	45	15806992	artifacts/gough-v90-payload-20261005/experiment-sources/v90-bounded-retry.py; artifacts/gough-v90-payload-20261005/experiment-sources/v90-retry.py; artifacts/gough-v90-payload-20261005/experiment-sources/v90-suite.py; docs/html_call_export.md
+reference-data/artifacts/gough-v92-payload-acquisition-20261005	268	17584589	docs/html_call_export.md; docs/offline_pcm_payload_recovery.md; docs/v92_test_call_windows.md
+reference-data/artifacts/gough-v92-recovery-20261005	69	11838570	artifacts/gough-v92-recovery-20261005/experiment-sources/v92-suite.py; artifacts/gough-v92-recovery-20261005/experiment-sources/v92-upstream.py; docs/html_call_export.md; docs/v92_test_call_windows.md
+reference-data/artifacts/hsf-6001-audio-011539Z	8	2191020	docs/hsf_analogue_v90_coupler.md
+reference-data/artifacts/hsf-echo9099-010721Z	8	4332268	docs/hsf_analogue_v90_coupler.md
+reference-data/artifacts/hsf-gainsweep-000922Z	74	9571921	docs/hsf_analogue_v90_coupler.md
+reference-data/artifacts/hsf-usbmon	10	5304149	docs/hsf_usb_daa.md; git-tracked fixture; tools/linux-capture/README.md
+reference-data/artifacts/hsf-v90	458	584780324	docs/hsf_analogue_v90_coupler.md; modem_engine.c; v90_analogue_fse.h; v90_analogue_rx.c; v90_analogue_rx.h; v90_analogue_rx_test.c
+reference-data/artifacts/jafb-500	77	41692304	v90.c
+reference-data/artifacts/k56flex-response-20261009	38	16226094	docs/mica_qam_firmware.md
+reference-data/artifacts/live-verify-231747Z	268	155535670	docs/v90_upstream_data_path.md
+reference-data/artifacts/lossretrain-ab-004426Z	84	192400657	docs/project_history.md; docs/retrain_and_resync.md
+reference-data/artifacts/lossretrain-ab-004426Z.log	1	2560	docs/project_history.md; docs/retrain_and_resync.md
+reference-data/artifacts/modem-lab.html	1	8722500	docs/browser_modem_demo.md; tools/package_modem_demo.py
+reference-data/artifacts/modem-showcase	81	10320906	tools/modem_showcase.py
+reference-data/artifacts/pcm	34681	20551072	docs/pcm_loopback_testing.md; tools/pcm_sweep.py
+reference-data/artifacts/rasfinder-flow-192655Z	5	3854984	modem_engine.c
+reference-data/artifacts/reneg-ab-225015Z	91	151674631	docs/project_history.md; docs/retrain_and_resync.md; modem_engine.c; tools/soak/v90_reneg_viability_ab.sh
+reference-data/artifacts/reneg-control-223605Z	28	13330025	docs/retrain_and_resync.md
+reference-data/artifacts/reneg-cpstream-222512Z	42	13173864	docs/retrain_and_resync.md
+reference-data/artifacts/reneg-eq	28	11723687	docs/project_history.md; docs/retrain_and_resync.md; docs/v34_flow_mapping.md; port/cp_stream_test.c; port/data_rx_test.c; port/v34_fixed.h
+reference-data/artifacts/reneg-live-r1	10	11055757	docs/project_history.md; docs/retrain_and_resync.md
+reference-data/artifacts/reneg-mp	56	19151507	modem_engine.c
+reference-data/artifacts/reneg-trn2d	56	23859924	v90.c
+reference-data/artifacts/renegviab-ab-010014Z	91	121744648	docs/project_history.md; docs/retrain_and_resync.md; docs/v90_upstream_data_path.md; modem_engine.c
+reference-data/artifacts/retrain-live-b2	10	3600805	docs/project_history.md; docs/retrain_and_resync.md
+reference-data/artifacts/rf-0929s-trim-3	5	285416	sip_modem.c
+reference-data/artifacts/rf-bbs-2	4	1948908	docs/v34_data_mode_rates.md
+reference-data/artifacts/rf-bbs-7	3	5224705	docs/v34_data_mode_rates.md
+reference-data/artifacts/rf-cp-investigation	45	16871932	docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-iosched-20260929-r3	6	1183559	docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-jafb1000-20260929-r2	5	1075613	docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-mac-20261016	14	4213838	docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-maxpow-c1	8	1494178	docs/project_history.md; docs/rf_maxpow_c1_transition_analysis.md; docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-mt5634-v90-b1	1	589440	docs/v90_rasfinder_phase4.md; git-tracked fixture; tests/fast.list
+reference-data/artifacts/rf-padrep-a1	5	1422170	docs/project_history.md
+reference-data/artifacts/rf-pp-carrier-20260929-r1	5	1322761	docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-pve-20261015	66	22464482	artifacts/rf-pve-20261015/run.sh; docs/v90_rasfinder_phase4.md
+reference-data/artifacts/rf-te-ab-ctl-1	5	299098	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-ctl-2	5	319627	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-ctl-3	5	287998	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-ctl-4	5	287038	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-ctl-5	5	289046	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-ctl-6	5	288242	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-1	5	289002	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-2	5	298660	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-3	5	289080	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-4	5	289969	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-5	5	289345	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-te-ab-te-6	5	298051	docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-1	5	993659	docs/project_history.md; docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-2	5	8434	docs/project_history.md
+reference-data/artifacts/rf-tower-3	5	1350443	docs/project_history.md; docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-4	5	1339704	docs/project_history.md; docs/v8_conformance_audit.md; modem_engine.c
+reference-data/artifacts/rf-tower-5	5	1325247	docs/project_history.md; docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-6	5	1352365	docs/project_history.md; docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-7	5	1356569	docs/project_history.md; docs/v8_conformance_audit.md
+reference-data/artifacts/rf-tower-fb-1	6	431923	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-11	6	1669007	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-12	6	1591771	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-13	6	1997451	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-14	6	1592545	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-15	6	1825478	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-16	6	1615912	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-19	8	6966964	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-2	6	1615324	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-3	6	4044	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-4	6	1625857	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-5	6	4043	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-6	6	1820851	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-7	6	2164927	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-8	6	1727616	docs/project_history.md
+reference-data/artifacts/rf-tower-fb-9	6	2938430	docs/project_history.md
+reference-data/artifacts/rf-tower-hold-1	6	3592236	docs/project_history.md
+reference-data/artifacts/rf-tower-jb0-1	5	1096924	docs/project_history.md
+reference-data/artifacts/rf-tower-jds-1	5	1555951	docs/project_history.md
+reference-data/artifacts/rf-tower-jds-2	5	1682130	docs/project_history.md
+reference-data/artifacts/rf-tower-jds-3	5	1622366	docs/project_history.md
+reference-data/artifacts/rf-tower-n400-1	6	3606226	docs/project_history.md
+reference-data/artifacts/rf-tower-n400-2	6	2060387	docs/project_history.md
+reference-data/artifacts/rf-tower-nop3-1	5	1449862	docs/project_history.md
+reference-data/artifacts/rf-tower-pcap-1	6	3906794	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-1	5	1608919	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-2	5	1558785	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-3	5	1630865	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-4	5	1576494	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-5	5	1641514	docs/project_history.md
+reference-data/artifacts/rf-tower-scan1-6	5	1602058	docs/project_history.md
+reference-data/artifacts/rf-tower-trn2dlvl-1	6	1456292	docs/project_history.md
+reference-data/artifacts/rf-tower-u2900-1	8	3537162	docs/project_history.md
+reference-data/artifacts/rf-tower-u2905-1	6	1476867	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-1	6	3580433	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-2	6	3560754	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-3	6	3547734	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-l2540	6	3576401	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-l2hold	6	3580392	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-lvl10	6	3558962	docs/project_history.md
+reference-data/artifacts/rf-tower-v34-no32h	6	3560860	docs/project_history.md
+reference-data/artifacts/rf-tower-v34b-1	7	5089825	docs/project_history.md
+reference-data/artifacts/rf-tower-v34b-2	5	964061	docs/project_history.md
+reference-data/artifacts/rf-tower-v34b-3	5	1260600	docs/project_history.md
+reference-data/artifacts/rf-tower-v34b1-16800	4	1256163	docs/project_history.md
+reference-data/artifacts/rf-tower-v34b1rc-1	5	1250968	docs/project_history.md
+reference-data/artifacts/rf-tower-v34cma-1	6	5096041	docs/project_history.md
+reference-data/artifacts/rf-tower-v34dd-1	5	1245091	docs/project_history.md
+reference-data/artifacts/rf-tower-v34dd-2	5	1239811	docs/project_history.md
+reference-data/artifacts/rf-tower-v34dd-3	5	1243594	docs/project_history.md
+reference-data/artifacts/rf-tower-v34frz-1	4	1250605	docs/project_history.md
+reference-data/artifacts/rf-tower-v34lec-1	4	1239393	docs/project_history.md
+reference-data/artifacts/rf-tower-v34lec-19200	5	1230956	docs/project_history.md
+reference-data/artifacts/rf-tower-v34lec-2	5	1260140	docs/project_history.md
+reference-data/artifacts/rf-tower-v34p4s-1	4	1249850	docs/project_history.md
+reference-data/artifacts/rf-tower-v34rec-1	5	954217	docs/project_history.md
+reference-data/artifacts/rf-tower-v90lec-1	6	1453502	docs/project_history.md
+reference-data/artifacts/rf-tower-v90lec-2900	6	7034	docs/project_history.md
+reference-data/artifacts/rf-tower-v90lec-2900b	6	7041	docs/project_history.md
+reference-data/artifacts/rf-v22-v8-2	6	697530	docs/v32bis_compliance_plan.md
+reference-data/artifacts/rf-v34-a1	5	1430888	docs/project_history.md; docs/v34_plain_phase2_call_role.md
+reference-data/artifacts/rf-v34-b1	5	1546316	docs/v34_plain_phase2_call_role.md
+reference-data/artifacts/rf-v34-c3	5	1480394	modem_engine.c
+reference-data/artifacts/rf-v34-d2	5	613940	docs/v34_plain_phase2_call_role.md; modem_engine.c
+reference-data/artifacts/rf-v34-n1	5	20125248	docs/project_history.md
+reference-data/artifacts/sd-delay250-fixed-005458Z	20	11413693	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/sd-jd-gate-fix-013254Z	13	7971184	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/sd-jd-gate-fix-r2-013643Z	13	7967344	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; v90.c
+reference-data/artifacts/sd-jdwait5s-010714Z	13	6820422	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/sd-phase-sweep-011320Z	25	14957860	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/serial-flex-a2	8	1810109	docs/project_history.md
+reference-data/artifacts/serial-x0-2049	8	1335495	docs/project_history.md
+reference-data/artifacts/serial-x0-2052	8	1618284	modem_engine.c
+reference-data/artifacts/slip-ab-211840Z	274	52673051	docs/project_history.md; docs/v90_upstream_data_path.md
+reference-data/artifacts/slip-ab-28800-001150Z	137	28196363	docs/project_history.md; docs/v90_upstream_data_path.md
+reference-data/artifacts/slip-ab-31200-010059Z	249	46370945	docs/project_history.md; docs/v90_upstream_data_path.md
+reference-data/artifacts/slm-v90-lapm3	8	1021946	modem_engine.c
+reference-data/artifacts/slm-v90-pay1	8	5228054	data_interface.c
+reference-data/artifacts/tower-interop-20261001	520	122768334	artifacts/tower-interop-20261001/higher-rates/analyse.py; docs/rasfinder_v42bis_interop.md
+reference-data/artifacts/trn1d-16008b-131324Z	168	73741784	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/trn1d-ab-063857Z	112	48507072	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; tools/soak/v90_trn1d_ab.sh
+reference-data/artifacts/trn1d-knee-075140Z	17	4827451	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/trn1d-knee-122741Z	168	73497830	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/trn1d-long-221035Z	70	32689271	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/trn1d-long-221035Z.log	1	1827	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/trn1d-long-ab-222757Z	168	78908060	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; v90.c
+reference-data/artifacts/trn1d-long-ab-222757Z.log	1	2905	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; v90.c
+reference-data/artifacts/trn2d-ab-212417Z	46	23124785	docs/v90_phase3_s_and_rbs_false_positive.md
+reference-data/artifacts/v34-21600-20260822T-c65	10	2426421	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-3429-check-20261008	5	4260	docs/eicon_other_modes_20261008.md
+reference-data/artifacts/v34-3429-diagnosis-20261008	112	2531676	docs/eicon_other_modes_20261008.md; docs/v34_3429_dense_data.md
+reference-data/artifacts/v34-peer-retrain-data-20260825T225827Z	10	9999652	artifacts/v34-peer-retrain-data-20260825T225827Z/README.md; artifacts/v34-peer-retrain-response-20260825T224623Z/README.md; docs/retrain_and_resync.md
+reference-data/artifacts/v34-peer-retrain-response-20260825T224623Z	10	4094612	artifacts/v34-peer-retrain-response-20260825T224623Z/README.md; docs/retrain_and_resync.md
+reference-data/artifacts/v34-rate-20260822T081433Z-b3000-14400	5	1228452	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T081759Z-b3000-21600	5	483529	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T082052Z-b3000-16800	5	3030200	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T083436Z-b3429-16800	4	493392	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T083842Z-b3000-14400-hr1	5	1136860	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T084132Z-b3200-16800	5	480944	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T085240Z-b3000-14400-up64	6	2324433	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T085727Z-b3429-9600	4	492314	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T110100Z-b3000-9600-echo-notch	8	2596244	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T110307Z-b3000-9600-echo-auto	8	2599492	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T110513Z-b3000-21600-echo-auto	8	2596818	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v34-rate-20260822T110913Z-b3429-16800-echo-auto	8	2710206	docs/project_history.md; docs/v34_data_mode_rates.md
+reference-data/artifacts/v56	322	250406	docs/v56_loopback.md; tools/v56_sweep.py
+reference-data/artifacts/v90-cap-20260822T130820Z-9600	19	10734420	docs/project_history.md; docs/v90_upstream_data_path.md
+reference-data/artifacts/v90-ecoff-d-233840Z	13	8069171	docs/v90_upstream_data_path.md
+reference-data/artifacts/v90-hardware	1173	1028006929	artifacts/courier-ja-3200low/README.md; docs/t30_annex_f_v34_fax.md; docs/v90_phase3_s_and_rbs_false_positive.md; git-tracked fixture; modem_engine.c; readme.md; rig/slmodemd/README.md
+reference-data/artifacts/v90-longsoak-233217Z	84	127262479	docs/project_history.md; docs/retrain_and_resync.md; docs/v90_phase3_s_and_rbs_false_positive.md; tools/soak/v90_loss_retrain_ab.sh
+reference-data/artifacts/v90-longsoak-233217Z.log	1	2650	tools/soak/v90_loss_retrain_ab.sh
+reference-data/artifacts/v90-peer-retrain-data-20260825T230105Z	10	5749654	docs/retrain_and_resync.md
+reference-data/artifacts/v92-loop-upstream	2	23293	docs/project_history.md; docs/v92_p3_rx_line_plan.md; git-tracked fixture; makefile; tools/v92_fit_line_channel.py; v92_line_channel.h; v92_line_channel_r4.h; v92_p3_rx_line_test.c
+reference-data/artifacts/voice-pcm-fidelity	11	1198994	tools/voice_pcm_fidelity.py
+reference-data/artifacts/wasm-build	238	6978942	docs/browser_modem_demo.md; tools/build_modem_wasm.py
+reference-data/artifacts/x2-codec-path-20261006-9600	20	17303985	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-codex-20261012-after-change	15	5667989	docs/x2_implementation.md
+reference-data/artifacts/x2-codex-20261012-control	3	668	docs/x2_implementation.md
+reference-data/artifacts/x2-codex-20261012-control-socket	13	5660127	docs/x2_implementation.md
+reference-data/artifacts/x2-codex-20261012-long	13	5683334	docs/x2_implementation.md
+reference-data/artifacts/x2-codex-20261012-output-capture	17	38181550	docs/x2_implementation.md
+reference-data/artifacts/x2-downstream-20261006	5	87429	docs/x2_implementation.md
+reference-data/artifacts/x2-ds-pace-20261010-burst	13	5671038	docs/x2_implementation.md
+reference-data/artifacts/x2-ds-pace-20261010-fixed	13	5672625	docs/x2_implementation.md
+reference-data/artifacts/x2-ds-pace-20261010-paced	13	5672543	docs/x2_implementation.md
+reference-data/artifacts/x2-ff3-20261010	13	35373775	docs/x2_implementation.md
+reference-data/artifacts/x2-final-20261010-default	13	11084028	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-final-20261010-nvram	13	11088835	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-handoff-20261006	287	121075610	artifacts/x2-handoff-20261006/README.md; docs/x2_implementation.md
+reference-data/artifacts/x2-headroom-full-20261006-12000	20	17336431	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-headroom-full-20261006-14400	20	17302994	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-headroom-full-20261006-19200	21	17378143	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-headroom-full-20261006-24000	20	18369561	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-headroom-full-20261006-7200	21	17211570	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-headroom-full-20261006-9600	20	17288772	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-higher-20261006-12000	16	13757265	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-higher-20261006-7200	16	13701389	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-higher-20261006-9600	17	16434305	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-host-analog-20261006	3	5707	docs/x2_implementation.md
+reference-data/artifacts/x2-host-analog-20261006-exact	12	7683379	artifacts/x2-host-analog-20261006/exact-symbol-phase-search.py
+reference-data/artifacts/x2-pm-origin-20261006-9600	21	6356229	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rates-20261010	13	11050212	modem_engine.c
+reference-data/artifacts/x2-rx-improve-20261006-baseline	19	16344329	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rx-improve-20261006-final	14	5680357	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rx-improve-20261006-handoff	17	16341926	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rx-improve-20261006-long	13	5692187	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rx-improve-20261006-long-fixed	14	5683596	docs/x2_implementation.md; docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-rx-improve-20261006-long-rx-fixed	13	5676910	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-12000	13	10744402	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-14400	13	10718251	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-19200	13	10865752	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-24000	13	11088413	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-26400	13	11088413	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-28800	13	11088413	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-7200	13	10589949	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-s39q-20261010-9600	13	10686131	docs/x2_v34_upstream_review.md
+reference-data/artifacts/x2-strict-20261010	13	10850288	docs/x2_implementation.md
+reference-data/artifacts/x2-symmetric-20261006	108	13476615	docs/x2_implementation.md
+reference-data/artifacts/x2-v34-review-20261006-9600	17	16343335	docs/x2_v34_upstream_review.md

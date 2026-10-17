@@ -34,7 +34,7 @@ defaults for comparison. `ME_V34_DATA_MM_TIMING`, `ME_V34_DATA_MM_GAIN` and
 
 ## Validation
 
-`artifacts/v34-3429-diagnosis-20261008/fixed-summary.json` records eight
+`reference-data/artifacts/v34-3429-diagnosis-20261008/fixed-summary.json` records eight
 sample delays (0, 3, 7, 11, 17, 23, 31, 40) in each of three bearers, with
 one million received bits per direction:
 
@@ -57,7 +57,7 @@ The rebuilt Tower binary separately passed one million bits per direction
 at 33600 in both G.711 laws. Strict 33600 Eicon calls on Tower still failed:
 its INFO1a selected 3200 baud and projected N=13 (31200), despite our INFO1c
 offering 3429/N=14. Preserved calls are in
-`artifacts/eicon-v34-33600-fixed-20261008-r1/`.
+`reference-data/artifacts/eicon-v34-33600-fixed-20261008-r1/`.
 
 The broad `make test` run found three K56flex client assertions on its A-law
 32k noisy PRIME row; those reproduce with this repair disabled. A subsequent

@@ -64,7 +64,7 @@ struct v90_analogue_rx_s {
      * The same W as a running mean LEVEL, for the level-tolerant comparison.
      * sd_w[] is latched from the first non-zero codeword a hypothesis sees,
      * which on an analogue line is one noisy sample: measured on
-     * artifacts/hsf-v90/call-062754Z it latched Ucode 96 (level 4158) where
+     * reference-data/artifacts/hsf-v90/call-062754Z it latched Ucode 96 (level 4158) where
      * the true median W level is 3326 -- 25% high, which puts 5.3% of the W
      * slots outside a 35% tolerance and kills a 24-codeword run more often
      * than not.  A run of 4, 28 and then 6 repetitions is exactly that.
@@ -242,7 +242,7 @@ static int codeword_ucode(const v90_analogue_rx_t *s, uint8_t c, int *sign_out);
  * honours it.  An Eicon Diva Server does not: told U_INFO = 78 it transmits
  * Sd at W = 64, and told 48 it transmits at W = 35 (measured live, run 57,
  * both calls also carrying a textbook 64-rep Sd, 8-rep S̄d and 30005T TRN1d).
- * Both in-tree fixtures in artifacts/eicon-digital-downstream/ -- calls a
+ * Both in-tree fixtures in reference-data/artifacts/eicon-digital-downstream/ -- calls a
  * Courier answered with CONNECT -- likewise run at W = 64.  A receiver pinned
  * to the value it requested is blind to all of them, and loopback cannot show
  * it: our own transmitter uses the same variable.
@@ -707,7 +707,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
              * It is exactly what the §9.3.2.4 transition looks like on a real
              * line: the reversal lands inside a repetition, and that straddle
              * repetition's zero slots carry the discontinuity.  Measured on
-             * the equalised stream of artifacts/hsf-v90/call-062754Z, Sd runs
+             * the equalised stream of reference-data/artifacts/hsf-v90/call-062754Z, Sd runs
              * 33 clean repetitions, repetition 33 reads zero/W = 1.120, and
              * repetitions 34 on are cleanly reversed -- so the receiver was
              * resetting to the hunt on the very repetition carrying the
@@ -745,7 +745,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
          * On an analogue line it is also what the §9.3.2.4 transition itself
          * looks like: the reversal is a discontinuity and the equaliser rings
          * through it, so the straddle repetition is unusable.  Measured on
-         * artifacts/hsf-v90/call-062754Z, repetition 33 carries W slots at
+         * reference-data/artifacts/hsf-v90/call-062754Z, repetition 33 carries W slots at
          * 0.41, 0.96 and 0.49 of the running W while 32 clean repetitions
          * precede it and repetition 34 is cleanly reversed -- so one bad
          * repetition stood between the receiver and the transition, every

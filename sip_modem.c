@@ -1633,7 +1633,7 @@ int main(int argc, char *argv[])
        samples of inserted silence in most calls that day and in none of
        the 09-28 calls, and V.8 failing with the peer's JM plainly present
        because 20 ms inserted into its V.21 sync broke the framing
-       (artifacts/rf-0929s-trim-3).  An inserted frame is a permanent
+       (reference-data/artifacts/rf-0929s-trim-3).  An inserted frame is a permanent
        timing step for every later phase too.  So make playout genuinely
        FIXED: a constant prefetch deep enough to ride out the spikes, and no
        discard, so nothing is ever inserted or deleted while packets keep

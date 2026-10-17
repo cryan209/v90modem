@@ -621,7 +621,7 @@ sporadically.  That harness is `v90_upstream_replay.c`.  It replays a
 500-second call in 108 seconds and is deterministic, which is what made
 everything below measurable.
 
-    ./v90_upstream_replay artifacts/dmodem-soak-0821-goalproper/tap/live-rx.g711 ulaw 3200 9600
+    ./v90_upstream_replay reference-data/artifacts/dmodem-soak-0821-goalproper/tap/live-rx.g711 ulaw 3200 9600
 
 The E handover is not recorded in the tap, so the harness searches for it:
 it prepares a receiver at candidate instants half a second apart, feeds the
@@ -762,7 +762,7 @@ the tower d-modem's own `DM_RESAMPLER` is the place to look -- or the frame
 phase has to survive a symbol being inserted or dropped, which means carrying
 the phase through a slip correction rather than rediscovering it afterwards.
 The recording that shows all of this is
-`artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711`, and
+`reference-data/artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711`, and
 `v90_upstream_replay` reproduces it in under two minutes.
 
 ## The slip carries a carrier step (2026-08-21, later)
@@ -783,7 +783,7 @@ the phase of that line IS the epoch, measured against the 8 kHz bearer.  One
 inserted or dropped sample moves it by exactly 360 x baud/8000 degrees -- 144
 at 3200 baud -- and nothing else in a call looks like that.
 
-    tools/measure_timing_slips.py artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711 --from 61
+    tools/measure_timing_slips.py reference-data/artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711 --from 61
 
 On round1 the phase sits at -119 degrees, steps to -263 at t=129.6 s and back
 at t=130.6: 28 steps in 290 s, net +7.2 ppm, arriving in bursts of three a
@@ -950,7 +950,7 @@ sweep's dwell are still worth attacking.  Neither is now a mystery.
 
 The offline work above was replay only, so it was run against the live
 d-modem/slmodemd rig.  Four calls reached data mode.  Evidence in
-`artifacts/dmodem-soak-0821-shellfix/`.
+`reference-data/artifacts/dmodem-soak-0821-shellfix/`.
 
 **The fix does what it was meant to.**  One call
 (`batcha/round1/try3`, 185 s) delivered **504 in-sequence upstream pattern
@@ -1175,7 +1175,7 @@ server process.**  `v90_retire_phase2_cc_notch()` guarded itself with a
 `v8_result_handler()` re-arms the 1200 Hz notch for every call, so call 1
 retired it and calls 2..N re-armed it and could never retire it again -- and on
 this rig the call that reaches data mode is rarely the first.  Read the notch
-lines in `artifacts/v90-cap-20260822T130820Z-9600/server.log` in order: the
+lines in `reference-data/artifacts/v90-cap-20260822T130820Z-9600/server.log` in order: the
 retirement appears once, against the first call, and the call that actually
 reaches data mode (notch armed at line 7931, Phase 3 complete 8519, data mode
 9698) has no retirement line at all.  That call ran its whole upstream at 0.139
@@ -1223,7 +1223,7 @@ PTY -- the first upstream payload this path has delivered.  B1's in-sample fit
 goes 98.6% -> 100.0% with it out, which is the same statement made where the
 sequence is known.
 
-`artifacts/v90-ecoff-d-233840Z` is kept as the record of the 730-line call.
+`reference-data/artifacts/v90-ecoff-d-233840Z` is kept as the record of the 730-line call.
 
 **What this did not fix.**  Payload is intermittent -- two of three data-mode
 calls delivered it, and the median `sym err` is still 0.666, so the eye is open
@@ -1246,7 +1246,7 @@ unprecoded.
 ## The frame phase cannot hold because the symbols are marginal (2026-08-23)
 
 "Frame-phase lock still does not hold" was the standing open item above.  It is
-not a lock defect.  Measured on `artifacts/goal-v90-073744Z` -- a live call that
+not a lock defect.  Measured on `reference-data/artifacts/goal-v90-073744Z` -- a live call that
 reached data mode at 52000 down / 31200 up and delivered 730 intact `U%07d`
 lines -- the receiver decodes cleanly for the first few seconds and then the
 symbols leave the constellation permanently, and for the remaining 95% of the
@@ -1371,7 +1371,7 @@ back afterwards.  It is not a decay: read the CINR trace rather than the
 average, or the constellation, and the shape is a cliff.
 
 **The cliff is the peer's clock.**  `tools/measure_timing_slips.py` over
-`artifacts/goal-v90-p2cap-r2-103404Z` finds the first one-sample slip of the
+`reference-data/artifacts/goal-v90-p2cap-r2-103404Z` finds the first one-sample slip of the
 whole call at tap t=121.25 s, against a B1 handover at 73.0 s -- data
 **t=48.25 s** -- and the eye shuts at t=49.0 s.  There are seven slips in the
 following eleven seconds, in the bursts this peer is known for.  Receiver-
@@ -1515,7 +1515,7 @@ whole matrix off the recordings** -- 24000 100% of the call clean with a
 the question can be asked deterministically, on the desk, in fifty seconds a
 run.
 
-Replayed, `artifacts/goal-matrix-115515Z/rate28800-r1` runs **19.7 s at 0.10 to
+Replayed, `reference-data/artifacts/goal-matrix-115515Z/rate28800-r1` runs **19.7 s at 0.10 to
 0.12 from the lattice with 0% bad shell frames -- exactly the figure its own
 B1 out-of-sample check predicted** (0.107 at acquisition) -- meets a
 disturbance at 19.5 s, and spends the remaining **95 s at 0.67**, the value for
@@ -1671,7 +1671,7 @@ more mechanism here.
 ## Live verification, and the fact it turned up: no replay reproduces a live call (2026-08-24)
 
 The rate/eye numbers above are all replays.  Run live against the d-modem rig
-(artifacts/live-verify-231747Z), same binary, both knob directions:
+(reference-data/artifacts/live-verify-231747Z), same binary, both knob directions:
 
 | row | fix on | fix off |
 |---|---|---|
@@ -1685,7 +1685,7 @@ all three knobs disabled, fails at the same instant.
 The reason is worth more than the result.  **The live receiver collapses
 within a second of B1 and every offline path fed the identical recorded
 samples runs for nineteen seconds.**  On
-`artifacts/goal-matrix-115515Z/rate28800-r1`, whose own live call failed at
+`reference-data/artifacts/goal-matrix-115515Z/rate28800-r1`, whose own live call failed at
 0.7 s: `v90_upstream_replay` of its recording holds 19.7 s and reaches 55% of
 the call clean, and `v90_engine_replay` -- which exists precisely to close
 this gap, running V.8, Phase 2, Phase 3 and Phase 4 through the whole engine
@@ -1859,7 +1859,7 @@ at 0.9 s, 0.602 at 1.0 s, with the timing integrator at -6.7e-5 by 0.4 s and
 pinned at -6.9e-5 thereafter, and 22 intact U-lines out of 315,541 bytes over
 a 105 s soak against the restored arm's 27 of 315,625.  A cold equalizer at
 the handover changes nothing, so the state a live call inherits there is not
-what kills 28800.  Capture: `artifacts/eqoff-28800-r1/`.
+what kills 28800.  Capture: `reference-data/artifacts/eqoff-28800-r1/`.
 
 That call also removes the other standing suspect.  Only 149 samples separate
 its RTP arrivals from what reached the engine (7073 packets, 1,131,680 sample
@@ -1912,7 +1912,7 @@ which input samples land on which of its five phases.  Over
 
 k=2 is the live call, digit for digit: 0.087, 0.125, 0.215, 0.321, 0.404,
 0.449, 0.602 with the integrator pinned at -6.9e-5 is exactly what
-`artifacts/eqoff-28800-r1/server.log` recorded off the wire.  **The live
+`reference-data/artifacts/eqoff-28800-r1/server.log` recorded off the wire.  **The live
 28800 collapse now reproduces offline from a recording**, which is what three
 commits of live A/B were missing.
 
@@ -1945,7 +1945,7 @@ and traced as far as the interpolator's phase.  It goes one step further
 than that: **the thing that shuts the eye is our own timing loop**, and on
 the reproducible failing phase it is provable in one line.
 
-`v90_upstream_replay artifacts/eqoff-28800-r1/live-rx.g711 ulaw 3200 28800
+`v90_upstream_replay reference-data/artifacts/eqoff-28800-r1/live-rx.g711 ulaw 3200 28800
 25.50025 0.4` -- the k=2 handover phase, which reproduces the live 28800
 collapse digit for digit -- runs 0.087, 0.125, 0.215, 0.321, 0.404, 0.449,
 0.602 with the timing integrator pinned at -6.9e-5.  With
@@ -2038,7 +2038,7 @@ caller, the V.90 upstream T/3 receiver.
 The section above changes the receiver.  This one says what is now in front
 of it, live, at the rate the receiver is best at.
 
-A live 19200 call on 2026-08-25 (`artifacts/det-live3-104534Z/mm-r1`) acquires
+A live 19200 call on 2026-08-25 (`reference-data/artifacts/det-live3-104534Z/mm-r1`) acquires
 B1 at an out-of-sample lattice distance of **0.011** and holds **0.013** --
 an enormous margin, ten times better than 28800's 0.11 -- for 0.8 s.  Then:
 
@@ -2260,7 +2260,7 @@ Twelve live calls against the rig at 19200, six per arm, **arms alternated
 rather than run in blocks** so a drifting rig cannot masquerade as an effect,
 one binary, `ME_RX_CLOCK_SLIP` the only variable. Each run greps its own
 server log to confirm the knob took effect in that call.
-`artifacts/slip-ab-211840Z/`, harness `tools/soak/v90_slip_ab.sh`.
+`reference-data/artifacts/slip-ab-211840Z/`, harness `tools/soak/v90_slip_ab.sh`.
 
 | arm | calls | reached data mode | clean | longest hold | U-lines | splices |
 |---|---|---|---|---|---|---|
@@ -2305,7 +2305,7 @@ the dose-response the offline injection predicted.
 19200 gave only two data-mode calls per arm. 28800 gives twelve for twelve, so
 this is the properly paired comparison — and it is the rate the offline work
 found collapsing hardest, which makes it the sharper test.
-`artifacts/slip-ab-28800-001150Z/`.
+`reference-data/artifacts/slip-ab-28800-001150Z/`.
 
 | run | clean | longest hold | splices | U-lines |
 |---|---|---|---|---|
@@ -2351,7 +2351,7 @@ and a white one short ones. Read seconds and line counts.
 
 ### The same A/B at 31200 — the direction agrees, the attribution does not (2026-08-25)
 
-`artifacts/slip-ab-31200-010059Z/`, same harness, six calls per arm.
+`reference-data/artifacts/slip-ab-31200-010059Z/`, same harness, six calls per arm.
 
 | run | clean | longest hold | splices | U-lines |
 |---|---|---|---|---|
@@ -2412,7 +2412,7 @@ data-mode calls held a clean constellation for 100-115 s and delivered nothing.
 
 ### What the failing call actually shows
 
-`fixed-r5` of `artifacts/slip-ab-31200-010059Z`: 115.6 s clean, `sym err` 0.16,
+`fixed-r5` of `reference-data/artifacts/slip-ab-31200-010059Z`: 115.6 s clean, `sym err` 0.16,
 **0 payload**. Its sweep made **73 steps of 112 and never completed** — zero
 "phase sweep done" lines in the whole call. So the enumeration never finished,
 the best candidate was never restored, and the receiver sat on whatever phase
@@ -2486,7 +2486,7 @@ bookkeeping counter moves, which made the first version of that test report
 
 ### The same gate A/B at 28800 — a null result that corrects the 31200 one (2026-08-25)
 
-`artifacts/gate-ab-28800-*`, six calls per arm, alternated, confirmation stage
+`reference-data/artifacts/gate-ab-28800-*`, six calls per arm, alternated, confirmation stage
 now off so the gate is the only variable.
 
 | arm | calls | data mode | clean | longest hold | U-lines |
@@ -2607,7 +2607,7 @@ measured against one, describes a receiver that is not experiencing the live
 path's dominant impairment."*
 
 That is no longer true. Replaying a live 600 s call
-(`artifacts/renegviab-ab-010014Z/gated-r3`) reproduces its own live run's
+(`reference-data/artifacts/renegviab-ab-010014Z/gated-r3`) reproduces its own live run's
 clean/broken structure essentially window for window:
 
 | | run lengths (clean, broken, clean, …) |

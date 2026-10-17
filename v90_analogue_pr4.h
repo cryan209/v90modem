@@ -4,7 +4,7 @@
  *
  * Why: the loop's response is flat from 300 to 3400 Hz with a null at DC
  * (-33 dB) and another at 4000 Hz (-61 dB) -- measured on the Apple modem
- * (artifacts/apple-pve-20261015/v90-dfe2).  Equalising to the symbols means
+ * (reference-data/artifacts/apple-pve-20261015/v90-dfe2).  Equalising to the symbols means
  * inverting both nulls.  A linear equaliser cannot (14 dB), and decision
  * feedback can only by regenerating the lost energy from past decisions: its
  * dominant tap is ~1.9 at lag 2, so a single wrong decision cascades

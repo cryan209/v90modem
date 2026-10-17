@@ -24,7 +24,7 @@ python3 tools/pcm_sweep.py --modes v92-upstream --v92-drns 9 \
 
 `make test` includes `pcm-data-test`; its existing PCM tests cover the
 procedures too. The focused `pcm-loopback-test` runs both groups together.
-Every matrix run creates a fresh directory under `artifacts/pcm/`. Each row
+Every matrix run creates a fresh directory under `reference-data/artifacts/pcm/`. Each row
 has a JSON result, raw stdout and stderr. `manifest.json` records the arguments
 and executable SHA-256, and `summary.json` records outcomes. `--output`
 selects a new destination; an existing directory is never overwritten.
@@ -140,16 +140,16 @@ combination. They are not a measured universal maximum V.92 line rate; their
 cause has not been isolated. They remain in `pcm-matrix` and are excluded from
 the strict clean subset, with no relaxation of acquisition/error criteria.
 
-Evidence: `artifacts/pcm/20261005T101003185695Z/results.jsonl` and its manifest.
+Evidence: `reference-data/artifacts/pcm/20261005T101003185695Z/results.jsonl` and its manifest.
 The strict 120-row subset uses V.90 DRN 1/9/22 with all Sr values, V.92 DRN
 1/9/13, both laws, seeds 1/7 and callbacks 37/160. All passed; evidence:
-`artifacts/pcm/20261005T101009575058Z/results.jsonl`. The procedure target and
+`reference-data/artifacts/pcm/20261005T101009575058Z/results.jsonl`. The procedure target and
 five measurement-integrity regression tests also passed.
 
 Longer checks also passed: one million payload bits per row for V.90 DRN 22
 (56000 bit/s), all Sr values and both laws (eight rows), and V.92 DRN 1/9/13,
 both laws (six rows). Reports are
-`artifacts/pcm/20261005T101103775956Z/results.jsonl` and
-`artifacts/pcm/20261005T101102738783Z/results.jsonl`, respectively. The existing
+`reference-data/artifacts/pcm/20261005T101103775956Z/results.jsonl` and
+`reference-data/artifacts/pcm/20261005T101102738783Z/results.jsonl`, respectively. The existing
 `vpcm_loopback_test --all-tests` suite passed after the changes. The entire
 repository `make test` suite was not rerun.

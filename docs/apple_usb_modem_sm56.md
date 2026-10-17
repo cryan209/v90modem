@@ -1084,7 +1084,7 @@ the VG224's D/A toward the loop is the central-office codec and there is
 exactly one of them, which is the real topology --
 `docs/hsf_analogue_v90_coupler.md` is the same arrangement with the HSF part.
 The open item there is our own codeword receiver, which is validated only
-against `artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, and
+against `reference-data/artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, and
 so does not normalise the gain, sampling phase and band-limiting a line
 imposes before it slices.  That is a receiver gap and the thing to fix; it is
 not a property of analogue lines.
@@ -1097,8 +1097,8 @@ end on tower.  The analogue end has to stay on the Mac because the modem is
 plugged into it, so the digital end belongs on tower, where Asterisk is, and
 the audio path between them is then PBX-internal.
 
-Artifacts: `artifacts/apple-v92-r2` (V.92 negotiated, demoted to V.90) and
-`artifacts/apple-v92-r3` (V.92 selected both directions), each with its
+Artifacts: `reference-data/artifacts/apple-v92-r2` (V.92 negotiated, demoted to V.90) and
+`reference-data/artifacts/apple-v92-r3` (V.92 selected both directions), each with its
 `run.sh`.
 
 **Two method notes from this session, both of which read as findings first.**
@@ -1120,7 +1120,7 @@ arrangement the Recommendation is written for: the Apple modem is the ANALOGUE
 modem on its 2-wire loop and dials `sip_v90_modem`, which answers on SIP as the
 DIGITAL modem over G.711.  Exactly one codec sits in the path -- the VG224's
 D/A toward the loop -- which is where a central-office codec sits in a real
-V.92 call.  `artifacts/apple-v92-sip-r4` (V.92) and `apple-v90-sip-r6` (V.90),
+V.92 call.  `reference-data/artifacts/apple-v92-sip-r4` (V.92) and `apple-v90-sip-r6` (V.90),
 each with its `run.sh`.
 
 **The digital end must be on tower, not this Mac.**  Register as **6000/6000**:
@@ -1206,7 +1206,7 @@ is, in the server log, indistinguishable from one on which no upstream arrived.
 
 New `tools/v92_p3_probe.c` (`make v92_p3_probe`) replays a recorded
 `live-rx.g711` through that same receiver and prints every state change.  On
-`artifacts/apple-v92-sip-r4/server/live-rx.g711` armed at the sample the engine
+`reference-data/artifacts/apple-v92-sip-r4/server/live-rx.g711` armed at the sample the engine
 named, it reproduces the live outcome exactly:
 
 ```
@@ -1242,7 +1242,7 @@ and TRN1u broadband, and it is not a level problem, which is why no gain change
 is worth trying.
 
 **V.90: Sd IS now transmitted, and the previous section's "silent in both
-directions" is superseded.**  `artifacts/apple-v90-sip-r7` repeats r6 with
+directions" is superseded.**  `reference-data/artifacts/apple-v90-sip-r7` repeats r6 with
 `V90_JA_BIT_DUMP` set and the digital side's own receive tap collected.  Same
 binary, same peer, opposite outcome: the 9.3.1.3 500 ms heuristic fallback
 fired at 11.1 s, `[V90] Phase 3: analogue Ja detected, starting Sd` and
@@ -1325,7 +1325,7 @@ measured on a byte-exact DS0, where there is no channel.
 
 **What survives is a better detector than the fit ever was**, because the
 component that survives is also the distinctive one.  Over the Phase 3 era of
-`artifacts/apple-v90-sip-r7`, in 32 ms windows on the 16 kHz T/2 grid: the Sd
+`reference-data/artifacts/apple-v90-sip-r7`, in 32 ms windows on the 16 kHz T/2 grid: the Sd
 burst reads **0.994-1.000** of the block energy on the 1333 Hz line, and the
 other **335** windows -- TRN1d, Jd, silence -- read at most **0.0377**.  1333.33
 Hz on a 16 kHz grid is exactly one cycle per 12 samples, so it is a plain
@@ -1450,7 +1450,7 @@ The bound above was a yes/no on recoverability.  This is the quantity a V.90
 constellation is actually chosen from: **how finely can the analogue end
 resolve a G.711 level after the whole path?**  Same method and the same
 ground truth -- the digital side's `live-tx.g711` against the Apple modem's
-device receive tap, held out, on `artifacts/apple-v90-sip-r7` -- scored as
+device receive tap, held out, on `reference-data/artifacts/apple-v90-sip-r7` -- scored as
 residual sigma in G.711 linear units rather than as R².
 
 **THE CLOCK OFFSET IS THE FIRST THING TO TAKE OUT, AND IT IS WORTH 7 dB.**  The
@@ -1680,7 +1680,7 @@ The acquisition window also consumes every caller sample, including any tail
 when a window is rejected. No resampler, buffer or codeword conversion was
 added to the DS0 bearer.
 
-The preserved `artifacts/apple-v90-sip-r7` RX and TX taps were graded by
+The preserved `reference-data/artifacts/apple-v90-sip-r7` RX and TX taps were graded by
 `tools/apple_v90_sd_recovery_verify.py`, which needs NumPy. This is a local
 capture target; missing captures cause an error rather than a skip:
 
@@ -1688,7 +1688,7 @@ capture target; missing captures cause an error rather than a skip:
 make v90-apple-line-test V90_LINE_PYTHON=.venv/bin/python
 ME_MODE=v90 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 \
   ./apple_usb_modem_coupler --rx-replay \
-  artifacts/apple-v90-sip-r7/call/rx-tap.s16 --pty-link /tmp/v90-line-replay
+  reference-data/artifacts/apple-v90-sip-r7/call/rx-tap.s16 --pty-link /tmp/v90-line-replay
 ```
 
 The independent frontend replay crops RX to 19.4–23.8 s, after Phase 2:
@@ -1737,7 +1737,7 @@ every symbol of the entire recording was recovered.
 The modem now hangs off the Grandstream ATA's line 2 (**6005**), not the VG224,
 and dials the digital end, which ran from a HEAD build on vmhost CT 117
 (`/root/apple-head`, ext **6002**) because tower was unreachable.  Recipe:
-`artifacts/apple-pve-20261015/run.sh <name> <mode> [hold]`; it dials `6002#`
+`reference-data/artifacts/apple-pve-20261015/run.sh <name> <mode> [hold]`; it dials `6002#`
 with `APPLE_MODEM_DTMF_MS=150/150` and collects both ends' logs and taps.
 
 ### Rig: every `endpoint-modem` endpoint was missing from Asterisk
@@ -1812,7 +1812,7 @@ offline, and find out why the analogue side's J'd bit walk missed the 12 zeros
 
 ### Ja fails on our analogue transmitter's clock: ~195 ppm, and V.34 allows 100 (2026-10-15)
 
-`artifacts/apple-pve-20261015/v90-ja1` repeats the V.90 call with
+`reference-data/artifacts/apple-pve-20261015/v90-ja1` repeats the V.90 call with
 `V90_JA_BIT_DUMP` and the server's `v34_rx.raw`.  Same outcome: the Apple side
 recovers Sd → TRN1d → Jd (this time it also sees J'd and sits in DIL receive),
 and the server never parses Ja.
@@ -2216,7 +2216,7 @@ notes), and the analogue side does not yet answer a §9.6 Rd while in data mode.
 
 The previous section ended with data mode live but the call dying on the
 upstream, an unanswered §9.6 Rd, and no LAPM.  Five findings, four of them
-ours; recordings `artifacts/apple-pve-20261015/v90-rr-{1..5}`.
+ours; recordings `reference-data/artifacts/apple-pve-20261015/v90-rr-{1..5}`.
 
 **Why the upstream is poor: the line's response is longer than the server's
 equaliser.**  Fitted from what we sent (`call/tx-tap.s16`, resampled 9600 →
@@ -2469,8 +2469,8 @@ Bounded 12-second PBX calls, caller `6002 / Apple CID Test`, no answering:
 
 | called extension | receiving modem | result | evidence |
 |---|---|---|---|
-| 6005 | `0:14` | checksum-valid number, name, date/time; AT fields after RING | `artifacts/apple-cid-20261016/modem-1/` |
-| 6004 | `0:13` | same; four RING indications, CID reported once | `artifacts/apple-cid-20261016-r2/modem-0/` |
+| 6005 | `0:14` | checksum-valid number, name, date/time; AT fields after RING | `reference-data/artifacts/apple-cid-20261016/modem-1/` |
+| 6004 | `0:13` | same; four RING indications, CID reported once | `reference-data/artifacts/apple-cid-20261016-r2/modem-0/` |
 
 Both raw recordings decode again through `--cid-replay`. Neither test seized
 its line. Both devices' manual/watch ownership and shutdown were also checked:
@@ -2484,7 +2484,7 @@ code 9 (approximately 29.7 mA), raw sense `0x07` (approximately +7 V). The
 one-second engine run had zero render errors, zero TX underruns and exactly
 135168 input/output device frames, including on-hook monitoring. It then
 returned on-hook with sense `0x32`. Evidence:
-`artifacts/apple-cid-answer-20261016/`. This verifies the monitoring/answer
+`reference-data/artifacts/apple-cid-answer-20261016/`. This verifies the monitoring/answer
 transition, not a complete modem connection.
 
 The CLI's default remains first-ring answer; `--answer-rings 2` (or GUI S0=2)
@@ -2528,7 +2528,7 @@ Both `0:13` and `0:14` passed at 9600 Hz: 9600 samples, zero sample/bit errors,
 correlation 1, gain 1 and RMSE 0. Observed round-trip delay was about 115–121 ms.
 The 8000 Hz test on `0:13` also passed exactly over 8000 samples (145.5 ms).
 All tests verified register restoration. Evidence is under
-`artifacts/apple-loopback-20261016/`, including a real GUI action which resumed
+`reference-data/artifacts/apple-loopback-20261016/`, including a real GUI action which resumed
 ring watching afterwards. The optional `startup` mode is unsupported on this
 firmware: register 6's PDL bit did not latch; the test stopped and restored the
 registers without claiming a pass.
@@ -2548,7 +2548,7 @@ both ring-burst events, checksum-valid CID before second-ring answer, hook
 readbacks, voltage/current transitions and engine startup. The call ran the
 engine for one second and returned on-hook; no overload event occurred.
 Evidence and a reproduction script are in
-`artifacts/apple-events-answer-20261016/`. This remains a monitoring/answer
+`reference-data/artifacts/apple-events-answer-20261016/`. This remains a monitoring/answer
 transition check rather than a trained modem connection.
 
 
@@ -2579,9 +2579,9 @@ requires OPE to be cleared **before** an off-hook transition, then re-armed
 25 ms afterwards. Leaving it continuously enabled produced OPD during normal
 make transients. Normal seizure and pulse makes now follow this sequence;
 current saturation and USB overload notifications still stop the attempt.
-The early failed attempts remain in `artifacts/apple-pulse-dial-20261016/`.
+The early failed attempts remain in `reference-data/artifacts/apple-pulse-dial-20261016/`.
 
-`artifacts/apple-pulse-dial-20261016-r4/` records a complete CLI `P6005` attempt:
+`reference-data/artifacts/apple-pulse-dial-20261016-r4/` records a complete CLI `P6005` attempt:
 31 pulses / 62 hook edges, observed break intervals 58–61 ms, intra-digit make
 intervals 39–42 ms, maximum scheduler lateness 1 ms, configuration restored.
 The destination did not ring. This verifies host-command timing, **not** physical
@@ -2590,7 +2590,7 @@ Enable Pulse Dialing option, default No, and a pulse-standard selector; the
 current ATA setting has not been inspected or changed. Manufacturer reference:
 [HT80x administration guide](https://documentation.grandstream.com/knowledge-base/ht80x-administration-guide/).
 
-`artifacts/apple-atdp-20261016/` verifies the real split PTY's `ATDP6005`
+`reference-data/artifacts/apple-atdp-20261016/` verifies the real split PTY's `ATDP6005`
 dispatch: the complete attempt produced 62 edges and restored settings; an ATH
 after the first edge stopped the attempt and restored settings. Both returned
 on-hook. `console_test` covers default ATP, mixed P/T, stored expansion, redial,
@@ -2624,9 +2624,9 @@ three-sample pattern matches, useful for spotting packet mixing.
 
 | path | modem 0:13 | modem 0:14 | evidence |
 |---|---|---|---|
-| digital, A-law and mu-law | 8000/8000 exact samples in each run | same on repeat | `artifacts/apple-pcm-loopback-20261016-r2/` |
+| digital, A-law and mu-law | 8000/8000 exact samples in each run | same on repeat | `reference-data/artifacts/apple-pcm-loopback-20261016-r2/` |
 | isolation, mu-law, quarter TX | 21.48 dB held-out SNR; 88.13% symbol errors | 21.48 dB; 88.33% | same |
-| analog, quiet call, quarter TX | 16.59 dB; 92.33% symbol errors | 16.66 dB; 92.25% | `artifacts/apple-pcm-loopback-20261016-quiet/` |
+| analog, quiet call, quarter TX | 16.59 dB; 92.33% symbol errors | 16.66 dB; 92.25% | `reference-data/artifacts/apple-pcm-loopback-20261016-quiet/` |
 
 The isolation return includes about 3.3–3.5k counts of DC and filter ISI; even
 after this equalizer it does not preserve arbitrary full-alphabet 64 kbit/s
@@ -2642,7 +2642,7 @@ One initial **digital A-law** run on `0:14` was a real failure: 2992/8000 sample
 errors. Its error pattern repeats every eight samples: five samples have lag
 1113, three have lag 1193 (an extra 80 samples / 10 ms). This is packet/sample
 mixing rather than a scalar gain or law conversion. The raw taps are retained
-under `artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw/`; all four digital
+under `reference-data/artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw/`; all four digital
 law/device combinations passed on the repeat. The intermittent fault remains
 unresolved; an exact self-test failure must not be hidden by an equalizer or
 by dropping/splicing samples.
@@ -2696,7 +2696,7 @@ All rows had zero host stream gap samples, restored registers and returned
 on-hook. Software controls passed at each tested rate; the 9600 control also
 passed with 1536 samples of delay in both directions. Raw taps, line events,
 modem logs, JSON summaries and control logs live in
-`artifacts/apple-v34-loopback-20261016/`. The failed rows are retained beside
+`reference-data/artifacts/apple-v34-loopback-20261016/`. The failed rows are retained beside
 the passes. This demonstrates why the preceding full-alphabet 64 kbit/s PCM
 probe does not establish V.34 performance: a trained bandlimited modem can
 recover data through that same analog path.
@@ -2789,7 +2789,7 @@ MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_loopback_spectrum.py \
 The synthetic controls check a known FIR with DC and independent noise,
 held-out inverse/ideal feedback fits, and an unrelated-signal negative
 control. The retained plots, model files and JSON measurements are under
-`artifacts/apple-loopback-spectrum-20261016-verified/`.
+`reference-data/artifacts/apple-loopback-spectrum-20261016-verified/`.
 
 ### Independent quiet noise and response shape (2026-10-16)
 
@@ -2865,7 +2865,7 @@ MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_line_characterize.py \
 
 Synthetic checks verify integrated white-noise band power and the centered
 FIR's complex-response convention. Results, response/inverse CSVs and the
-visually inspected plot are in `artifacts/apple-line-characterize-20261016/`.
+visually inspected plot are in `reference-data/artifacts/apple-line-characterize-20261016/`.
 No new hardware call or audio-path change was needed for this analysis.
 
 ### Native sample rate really extends the passband (2026-10-16)
@@ -2925,10 +2925,10 @@ runs reported zero stream gaps. Both devices finished at 9600 Hz. All four
 `make gui-apple-test` checks passed (the GUI check needed localhost socket
 permission outside the sandbox); the direct diagnostic self-test also passed.
 
-Evidence roots are `artifacts/apple-native-rates-20261016/`,
-`artifacts/apple-native-rates-20261016-repeat13/`,
-`artifacts/apple-native-rates-20261016-device14/` and
-`artifacts/apple-native-rates-20261016-repeat14/`. The first contains the
+Evidence roots are `reference-data/artifacts/apple-native-rates-20261016/`,
+`reference-data/artifacts/apple-native-rates-20261016-repeat13/`,
+`reference-data/artifacts/apple-native-rates-20261016-device14/` and
+`reference-data/artifacts/apple-native-rates-20261016-repeat14/`. The first contains the
 combined summary and visually inspected `native-response.png`.
 
 ```sh
@@ -2942,7 +2942,7 @@ MPLCONFIGDIR=/tmp/apple-mpl .venv/bin/python tools/apple_native_rate_report.py \
 ## DAA identification: Si3018-compatible revision F (2026-10-16)
 
 The complete register dumps are retained under
-`artifacts/apple-registers-20261016/`. Comparing only with the older Si3016
+`reference-data/artifacts/apple-registers-20261016/`. Comparing only with the older Si3016
 sheet gave misleading reserved-bit conflicts and a conditional domestic-only
 interpretation. The newer manufacturer Si3056/Si3018/19/10 sheet, revision
 1.06, resolves the principal identification fields:
@@ -3065,7 +3065,7 @@ only the other measurements. No result is a modulation BER or trained rate.
 Synthetic checks recover a known non-bin-centered tone, second harmonic and
 white-noise band power. Invalid level/gain inputs are rejected before opening
 USB. `make gui-apple-test`: all four tests passed. Evidence is in
-`artifacts/apple-snr-sweep-20261016/` and its `-repeat13`, `-repeat14` and
+`reference-data/artifacts/apple-snr-sweep-20261016/` and its `-repeat13`, `-repeat14` and
 `-repeat14-gain9` siblings, with the combined JSON and inspected plot in the
 first directory.
 
@@ -3130,7 +3130,7 @@ The source-to-received digital level at 1 kHz is +1.85 dB, which describes
 two digital taps with different reference scales and is not a calibrated
 analog gain or dBm measurement. Both audio runs reported zero render errors.
 
-Evidence: `artifacts/apple-9667-20261016/` contains source WAV, raw dial and
+Evidence: `reference-data/artifacts/apple-9667-20261016/` contains source WAV, raw dial and
 receive taps, final hook status, call log, response CSV/JSON and visually
 inspected `call-response.png`. This was a received test sweep, not CONNECT
 or payload evidence, and it does not demonstrate a change in live-call SNR.
@@ -3218,7 +3218,7 @@ about 81 ms after the hook request (0x0c=0x46, 0x13=0x01). Further seizure
 attempts were stopped; overload protection was retained. A clean digital
 loopback does not validate the analogue line interface or attached line.
 
-Evidence: `artifacts/apple-rasfinder-20261016/`, including immutable coupler
+Evidence: `reference-data/artifacts/apple-rasfinder-20261016/`, including immutable coupler
 snapshot and build provenance, per-port events/logs/results, on-hook
 self-test, and `6311-warm/`. The current physical line/DAA seizure fault
 must be resolved before this run can assess any of the three RasFinder
@@ -3299,7 +3299,7 @@ scale is uncalibrated; these readings do not independently establish the
 supply voltage, continuity, or a failed DAA. No peer audio or training was
 attempted. Both were restored on-hook with monitoring off and hardware
 protection enabled. Final readbacks and observations are saved locally in
-`artifacts/apple-direct-line-20261017/`. Check physical feed and wiring
+`reference-data/artifacts/apple-direct-line-20261017/`. Check physical feed and wiring
 under off-hook load before interpreting a modem negotiation failure.
 
 Follow-up after the wiring was clarified: green is continuous between the
@@ -3331,7 +3331,7 @@ passed in both directions. The peer captures contain strong tone windows
 with amplitudes about 1382 and 1349 native counts, compared with near-zero
 1 kHz bins outside the bursts; local returns were only tens of counts.
 Both audio tools returned success, with fresh captures in
-`artifacts/apple-direct-line-20261017/audio-new-feed/`. This demonstrates
+`reference-data/artifacts/apple-direct-line-20261017/audio-new-feed/`. This demonstrates
 bidirectional physical audio and adequate indicated current during that
 trial, not V.34 training, CONNECT or user data. Both hooks and monitors
 were released afterward.
@@ -3365,7 +3365,7 @@ trial is intermittent too and must not be discarded. Clean moderate
 duplex own-echo levels are 27–29 dB below the far tones.
 
 Evidence and reproducible analysis: local
-`artifacts/apple-direct-quality-20261017/report.md`, `summary.json`,
+`reference-data/artifacts/apple-direct-quality-20261017/report.md`, `summary.json`,
 `duplex-summary.json`, `line-quality.png`, raw captures and per-run logs.
 There are 34 one-way bursts plus three simultaneous-tone trials.
 Measurements use independent quiet windows, fitted tone frequencies and
@@ -3413,13 +3413,13 @@ training thresholds or G.711 bearer logic were altered for these trials.
 
 Full evidence, tested executable snapshot/hash, launches, logs, device
 TX/RX taps, engine dumps, manifests, summary and report are local under
-`artifacts/apple-direct-training-20261017/`. Coupler build, diagnostic
+`reference-data/artifacts/apple-direct-training-20261017/`. Coupler build, diagnostic
 self-test, resampler self-test and conflicting dial/answer argument
 check pass.
 
 ### Direct-pair V.90 calibration and delayed upstream E (2026-10-17)
 
-Follow-up evidence is under `artifacts/apple-v90-followup-20261017/`.
+Follow-up evidence is under `reference-data/artifacts/apple-v90-followup-20261017/`.
 Use `ME_V90_JA_HEURISTIC_FALLBACK_MS=0` for this own-engine pair: the
 default energy-gap heuristic advanced before decoding Ja, leaving
 `dil_requested=false`. The digital end then sent Ri where the analogue
@@ -3455,7 +3455,7 @@ only 0.85 seconds, so its nominal 120000-sample search-back cannot find B1.
 Restoring 131072 samples retains 13.65 seconds without changing playout or
 sample accounting; the two complex observation rings occupy 2 MiB together.
 With a fixed late handover/history, the retained RX fixture now acquires at
-100.0% fit. `artifacts/apple-direct-v90-b1/README.md` records its provenance.
+100.0% fit. `reference-data/artifacts/apple-direct-v90-b1/README.md` records its provenance.
 The first two live history-build retries fail earlier in Phase 3, so they
 do not establish live validation of that B1 fix.
 
@@ -3612,10 +3612,10 @@ longer traceback. These observations bracket this detector's tested
 capability, not a proof of Shannon capacity or a negotiated V.90 rate.
 No live traceback or DSP constants were changed for the size experiment.
 
-Local evidence/report/plots: `artifacts/apple-pcm-matrix-20261017/`,
-`artifacts/apple-pcm-subset-20261017/`,
-`artifacts/apple-pcm-subset-repeat-20261017/` and
-`artifacts/apple-pcm-sweep-20261017/`. Reproduce with numpy/scipy using
+Local evidence/report/plots: `reference-data/artifacts/apple-pcm-matrix-20261017/`,
+`reference-data/artifacts/apple-pcm-subset-20261017/`,
+`reference-data/artifacts/apple-pcm-subset-repeat-20261017/` and
+`reference-data/artifacts/apple-pcm-sweep-20261017/`. Reproduce with numpy/scipy using
 `tools/apple_pcm_matrix.py capture OUTPUT [--profile subset|sweep]`, then
 `analyze OUTPUT`; select the rate list with `--rates`. The large captures
 remain gitignored; the fixed delayed-E acquisition fixture is committed.
@@ -3634,7 +3634,7 @@ existing `ME_V90A_PR4_MU` controls tracking in thousandths (default 2).
 `tools/apple_pcm_pr4.c` additionally accepts `[traceback [taps
 [tracking-milli]]]`, retaining the previous defaults 24/128/0. It reports
 geometry and adaptation count alongside the held-out error counts.
-The recorded-input sweep is `artifacts/apple-rx-eq-20261017/sweep.json`:
+The recorded-input sweep is `reference-data/artifacts/apple-rx-eq-20261017/sweep.json`:
 8000/9600 Hz, both directions, both laws, 32/48 signed levels, 64/128/192
 T/2 taps, depth 24/64/128, tracking 0/.002. Each run trains on 5000 known
 symbols and scores later symbols against the immutable transmit reference;
@@ -3679,7 +3679,7 @@ native 9600 Hz, strict Ja, upstream N=4, normal V.42 LAPM/V.42bis and
 4096-byte body plus markers in each direction and required the complete
 opposite payload byte-for-byte, not merely CONNECT or matching markers.
 They ran in A1/B1/A2/B2/C1 order under
-`artifacts/apple-v90-followup-20261017/rx-eq-*`.
+`reference-data/artifacts/apple-v90-followup-20261017/rx-eq-*`.
 
 | Trial | Taps / depth | Completed outcome | TRN1d fit |
 |---|---|---|---|
@@ -3710,5 +3710,5 @@ Validation: expanded slot-varying PR4 synthetic test covers 16/24 frozen,
 128/24 tracking and 128/64 tracking, all with zero codeword errors; five
 analogue/recorded-upstream regressions and two whole-engine linear-I/O
 regressions passed, as did the coupler resampler self-test. Detailed output
-is in `artifacts/apple-rx-eq-20261017/`; no PCM bearer processing or ITU
+is in `reference-data/artifacts/apple-rx-eq-20261017/`; no PCM bearer processing or ITU
 constants were changed (V.90 §§5.4.3, 8.4.5).

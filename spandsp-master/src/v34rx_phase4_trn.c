@@ -176,7 +176,7 @@ static void phase4_trn_recent_update(v34_rx_state_t *s, int raw_sym)
    are separated by the histogram and NOT by the score: the call that reached
    data mode read 57% ones over dibits 997/1217/1037/1212, and the call that
    never validated an MP frame read 88% over 442/3440/437/144
-   (artifacts/rf-v34-d2 and -c3).  So the score alone is the wrong instrument,
+   (reference-data/artifacts/rf-v34-d2 and -c3).  So the score alone is the wrong instrument,
    and it gates PHASE4_TRN_READY_MIN_SCORE.
  
    */

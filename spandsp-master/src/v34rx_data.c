@@ -191,7 +191,7 @@ static float v34_rx_b1_fallback_threshold(void)
 
    The Godard band-edge loop (pri_symbol_sync()) is the timing recovery the
    training stages use, and in data mode it does not follow a real clock
-   offset: against the RasFinder (artifacts/rf-bbs-2, 3200 baud), whose
+   offset: against the RasFinder (reference-data/artifacts/rf-bbs-2, 3200 baud), whose
    transmitter measures 16.5 ppm slow against the bearer straight off the
    recording, its integrator wandered +/-60 against a trigger of 100 and it
    made ONE correction in 24 s, while the DD-LMS equalizer followed the drift
@@ -959,7 +959,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        v34_phase4_trn_measured_rate_n().
 
                        Live ladder against the SmartLink rig at 3000 baud, all
-                       three calls kept under artifacts/v34-rate-*: 14400
+                       three calls kept under reference-data/artifacts/v34-rate-*: 14400
                        decodes and carries payload at 0.32-0.39 from the
                        lattice, 16800 is white (0.63-0.68) from its first
                        window, 21600 loses the call.  The offset below is set
@@ -1152,7 +1152,7 @@ skip_gain_report:
                            V.34 path's "distance to grid"; see
                            docs/v34_data_mode_rates.md.
 
-                           Measured on artifacts/goal-v90-073744Z and
+                           Measured on reference-data/artifacts/goal-v90-073744Z and
                            goal-v90-r2: 35.4 and 36.2 dB, against a wire whose
                            least-squares bound is 36.3 and 36.9 -- so this is
                            the line, not the receiver -- while the call was
