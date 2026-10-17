@@ -3335,3 +3335,41 @@ Both audio tools returned success, with fresh captures in
 bidirectional physical audio and adequate indicated current during that
 trial, not V.34 training, CONNECT or user data. Both hooks and monitors
 were released afterward.
+
+
+### Direct powered pair: quality and intermittent distortion (2026-10-17)
+
+Fresh bidirectional tests at native 9600 Hz, with the changed feed above,
+measure the complete USB/audio/DAA/powered-pair path. The sampled
+300–3400 Hz response ripple is 0.53 dB in either direction. Clean 1 kHz
+gains are -1.48/-1.69 dB. Independent quiet voice-band noise is about
+32 counts RMS per receiver, with common tones near 104/311 Hz, 50 Hz hum
+and higher-frequency contamination. Its source has not been isolated.
+
+At transmitted sine amplitude 0.15, voice-band SNDR is about 39 dB in
+both directions, with 0.016–0.032% 1 kHz THD on the moderate controls.
+Strong amplitude 0.35 gives 46 dB SNDR when clean, but reverse-direction
+trials are NOT consistently clean: 2/3 show severe waveform distortion
+(about 53/76% THD and 5.7/1.5 dB SNDR); the third is clean. The other
+direction is clean in 2/2 strong-level trials. No int16 rail clipping or
+AudioUnit render errors explain the failed captures. This is not enough
+evidence to attribute the fault to a peer, the physical line, the supply,
+or the USB/audio path. The tool generates a known sine but does not
+retain a tap of each actual submitted output buffer.
+
+Simultaneous 1 kHz/1.4 kHz transmission initially has poor residual
+voice-band ratios (4.0/27.3 dB) after removing the two expected tones.
+A moderate-level repeat is clean at 38.9/39.0 dB; a lower-level repeat
+is 29.4/29.4 dB, matching the one-way noise floor. Thus the bad duplex
+trial is intermittent too and must not be discarded. Clean moderate
+duplex own-echo levels are 27–29 dB below the far tones.
+
+Evidence and reproducible analysis: local
+`artifacts/apple-direct-quality-20261017/report.md`, `summary.json`,
+`duplex-summary.json`, `line-quality.png`, raw captures and per-run logs.
+There are 34 one-way bursts plus three simultaneous-tone trials.
+Measurements use independent quiet windows, fitted tone frequencies and
+interior burst windows; the fitter passes a synthetic offset/noise/THD
+control. Both devices finish on-hook with monitoring off and hardware
+protection enabled (Si3056 §5.8, §5.22). This is an analogue-path quality
+measurement, not V.34/V.90 training, CONNECT or a BER/data-rate result.
