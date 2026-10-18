@@ -3875,3 +3875,50 @@ environments, manifests and report:
 `reference-data/artifacts/apple-direct-review-20261018/`. The planned
 alternating comparison remains incomplete; no payload reliability or rate
 advantage is established by these two calls.
+
+### Reconnected direct pair: live early-CP′ recovery (2026-10-18)
+
+After the user reconnected both USB units, register reads recovered. The
+mapping is now digital answerer 0:2/UID 000000 and analogue caller
+1:2/UID 1130000. Reconfigured both audio interfaces and ran four sequential
+60-second calls, waiting for each runner's complete cleanup. The executable
+is unchanged from `d129422d`; strict Ja descriptors, upstream N=4, lookahead 0,
+default equalizer/traceback and 4096-byte bodies per direction stay fixed.
+
+| Run | Native codec rate | Completed result | CP′ search to first upstream bit |
+|---|---|---|---|
+| A1 | 9600 Hz | Training stalls before DATA; no payload queued | Not exercised |
+| B1 | 9000 Hz | Exact bidirectional payload, 33333 downstream / 9600 upstream | 73 ms |
+| A2 | 9600 Hz | Exact bidirectional payload, 33333 downstream / 9600 upstream; E entry | Not exercised |
+| B2 | 9000 Hz | Exact bidirectional payload, 32000 downstream / 9600 upstream | 113 ms |
+
+B1 and B2 decode CRC-valid CP′ and exercise the reviewed buffered B1 search
+(V.90 §§9.4.2.4–9.4.2.5), rather than waiting for E on the CP demodulator.
+Both ends establish LAPM and negotiate V.42bis in all three successful
+calls. Each direction's independent 4096-byte printable body plus framing
+(4161 bytes total) arrives byte-for-byte, with no extra user-data bytes:
+the DTE captures contain only CONNECT, the exact peer block and teardown
+NO CARRIER. The two 9000-Hz analogue B1d decodes each report 48/48 frames,
+3 bit errors and zero demap failures; the successful 9600-Hz B1d has zero
+bit errors. No acceptance thresholds were loosened.
+
+Every side of every call reports zero render errors, timestamp gaps,
+over-budget callbacks, TX ring underruns and TX ring overruns. Device
+counts balance at 576000 in/out per 9600-Hz leg and 539648 in/out per
+9000-Hz leg. All final readbacks confirm hook/monitor cleared and hardware
+protection enabled; all eight processes exit normally. The USB control
+failure does not recur in this batch, but its cause is still unknown.
+
+This establishes live bidirectional payload and early-search operation
+with the reviewed native-9000 path. Observed success is 1/2 at 9600 and
+2/2 at 9000; two calls per arm cannot establish a reliability improvement.
+The successful E-triggered 9600 call also shows that missing CP′ does not
+always prevent LAPM. These are minute-long calls with a small payload,
+not soak/full-upstream-rate evidence; the N=4 cap remains part of the setup.
+Native 9000 does not select 3000 baud: these calls retain the negotiated
+3200-baud/9600-Hz internal T/3 grid (V.90 §5.2, V.34 §5.2).
+
+Retained executable/provenance, raw taps, manifests, events, launch settings,
+independent DTE grading (`analyze.py`, `summary.json`) and report:
+`reference-data/artifacts/apple-direct-resume-20261018/`. No source-code or
+default-setting change was needed after this live comparison.
