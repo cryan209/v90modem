@@ -348,3 +348,4 @@ reference-data/artifacts/x2-s39q-20261010-9600	13	10686131	docs/x2_v34_upstream_
 reference-data/artifacts/x2-strict-20261010	13	10850288	docs/x2_implementation.md
 reference-data/artifacts/x2-symmetric-20261006	108	13476615	docs/x2_implementation.md
 reference-data/artifacts/x2-v34-review-20261006-9600	17	16343335	docs/x2_v34_upstream_review.md
+reference-data/artifacts/apple-direct-review-20261018	95	21567518	docs/apple_usb_modem_sm56.md; bounded direct-pair comparison and USB control fault

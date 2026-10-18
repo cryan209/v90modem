@@ -3831,3 +3831,47 @@ still run inside audio callbacks; a slow callback or a full/empty TX ring
 can spoil a hardware comparison. Timestamp continuity does not establish
 USB/codec sample integrity. The intermittent raw-waveform disturbance remains
 unexplained; do not infer that native 9000 cures it from clean training alone.
+
+### Direct-pair comparison stopped by USB control failure (2026-10-18)
+
+Tested reviewed build `d129422d` against the two physically connected Apple
+modems, newly enumerated at USB 0:2/UID 000000 (digital answerer) and
+1:3/UID 1130000 (analogue caller). Both initially needed `--configure`.
+Kept strict Ja descriptors, upstream N=4, CP′ lookahead 0 and default
+equalizer/traceback, with 60-second holds and planned 4096-byte payloads
+per direction. This local direct-USB test does not traverse SIP or Wi-Fi.
+
+The completed native-9600 call reaches both V.90 startup flags at
+32000 downstream/9600 upstream. Analogue B1d is 48/48 frames with no bit
+errors or demap failures. The digital decoder misses CP′, however, and
+uses E; first upstream data is traced 603 ms after digital DATA entry.
+The caller falls back to V.14 while the answerer enters LAPM establishment.
+Both DTEs never jointly CONNECT, so the runner correctly sends no payload.
+This exercises the existing E path, not the early CP′ search
+(V.90 §§9.4.2.4–9.4.2.5). Both devices count 576000 samples in and out,
+with no timestamp gaps, over-budget callbacks, render errors, TX underruns
+or TX overruns. This is training success, not a working data connection.
+
+The following native-9000 call times out at the caller's V.8 stage and
+does not complete V.90 startup. No payload is sent. Logged audio callbacks
+have balanced per-device frame counts and no continuity/ring errors, but
+the answerer's USB register reads become unresponsive near teardown.
+It still enumerates with configuration 1; all line-register reads then
+return -1, and protected hook-off/monitor-off commands fail. Its final hook
+and protection state cannot be verified. The peer is confirmed on-hook,
+monitor off, with hardware protection enabled. One standard USB reset of
+the unresponsive unit times out; physical USB reconnection is required
+before further calls. This does not identify native 9000 as the cause.
+
+A repeat baseline was inadvertently launched during the prior runner's
+cleanup and aborted before launching either modem process; it is excluded.
+No B2 call was made. Wait for the entire runner, including cleanup, to exit
+before the next trial. Blocking USB reads also extend the nominal hold:
+the 9000 runner takes 87.6 seconds including teardown. A zero process exit
+does not prove a successful hook release; inspect cleanup readbacks.
+
+Retained executable/hash, runner, per-side logs/events/audio taps, launch
+environments, manifests and report:
+`reference-data/artifacts/apple-direct-review-20261018/`. The planned
+alternating comparison remains incomplete; no payload reliability or rate
+advantage is established by these two calls.
