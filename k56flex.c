@@ -551,6 +551,12 @@ int k56flex_v8bis_ns_offset(const uint8_t *p, size_t len)
         ++i;
     if (i + 2 >= len || p[i] < 7 || p[i + 1] != 0xb5)   /* length, T.35 country */
         return -1;
+    /* Draft 0.23 clause 4.1: the NS length counts the octets AFTER the
+     * length octet (9 in both recovered MICA and Rockwell templates).
+     * Require the whole block, not just the version byte: otherwise a
+     * truncated CL/MS can pass the peer predicate with no DSP/law octets. */
+    if ((size_t)p[i] > len - i - 1)
+        return -1;
     return (int)i;
 }
 

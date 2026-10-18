@@ -53,7 +53,20 @@ int main(void)
         CHECK(k56flex_v8bis_flex_version(m, 18) < 0 && !k56flex_v8bis_peer_acceptable(m, 18),
               "message without NS-present bit rejected");
         k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_CL, m);
-        CHECK(!k56flex_v8bis_peer_acceptable(m, 15), "truncated NS rejected");
+        for (n = 0; n < sizeof(m); ++n) {
+            CHECK(k56flex_v8bis_ns_offset(m, n) < 0,
+                  "Rockwell NS truncated at %zu rejected", n);
+            CHECK(!k56flex_v8bis_peer_acceptable(m, n),
+                  "Rockwell peer truncated at %zu rejected", n);
+        }
+        m[8] = 10;                      /* declared NS extends past the frame */
+        CHECK(!k56flex_v8bis_peer_acceptable(m, sizeof(m)), "oversized NS rejected");
+        m[8] = 7;
+        m[10] = 3;                      /* version byte now lies outside NS */
+        CHECK(!k56flex_v8bis_peer_acceptable(m, sizeof(m)), "version outside NS rejected");
+        m[8] = 9;
+        m[10] = 8;                      /* provider length crosses NS boundary */
+        CHECK(!k56flex_v8bis_peer_acceptable(m, sizeof(m)), "oversized provider rejected");
 
         k56flex_v8bis_payload(K56FLEX_V8BIS_CL, 0, 1, cl);
         CHECK(k56flex_v8bis_ns_offset(cl, 16) == 6 && k56flex_v8bis_flex_version(cl, 16) == 0x42,
@@ -61,6 +74,9 @@ int main(void)
         CHECK(!k56flex_v8bis_peer_acceptable(cl, 16), "server template rejected as a client");
         cl[13] = 0x02;
         CHECK(k56flex_v8bis_peer_acceptable(cl, 16), "MICA-layout 0x02 still accepted");
+        for (n = 0; n < sizeof(cl); ++n)
+            CHECK(!k56flex_v8bis_peer_acceptable(cl, n),
+                  "MICA peer truncated at %zu rejected", n);
         cl[13] = 0x21;
         CHECK(k56flex_v8bis_peer_acceptable(cl, 16), "MICA-layout 0x21 still accepted");
     }

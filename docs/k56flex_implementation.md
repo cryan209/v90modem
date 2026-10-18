@@ -242,6 +242,22 @@ The spec's recovered serial compander is mu-law only, but that is the DSP's
 T1 output stage. Here the codeword is chosen in the bearer's law, so PCMU uses
 the bit-0 = 0 tables and PCMA the bit-0 = 1 tables.
 
+## Reject incomplete V.8bis NS blocks
+
+The NS walker now requires all octets declared by the NS length before
+returning a block offset (Draft 0.23 clause 4.1). Previously, Rockwell CL
+prefixes of 16 or 17 bytes (full length 18), and MICA-layout client prefixes
+of 14 or 15 bytes (full length 16), could pass the peer predicate because
+the version byte was present even though the DSP/law tail was missing.
+An overstated NS length was also accepted.
+
+`k56flex_v8bis_test` checks every shorter prefix of both recovered layouts,
+an oversized NS declaration and a provider length that places the version
+outside the declared NS block. Complete templates and the clean/noisy audio
+exchanges still pass. All five K56flex binaries and `legacy_pcm_decode_test`
+pass after rebuilding. This is framing validation only, not progress on the
+missing live upstream gates or hardware qualification.
+
 ## Not covered (the integration boundary)
 
 - The client's side of the exchange: decoding what the client sends during and
