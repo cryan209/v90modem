@@ -105,7 +105,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_RETRAIN_ON_LOSS` | modem_engine.c |  | sdh | How far this call has backed off the receive rate it asks for in MP.  See |
 | `ME_V90_SWEEP_EYE_ABS` | v34rx.c |  | sdh | ME_V90_SWEEP_EYE_ABS=1 restores the absolute eye test that used to gate the |
 | `ME_V90_SWEEP_NEEDS_EVIDENCE` | v34rx.c |  | sdh |  |
-| `ME_V90_T3_CPPRIME_LOOKAHEAD` | v34rx.c |  | d | CP' is decoded behind the physical input: B1 may already be in |
+| `ME_V90_T3_CPPRIME_LOOKAHEAD` | v34rx.c | 0 | d | Experimental CP′ search lookahead in internal T/3 samples, 0..4800; 4800 restores the old wait for A/B comparisons. Not the physical codec rate. |
 | `ME_V90_T3_NO_BLIND` | v34rx.c |  | d |  |
 | `ME_V90_TRN1D_SYMBOLS` | v90.c |  | sdh | 24796T (3.1 s) of Jd wait. |
 | `ME_V90_TRN2D_SYMBOLS` | v90.c |  | sdh |  |

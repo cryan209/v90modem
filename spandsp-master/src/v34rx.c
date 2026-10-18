@@ -13586,6 +13586,8 @@ static bool v90_t3_cma_begin(v34_rx_state_t *rx, int scrambler_tap, int trellis)
 static bool v90_t3_cma_continue(v34_rx_state_t *rx, int limit);
 static void v90_t3_cma_abandon(v34_rx_state_t *rx);
 
+enum { V90_T3_SEARCH_FORWARD = 4800 };
+
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
     /* The E handover is only a coarse anchor: it is detected on the CP bit
@@ -13599,7 +13601,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     /* 3.4 s of history was not enough either: the E detector's lag varies a
        lot per call, and one measured at 79471 samples with B1 long rotated
        out of the ring by the time the search ran. */
-    enum { SEARCH_BACK = 120000, SEARCH_FORWARD = 4800 };
+    enum { SEARCH_BACK = 120000 };
     int64_t search_start;
     int64_t search_end;
     complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
@@ -13635,7 +13637,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     if (search_start < V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2)
         search_start = V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2;
     /*endif*/
-    search_end = s->v90_t3_e_anchor + SEARCH_FORWARD;
+    search_end = s->v90_t3_e_anchor + V90_T3_SEARCH_FORWARD;
     if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
         || s->v90_t3_raw_count < s->v90_t3_acq_retry_at
         || s->v90_t3_b1_symbols <= 0
@@ -13877,6 +13879,18 @@ search:
         s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
         return;
     }
+    /*endif*/
+    /* V.90 9.4.2.5: DATA follows B1. An early CP' search must wait for
+       enough of that DATA to run the existing out-of-sample check; lack
+       of buffered samples is not a successful validation. Keep the fitted
+       candidate and resume when input arrives, without replaying or adding
+       line samples and without spending an acquisition retry. */
+    if (best_match >= 0.95f
+        && s->v90_t3_raw_count
+               < best_first + 3*(s->v90_t3_b1_symbols
+                                 + V34_V90_T3_VALIDATE_SYMBOLS/2 - 1)
+                            + V34_V90_T3_FSE_TAPS - V34_V90_T3_FSE_TAPS/2)
+        return;
     /*endif*/
     s->v90_t3_srch_running = false;
 
@@ -18107,6 +18121,19 @@ SPAN_DECLARE(int) v34_v90_begin_b1_search(v34_state_t *s)
            fallback for a non-reset peer. This entry requires the actual
            complete B1 template and its out-of-sample validation. */
         s->rx.v90_t3_blind_tried = true;
+        /* CP' is decoded behind the physical input: B1 may already be in
+           the ring (V.90 9.4.2.4-.5). Search that history before waiting
+           another 500 ms for the E path's forward window. The complete B1
+           fit and out-of-sample checks are unchanged. A failed early window
+           uses the existing bounded forward retries if B1 has not arrived.
+           This avoids spending V.42 7.2.1.2's ADP detection window on a
+           receiver delay after our downstream has already entered DATA.
+           ME_V90_T3_CPPRIME_LOOKAHEAD=4800 restores the old wait for A/Bs. */
+        const char *e = V34_DIAG_GETENV("ME_V90_T3_CPPRIME_LOOKAHEAD");
+        int ahead = e ? atoi(e) : 0;
+        if (ahead < 0 || ahead > V90_T3_SEARCH_FORWARD) ahead = 0;
+        s->rx.v90_t3_e_anchor -= V90_T3_SEARCH_FORWARD - ahead;
+        if (s->rx.v90_t3_e_anchor < 0) s->rx.v90_t3_e_anchor = 0;
     }
     return result;
 }

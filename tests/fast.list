@@ -63,6 +63,10 @@
 sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.2 6.2 2>&1 | grep -q "^replay: acquired=1$"'
 # CP' can start the independent B1 search even when the CP decoder misses E.
 sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.2 0.2 cp-prime 2>&1 | grep -q "^replay: acquired=1$"'
+./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.2 6.2 cp-prime 200
+# An unaligned handover and short history must consume the boundary tail too.
+./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 6.200125 6.2 cp-prime 200
+./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.200125 0.2 cp-prime 500
 ./at_test_test
 ./clear_channel_test
 # The rows that recover payload without a single bit error.  Every rate that

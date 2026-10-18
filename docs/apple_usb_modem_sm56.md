@@ -3712,3 +3712,122 @@ analogue/recorded-upstream regressions and two whole-engine linear-I/O
 regressions passed, as did the coupler resampler self-test. Detailed output
 is in `reference-data/artifacts/apple-rx-eq-20261017/`; no PCM bearer processing or ITU
 constants were changed (V.90 §§5.4.3, 8.4.5).
+
+## Training quality and B1 search latency (2026-10-17)
+
+The failed `rx-eq-C1-t128-d64` recording does not support simply replacing
+hard training decisions with an ideal TRN1d reference. Independently checked
+against V.90 §§5.3/8.4.5's zero-initialised scrambled ones, the digital TX
+engine's first 18000 checked TRN1d signs are exact; its native TX tap fits a
+linear interpolated reference above 60 dB on held-out samples. The analogue
+side's raw RX instead contains large disturbances at approximately 48 native
+samples (5 ms) spacing, with occasional changes in cadence. Many affect two
+adjacent samples. A known-sign PR4 fit on one bad interval was only 15.4 dB,
+versus 21.5 dB when trained against the FSE decisions: the latter partly
+learns the disturbances. Forcing the ideal reference would hide that fact,
+not establish a clean receive channel. No training-pattern substitution was
+installed.
+
+A new native-9600, fixed-16-level capture in both directions was clean:
+37.3–37.6 dB PR4 fits, zero held-out errors in both laws. Thus the disturbance
+is intermittent. Its source is not established. The new callback diagnostics
+report input/output timestamp discontinuities, signed gap-frame totals,
+callbacks exceeding their block duration, and maximum wall duration; they
+never fill a gap or splice samples. The initial three live rate trials
+reported no timestamp gaps and no over-budget callbacks. These observations
+cannot exclude faults hidden below CoreAudio.
+
+### Native 9000 Hz and sample accounting
+
+The physical coupler now accepts native `--rate 9000`: receive ratios 8/9 to
+8 kHz and 16/9 to T/2, transmit 9/8. This retains the existing continuous
+clock correction and scales the echo-canceller geometry by the native rate.
+Unlike 9600, 9000 has an integer count of samples per USB millisecond; this is
+an experimental comparison, not a proven cure for the intermittent noise.
+The hardware's native format is still mono signed 16-bit PCM. The default
+stays 9600 Hz and the byte-exact SIP G.711 bearer is unchanged.
+
+The new TX ratio exposed truncation in the resampler initialisation:
+`M*240/L` was rounded to an integer *before* conversion to fixed-point.
+It is now calculated in fixed-point, preserving the fractional phase units.
+The existing 9600 and opt-in 8000 ratios are numerically unchanged. Expanded
+self-tests check tone gain/residual, output sample counts, and ±200 ppm for
+all three new paths; all pass. Callback continuity accounting also has a
+hardware-free check.
+
+### Remove the extra half-second wait after CP′
+
+Clean training uncovered a separate problem. In two native-9000 trials the
+128-tap/depth-64 receiver reached B1d and DATA with ~42 dB TRN1d fits, but
+V.42 failed to establish. The digital B1 search always waited for an extra
+4800 T/3 samples (500 ms) beyond its handover anchor, even when B1 was already
+in the captured history. Validated upstream data then appeared around 580 ms
+after CP′ handover. V.42 §7.2.1.2's originator was already sending ODP while
+our answerer waited; that delay consumed much of §9.1.1's default 750 ms T400.
+
+`v34_v90_begin_b1_search()` now places the first coarse window's end at the
+buffered input (with the existing small-history lower bound), rather than
+500 ms into the future. This applies to the CRC-valid CP′ entry used by the
+linear physical frontend (V.90 §§9.4.2.4–9.4.2.5). The existing forward retries
+remain available when B1 really is later. E-triggered entry, complete-template
+>=95% fit, out-of-sample validation and event semantics are unchanged. No E
+event or carrier is fabricated. `ME_V90_T3_CPPRIME_LOOKAHEAD=4800` restores the
+old window for controlled comparisons; default 0 searches buffered input first.
+
+On the preserved `apple-direct-v90-b1` fixture, identical replay input with
+the old/new setting publishes the first data bit within 600/100 ms of forced
+late CP′ handover (20 ms block-end measurement). The early-CP′ fixture still
+acquires, within 400 ms; the ordinary late-E entry still acquires, within
+640 ms. A new fast-tier test requires acquisition and publication within
+200 ms in the late-CP′ case and retains the assertion that CP′ does not
+manufacture E. Eight targeted analogue/upstream/linear-I/O regressions pass.
+
+### Pre-comparison code review (2026-10-18)
+
+The CP′ entry retains its startup/linear-frontend qualification and disables
+blind acquisition. The remaining T/2 symbols in the callback cannot enter
+the T/3 data decoder: `V34_RX_STAGE_DATA` already requires `v90_t3_in_emit`.
+The raw block was captured before CP decoding, so the next callback must
+continue from the next physical sample, without feeding that block twice.
+The shifted CP′ anchor is a search-window control, not an observed E time;
+short history still clamps it at zero and can retain the forward wait.
+Retries are bounded and the existing final-retry passable-window policy is
+unchanged; the early search does not guarantee a high-quality live carrier.
+
+One validation hole was closed: a complete B1 candidate with fewer than
+128 available post-B1 symbols previously skipped the out-of-sample check.
+The search now retains that candidate and waits for the existing minimum
+validation span, without spending retries or changing thresholds
+(V.90 §9.4.2.5). No line samples are inserted, removed or replayed by this wait.
+
+The upstream replay harness also discarded partial blocks at handover and
+EOF. It now feeds every sample, with partial-block first-bit timestamps.
+Two additional fast-tier cases use handovers one 8 kHz sample past a block
+boundary, covering both retained and short history. The physical coupler now
+counts and reports TX ring overruns in headless and replay runs, including
+every unqueued output sample; previously only the GUI exposed a drop count.
+This is observation only: overflow/underrun behavior is unchanged.
+
+Final targeted validation: 11 tests passed (five fixed Apple replay cases,
+analogue TX/RX/PR4, V.PCM loopback, and both-law whole-engine linear I/O),
+plus the coupler resampler/continuity self-test. Restoring lookahead=4800
+still acquires but publishes at 600 ms and fails the 200 ms latency check.
+The new default passes that check. These are offline results, not a new
+hardware comparison.
+
+For the next tower-wired comparison, alternate native 9600/9000 while holding
+the CP′ lookahead, filter/traceback, rate caps and payload constant. Compare
+completed calls using exact bidirectional payloads and CP′-to-first-upstream
+data latency, alongside training quality, render errors, timestamp gaps,
+over-budget callbacks, device frame balance, ring underruns and overruns.
+Then compare lookahead 0/4800 at one fixed native rate as a separate variable.
+Native 9000 changes only the codec conversion; negotiated 3200-baud upstream
+still runs internally at 9600 T/3 samples/s (V.90 §5.2, V.34 §5.2).
+The forward constant 4800 therefore means 500 ms at 3200 baud and about
+533 ms at 3000 baud, regardless of the physical codec setting.
+
+Remaining risks: acquisition work, synchronous tap writes and GUI locks
+still run inside audio callbacks; a slow callback or a full/empty TX ring
+can spoil a hardware comparison. Timestamp continuity does not establish
+USB/codec sample integrity. The intermittent raw-waveform disturbance remains
+unexplained; do not infer that native 9000 cures it from clean training alone.

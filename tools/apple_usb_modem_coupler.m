@@ -17,24 +17,26 @@
  *   80 <idx> 00        read a register (then GET_ENCAPSULATED_RESPONSE)
  *   00 <idx> <val>     write one
  *
- * THE RATE IS 9600, NOT 8000, and the arithmetic is the reason.  The device's
+ * THE DEFAULT RATE IS 9600, and the arithmetic is the reason. The device's
  * rate list is 8000 plus every V.34 symbol rate times three, because the SM56's
  * host datapump ran its receiver on a T/3 grid -- the same grid this tree's own
  * T/3 upstream receiver uses.  The engine wants two grids: 8000 for
- * me_rx_audio() and 16000 (T/2) for me_rx_v90a_16k(), and of the seven offered
- * rates only two reach both by a small exact ratio:
+ * me_rx_audio() and 16000 (T/2) for me_rx_v90a_16k(). Three native rates now
+ * reach both by small rational ratios:
  *
  *     8000  -> 8000 = 1/1    -> 16000 = 2/1
  *     9600  -> 8000 = 5/6    -> 16000 = 5/3
+ *     9000  -> 8000 = 8/9    -> 16000 = 16/9
  *
  * and the difference between them is the whole argument.  8000 -> 16000 is
  * UPSAMPLING: it invents the T/2 samples by interpolation instead of measuring
  * them, from a stream that is already critically sampled -- V.34 at 3429 baud
  * occupies up to 3673 Hz, so 8000 leaves 326 Hz of Nyquist margin.  9600 leaves
  * 1126 Hz, and 9600 -> 16000 carries genuine information to 4800 Hz, which
- * covers the whole DS0 band.  So sampling at 8000 is a dead end for the V.90
- * analogue role, which can only recover its downstream from T/2 samples, while
- * 9600 reaches both grids and is additionally T/3 at 3200 baud exactly.
+ * covers the whole DS0 band. Native 9000 still measures through 4500 Hz and
+ * permits a comparison without 9600's fractional USB samples per millisecond.
+ * Native 8000 is an opt-in waveform experiment (APPLE_MODEM_8K_PCM), measured
+ * with less margin; 9600 remains the default and is T/3 at 3200 baud exactly.
  *
  * Both resamplers are therefore exact rational polyphase, not fractional
  * delays, and that is also what keeps the HSF path's defect out of here: that
@@ -426,10 +428,10 @@ static int build_dial_script(const char *digits, double on_ms, double off_ms)
  * one device sample in still owes one device sample out -- so no sample is
  * ever dropped or inserted; only where the filter samples between inputs moves.
  *
- * 240 phases because it is divisible by 3, 5 and 6: at zero offset every
- * output lands exactly on a phase, and the resampler is the exact rational
- * polyphase it always was.  Off zero, adjacent phases are interpolated
- * linearly; at 240 phases that error is far below the -53 dB stopband. */
+ * 240 phases because it is divisible by 3, 5 and 6: the original 9600 ratios
+ * land exactly on phases at zero clock offset. Native-9000 TX and non-zero
+ * clock correction use linear interpolation between adjacent phases; at 240
+ * phases that error is far below the -53 dB stopband. */
 #define RS_NPH 240
 #define RS_FRAC_BITS 24
 #define RS_UNIT ((uint64_t)RS_NPH << RS_FRAC_BITS)   /* position units per input */
@@ -451,7 +453,9 @@ static void rs_init(struct resamp *r, int L, int M)
     double fc = 0.5 * (L < M ? (double)L / M : 1.0) / RS_NPH;
 
     memset(r, 0, sizeof *r);
-    r->step_nominal = (uint64_t)M * RS_NPH / L << RS_FRAC_BITS;
+    /* Retain fractional phase units when L does not divide RS_NPH (9/8
+     * native-9000 TX). Dividing before the shift changes the sample rate. */
+    r->step_nominal = ((uint64_t)M * RS_UNIT + L/2) / L;
     r->step = r->step_nominal;
     for (int i = 0; i < n; i++) {
         double t = i - (n - 1) / 2.0;
@@ -937,7 +941,7 @@ static void ec_setup(void)
     int on = (role && !strcmp(role, "analogue"));
 
     if (force && *force) on = strcmp(force, "0") != 0;
-    if (!on || g_ec || (g_rate != 9600.0 && !(g_rate == 8000.0 && g_pcm8k))) return;
+    if (!on || g_ec || (g_rate != 9600.0 && g_rate != 9000.0 && !(g_rate == 8000.0 && g_pcm8k))) return;
     /* Delays 900..1667 samples (94-174 ms): the measured onsets are 1121-1165
      * and the response needs ~384 taps to reach the line's floor.  A live
      * call solves on a worker (a 768-tap solve is ~75 M operations, far too
@@ -1023,8 +1027,11 @@ static void answer_block(const int16_t *s)
 static volatile int tx_preroll;
 static int16_t ring[RING_N];
 static volatile unsigned ring_w, ring_r;
+/* Count every lost TX sample even in headless runs. V.90 5.2 fixes the
+ * downstream symbol clock; a full ring invalidates a continuity comparison. */
+static unsigned long tx_overrun_samples;
 
-/* Receive chain: device rate -> 8000 for me_rx_audio, and (from 9600 only)
+/* Receive chain: device rate -> 8000 for me_rx_audio, and
  * -> 16000 for me_rx_v90a_16k.  The T/2 stream is offered FIRST, as the engine
  * header requires: it is the stream the V.90 analogue Phase 3 receiver reads,
  * and it must see the samples before the 8 kHz decimation. */
@@ -1091,7 +1098,11 @@ static void engine_block_8k(const int16_t *s, long n)
                           : rs_put(&rs_tx, out[i], up, 8);
                 for (int j = 0; j < got; j++) {
                     unsigned nw = (ring_w + 1) % RING_N;
-                    if (nw == ring_r) { if (g_gui_control) { pthread_mutex_lock(&gui_raw_lock); gui_overruns++; pthread_mutex_unlock(&gui_raw_lock); } break; }      /* consumer behind; drop */
+                    if (nw == ring_r) {
+                        tx_overrun_samples += got - j;
+                        if (g_gui_control) { pthread_mutex_lock(&gui_raw_lock); gui_overruns += got - j; pthread_mutex_unlock(&gui_raw_lock); }
+                        break;
+                    }
                     ring[ring_w] = clip16(up[j] * g_tx_gain);
                     ring_w = nw;
                 }
@@ -1357,7 +1368,7 @@ static unsigned loopback_capacity;
 static int loopback_peer_fd = -1;
 static _Atomic unsigned loopback_stream_gaps;
 
-static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
+static OSStatus input_cb_impl(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
                          AudioBufferList *unused)
 {
@@ -1389,7 +1400,7 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
     return noErr;
 }
 
-static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
+static OSStatus output_cb_impl(void *ref, AudioUnitRenderActionFlags *flags,
                           const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
                           AudioBufferList *io)
 {
@@ -1491,6 +1502,69 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
 /* ------------------------------------------------------------------ */
 /* CoreAudio device                                                   */
 /* ------------------------------------------------------------------ */
+
+/* Observe callback continuity without inserting/deleting received samples.
+ * Successful AudioUnitRender calls alone do not establish clock continuity
+ * (V.90 §5.2's network symbol clock, V.34 §5.2's symbol-rate tolerance). */
+typedef struct {
+    uint64_t calls, gaps, slow, max_ns;
+    double next_sample, gap_frames;
+    int have_sample;
+} audio_callback_stats_t;
+static audio_callback_stats_t input_stats, output_stats;
+
+static uint64_t callback_now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec*1000000000ULL + t.tv_nsec;
+}
+
+static void callback_record(audio_callback_stats_t *s, const AudioTimeStamp *ts,
+                            UInt32 frames, uint64_t elapsed)
+{
+    s->calls++;
+    if (ts && (ts->mFlags & kAudioTimeStampSampleTimeValid)) {
+        if (s->have_sample && fabs(ts->mSampleTime-s->next_sample) > 0.5) {
+            s->gaps++;
+            s->gap_frames += ts->mSampleTime-s->next_sample;
+        }
+        s->next_sample = ts->mSampleTime + frames;
+        s->have_sample = 1;
+    } else s->have_sample = 0;  /* no continuity claim across unknown timestamps */
+    if (elapsed > s->max_ns) s->max_ns = elapsed;
+    if (elapsed > frames*1000000000.0/g_rate) s->slow++;
+}
+
+static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
+                         const AudioTimeStamp *ts, UInt32 bus, UInt32 frames,
+                         AudioBufferList *io)
+{
+    uint64_t start = callback_now_ns();
+    OSStatus rc = input_cb_impl(ref, flags, ts, bus, frames, io);
+    callback_record(&input_stats, ts, frames, callback_now_ns()-start);
+    return rc;
+}
+
+static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
+                          const AudioTimeStamp *ts, UInt32 bus, UInt32 frames,
+                          AudioBufferList *io)
+{
+    uint64_t start = callback_now_ns();
+    OSStatus rc = output_cb_impl(ref, flags, ts, bus, frames, io);
+    callback_record(&output_stats, ts, frames, callback_now_ns()-start);
+    return rc;
+}
+
+static void callback_report(void)
+{
+    const audio_callback_stats_t *s[] = {&input_stats, &output_stats};
+    for (int i = 0; i < 2; i++)
+        fprintf(stderr, "[APPLE] %s callbacks: %llu, timestamp gaps %llu (%+.0f frames), "
+                "over budget %llu, longest %.3f ms\n", i ? "output" : "input",
+                (unsigned long long)s[i]->calls, (unsigned long long)s[i]->gaps,
+                s[i]->gap_frames, (unsigned long long)s[i]->slow, s[i]->max_ns/1e6);
+}
 
 static AudioObjectID find_device(void)
 {
@@ -1608,6 +1682,8 @@ static int audio_start(void)
     if ((rc = AudioUnitInitialize(au)) != noErr) {
         fprintf(stderr, "AudioUnitInitialize: %d\n", (int)rc); return -1;
     }
+    memset(&input_stats, 0, sizeof input_stats);
+    memset(&output_stats, 0, sizeof output_stats);
     if ((rc = AudioOutputUnitStart(au)) != noErr) {
         fprintf(stderr, "AudioOutputUnitStart: %d\n", (int)rc); return -1;
     }
@@ -2047,12 +2123,15 @@ static int replay(const char *path)
     for (unsigned long i = 0; i < tx_underrun_runs && i < 8; i++)
         fprintf(stderr, "%s%.3f s", i ? ", " : " (first at ", tx_underrun_at[i] / g_rate);
     fprintf(stderr, "%s\n", tx_underrun_runs ? ")" : "");
+    fprintf(stderr, "[APPLE] transmit ring overruns: %lu samples\n", tx_overrun_samples);
     return line_guard_tripped ? 1 : g_engine_running ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */
 
-/* 9600 -> 8000 is 5/6, 9600 -> 16000 is 5/3, 8000 -> 9600 is 6/5.  All exact. */
+/* Physical codec conversion; the negotiated upstream T/3 rate remains
+ * independent of the device rate (V.90 5.2, V.34 5.2). Native 9000 does
+ * not select 3000 baud: a 3200-baud upstream still uses 9600 internally. */
 static void rs_setup(void)
 {
     if (g_rate == 8000.0) {
@@ -2069,14 +2148,16 @@ static void rs_setup(void)
         }
         return;
     }
-    if (g_rate != 9600.0) {
+    if (g_rate != 9600.0 && g_rate != 9000.0) {
         fprintf(stderr, "[APPLE] %.0f Hz has no small exact ratio to 8000 or "
-                        "16000; use 9600 (or 8000 for V.34 only)\n", g_rate);
+                        "16000; use 9600, 9000 (or 8000 for V.34 only)\n", g_rate);
         exit(2);
     }
-    rs_init(&rs_8k,  5, 6);
-    rs_init(&rs_16k, 5, 3);
-    rs_init(&rs_tx,  6, 5);
+    /* Physical codec conversion only; the SIP G.711 bearer is untouched.
+     * 9000 Hz is also native: 8/9 and 16/9 in, 9/8 out. */
+    rs_init(&rs_8k,  g_rate == 9000.0 ? 8 : 5, g_rate == 9000.0 ? 9 : 6);
+    rs_init(&rs_16k, g_rate == 9000.0 ? 16 : 5, g_rate == 9000.0 ? 9 : 3);
+    rs_init(&rs_tx,  g_rate == 9000.0 ? 9 : 6, g_rate == 9000.0 ? 8 : 5);
     ec_setup();
 
     const char *lt = getenv("APPLE_MODEM_LOOP_TIMING");
@@ -2098,13 +2179,31 @@ static void rs_setup(void)
  * frequency, the level and the residual after the ideal tone is subtracted. */
 static int selftest(void)
 {
+    audio_callback_stats_t continuity = {0};
+    AudioTimeStamp stamp = {.mSampleTime=100, .mFlags=kAudioTimeStampSampleTimeValid};
+    callback_record(&continuity, &stamp, 512, 0);
+    stamp.mSampleTime += 512;
+    callback_record(&continuity, &stamp, 512, 0);
+    stamp.mSampleTime += 640;
+    callback_record(&continuity, &stamp, 512, 1000000000ULL);
+    if (continuity.calls != 3 || continuity.gaps != 1 || continuity.gap_frames != 128
+        || continuity.slow != 1 || continuity.max_ns != 1000000000ULL) return 1;
+    stamp.mFlags = 0;
+    callback_record(&continuity, &stamp, 512, 0);
+    stamp.mFlags = kAudioTimeStampSampleTimeValid;
+    stamp.mSampleTime += 1024;
+    callback_record(&continuity, &stamp, 512, 0);
+    if (continuity.gaps != 1) return 1;
     struct { const char *name; int L, M; double out_rate; } c[] = {
         { "9600 -> 8000  (me_rx_audio)",     5, 6, 8000.0  },
         { "9600 -> 16000 (me_rx_v90a_16k)",  5, 3, 16000.0 },
         { "8000 -> 9600  (transmit)",        6, 5, 9600.0  },
         { "8000 -> 16000 (PCM experiment)",  2, 1, 16000.0 },
+        { "9000 -> 8000  (me_rx_audio)",     8, 9, 8000.0  },
+        { "9000 -> 16000 (me_rx_v90a_16k)", 16, 9, 16000.0 },
+        { "8000 -> 9000  (transmit)",        9, 8, 9000.0  },
     };
-    const double in_rate[4] = { 9600.0, 9600.0, 8000.0, 8000.0 };
+    const double in_rate[] = { 9600.0, 9600.0, 8000.0, 8000.0, 9000.0, 9000.0, 8000.0 };
     int bad = 0;
 
     /* Loop timing scales every ratio by the codec's offset, so the off-nominal
@@ -2113,14 +2212,14 @@ static int selftest(void)
      * past the -165 ppm this hardware measures. */
     static const double ppms[] = { 0.0, +200.0, -200.0 };
     for (unsigned pi = 0; pi < sizeof ppms / sizeof ppms[0]; pi++)
-    for (int t = 0; t < 4; t++) {
+    for (unsigned t = 0; t < sizeof c / sizeof c[0]; t++) {
         /* 3673 Hz is V.34's worst case: 3429 baud at fc 1959 reaches it, and it
          * is 327 Hz from the 8 kHz grid's Nyquist, so it is the frequency that
          * decides whether this bearer can carry the top symbol rate. */
         static const double freqs[] = { 300, 1000, 2000, 3000, 3520, 3673 };
         double d = ppms[pi] * 1e-6;
         /* Receive paths take (1+d) input per output, transmit 1/(1+d). */
-        double factor = (t == 2) ? 1.0 / (1.0 + d) : 1.0 + d;
+        double factor = (t == 2 || t == 6) ? 1.0 / (1.0 + d) : 1.0 + d;
         for (unsigned fi = 0; fi < sizeof freqs / sizeof freqs[0]; fi++) {
             double f = freqs[fi], fo = f * factor;
             static struct resamp r;
@@ -2140,6 +2239,12 @@ static int selftest(void)
                 double o[8];
                 int got = rs_put(&r, 10000.0 * sin(2 * M_PI * f * i / in_rate[t]), o, 8);
                 for (int j = 0; j < got; j++) y[ny++] = o[j];
+            }
+            double expected_n = nin*c[t].out_rate/in_rate[t]/factor;
+            if (fabs(ny-expected_n) > 2.0) {
+                printf("FAIL sample count: %s got %ld expected %.3f\n",
+                       c[t].name, ny, expected_n);
+                bad++;
             }
             /* Skip the filter's transient, then fit amplitude and phase at the
              * expected frequency and report what is left: a resampler wrong in
@@ -2244,7 +2349,7 @@ static void usage(const char *a0)
         "  --rx-replay  run the analogue side offline against a recorded tap;\n"
         "               needs no line and no device\n"
         "  --hook       line control only, then exit\n"
-        "  --rate       9600 (default) reaches both engine grids exactly, 5/6 to\n"
+        "  --rate       9600 (default) or native 9000; 9600 uses 5/6 to\n"
         "               8000 and 5/3 to 16000; 8000 skips the receive resampler\n"
         "               but cannot feed the T/2 path at all.  See the header\n"
         "  --cid-replay FILE  decode raw on-hook s16le CID at --rate, no USB\n"
@@ -2712,12 +2817,14 @@ int main(int argc, char **argv)
     fprintf(stderr, "[APPLE] render errors %d, engine %s, dial sequence %s\n",
             render_errors, g_engine_running ? "ran" : "never started",
             tx_dtmf_done ? "completed" : "CUT SHORT");
+    callback_report();
     fprintf(stderr, "[APPLE] transmit ring underruns while the engine ran: %lu runs, "
                     "%lu samples", (unsigned long)tx_underrun_runs,
             (unsigned long)tx_underrun_samples);
     for (unsigned long i = 0; i < tx_underrun_runs && i < 8; i++)
         fprintf(stderr, "%s%.3f s", i ? ", " : " (first at ", tx_underrun_at[i] / g_rate);
     fprintf(stderr, "%s\n", tx_underrun_runs ? ")" : "");
+    fprintf(stderr, "[APPLE] transmit ring overruns: %lu samples\n", tx_overrun_samples);
     fprintf(stderr, "[APPLE] device frames: in %lu, out %lu (out-in %+ld); ring fill minimum per 0.5 s:",
             dev_in_frames, dev_out_frames, (long)dev_out_frames - (long)dev_in_frames);
     for (int b = 0; b < FILL_BINS; b++) if (fill_min[b] >= 0) fprintf(stderr, " %d", fill_min[b]);

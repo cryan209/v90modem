@@ -30,6 +30,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
 
 #include "spandsp.h"
 
@@ -42,6 +44,7 @@ static int16_t *samples;
 static int sample_count;
 
 static int64_t bits_out;
+static int feed_end_sample, first_bit_sample = -1;
 
 /* Keep the published bits so the replay can report PAYLOAD, not just a bit
    count.  Every metric inside the receiver is a proxy -- the marks fraction,
@@ -60,6 +63,7 @@ static void replay_put_bit(void *user_data, int bit)
         return;
     /*endif*/
     bits_out++;
+    if (first_bit_sample < 0) first_bit_sample = feed_end_sample;
     if (bit_log_len >= bit_log_cap)
     {
         int64_t want = bit_log_cap ? bit_log_cap*2 : (1 << 20);
@@ -185,7 +189,9 @@ static int load_tap(const char *path, int alaw)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Feed the receiver from `from` up to `to`, in whole blocks. */
+/* Feed every sample in [from, to), including a partial block at handover.
+   V.90 9.4.2.4-.5: E/B1 are contiguous on the wire; block alignment must
+   not remove samples from that boundary (or from the capture tail). */
 static int feed(v34_state_t *rx, int from, int to)
 {
     if (from < 0)
@@ -194,9 +200,11 @@ static int feed(v34_state_t *rx, int from, int to)
     if (to > sample_count)
         to = sample_count;
     /*endif*/
-    for (int i = from;  i + BLOCK <= to;  i += BLOCK)
+    for (int i = from;  i < to;  i += BLOCK)
     {
-        if (v34_rx(rx, samples + i, BLOCK) != 0)
+        int n = to - i < BLOCK ? to - i : BLOCK;
+        feed_end_sample = i + n;
+        if (v34_rx(rx, samples + i, n) != 0)
             return -1;
         /*endif*/
     }
@@ -208,6 +216,7 @@ static int feed(v34_state_t *rx, int from, int to)
 static v34_state_t *make_rx(int alaw, int baud_code, int high_carrier,
                             int bps, int verbose)
 {
+    first_bit_sample = -1;
     v34_state_t *rx = v34_init(NULL, baud_code == 3 ? 3000 : 3200, 21600,
                                false, true,
                                replay_get_bit, NULL, replay_put_bit, NULL);
@@ -259,7 +268,7 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps] [handover-sec [history-sec [cp-prime]]]\n",
+                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps] [handover-sec [history-sec [cp-prime [max-first-bit-ms]]]]\n",
                 argv[0]);
         return 2;
     }
@@ -292,10 +301,15 @@ int main(int argc, char *argv[])
         int t = (int) (atof(argv[5])*8000.0);
         double history = (argc > 6) ? atof(argv[6]) : (double) HISTORY_SEC;
 
+        if (t < 0 || t >= sample_count || !isfinite(history) || history < 0
+            || history > INT_MAX/8000.0)
+            return 2;
+
         rx = make_rx(alaw, baud_code, 0, bps, 1);
         printf("replay: feeding %.2f s of history before the handover\n",
                history);
-        feed(rx, t - (int) (history*8000.0), t);
+        if (feed(rx, t - (int) (history*8000.0), t) != 0)
+            return 1;
         printf("replay: handover forced at %.1f s\n", t/8000.0);
         bool cp_prime = argc > 7 && strcmp(argv[7], "cp-prime") == 0;
         int event_before = v34_get_rx_event(rx);
@@ -307,8 +321,20 @@ int main(int argc, char *argv[])
         }
         if (cp_prime)
             printf("replay: CP' B1 search started without an E event\n");
-        feed(rx, t, sample_count);
+        if (feed(rx, t, sample_count) != 0)
+            return 1;
         printf("replay: acquired=%d\n", v34_v90_upstream_rx_acquired(rx));
+        if (first_bit_sample >= 0)
+            printf("replay: first data bit published within %.1f ms of handover (block end)\n",
+                   (first_bit_sample-t)/8.0);
+        if (cp_prime && argc > 8)
+        {
+            char *end;
+            long limit = strtol(argv[8], &end, 10);
+            if (!*argv[8] || *end || limit < 1 || limit > 60000) return 2;
+            if (!v34_v90_upstream_rx_acquired(rx) || first_bit_sample < 0
+                || (first_bit_sample-t)/8.0 > limit) return 1;
+        }
         return 0;
     }
     /*endif*/
