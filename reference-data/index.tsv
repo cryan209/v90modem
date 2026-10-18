@@ -350,3 +350,4 @@ reference-data/artifacts/x2-symmetric-20261006	108	13476615	docs/x2_implementati
 reference-data/artifacts/x2-v34-review-20261006-9600	17	16343335	docs/x2_v34_upstream_review.md
 reference-data/artifacts/apple-direct-review-20261018	95	21567518	docs/apple_usb_modem_sm56.md; bounded direct-pair comparison and USB control fault
 reference-data/artifacts/apple-direct-resume-20261018	301	53651265	docs/apple_usb_modem_sm56.md; resumed alternating direct-pair tests and live CP-prime recovery evidence
+reference-data/artifacts/apple-cx-direct-20261018	69	20068016	docs/apple_usb_modem_sm56.md; Conexant CX93001 direct-pair Phase 2 and V34 payload evidence

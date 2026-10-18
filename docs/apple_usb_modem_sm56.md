@@ -3922,3 +3922,53 @@ Retained executable/provenance, raw taps, manifests, events, launch settings,
 independent DTE grading (`analyze.py`, `summary.json`) and report:
 `reference-data/artifacts/apple-direct-resume-20261018/`. No source-code or
 default-setting change was needed after this live comparison.
+
+### Foreign USB hardware peer: Conexant CX93001 (2026-10-18)
+
+The user replaced the UID-000000 Apple with a USB hardware modem, identified
+as `0572:1349`, serial `24680246`, `/dev/cu.usbmodem246802461`, firmware
+`CX93001-EIS_V0.2013-V92`. The remaining Apple is USB 1:2/UID 1130000 and
+runs our digital answerer. The Conexant originates with `ATD1` over the same
+powered direct pair, with dial-tone checking disabled. There is no SIP/PBX
+in this test. No source or DSP settings were changed.
+
+| Attempt | Native Apple rate | Hardware TX ceiling | Completed result |
+|---|---|---|---|
+| 1 | 9000 Hz | 9600 bit/s | V.8 selects V.90, INFO1a leads to V.34 fallback; hardware NO CARRIER |
+| 2 | 9600 Hz | 9600 bit/s | Both CONNECT in V.34 at 9600/9600; V.90-only runner queues no payload |
+| 3 | 9600 Hz | 9600 bit/s | V.34: hardware TX 9600/RX 4800; upstream block exact, downstream block has 6 corrupted bytes |
+| 4 | 9600 Hz | 33600 bit/s | V.34: initial 21600/21600, one retrain, final 16800/16800; exact located blocks both ways |
+
+The hardware's `AT&V1` supplies the actual directional rates. Attempt 2's
+`CONNECT 115200` was the serial DTE speed, not the carrier; `ATW2` makes the
+later CONNECT results report the carrier. Error-control protocol is NONE,
+compression N/A in the connected calls; our side falls back to buffered
+V.14. The 9600-bit/s ceiling inherited from the Apple-pair setup is removed
+for attempt 4; V.90 still does not establish, so that cap is not the sole
+explanation for the Phase 2 fallback.
+
+V.90 never reaches CP′/B1. Our local INFO1a readout gives downstream
+symbol-rate code 0 (later 4 during the uncapped retrain), selecting V.34
+under Table 11 rather than Table 10's V.90 code 6 (V.90 §§8.2.3.2, 9.2).
+This identifies the first failed layer, not which endpoint caused it.
+Compare our own Phase 2 TX tap before attributing a defect to the Conexant.
+
+Attempt 3 receives all 4145 framed upstream bytes exactly; downstream has
+six adjacent mismatches at framed offsets 2014..2019 of 4142 bytes.
+Attempt 4 receives all 4146 upstream and 4143 downstream framed bytes
+exactly, each containing an independently generated 4096-byte printable
+body. However, both captures also contain extra pre-payload bytes: in
+attempt 4 the block markers start at offsets 153/292, including CONNECT
+responses. This is one successful exact block exchange, **not a clean
+byte-stream or reliable interoperability pass**. Extra bytes, occasional
+downstream corruption and the Phase 2 V.90 selection remain unresolved.
+
+All four Apple legs have balanced device frame counts and zero render
+errors, timestamp gaps, over-budget callbacks, TX underruns and TX overruns.
+Each final readback confirms hook/monitor cleared and hardware protection
+enabled. The Conexant accepts ATH0; after saving last-call diagnostics its
+saved profile is restored with ATZ (`+MS: V92,1,300,48000,300,56000`).
+
+Retained identity/settings, tested executable/hash, bounded runner, per-call
+logs/audio taps/events, `AT&V1`/`AT#UD`, raw DTE/payload files and offline
+grading: `reference-data/artifacts/apple-cx-direct-20261018/`.

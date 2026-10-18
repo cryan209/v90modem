@@ -68,6 +68,20 @@ without unexplained errors.
 |---|---|---:|---:|---:|---:|---:|---:|---|---|
 | _pending_ | _pending_ | - | - | - | - | - | - | - | - |
 
+### Conexant CX93001 direct Apple waveform leg, 18 October 2026
+
+USB `0572:1349`, firmware `CX93001-EIS_V0.2013-V92`, originates into our
+digital-role software through the remaining physical Apple USB modem on
+the powered direct pair. V.8 selects V.90, but received INFO1a selects V.34
+(V.90 Tables 10/11, §9.2); no CP′/B1 or V.90 DATA is established. Trials
+cover native 9000/9600 Hz and hardware upstream ceilings 9600/33600 bit/s.
+The uncapped call retrains from 21600/21600 to 16800/16800 and transfers
+4096-byte bodies with exact framing both ways, without LAPM/compression.
+There are extra bytes before the payloads; a preceding lower-rate call
+has six corrupted downstream bytes. This is not an interoperability pass.
+See `apple_usb_modem_sm56.md`, “Foreign USB hardware peer”, and retained
+`reference-data/artifacts/apple-cx-direct-20261018/` for diagnostics and grading.
+
 ## Eicon, 8 October 2026: clean LAN results and native V.34 corrections
 
 Using our analogue caller against Eicon endpoints 7910 (PCMU) and 7900
