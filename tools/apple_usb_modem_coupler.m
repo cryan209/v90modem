@@ -54,7 +54,10 @@
  * receive timing"): it measures the far end's ANSam on the raw device stream
  * and scales all three ratios by the codec's offset, still with no free phase
  * and no sample dropped or inserted.  APPLE_MODEM_LOOP_TIMING=0 turns it off,
- * APPLE_MODEM_CLOCK_PPM forces a value.  The transmit ring pre-rolls a cushion
+ * APPLE_MODEM_CLOCK_PPM forces a value. Automatic ANSam correction is for
+ * originating calls only: an answerer hears its own answer-tone echo, not a
+ * remote clock reference (V.90 5.2, 9.2.1.1.2).
+ * The transmit ring pre-rolls a cushion
  * so the moving block/cycle alignment that loop timing brings never underruns.
  *
  * --rate still accepts 8000, which skips the receive resampler entirely and is
@@ -2162,15 +2165,23 @@ static void rs_setup(void)
 
     const char *lt = getenv("APPLE_MODEM_LOOP_TIMING");
     const char *forced = getenv("APPLE_MODEM_CLOCK_PPM");
-    lt_enabled = !(lt && strcmp(lt, "0") == 0);
+    /* ANSam is a remote reference only when we originate. An answerer
+     * receives its own 2100 Hz echo, which measures the local clock against
+     * itself and cannot establish peer/network clock lock. V.90 5.2 derives
+     * downstream timing from the digital network; V.90 9.2.1.1.2 instead
+     * has this digital answerer receive the peer's Phase 2 Tone A.
+     * Keep forced ppm available for measured physical-clock experiments. */
+    lt_enabled = !g_answer_mode && !(lt && strcmp(lt, "0") == 0);
     lt_done = 0; lt_n = 0; lt_fill = 0; lt_misses = 0; lt_block_index = 0;
     lt_re = lt_im = lt_energy = lt_osc = 0;
     if (forced && *forced) {
         loop_timing_apply(atof(forced), "APPLE_MODEM_CLOCK_PPM");
     } else if (!lt_enabled) {
         lt_done = 1;
-        fprintf(stderr, "[APPLE] loop timing: off (APPLE_MODEM_LOOP_TIMING=0); "
-                        "transmitting on the codec's free-running clock\n");
+        fprintf(stderr, "[APPLE] loop timing: off (%s); "
+                        "transmitting on the codec's free-running clock\n",
+                g_answer_mode ? "answerer has no remote ANSam reference"
+                              : "APPLE_MODEM_LOOP_TIMING=0");
     }
 }
 

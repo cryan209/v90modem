@@ -3972,3 +3972,52 @@ saved profile is restored with ATZ (`+MS: V92,1,300,48000,300,56000`).
 Retained identity/settings, tested executable/hash, bounded runner, per-call
 logs/audio taps/events, `AT&V1`/`AT#UD`, raw DTE/payload files and offline
 grading: `reference-data/artifacts/apple-cx-direct-20261018/`.
+
+### Clock-reference audit and measured correction A/B (2026-10-18)
+
+The answerer's near-zero ANSam clock log was not an independent reference:
+it was measuring our own reflected 2100 Hz answer tone. The Conexant was
+originating and did not supply that tone. At native 9000 one such fit even
+applied about -7.1 ppm to our output. Automatic ANSam estimation now runs
+only for originating calls; answer mode logs that it has no remote ANSam
+reference. Explicit `APPLE_MODEM_CLOCK_PPM` still works in either role.
+V.90 §5.2 derives digital downstream timing from the network, while
+§9.2.1.1.2 has the digital modem receive peer Tone A. This fix prevents
+self-echo from masquerading as clock lock; it does not supply a network PLL.
+
+Independent squared-baseband phase fits on the retained raw peer Tone A
+(2400 Hz) give approximately -34..-36 ppm relative offset. Clean 9600-Hz
+windows have squared-phase residuals about 0.0007..0.0048 rad. This is a
+tone-derived relative oscillator estimate, not an absolute PCM clock or
+sub-block DAC-jitter measurement. The far tone's offset cannot be inferred
+from the returned copy of our own ANSam.
+
+Ran four sequential native-9600 calls, alternating forced 0/-34/0/-34 ppm
+with the hardware TX ceiling at 33600 and all other settings fixed. Both
+arms select V.34 in INFO1a (downstream code 0), before V.90 Phase 3/CP′/B1.
+The runner stops at that first fallback; no payload is queued or later
+divergent protocol behavior scored. The correction is verified in our TX
+tap: Tone B moves from 1200.000007 Hz to 1200.040807/1200.040803 Hz, with
+phase residuals 0.000017/0.000006 rad. Against peer Tone A near 2400.081 Hz,
+this brings the tone-derived ratio to roughly 1 ppm, without restoring V.90.
+The measured fixed offset alone is therefore insufficient to explain the
+failure; jitter and physical PCM distortion have not been ruled out.
+
+Every call retains balanced device frame counts, zero timestamp gaps,
+over-budget callbacks, render errors, TX underruns and overruns. Both ends
+are released afterward; Apple hook/monitor/protection readbacks are verified
+and the Conexant's saved profile restored. No -34 ppm default is installed,
+and no sample insertion/deletion or receiver thresholds change.
+
+The new hardware-free clock-reference regression feeds a synthetic +200 ppm
+tone: caller mode estimates it, answer mode rejects it as a remote reference,
+and the explicit -34 ppm override remains honored. Resampler self-tests and
+all five Apple backend checks pass. The GUI check initially hits the sandbox's
+localhost-bind restriction and passes with localhost access enabled.
+
+Next inspect our own Phase 2 INFO1d/probing TX against V.90 §8.2.3.2,
+Tables 9–11 and §§9.2.1.1.7–9.2.1.1.8, rather than assuming tighter fixed
+clocking will fix the peer's V.34 selection. Retained measurement scripts,
+phase fits, alternating trial logs/raw taps/events, executable provenance,
+cleanup readbacks and test evidence:
+`reference-data/artifacts/apple-cx-clocking-20261018/`.
