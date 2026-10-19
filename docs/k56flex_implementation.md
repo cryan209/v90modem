@@ -821,11 +821,66 @@ make k56flex_upstream_test
 python3 tools/run_tests.py --filter k56flex tests/fast.list
 ```
 
-No engine gates are wired from this decoder. S/S-bar/PP acquisition, timing,
-carrier/equalizer training, decision confidence, MP/E, and upstream DATA
-remain outside its scope. The next integration step is a PCM front end that
-supplies these equalized points; a successful report alone must not stand in
-for the distinct training/status gates.
+No engine gates are wired from this decoder. PCM acquisition is now exercised
+by the offline front end below; streaming clock/carrier tracking, MP/E, and
+upstream DATA remain open. A successful report alone must not stand in for
+the distinct training/status gates.
+
+## Offline PCM acquisition through report recovery
+
+`k56flex_upstream_pcm.c` supplies a batch-only 8 kHz linear-PCM front end for
+one research profile: **3200 baud, low carrier, 128T S, 16T S-bar, 288T PP,
+512T four-point TRN**, then the repeated report. These lengths are the
+MicaEmu transmitter's experimental profile, not established universal
+K56flex requirements (Draft 0.23 clause 11; V.34 10.1.3.6-8 defines the
+preamble waveforms). No sample or symbol boundary, report value, or ideal
+I/Q reference is supplied by the caller.
+
+The receiver reuses `p3_demod.c`'s vendored V.34 matched-filter bank and carrier
+mixer at T/2, with its blind CMA/AGC/timing corrections explicitly disabled.
+It searches for the known zero-initialized TRN sequence (resident 588D/581B),
+fits a nine-complex-observation FIR on 256 TRN symbols, and requires low error
+on 192 **held-out** TRN symbols. Before decoding report bits it also validates
+the preceding PP and S/S-bar against their waveforms through the same FIR.
+Independent real I/Q columns absorb constant carrier phase and conjugate
+orientation; the T/2 span absorbs fixed fractional timing. Neither report
+acceptance nor the expected report content selects the acquisition hypothesis.
+Returned sample indices are observation indices including filter delay.
+
+`k56flex_upstream_pcm_test` is in `tests/fast.list`. Retained inputs under
+`reference-data/k56flex-upstream/` are **synthesized research-transmitter PCM,
+not hardware recordings**: 3200 baud and a 2400-baud negative control,
+with source/build and file hashes in `manifest.json`. The transmitter's
+point mapping was independently checked against original resident firmware
+as described above; that does not independently validate every PCM detail.
+Tests encode each channel waveform once to the selected G.711 law and expand
+it for the receiver, never transcode between laws. All 36 positive cases pass:
+
+- Both laws; prefixes of 0, 1, 7, 37, 159 and 317 samples.
+- Clean wire; half gain with a modest three-tap channel and additive noise;
+  quarter gain with inverted polarity.
+- Worst unit-RMS errors: held-out TRN **0.0230**, PP **0.0234**, S/S-bar
+  **0.0239**. These are fixture results, not hardware acquisition rates.
+
+Negative controls reject 2400 baud, the wrong scrambler tap, silence, noise,
+a carrier tone, and TRN/report or report alone without the preceding preamble.
+A truncated report does not acquire; a report before its terminator is exposed
+without an END event. Repeated calls reset correctly. All seven K56flex
+fast-list tests and a Clang UBSan build of the PCM test (including the shared
+front end) pass.
+
+```
+python3 tools/generate_k56flex_pcm_fixtures.py ../MicaEmu
+make k56flex_upstream_pcm_test
+python3 tools/run_tests.py --filter k56flex tests/fast.list
+```
+
+**Not live-ready:** the front end buffers a bounded batch (at most 10 s),
+uses a fixed nominal carrier/rate, and looks backwards from TRN to validate
+the preamble. It has no streaming state machine, clock/frequency tracking,
+echo handling, MP/E receiver, or engine gate callbacks. Next: qualify carrier
+and clock offsets, then implement streaming acquisition before assigning any
+recovered event to a server training gate.
 
 ## Mainline integration, 13 October 2026
 
