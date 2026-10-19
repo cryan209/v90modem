@@ -38,7 +38,9 @@
  * drifted from the live call's (needs a tap that starts at byte 0).
  *
  * --dial replays a call this side ORIGINATED (V.8 caller), for recordings of
- * outbound calls such as the RasFinder's.
+ * outbound calls such as the RasFinder's. --sip-answer also delivers the
+ * early-media/answered callbacks immediately after media connect, matching
+ * the SIP caller's timer arming when testing preflights before V.8.
  *
  * Timing is REAL TIME by default, one 20 ms frame at a time, and that is not
  * an oversight: the engine's phase timeouts are wall-clock (trace_now_ms()),
@@ -232,6 +234,7 @@ int main(int argc, char *argv[])
     int split = 0;
     int sync = 0;
     int echo_ref = 0;
+    int sip_answer = 0;
     uint8_t *ref_tap = NULL;
 
     /* The live engine runs the Phase 3 Ja scan on a worker thread; a replay
@@ -251,7 +254,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--sync] [--echo-ref] [--schedule IO.bin]\n",
+                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--sync] [--echo-ref] [--sip-answer] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -271,6 +274,8 @@ int main(int argc, char *argv[])
             at_cmds = argv[++i];
         else if (strcmp(argv[i], "--dial") == 0)
             dial = 1;
+        else if (strcmp(argv[i], "--sip-answer") == 0)
+            sip_answer = 1;
         else if (strcmp(argv[i], "--split") == 0)
             split = 1;
         else if (strcmp(argv[i], "--echo-ref") == 0)
@@ -380,6 +385,13 @@ int main(int argc, char *argv[])
     if (dial)
         me_dial("replay");
     me_on_sip_connected();
+    if (sip_answer) {
+        /* The real SIP caller marks early media before CONFIRMED, then
+         * delivers answered. Include those timer side effects on request;
+         * a media-connect-only replay misses preflight timeout bugs. */
+        me_on_sip_early_media();
+        me_on_sip_answered();
+    }
 
     if (schedule) {
         /* Replay the live call's own RX/TX interleaving, recorded with

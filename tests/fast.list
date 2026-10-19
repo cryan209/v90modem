@@ -12,6 +12,7 @@
 ./k56flex_test
 ./k56flex_upstream_test
 ./k56flex_upstream_pcm_test
+python3 tools/test_k56flex_probe_timeout.py
 ./mica_qam_test
 ./k56flex_probe_test
 ./k56flex_client_test

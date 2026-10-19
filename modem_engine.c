@@ -13486,7 +13486,11 @@ skip_8k_codewords:
     /* Check for phase timeouts */
     if (g_phase_start_ms > 0) {
         uint64_t elapsed = trace_now_ms() - g_phase_start_ms;
-        if (state == ME_V8
+        /* Draft 0.23 clause 4.1: K56flex's V.8bis/probe runs BEFORE
+         * ordinary V.8. SIP answered may arm this clock during preflight;
+         * do not let V.8's 15 s steal the probe's own bounded peer wait.
+         * me_start_or_restart_v8_locked() starts a fresh fallback budget. */
+        if (state == ME_V8 && !g_k56 && !g_k56_train
             && elapsed > (g_awaiting_answer
                           ? (uint64_t) parse_env_int("ME_V8_RING_TIMEOUT_MS", 60000)
                           : (uint64_t) V8_TIMEOUT_MS)) {

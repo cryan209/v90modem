@@ -269,11 +269,10 @@ missing live upstream gates or hardware qualification.
   (clause 7.24 is Provisional) and the peer parser AC6D for received MS/CL.
 - Hardware interop. No result here says a real K56flex client will connect.
 
-Next step: from v90modem dial the MultiTech RAS (it answers; it cannot dial
-out) with `ME_K56FLEX=probe` and `ME_G711_CAPTURE`. The log shows whether it
-answers our CRe and what its MS holds. Whether it reacts to the probes at all
-is visible in the capture, and would be the first on-wire evidence for the
-gate signals.
+This probe was attempted from vmhost CT 117 against the current RasFinder
+extension 6311; see the live attempt below. It did not produce a K56flex
+V.8bis response. A peer actually enabled for K56flex is still needed before
+its on-wire training gates can be identified.
 
 ## Offline call evidence
 
@@ -881,6 +880,61 @@ the preamble. It has no streaming state machine, clock/frequency tracking,
 echo handling, MP/E receiver, or engine gate callbacks. Next: qualify carrier
 and clock offsets, then implement streaming acquisition before assigning any
 recovered event to a server training gate.
+
+## Live probe from vmhost CT 117, 19 October 2026
+
+**No K56flex CONNECT.** `root@vmhost.net.cryan.nz` is reachable while tower
+SSH times out. CT 117 (`v90modem-dev`, 192.168.88.230) was fast-forwarded to
+`e094ff76`, rebuilt with vendored libraries, and passed the PCM and V.8bis
+regressions. Calls used account 2903, SIP port 5078, RTP base 14800,
+`SIP_FORCE_PCMU=1`, and `ME_K56FLEX=probe`; no existing server was stopped.
+Evidence is retained locally under
+`reference-data/artifacts/k56flex-vmhost-live/` (logs, PTY, untouched G.711,
+RTP CSVs, source patch and hash manifest). These are call evidence, not new
+fixtures required by `make test`.
+
+The first attempt to the obsolete 8416 route stopped before media with
+`PJSIP_EUNSUPTRANSPORT`. `sip_modem.c` created only UDP, although PJSIP may
+switch a large INVITE to TCP (RFC 3261 18.1.1). Asterisk's TCP 5060 is
+reachable. Creating both transport factories fixes the call setup: subsequent
+calls to the current RasFinder route **6311** reach confirmed SIP media with
+PCMU passthrough. This changes SIP signalling only, not RTP or codewords.
+
+`k56flex-live-6311-1`: our own TX tap first checked independently. At 0.6 s,
+1375 and 2002 Hz each account for about 0.502 of a 100 ms block's energy;
+at 0.8 s, the 400 Hz tail accounts for 0.880. RX at 0.8 s contains a much
+quieter copy of our CRe (echo), followed around 2.6 s by a strong 2100 Hz
+answer tone (0.981 of the block energy). No CRd/MS is accepted. The probe
+then reaches gate A without a peer status event. The 750 received RTP
+packets have consecutive sequence numbers and 160-sample timestamp steps.
+Do **not** infer a peer defect or lack of firmware support from this: its
+K56flex capability/configuration has not been independently confirmed.
+
+The call also exposed our premature timeout: at +15010 ms the generic V.8
+timer hangs up while the K56flex probe is still waiting at gate A. SIP's
+answered callback arms that timer even though ordinary V.8 has not started.
+Draft 0.23 clause 4.1 puts K56flex V.8bis before V.8; its probe has its own
+bounded gate timer. The generic V.8 timer now excludes active K56flex
+preflight/probe contexts, and ordinary fallback still starts a fresh budget.
+
+`tools/test_k56flex_probe_timeout.py` reproduces the engine bug with
+non-idle noise and the real early-media/answered callback sequence via
+`v90_engine_replay --sip-answer`. Before the fix it observes the erroneous
++15020 ms timeout; after it, the probe expires at +16660 ms and fallback
+V.8 gets another 15020 ms. A media-connect-only replay missed the bug,
+which is why the extra replay option exists. The new fast-list regression
+and all seven existing K56flex rows pass (eight total).
+
+`k56flex-live-6311-2` validates the timer fix on a fresh bounded call: no
+CRd, probe expiry at **+16647 ms**, then V.8 expiry at **+31666 ms**. No
+K56flex DATA, no forced gates, and no modem CONNECT. This call has variable
+short PCMU packets and RX RTP stops after about 10.58 s; do not mistake the
+subsequent receive-side idle samples for continued peer transmission or use
+it as a demodulator A/B against the first call.
+
+Next live prerequisite: confirm/enable K56flex on an actual analogue peer
+and obtain a genuine V.8bis exchange. Repeating a transmit-only probe at an
+unconfirmed peer cannot qualify the missing report/MP/E/upstream path.
 
 ## Mainline integration, 13 October 2026
 
