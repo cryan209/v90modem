@@ -2073,6 +2073,8 @@ typedef struct
     bool info0_received;
     bool info1a_received;
     bool info1c_received;
+    /*! K56flex Phase 2: accept actual INFO1c during the probe window. */
+    bool k56_phase2;
     uint8_t info1a_raw_12_17;
     uint8_t info1a_raw_32_33;
     uint16_t info1a_raw_40_49;

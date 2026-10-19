@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--cruft", type=Path, default=ROOT.parent / "cruft")
     ap.add_argument("--seconds", type=int, default=35)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--require-startup", action="store_true",
+                    help="fail unless native K56 reaches Phase 3 through real V.8/INFO1")
     args = ap.parse_args()
     if not 1 <= args.seconds <= 120:
         ap.error("--seconds must be 1..120")
@@ -139,6 +141,10 @@ def main():
             raise RuntimeError("wrong engine role; see server.log")
         notices = [notice for event in client.events
                    for notice in event.get("notifications", [])]
+        phase2_handoff = (client.flex_agreed and client.v8_modulations == 1
+                          and client.selected_modulation == "k56"
+                          and any(e.get("rx_label") == "DEMY" for e in client.events)
+                          and "K56flex Phase 2 complete; starting PCM probes" in server_log)
         report = {
             "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
             "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
@@ -148,6 +154,7 @@ def main():
             "v8_started": client.v8 is not None,
             "v8_modulations": client.v8_modulations,
             "selected_modulation": client.selected_modulation,
+            "phase2_handoff": phase2_handoff,
             "final_client_state": final_state, "failure": client.failure,
             "client_tx_training_completed": any(n[0] == 1000 for n in notices),
             "client_rx_training_completed": any(n[0] == 1001 for n in notices),
@@ -159,6 +166,8 @@ def main():
         }
         (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2))
+        if args.require_startup and not phase2_handoff:
+            raise SystemExit("K56flex V.8/Phase-2 startup requirement failed")
     finally:
         client.close()
         if proc is not None and proc.poll() is None:

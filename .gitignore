@@ -198,6 +198,7 @@ v92_tone_a_test
 /x2_test
 /k56flex_test
 /k56flex_upstream_test
+/k56flex_startup_test
 /k56flex_upstream_pcm_test
 /mica_qam_test
 /k56flex_v8bis_test

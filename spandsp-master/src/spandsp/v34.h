@@ -923,6 +923,11 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
+/*! Experimental K56flex common Phase 2 (Draft 0.23 4.1; V.34 Table 15).
+    Receive INFO1c concurrently with the short upstream probe. Does not
+    enable V.90 framing, manufacture INFO1, or enter K56flex DATA. */
+SPAN_DECLARE(void) v34_set_k56_phase2(v34_state_t *s, int enabled);
+
 /*! Re-supply the peer's INFO0 bits 26:27 (V.92 Table 16 capability and
     short-Phase-2 request) after v34_restart() when the following Phase 2
     omits INFO0, as a V.90 9.5 retrain does.  V.92 9.3 makes the capability

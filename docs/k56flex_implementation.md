@@ -76,9 +76,14 @@ stretches reproduce the original primitives' stream for both laws and both
 bit-8 settings (56 segment hashes in `k56flex_train_vectors.h`). A pair is 12
 samples, so the fixed prefix through probe 3 is 3,507 pairs, 5.26 s.
 
-`ME_K56FLEX=probe` runs it after V.8bis as raw G.711, then gives up and starts
-V.8 if no peer gate is satisfied within `ME_K56FLEX_GATE_MS` (default 8000)
-of the probes. Pair it with `ME_G711_CAPTURE` to record the client's reply.
+With an accepted K56flex MS/ACK, `ME_K56FLEX=probe` now runs negotiated V.8
+and the experimental common Phase-2 prelude **before** raw PCM probes (see
+the native HSF handoff below). A failed negotiated startup/probe ends the
+call without a lower-mode DATA fallback. If V.8bis did not agree K56flex,
+the explicit transmit-only diagnostic is preserved: it sends the probes,
+waits `ME_K56FLEX_GATE_MS` (default 8000), then starts ordinary V.8. Neither
+path manufactures a peer gate. Pair it with `VPCM_G711_TAP_DIR` to retain
+untouched codewords both ways.
 
 What the gates are: the firmware polls DM 8F31 bits 11, 10, 12|13, 13|14 and
 14, which its receive worker sets from the client's signalling. How that looks
@@ -989,8 +994,87 @@ Retained local evidence: `reference-data/artifacts/k56flex-hsf-engine/`
 contains the whole-engine log, untouched codewords both ways, DTE bytes,
 original client events, V.8bis-only verification, and input binary hashes.
 Driver-derived captures remain local, not published as regression fixtures.
-`verified_connection` is false. Next implementation target is the negotiated
-V.8/Phase-2 handoff **before** wiring report events to later training gates.
+`verified_connection` is false. The handoff correction below supersedes
+this direct-to-probe baseline; it does not qualify DATA.
+
+## Negotiated V.8 / Phase-2 handoff to native HSF
+
+`k56flex_startup.c` now owns the post-ACK startup for an actually agreed
+K56flex `probe` call. V.8bis 9.9 assigns V.8 roles from the **MS direction**,
+not SIP dial direction: our CL receives MS, so V.8 answers; a received CL
+and locally sent MS selects V.8 calling instead. The digital common Phase-2
+prelude remains answer-shaped (2400 Hz A, standard 49-bit INFO0), separate
+from both V.8 direction and V.90's 62-bit INFO0d. Only common V.8 mode V34
+is offered: the original Flex-latched client maps that startup mode to its
+**K56** object, not a V.34 DATA pump (Draft 0.23 4.1).
+
+The isolated context waits for actual V.8 completion before creating the
+Phase-2 receiver/transmitter. It requires durable CRC-valid INFO1 flags,
+a positive measured INFO1 selection, and completed local INFO1 transmission
+before releasing PCM probes. No primary-channel DATA callback can connect
+the DTE. Failure is bounded by received samples (15 s V.8, 30 s Phase 2,
+local experimental limits) and fails closed. Disconnect frees the preflight,
+startup and probe objects; probe-log state is per call, not function-static.
+The exchange-only `ME_K56FLEX=1` policy is unchanged.
+
+### The short upstream L1 probe
+
+The first native run after fixing V.8 starts the real K56 pump and exchanges
+INFO0, but misses INFO1c. The original HSF client sends L1 for about 160 ms,
+then its **109-bit INFO1c**, inside SpanDSP's ordinary 420 ms L1/L2 receive
+window. Waiting for that window to end loses the actual message. Simply
+arming INFO1 early recovers CRC residue zero but leaves the ordinary L2-only
+measurement analysing INFO rather than the probe, yielding an unusable zero
+projected rate. That intermediate run is not a valid handoff result.
+
+The explicitly enabled `v34_set_k56_phase2()` profile now receives INFO1c
+concurrently with the probe, preserves its durable acceptance, and measures
+the interior 40..160 ms of the observed L1-only probe. Its amplitudes are
+normalized by the standard half-amplitude L1/L2 ratio before the existing
+measured selection code (V.34 10.1.2, Tables 15/16). Plain V.34's L2 window,
+framing, and selection are unchanged. This **research profile is scoped to
+the observed legacy HSF client**, not a universal recovered K56flex clause.
+The native run selects 2400 baud / projected 9600 bit/s in the common INFO1;
+that projection is not a K56flex DATA rate or proof that all proprietary
+Phase-2 semantics match MICA's different profile.
+
+### Result and regression
+
+```
+make audio_sock_modem k56flex_startup_test
+python3 tools/k56flex_hsf_pair.py --cruft ../cruft --seconds 35 \
+    --require-startup --output artifacts/k56flex-hsf-startup-new
+```
+
+The final run passes `--require-startup`:
+
+- HSF reports V.8 intersection **1**, selects its original **K56** pump,
+  and retains `active_modulation=k56`.
+- Our receiver accepts INFO0 and the 93 protected INFO1c bits with CRC
+  residue **0**. HSF accepts our INFO1a and moves from `CALL_INFO1A` to
+  `DEMY`, its Phase-3 receiver.
+- At **+11960 ms** our engine starts PCM probes; at **+25220 ms** the
+  still-unwired peer gate A expires and the negotiated call ends, without
+  returning to V.8/V.34 DATA. Neither native training completion event,
+  DATA, DTE CONNECT, nor a checked payload is claimed.
+
+A 10-second negative control has already agreed V.8 and selected the K56
+object, but is still in `CALL_L1PROBING`; `--require-startup` correctly
+returns failure. Selecting K56 alone is therefore not the pass condition.
+
+`k56flex_startup_test` covers both V.8 roles independently of Phase-2 role,
+fragmented blocks (7 and 160 samples), missing-peer timeouts and fresh calls.
+It never treats elapsed time as INFO1. All nine K56flex fast-list rows pass.
+The ordinary V.34 phase-2 decoder, INFO1 validator, 2400/9600 duplex in both
+laws, and data codec regressions pass (five rows). The startup module/test
+also passes UBSan; the linked vendored archive was not sanitizer-instrumented.
+The changed private header caused all six V.34 objects to rebuild.
+
+Final and intermediate native traces remain local under
+`reference-data/artifacts/k56flex-hsf-startup/`. No translated-driver assets
+or driver-derived captures are published. Next: inspect the native client's
+actual Phase-3 response and recover the gate/report handoff; do not satisfy
+gate A just because Phase 2 completed.
 
 ## Mainline integration, 13 October 2026
 

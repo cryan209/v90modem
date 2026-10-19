@@ -32,6 +32,7 @@
 #include "k56flex_v8bis.h"
 #include "v8bis_modem.h"
 #include "k56flex_train.h"
+#include "k56flex_startup.h"
 #include "v91.h"
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
@@ -4618,18 +4619,21 @@ static bool me_v8_no_ci(void)
  * V.8, so when enabled it owns the bearer until it ends.
  *   ME_K56FLEX=1      V.8bis exchange only, then ordinary V.8 (the call carries on
  *                     as V.90/V.34; the log records the peer's CL/MS octets).
- *   ME_K56FLEX=probe  V.8bis, then the server's training stream (silence,
- *                     identification, three probes, parameter training) as raw
- *                     G.711 until the peer's signalling is needed.  That
- *                     signalling is not recovered, so the stream runs to its
- *                     first peer gate, waits ME_K56FLEX_GATE_MS (default 8000),
- *                     then gives up and starts V.8.  Pair it with
- *                     ME_G711_CAPTURE to record what the client sends back.
+ *   ME_K56FLEX=probe  An agreed MS/ACK runs negotiated V.8 and experimental
+ *                     common Phase 2 before the raw PCM probe stream. No
+ *                     later peer gates are forced; a negotiated failure ends
+ *                     the call without lower-mode DATA fallback. Without
+ *                     agreement, preserve the transmit-only diagnostic:
+ *                     probe, wait ME_K56FLEX_GATE_MS, then ordinary V.8.
+ *                     VPCM_G711_TAP_DIR records what the client sends back.
  *                     ME_K56FLEX_RATE sets the downstream rate (default 56000).
  * Neither mode completes a K56flex call (docs/k56flex_implementation.md).
  */
 static k56flex_v8bis_t *g_k56 = NULL;
 static k56flex_train_t *g_k56_train = NULL;
+static k56flex_startup_t *g_k56_startup = NULL;
+static bool g_k56_negotiated = false;
+static k56flex_train_phase_t g_k56_last_phase = K56T_FAILED;
 
 /* ME_K56FLEX, when set, wins (0 forces it off, probe adds the training
  * stream); otherwise AT+MS=K56 turns the V.8bis exchange on for the call. */
@@ -4679,12 +4683,57 @@ static void me_k56_start_locked(void)
     }
     if (g_k56)
         k56flex_v8bis_free(g_k56);
+    g_k56_negotiated = false;
+    g_k56_last_phase = K56T_FAILED;
     g_k56 = k56flex_v8bis_new(&cfg);
     g_state = ME_V8;
     ME_LOG("[ME] K56flex V.8bis: %s as %s%s, %s advertised, v90=%d\n",
            g_calling_party ? "initiating (CRe)" : "responding (listening for CRe)",
            cfg.client_model ? "client" : "server", cfg.blind ? ", blind CL" : "",
            cfg.mu_law ? "mu-law" : "A-law", cfg.v90_capable);
+}
+
+static bool me_k56_probe_start_locked(void)
+{
+    k56flex_train_cfg_t tc;
+    const char *rate = getenv("ME_K56FLEX_RATE"), *gate = getenv("ME_K56FLEX_GATE_MS");
+    memset(&tc, 0, sizeof(tc));
+    tc.law = g_law == ME_LAW_ULAW ? K56FLEX_LAW_MU : K56FLEX_LAW_A;
+    tc.rate_bps = rate ? atoi(rate) : 56000;
+    tc.training_word = 0xffff;
+    /* a pair is 12 samples = 1.5 ms */
+    tc.gate_timeout_pairs = (unsigned)((gate ? atoi(gate) : 8000) * 2 / 3);
+    g_k56_train = calloc(1, sizeof(*g_k56_train));
+    if (g_k56_train && k56flex_train_init(g_k56_train, &tc) == 0) {
+        g_k56_last_phase = K56T_FAILED;
+        ME_LOG("[ME] K56flex probe: transmitting training stream (%s, %d bit/s), "
+               "gives up %d ms after the probes if the peer does not answer\n",
+               tc.law == K56FLEX_LAW_MU ? "mu-law" : "A-law", tc.rate_bps, gate ? atoi(gate) : 8000);
+        trace_phase("K56flex probe stream start");
+        return true;
+    }
+    ME_LOG("[ME] K56flex probe: bad configuration, rate %d\n", tc.rate_bps);
+    free(g_k56_train);
+    g_k56_train = NULL;
+    return false;
+}
+
+static void me_k56_startup_progress_locked(void)
+{
+    int st = k56flex_startup_state(g_k56_startup);
+    if (st != K56S_READY && st != K56S_FAILED) return;
+    if (st == K56S_FAILED) {
+        ME_LOG("[ME] K56flex startup failed: %s\n", k56flex_startup_failure(g_k56_startup));
+        trace_phase("K56flex startup failed (no data fallback)");
+    } else {
+        trace_phase("K56flex Phase 2 complete; starting PCM probes");
+    }
+    k56flex_startup_free(g_k56_startup);
+    g_k56_startup = NULL;
+    if (st == K56S_FAILED || !me_k56_probe_start_locked()) {
+        g_state = ME_HANGUP;
+        g_phase_start_ms = 0;
+    }
 }
 
 static void me_k56_progress_locked(void)
@@ -4709,28 +4758,40 @@ static void me_k56_progress_locked(void)
         trace_phase("K56flex V.8bis %s: %s", st == K56V8B_DONE ? "done" : "failed",
                     k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)));
     }
+    size_t peer_len = 0;
+    const uint8_t *peer = k56flex_v8bis_peer_payload(g_k56, &peer_len);
+    bool v8_calling = peer && peer_len && (peer[0] & 15) == 2; /* received CL, sent MS */
+    bool peer_v8 = peer && peer_len > 1 && (peer[1] & 1);
+    bool agreed = st == K56V8B_DONE
+               && k56flex_v8bis_result(g_k56) == K56V8B_OK
+               && k56flex_v8bis_ack(g_k56) == 1;
     k56flex_v8bis_free(g_k56);
     g_k56 = NULL;
     if (me_k56flex_mode() == 2) {
-        k56flex_train_cfg_t tc;
-        const char *rate = getenv("ME_K56FLEX_RATE"), *gate = getenv("ME_K56FLEX_GATE_MS");
-        memset(&tc, 0, sizeof(tc));
-        tc.law = g_law == ME_LAW_ULAW ? K56FLEX_LAW_MU : K56FLEX_LAW_A;
-        tc.rate_bps = rate ? atoi(rate) : 56000;
-        tc.training_word = 0xffff;
-        /* a pair is 12 samples = 1.5 ms */
-        tc.gate_timeout_pairs = (unsigned)((gate ? atoi(gate) : 8000) * 2 / 3);
-        g_k56_train = calloc(1, sizeof(*g_k56_train));
-        if (g_k56_train && k56flex_train_init(g_k56_train, &tc) == 0) {
-            ME_LOG("[ME] K56flex probe: transmitting training stream (%s, %d bit/s), "
-                   "gives up %d ms after the probes if the peer does not answer\n",
-                   tc.law == K56FLEX_LAW_MU ? "mu-law" : "A-law", tc.rate_bps, gate ? atoi(gate) : 8000);
-            trace_phase("K56flex probe stream start");
+        if (agreed) {
+            /* Draft 0.23 4.1 / V.8bis 9.9: ACK precedes V.8, not the
+             * PCM probes. Our CL received MS: V.8 answers regardless of
+             * which SIP endpoint dialled. Keep that role out of plain V.34. */
+            g_k56_negotiated = true;
+            if (!peer_v8) {
+                ME_LOG("[ME] K56flex: negotiated startup without V.8 is unsupported\n");
+                g_state = ME_HANGUP;
+                return;
+            }
+            g_k56_startup = k56flex_startup_new(v8_calling, me_verbose_enabled());
+            if (g_k56_startup) {
+                g_state = ME_TRAINING;
+                g_mod = ME_MOD_NONE;
+                g_phase_start_ms = trace_now_ms();
+                trace_phase("K56flex post-ACK V8/Phase2 startup (no data fallback)");
+                return;
+            }
+            g_state = ME_HANGUP;
             return;
         }
-        ME_LOG("[ME] K56flex probe: bad configuration, rate %d\n", tc.rate_bps);
-        free(g_k56_train);
-        g_k56_train = NULL;
+        /* Preserve the explicit transmit-only diagnostic for a peer which
+         * did not negotiate K56flex. It is not a selected data mode. */
+        if (me_k56_probe_start_locked()) return;
     }
     if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
         ME_LOG("[ME] v8_init failed after K56flex V.8bis\n");
@@ -4740,21 +4801,26 @@ static void me_k56_progress_locked(void)
 static void me_k56_train_fill_locked(uint8_t *codewords, int count)
 {
     size_t got = k56flex_train_g711(g_k56_train, codewords, (size_t)count);
-    static k56flex_train_phase_t last = K56T_FAILED;
     k56flex_train_phase_t ph = k56flex_train_phase(g_k56_train);
-    if (ph != last) {
+    if (ph != g_k56_last_phase) {
         ME_LOG("[ME] K56flex probe: phase %s (%u pairs sent)\n", k56flex_train_phase_name(ph),
                g_k56_train->pairs_total);
-        last = ph;
+        g_k56_last_phase = ph;
     }
     for (size_t i = got; i < (size_t)count; i++)
         codewords[i] = pcm_idle();
     if (ph == K56T_FAILED) {
-        ME_LOG("[ME] K56flex probe: no peer progress signal; continuing with V.8\n");
+        ME_LOG("[ME] K56flex probe: no peer progress signal; %s\n",
+               g_k56_negotiated ? "ending negotiated call (no data fallback)" : "continuing with V.8");
         trace_phase("K56flex probe gave up after %u pairs", g_k56_train->pairs_total);
         free(g_k56_train);
         g_k56_train = NULL;
-        last = K56T_FAILED;
+        g_k56_last_phase = K56T_FAILED;
+        if (g_k56_negotiated) {
+            trace_phase("K56flex negotiated probe failed; no data fallback");
+            g_state = ME_HANGUP;
+            return;
+        }
         if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
             ME_LOG("[ME] v8_init failed after K56flex probe\n");
     }
@@ -11650,6 +11716,7 @@ void me_destroy(void)
     if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
+    k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
     v21_release();
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
@@ -12173,6 +12240,11 @@ void me_on_sip_disconnected_status(int sip_status)
 {
     pthread_mutex_lock(&g_state_mtx);
 
+    if (g_k56) { k56flex_v8bis_free(g_k56); g_k56 = NULL; }
+    if (g_k56_train) { free(g_k56_train); g_k56_train = NULL; }
+    k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
+    g_k56_negotiated = false;
+    g_k56_last_phase = K56T_FAILED;
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     g_v8bis_handoff = false;
     g_v8bis_to_v8 = false;
@@ -13359,6 +13431,12 @@ void me_rx_audio(const int16_t *amp, int len)
     }
 
     pthread_mutex_lock(&g_state_mtx);
+    if (g_k56_startup) {
+        k56flex_startup_rx(g_k56_startup, amp, len);
+        me_k56_startup_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
     if (g_k56) {
         k56flex_v8bis_rx(g_k56, amp, len);
         pthread_mutex_unlock(&g_state_mtx);
@@ -13490,7 +13568,7 @@ skip_8k_codewords:
          * ordinary V.8. SIP answered may arm this clock during preflight;
          * do not let V.8's 15 s steal the probe's own bounded peer wait.
          * me_start_or_restart_v8_locked() starts a fresh fallback budget. */
-        if (state == ME_V8 && !g_k56 && !g_k56_train
+        if (state == ME_V8 && !g_k56 && !g_k56_train && !g_k56_startup
             && elapsed > (g_awaiting_answer
                           ? (uint64_t) parse_env_int("ME_V8_RING_TIMEOUT_MS", 60000)
                           : (uint64_t) V8_TIMEOUT_MS)) {
@@ -16447,6 +16525,12 @@ static void me_tx_audio_impl(int16_t *amp, int len)
     }
 
     pthread_mutex_lock(&g_state_mtx);
+    if (g_k56_startup) {
+        k56flex_startup_tx(g_k56_startup, amp, len);
+        me_k56_startup_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
     if (g_k56) {
         k56flex_v8bis_tx(g_k56, amp, len);
         me_k56_progress_locked();
