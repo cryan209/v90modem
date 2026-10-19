@@ -876,8 +876,9 @@ against its original I-modem also fails a sustained x2 traffic test
 there). Until that is fixed, or real hardware is available,
 `AT+MS=X2,0,0,40000` with LAPM is the highest rate here that delivers exactly.
 
-One fault remains ours: if the Courier does fall back to Tone A during a rate
-change, we still wait in RECORD_TX until the call ends.
+One fault remained ours: if the Courier fell back to Tone A during a rate
+change, we waited in RECORD_TX until the call ended. That is now bounded; see
+"Bounding an unanswered rate change" below.
 
 Reproduce (clean courier-emu export in `$EMU`):
 
@@ -889,3 +890,71 @@ X2_HOST_EMU_ROOT=$EMU ../courier-emu/.venv/bin/python tools/probe_x2_host_courie
 ```
 
 `--engine-at` sends DTE commands to our PTY before the call starts.
+
+## Bounding an unanswered rate change, 19 October 2026
+
+Only the Courier's E released `X2_RECORD_TX`. When the Courier gave up on a
+rate change, nothing ended the wait. The generic 10 s stage watchdog never
+fired: the stuck change started 24.5 s into a 32.5 s run.
+
+**What the Courier does.** Reproduced by forcing `align_code()` back to a fixed
+`A5` with `AT+MS=X2,0,0,44000` and `S39=8&M5&K0`, against a clean export of
+courier-emu `f1ccd92`. The first change, from index 1, completes. The second,
+from index 6, is not answered in a form the Courier accepts:
+- the Courier sends its MP `0378` without the ACK bit (we accept it);
+- it sends no E;
+- **1.57 s after the end of its S**, it falls back to V.90 9.5.2.1's retrain:
+  70 ms of silence (tap 248920..249480), then 2400 Hz Tone A with the 1800 Hz
+  guard. Over a 40-sample window, 0.80 of the power is at 2400 Hz and 0.20 at
+  1800 Hz, with an RMS of 1175.
+
+It repeats nothing before the retrain: one S, one MP, then Tone A.
+
+A trap when reading these runs: `engine-rx.g711` starts before x2 does.
+x2's `rx_samples` is about 41440 samples behind the tap index, not the
+~16000 a first guess gives. The second change's S is at tap 236960 (x2 rx
+195840). The S at tap 211920 is the first change, which completed.
+
+**What we do now** (`x2_session.c`):
+- **Tone A.** In PAYLOAD, and during a rate change up to RECORD_TX, the 40-sample
+  upstream window that finds S also measures 2400 Hz. 64 consecutive 5-sample
+  steps (40 ms) with at least 0.6 of the power at 2400 Hz and RMS of at least
+  250 end the session as `X2_FAILURE_PEER_RETRAIN`.
+- **Deadline.** With no E 24000 samples (3 s) after the end of the Courier's S,
+  the session ends as `X2_FAILURE_RENEG_TIMEOUT`. A completed change reaches E
+  0.25 s after S.
+- **Stage watchdog.** The old 10 s watchdog now records
+  `X2_FAILURE_STAGE_TIMEOUT`.
+- **Engine.** The engine logs
+  `X2 failed: <cause> in <stage> (renegotiation N, M samples after its S, MP .., E ..)`.
+  It sets the hang-up cause: Remote for Tone A, Modem for the deadline. It hangs
+  up, so the DTE gets `NO CARRIER`.
+
+**False-positive check.** The same detector, run offline over every retained
+x2 `engine-rx.g711`, fires only where the Courier really sent Tone A: every
+stuck run of 6, 10 and 19 Oct. On calls without Tone A, the longest qualifying
+run is 3 steps, against the 64 needed. That includes the 132 s LAPM soak,
+`ff3` (171 s) and all `fix-`/`arq-` runs.
+
+**Evidence** (`reference-data/artifacts/`):
+- `x2-20261019-tonea-repro-a5`: the forced-`A5` repro. It logs
+  `X2 failed: peer retrain (Tone A) in RECORD_TX (renegotiation 2, 12651
+  samples after its S, MP accepted, E none)`, about 50 ms after Tone A
+  starts. The DTE gets `CONNECT 32000`, the Courier's line, then
+  `NO CARRIER`.
+- `x2-20261019-tonea-control-44000`: the same cap with the real `align_code()`.
+  Both changes complete (index 6, 44000/31200), with no false trip, and all
+  nine checks pass, including exact host-to-Courier delivery over this longer
+  (220M-instruction) run.
+
+**Why we hang up instead of answering the retrain.** Answering Tone A with
+Tone B does make the Courier reverse it (10 October). After that comes a full
+Phase 2 restart, with the Courier in the Tone A role, which is the reverse of
+the startup roles our asymmetric session implements. We would then need the
+probe, marker, J, training, MP and record again, plus a fresh upstream
+receiver. Nothing shows how the Courier continues after the reversal, and with
+the alignment fix it no longer abandons rate changes on its own. A clean,
+logged hang-up is the bounded answer until a peer is seen to retrain for
+another reason. `x2_session_test` covers the deadline, Tone A in RECORD_TX and
+in PAYLOAD, S during RECORD_TX, and quiet or guard-only tones that must not
+trip it.

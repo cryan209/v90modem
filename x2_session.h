@@ -12,6 +12,16 @@ typedef enum {
     X2_RECORD_ALIGN, X2_RECORD_TX,
     X2_FINAL_TRAINING, X2_DATA_STARTUP, X2_PAYLOAD, X2_SYMMETRIC, X2_FAILED
 } x2_session_stage_t;
+/* Why the session reached X2_FAILED, where the cause is known. */
+typedef enum {
+    X2_FAILURE_NONE,
+    X2_FAILURE_STAGE_TIMEOUT,   /* a startup stage ran 10 s */
+    X2_FAILURE_PEER_RETRAIN,    /* the Courier's V.90 9.5.2.1 Tone A in data */
+    X2_FAILURE_RENEG_TIMEOUT    /* no E within X2_RENEG_DEADLINE of its S */
+} x2_session_failure_t;
+/* Samples after the Courier's S without its E. A completed change takes
+ * 0.25 s to E; an unanswered one falls back to Tone A 1.57 s after S. */
+#define X2_RENEG_DEADLINE 24000
 typedef struct {
     unsigned clock, sync, count;
     double re, im, previous_re, previous_im;
@@ -54,6 +64,13 @@ typedef struct {
        RECORD_ALIGN sign pattern and the rate record in the current data
        banks, then restart DATA_STARTUP in the bank its new MP selects. */
     unsigned reneg, renegotiations, reneg_ack, reneg_record_started, record_ack_built;
+    /* rx_samples at the end of the Courier's S for this rate change, and
+       windows of sustained Tone A in data (docs/x2_implementation.md,
+       "Bounding an unanswered rate change", 19 Oct). */
+    uint64_t reneg_s_sample;
+    unsigned tone_a_windows;
+    x2_session_failure_t failure;
+    x2_session_stage_t failed_stage;
     x2_pcm_config_t reneg_config;
     x2_get_bit_func_t payload_source;
     void *payload_context;
@@ -72,4 +89,5 @@ void x2_session_upstream_s_bar(x2_session_t *session);
 unsigned x2_session_renegotiating(const x2_session_t *session);
 size_t x2_session_tx(x2_session_t *session, uint8_t *octets, size_t count);
 const char *x2_session_stage_name(x2_session_stage_t stage);
+const char *x2_session_failure_name(x2_session_failure_t failure);
 #endif

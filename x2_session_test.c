@@ -394,8 +394,84 @@ static void reneg_from_index6_test(void)
     for(unsigned i=0;i<16;++i){w0|=bits[18+i]<<i;w1|=bits[35+i]<<i;}
     assert(w0==(0x5000u|(6u<<2)|(13u<<6)) && w1==0x003f);
 }
+/* A rate change the Courier never completes is bounded (docs/x2_implementation.md,
+ * "Bounding an unanswered rate change", 19 October 2026). 1.57 s after its S
+ * the Courier falls back to V.90 9.5.2.1's retrain: 70 ms of silence, then
+ * 2400 Hz Tone A with the 1800 Hz guard. */
+enum { LINE_SILENCE, LINE_S, LINE_TONE_A };
+static void reneg_start(x2_session_t *s,unsigned reneg)
+{
+    x2_pcm_config_t six;
+    assert(!x2_short_profile(6,5,&six));
+    x2_session_init(s);
+    s->stage=X2_PAYLOAD;s->data_config=six;s->selected_index=6;s->upstream_rate_n=13;
+    s->downstream_rate_mask=x2_short_record_mask(0,44000);
+    s->rx_samples=s->tx_samples=200000;
+    assert(!x2_pcm_tx_init(&s->training_mapper,&six,18,ones_bit,NULL));
+    if(reneg){x2_session_upstream_s_bar(s);assert(x2_session_renegotiating(s));}
+}
+/* Feed `count` samples of one line signal, transmitting in lockstep; return
+ * the samples fed before the session failed, or count if it did not. */
+static unsigned line_feed(x2_session_t *s,unsigned signal,unsigned count)
+{
+    int16_t rx[160];uint8_t tx[160];unsigned done=0;
+    while(done<count && s->stage!=X2_FAILED) {
+        unsigned n=count-done;if(n>160)n=160;
+        for(unsigned i=0;i<n;++i) {
+            double t=(double)(s->rx_samples+i),v=0;
+            if(signal==LINE_S)
+                v=1000*(cos(2*PI*320*t/8000)+cos(2*PI*1920*t/8000)+cos(2*PI*3520*t/8000));
+            if(signal==LINE_TONE_A)   /* rms 1175, 0.8 of the power at 2400 Hz */
+                v=1660*(sqrt(0.8)*cos(2*PI*2400*t/8000)+sqrt(0.2)*cos(2*PI*1800*t/8000));
+            rx[i]=(int16_t)lrint(v);
+        }
+        uint64_t before=s->rx_samples;
+        x2_session_tx(s,tx,n);
+        x2_session_rx(s,rx,n);
+        if(s->stage==X2_FAILED)return done+(unsigned)(s->rx_samples-before);
+        done+=n;
+    }
+    return done;
+}
+static void reneg_bound_test(void)
+{
+    x2_session_t s;
+    /* No E and no Tone A: X2_RENEG_DEADLINE after its S, from RECORD_TX. */
+    reneg_start(&s,1);
+    assert(line_feed(&s,LINE_SILENCE,X2_RENEG_DEADLINE)==X2_RENEG_DEADLINE);
+    assert(s.stage==X2_RECORD_TX);
+    assert(line_feed(&s,LINE_SILENCE,1000)<=160);
+    assert(s.stage==X2_FAILED && s.failure==X2_FAILURE_RENEG_TIMEOUT
+           && s.failed_stage==X2_RECORD_TX);
+    /* S during RECORD_TX is neither Tone A nor a new deadline. */
+    reneg_start(&s,1);
+    assert(line_feed(&s,LINE_SILENCE,16000)==16000);
+    assert(line_feed(&s,LINE_S,320)==320 && s.stage==X2_RECORD_TX);
+    assert(line_feed(&s,LINE_SILENCE,10000)<=X2_RENEG_DEADLINE-16320+160);
+    assert(s.failure==X2_FAILURE_RENEG_TIMEOUT);
+    /* Tone A after 70 ms of silence ends the call within 60 ms of onset (block resolution). */
+    reneg_start(&s,1);
+    assert(line_feed(&s,LINE_SILENCE,12000)==12000);
+    unsigned onset=line_feed(&s,LINE_TONE_A,2000);
+    assert(onset<=480 && s.failure==X2_FAILURE_PEER_RETRAIN && s.failed_stage==X2_RECORD_TX);
+    /* ... and also in data with no rate change running. */
+    reneg_start(&s,0);
+    assert(line_feed(&s,LINE_SILENCE,560)==560 && !x2_session_renegotiating(&s));
+    onset=line_feed(&s,LINE_TONE_A,2000);
+    assert(onset<=480 && s.failure==X2_FAILURE_PEER_RETRAIN && s.failed_stage==X2_PAYLOAD);
+    /* Tone A below the level floor, or the guard tone alone, is not it. */
+    for(unsigned i=0;i<2;++i) {
+        reneg_start(&s,0);
+        int16_t rx[1600];uint8_t tx[1600];
+        for(unsigned n=0;n<1600;++n)rx[n]=(int16_t)lrint(i ? 150*cos(2*PI*2400*n/8000.0)
+                                                         : 1600*cos(2*PI*1800*n/8000.0));
+        x2_session_tx(&s,tx,1600);x2_session_rx(&s,rx,1600);
+        assert(s.stage==X2_PAYLOAD && s.failure==X2_FAILURE_NONE);
+    }
+    assert(!strcmp(x2_session_failure_name(X2_FAILURE_PEER_RETRAIN),"peer retrain (Tone A)"));
+}
 int main(int argc,char **argv)
 {
-    codec_test();info_recovery_test();phase2_test();training_test();s_bar_test();record_test();source_activation_test();reneg_from_index6_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
-    puts("x2 session: INFO codecs, marker semantics, received gates, 105 I-modem frames, recorded MP/E, payload activation and renegotiation from index 6 passed");return 0;
+    codec_test();info_recovery_test();phase2_test();training_test();s_bar_test();record_test();source_activation_test();reneg_from_index6_test();reneg_bound_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
+    puts("x2 session: INFO codecs, marker semantics, received gates, 105 I-modem frames, recorded MP/E, payload activation, renegotiation from index 6 and its Tone A/deadline bounds passed");return 0;
 }

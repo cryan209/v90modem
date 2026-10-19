@@ -10147,7 +10147,21 @@ static void me_x2_progress_locked(void)
                     (unsigned long long)g_x2.rx_samples);
         g_x2_last_stage = g_x2.stage;
     }
-    if (g_x2.stage == X2_FAILED) g_state = ME_HANGUP;
+    if (g_x2.stage == X2_FAILED && g_state != ME_HANGUP) {
+        if (g_x2.failure == X2_FAILURE_PEER_RETRAIN)
+            g_hangup_cause = "Remote (x2: peer retrain, Tone A in data)";
+        else if (g_x2.failure == X2_FAILURE_RENEG_TIMEOUT)
+            g_hangup_cause = "Modem (x2: rate change not completed)";
+        if (g_x2.failure != X2_FAILURE_NONE)
+            trace_phase("X2 failed: %s in %s (renegotiation %u, %llu samples after its S, MP %s, E %s)",
+                        x2_session_failure_name(g_x2.failure),
+                        x2_session_stage_name(g_x2.failed_stage),
+                        g_x2.renegotiations,
+                        (unsigned long long)(g_x2.rx_samples-g_x2.reneg_s_sample),
+                        g_x2.mp_valid ? "accepted" : "none",
+                        g_x2.mp_rx.e_detected ? "detected" : "none");
+        g_state = ME_HANGUP;
+    }
     if(!g_x2.symmetric && g_state==ME_TRAINING && g_x2.stage==X2_PAYLOAD
        && g_x2.mp_valid && g_x2_data_stack_started && g_x2_upstream_started
        && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {

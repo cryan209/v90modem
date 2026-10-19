@@ -223,6 +223,11 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
+static void fail(x2_session_t *s,x2_session_failure_t why)
+{
+    if(s->stage==X2_FAILED)return;
+    s->failure=why;s->failed_stage=s->stage;stage(s,X2_FAILED);
+}
 static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
 {
     if(!h->count) {
@@ -280,6 +285,7 @@ static void begin_renegotiation(x2_session_t *s)
 {
     if(s->stage!=X2_PAYLOAD || s->reneg || s->symmetric)return;
     s->reneg=1;s->reneg_ack=0;++s->renegotiations;
+    s->reneg_s_sample=s->rx_samples;
     s->reneg_config=s->data_config;
     s->mp_valid=0;
     x2_mp_rx_init(&s->mp_rx,mp_received,s);
@@ -288,7 +294,7 @@ static void begin_renegotiation(x2_session_t *s)
 static void upstream_s_sample(x2_session_t *s, int16_t sample)
 {
     static const unsigned frequencies[] = {320,1920,3520};
-    double re[3]={0}, im[3]={0}, power[3], energy=0, total=0;
+    double re[3]={0}, im[3]={0}, power[3], energy=0, total=0, a_re=0, a_im=0;
     unsigned j,k; int stable=1, reversed=1;
     s->s_window[s->s_position++]=sample;s->s_position%=40;
     if(++s->s_samples<40 || s->s_samples%5)return;
@@ -300,7 +306,18 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
             double phase=2*PI*frequencies[k]*(double)(time%200)/8000;
             re[k]+=x*cos(phase);im[k]-=x*sin(phase);
         }
+        a_re+=x*cos(2*PI*2400*(double)(time%10)/8000);
+        a_im-=x*sin(2*PI*2400*(double)(time%10)/8000);
     }
+    /* V.90 9.5.2.1 retrain: the Courier abandons a rate change it was not
+     * answered in, or retrains outright in data, with 70 ms of silence then
+     * 2400 Hz Tone A and the 1800 Hz guard (0.8 of the power in Tone A).
+     * Nothing in x2 data is a pure 2400 Hz line for 40 ms. We do not answer
+     * the retrain (that is a full Phase 2 restart): end the call with the
+     * cause, rather than send data nobody is decoding. */
+    if(energy>=40*250.0*250.0 && a_re*a_re+a_im*a_im>=0.6*20*energy) {
+        if(++s->tone_a_windows>=64){fail(s,X2_FAILURE_PEER_RETRAIN);return;}
+    } else s->tone_a_windows=0;
     for(k=0;k<3;++k){power[k]=re[k]*re[k]+im[k]*im[k];total+=power[k];}
     if(energy<40*10000.0 || total<0.75*energy*20
        || power[0]<0.08*total || power[1]<0.08*total || power[2]<0.08*total) {
@@ -388,7 +405,14 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
         if(s->stage==X2_TONE_A && s->peer_info_valid)
             phase2_b_sample(s,samples[k],s->tx_samples+k);
         if(s->stage==X2_J && !s->s_bar_seen)upstream_s_sample(s,samples[k]);
-        if(s->stage==X2_PAYLOAD && !s->symmetric && !s->reneg)upstream_s_sample(s,samples[k]);
+        if(!s->symmetric && (s->stage==X2_PAYLOAD
+           || (s->reneg && s->stage>=X2_RECORD_ALIGN && s->stage<=X2_RECORD_TX))) {
+            upstream_s_sample(s,samples[k]);
+            /* Bounded: only the Courier's E releases RECORD_TX. */
+            if(s->reneg && !s->mp_rx.e_detected && s->stage!=X2_FAILED
+               && s->rx_samples-s->reneg_s_sample>X2_RENEG_DEADLINE)
+                fail(s,X2_FAILURE_RENEG_TIMEOUT);
+        }
         if(s->marker_valid||s->stage==X2_FAILED)continue;
         for(i=0;i<40;++i) {
             x2_info_hypothesis_t *h=&s->info_rx[i];
@@ -438,7 +462,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
     for(k=0;k<count;++k,++s->tx_samples) {
         unsigned n=s->stage_samples;uint8_t code=0x7f;
         x2_session_stage_t old_stage=s->stage;
-        if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD && !(s->stage==X2_SYMMETRIC && s->sym.tx_data && s->sym.rx_data)){stage(s,X2_FAILED);old_stage=s->stage;n=0;}
+        if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD && !(s->stage==X2_SYMMETRIC && s->sym.tx_data && s->sym.rx_data)){fail(s,X2_FAILURE_STAGE_TIMEOUT);old_stage=s->stage;n=0;}
         switch(s->stage) {
         case X2_INFO0:
         case X2_TONE_A: {
@@ -567,4 +591,9 @@ const char *x2_session_stage_name(x2_session_stage_t s)
 {
     static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","SYMMETRIC","FAILED"};
     return (unsigned)s<sizeof(names)/sizeof(names[0])?names[s]:"INVALID";
+}
+const char *x2_session_failure_name(x2_session_failure_t f)
+{
+    static const char *names[]={"unspecified","stage timeout","peer retrain (Tone A)","rate change timeout (no E)"};
+    return (unsigned)f<sizeof(names)/sizeof(names[0])?names[f]:"INVALID";
 }
