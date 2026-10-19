@@ -1,4 +1,5 @@
 path	files	bytes	retention_reason
+reference-data/artifacts/k56flex-hsf-engine	9	1034832	docs/k56flex_implementation.md; native legacy HSF V.8bis succeeds, whole-engine post-ACK startup fails; local driver-derived evidence, not a regression dependency
 reference-data/artifacts/k56flex-vmhost-live	21	1008683	docs/k56flex_implementation.md; two wired live K56flex probe calls, no CRd/CONNECT; local evidence, not a regression dependency
 reference-data/k56flex-upstream	3	28412	k56flex_upstream_pcm_test.c; synthesized 3200-baud PCM regression and 2400-baud negative control; docs/k56flex_implementation.md
 reference-data/artifacts/apple-9667-20261016	8	1932525	docs/apple_usb_modem_sm56.md

@@ -271,8 +271,8 @@ missing live upstream gates or hardware qualification.
 
 This probe was attempted from vmhost CT 117 against the current RasFinder
 extension 6311; see the live attempt below. It did not produce a K56flex
-V.8bis response. A peer actually enabled for K56flex is still needed before
-its on-wire training gates can be identified.
+V.8bis response. The native legacy HSF peer below does complete V.8bis and
+exposes an earlier post-ACK startup defect in our engine.
 
 ## Offline call evidence
 
@@ -932,9 +932,65 @@ short PCMU packets and RX RTP stops after about 10.58 s; do not mistake the
 subsequent receive-side idle samples for continued peer transmission or use
 it as a demodulator A/B against the first call.
 
-Next live prerequisite: confirm/enable K56flex on an actual analogue peer
-and obtain a genuine V.8bis exchange. Repeating a transmit-only probe at an
-unconfirmed peer cannot qualify the missing report/MP/E/upstream path.
+For physical-hardware qualification, confirm/enable K56flex on an analogue
+peer and obtain a genuine V.8bis exchange. The native HSF experiment below
+now provides a software peer for the earlier startup work; it is not evidence
+that the RasFinder hardware supports the selected mode.
+
+## Native legacy HSF peer: post-ACK startup failure
+
+The user's suggested `../cruft/native/hsf` peer is available locally. This
+is the static native translation of the **legacy K56 pump**, not modern HSF
+7.12's V124 path that silently selects V.90/V.34. Its Flex-only client has
+separately qualified binary duplex against MICA, so it is a useful independent
+software peer (not a physical modem oracle). No cruft source or DSP decisions
+were changed for this experiment.
+
+First, the existing `native.hsf.test_v90modem_peer` was rerun against the
+current checkout: CRe/CRd and CL/MS/ACK complete through the original tone
+and FSK pumps in 229 blocks of 128 samples (3.664 s). This validates the
+nonblind V.8bis boundary, not the rest of our engine.
+
+`tools/k56flex_hsf_pair.py` now connects that normal Flex-only client to the
+**whole `audio_sock_modem` engine** through byte-exact PCMU. The engine DTE
+dials before socket connect so it takes the same digital/calling role as
+the RasFinder attempt. Both sides exchange exactly 160 octets per iteration;
+the client's existing 128-sample buffering supplies a causal delay. The
+engine's media clock permits a bounded faster-than-real-time diagnostic.
+No peer state, receive gates, role overrides, or ideal I/Q are injected.
+
+```
+make audio_sock_modem
+python3 tools/k56flex_hsf_pair.py --cruft ../cruft --seconds 35 \
+    --output artifacts/k56flex-hsf-engine-new
+```
+
+Observed against the current probe path:
+
+- Our engine completes V.8bis at **+3640 ms**, accepts the original HSF MS
+  `11 c9 80 80 81 c0 09 b5 02 00 94 81 81 02 47 85`, and sends ACK1.
+- HSF accepts ACK at client block 223 and starts its original **V.8** pump.
+- Our `me_k56_progress_locked()` instead starts the **PCM transmit probe
+  immediately**, skipping V.8 and Phase 2. HSF sees no V.8 result, never
+  starts its K56 pump, and has neither TX nor RX training completion.
+- Our probe waits at gate A, expires at **+16900 ms**, and only then starts
+  ordinary V.8. That also yields no common mode in this run, and the engine
+  hangs up at **+31920 ms**. No DTE CONNECT or payload is reported.
+
+This is **our earlier startup boundary**, not evidence that the HSF receiver
+rejects the probes, cannot acquire TRN, or has a broken report decoder: its
+high-speed pump was never started. The nominally successful V.8bis exchange
+is not permission to jump straight to the PCM probes. Draft 0.23 clause 4.1
+puts V.8 after V.8bis; the independent original controller follows that path.
+The server's V.8 direction and Phase-2 digital role must also be handled
+explicitly rather than assuming they follow which side initiated the socket.
+
+Retained local evidence: `reference-data/artifacts/k56flex-hsf-engine/`
+contains the whole-engine log, untouched codewords both ways, DTE bytes,
+original client events, V.8bis-only verification, and input binary hashes.
+Driver-derived captures remain local, not published as regression fixtures.
+`verified_connection` is false. Next implementation target is the negotiated
+V.8/Phase-2 handoff **before** wiring report events to later training gates.
 
 ## Mainline integration, 13 October 2026
 
