@@ -787,6 +787,46 @@ robustly first: they are 16-point on a grid MICA's slicer now agrees with, so
 the next place to look is why MP acceptance (4096 -> 8192 -> 16384 status
 sequence) depends on the equaliser at all, not more training.
 
+## Equalized-symbol upstream report receiver
+
+`k56flex_upstream.c` implements the report-control part of Draft 0.23 clause
+11 at the equalized four-point I/Q boundary. It uses resident PM 0294's
+quadrant labels and PM 02B0's differential mapping (5903/5961), **not overlay
+8E**. Dibits enter the existing blind 24-bit report acquirer LSB first,
+with continuous 18/23 descrambler history (5/23 is a diagnostic option).
+Quarter-turn carrier ambiguity cancels differentially after the first point.
+One-shot events expose the accepted report/extension and the subsequent
+899F terminator. Requiring three consecutive 899F words is a conservative
+local policy, not a recovered firmware threshold. Terminators before report
+acceptance do not arm the handoff.
+
+`k56flex_upstream_test` is in `tests/fast.list`. Retained sign-pair vectors
+come from MicaEmu's research transmitter, independently checked against
+original 5903/5961/1D5A and the resident mapping tables. They cover both taps,
+four carrier rotations, and joining during TRN or partway through the report.
+Additional bit-source tests cover all 24 record offsets, incomplete/corrupted
+terminators, one-shot events, and per-call reset. Invalid coordinates,
+constant quadrants, random quadrants and a wrong-tap stream are negative
+controls. All six K56flex fast-list tests pass, and the upstream test passes
+Clang's undefined-behavior sanitizer. The original-firmware check passed 16
+report cases and 60 continuous transmitter blocks; this is **not recorded
+PCM or hardware interop evidence**.
+
+Regenerate and check:
+
+```
+python3 ../MicaEmu/tools/verify_k56flex_training_tx.py --output artifacts/k56flex-upstream/training-oracle.json
+python3 tools/generate_k56flex_upstream_vectors.py ../MicaEmu
+make k56flex_upstream_test
+python3 tools/run_tests.py --filter k56flex tests/fast.list
+```
+
+No engine gates are wired from this decoder. S/S-bar/PP acquisition, timing,
+carrier/equalizer training, decision confidence, MP/E, and upstream DATA
+remain outside its scope. The next integration step is a PCM front end that
+supplies these equalized points; a successful report alone must not stand in
+for the distinct training/status gates.
+
 ## Mainline integration, 13 October 2026
 
 The `k56flex-rockwell-ns` work was consolidated onto main while retaining
