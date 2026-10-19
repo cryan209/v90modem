@@ -355,8 +355,47 @@ static void capture_test(const char *path)
     printf("capture: INFO0=%04x marker=%02x at RX sample %llu\n",s.peer_capabilities,s.marker,(unsigned long long)s.rx_samples);
     assert(s.peer_info_valid && s.marker==0x4d && s.stage==X2_UPSTREAM_WAIT);
 }
+/* AT+MS bounds -> PCM index mask, and the in-data renegotiation answer
+ * from above index 1: RECORD_ALIGN on the current banks' lowest codes,
+ * then the record in the index-1 allocation (docs/x2_implementation.md,
+ * "Renegotiating from above index 1", 19 October 2026). */
+static int ones_bit(void *context){(void)context;return 1;}
+static void reneg_from_index6_test(void)
+{
+    assert(x2_short_record_rate(1)==32000 && x2_short_record_rate(14)==54666
+           && x2_short_record_rate(15)==56000 && !x2_short_record_rate(0) && !x2_short_record_rate(16));
+    assert(x2_short_record_mask(0,0)==0x7fff && x2_short_record_mask(0,44000)==0x003f
+           && x2_short_record_mask(0,32000)==0x0001 && x2_short_record_mask(54000,0)==0x6000
+           && x2_short_record_mask(0,31999)==0);
+    x2_session_t s;x2_pcm_config_t six,one;uint8_t out[54+96*4];
+    assert(!x2_short_profile(6,5,&six) && !x2_short_profile(1,5,&one));
+    x2_session_init(&s);
+    s.stage=X2_PAYLOAD;s.data_config=six;s.selected_index=6;s.upstream_rate_n=13;
+    s.downstream_rate_mask=x2_short_record_mask(0,44000);
+    assert(!x2_pcm_tx_init(&s.training_mapper,&six,18,ones_bit,NULL));
+    x2_session_upstream_s_bar(&s);
+    assert(x2_session_renegotiating(&s));
+    assert(x2_session_tx(&s,out,sizeof(out))==sizeof(out));
+    for(unsigned n=0;n<54;++n) {
+        unsigned base=(six.banks[n%6][0]&0xff)|0x80;
+        unsigned sign=(n%6>=3)^(n>=48);
+        assert(out[n]==(base^(sign<<7)));
+    }
+    assert((six.banks[0][0]&0xff)==0xa3 && out[0]==0xa3);   /* not A5 */
+    x2_pcm_state_t st={0};x2_scrambler_t d;x2_scrambler_init(&d,18,0);
+    uint8_t bits[96*4/6*24];unsigned nb=0;
+    for(unsigned f=0;f<96*4/6;++f) {
+        uint64_t b;assert(!x2_pcm_decode(&one,&st,out+54+6*f,&b));
+        for(unsigned i=0;i<24;++i)bits[nb++]=(uint8_t)x2_descramble_bit(&d,(b>>i)&1);
+    }
+    for(unsigned i=0;i<17;++i)assert(bits[i]==1);
+    assert(bits[17]==0);
+    unsigned w0=0,w1=0;
+    for(unsigned i=0;i<16;++i){w0|=bits[18+i]<<i;w1|=bits[35+i]<<i;}
+    assert(w0==(0x5000u|(6u<<2)|(13u<<6)) && w1==0x003f);
+}
 int main(int argc,char **argv)
 {
-    codec_test();info_recovery_test();phase2_test();training_test();s_bar_test();record_test();source_activation_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
-    puts("x2 session: INFO codecs, marker semantics, received gates, 105 I-modem frames, recorded MP/E and payload activation passed");return 0;
+    codec_test();info_recovery_test();phase2_test();training_test();s_bar_test();record_test();source_activation_test();reneg_from_index6_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
+    puts("x2 session: INFO codecs, marker semantics, received gates, 105 I-modem frames, recorded MP/E, payload activation and renegotiation from index 6 passed");return 0;
 }

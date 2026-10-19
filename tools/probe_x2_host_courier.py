@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 EMU = Path(os.environ.get('X2_HOST_EMU_ROOT', ROOT.parent / 'courier-emu'))
@@ -62,6 +63,10 @@ def main():
                              "for the unmodified NVRAM profile")
     parser.add_argument('--pty-source', action='store_true',
                         help='send and receive through the real engine PTY after CONNECT')
+    parser.add_argument('--engine-at', action='append', default=[],
+                        help="with --pty-source, an AT command for our engine's PTY before "
+                             "the call starts, as its DTE would send (e.g. AT+MS=X2,0,0,48000); "
+                             'repeatable')
     parser.add_argument('--fixed-native-rate', action='store_true',
                         help='retain the old diagnostic &U26&N39 Courier rate clamp')
     parser.add_argument('--capture-native', action='store_true',
@@ -71,6 +76,8 @@ def main():
     args = parser.parse_args()
     if args.host_after_rate_change and not args.pty_source:
         parser.error('--host-after-rate-change requires --pty-source')
+    if args.engine_at and not args.pty_source:
+        parser.error('--engine-at requires --pty-source')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'host-source.bin'
@@ -101,6 +108,31 @@ def main():
                     self.source_first_sample = None
                     self.source_pace_origin = None
                     self.rate_change_seen = False
+                    self.engine_at_replies = []
+                    for command in args.engine_at:
+                        self.engine_at_replies.append(self.send_at(command))
+
+            def send_at(self, command, timeout=10.0):
+                """One DTE command before the first bearer frame; returns the reply."""
+                deadline = time.monotonic() + timeout
+                while self.pty_fd is None and time.monotonic() < deadline:
+                    self.drain()
+                    if self.pty_fd is None:
+                        time.sleep(0.05)
+                if self.pty_fd is None:
+                    raise RuntimeError('engine PTY never appeared')
+                start = len(self.dte)
+                os.write(self.pty_fd, command.encode('ascii') + b'\r')
+                while time.monotonic() < deadline:
+                    self.drain()
+                    reply = bytes(self.dte[start:])
+                    if b'OK\r\n' in reply or b'ERROR\r\n' in reply:
+                        del self.dte[start:]
+                        if b'OK\r\n' not in reply:
+                            raise RuntimeError(f'{command}: {reply!r}')
+                        return reply.decode('ascii', 'replace')
+                    time.sleep(0.02)
+                raise RuntimeError(f'{command}: no reply')
 
             def drain(self):
                 if self.pty_fd is None:
@@ -157,6 +189,7 @@ def main():
                 status['source_queued'] = getattr(self, 'source_offset', 0)
                 status['source_first_sample'] = getattr(self, 'source_first_sample', None)
                 status['source_after_rate_change'] = getattr(self, 'rate_change_seen', False)
+                status['engine_at'] = getattr(self, 'engine_at_replies', [])
                 return status
 
         probe.EnginePeer = PtyPeer

@@ -353,3 +353,29 @@ reference-data/artifacts/apple-direct-review-20261018	95	21567518	docs/apple_usb
 reference-data/artifacts/apple-direct-resume-20261018	301	53651265	docs/apple_usb_modem_sm56.md; resumed alternating direct-pair tests and live CP-prime recovery evidence
 reference-data/artifacts/apple-cx-direct-20261018	69	20068016	docs/apple_usb_modem_sm56.md; Conexant CX93001 direct-pair Phase 2 and V34 payload evidence
 reference-data/artifacts/apple-cx-clocking-20261018	59	6633107	docs/apple_usb_modem_sm56.md; clock-reference audit and alternating measured-offset Phase 2 comparison
+reference-data/artifacts/x2-20261019-head-after-change	13	5665851	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-fix-cap32000	13	5665585	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-fix-cap36000	13	5604547	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-fix-cap44000	13	5604746	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-fix-cap52000	13	5604931	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-fix-cap0	13	5665930	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-short	13	5754879	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap32000	13	5784742	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap36000	13	5723236	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap40000	13	5724298	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap44000	13	5724989	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap48000	13	5723895	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap52000	13	5720261	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-cap0	13	5779902	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-long40000	13	28208673	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-mptrace44000	13	5260527	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-cpi3.5	13	7602065	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-cpi4.5	13	6800561	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-cap40000	13	5226096	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-cap48000	13	5226303	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-cap44000	13	5226270	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-arq-after	13	5779776	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-align0-44000	13	5284788	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-rb-index1	13	5615700	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-rb-training	13	4862207	docs/x2_implementation.md
+reference-data/artifacts/x2-20261019-rec1-cap44000	13	5226499	docs/x2_implementation.md

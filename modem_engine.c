@@ -10197,7 +10197,21 @@ static void me_x2_start_locked(void)
             g_state=ME_HANGUP;return;
         }
         g_x2.upstream_rate_mask=(uint16_t)((1u<<(rate/2400))-1);
-        trace_phase("X2 host upstream limit: %d bit/s",rate);
+        /* AT+MS (V.250 6.4.1) bounds both masks: TX is our PCM downstream,
+         * whose index ceiling the Courier selects under initially and at
+         * every fall forward (the record's W2, Draft 0.33 sections 20/22);
+         * RX is the V.34 upstream, N*2400 for mask bit N-1. */
+        for(unsigned n=1;n<=14;++n)
+            if(!lim_admits((int)n*2400,g_lim[LIM_MIN_RX],g_lim[LIM_MAX_RX]))
+                g_x2.upstream_rate_mask&=(uint16_t)~(1u<<(n-1));
+        g_x2.downstream_rate_mask=x2_short_record_mask(g_lim[LIM_MIN_TX],g_lim[LIM_MAX_TX]);
+        if(!g_x2.upstream_rate_mask || !g_x2.downstream_rate_mask) {
+            ME_LOG("[ME] x2: no rate inside AT+MS TX %d-%d, RX %d-%d bit/s\n",
+                   g_lim[LIM_MIN_TX],g_lim[LIM_MAX_TX],g_lim[LIM_MIN_RX],g_lim[LIM_MAX_RX]);
+            g_state=ME_HANGUP;return;
+        }
+        trace_phase("X2 host upstream limit: %d bit/s, upstream mask %04x, downstream mask %04x",
+                    rate,g_x2.upstream_rate_mask,g_x2.downstream_rate_mask);
     }
     x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);

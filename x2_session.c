@@ -212,9 +212,14 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
         build_record(s);
         s->record_position=0;
         x2_pcm_config_t c;training_config(&c);
-        /* In data the record rides the current data banks: the captured
-         * I-modem record decodes in them, not in the training alphabet. */
-        if(s->reneg)c=s->reneg_config;
+        /* In data the record rides the index-1 (B=19) data allocation at
+         * the current MD, not the training alphabet: the captured I-modem
+         * record decodes there (pair capture, 25.2 s, from index 1), and
+         * from index 6 the Courier ACKs it there and in neither the index-6
+         * banks nor the training banks (19 Oct). From index 1 that is also
+         * the current allocation, so the observed I-modem cannot tell the
+         * two apart; nothing here suggests the startup allocation instead. */
+        if(s->reneg && x2_short_profile(1,s->reneg_config.independent_signs,&c))s->stage=X2_FAILED;
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
@@ -415,6 +420,17 @@ unsigned x2_session_renegotiating(const x2_session_t *s)
 {
     return s ? s->reneg : 0;
 }
+/* RECORD_ALIGN's sign pattern rides each position's lowest-level code of
+ * the banks the Courier is decoding: the training banks at startup and the
+ * current data banks in data. Every training and index-1 bank starts with
+ * A5, so the fixed A5 the I-modem sends (pair capture, 25.2 s) is that rule
+ * at index 1. Above index 1 the Courier (403 f7d8..f854) ignores A5: at
+ * index 6, where position 0 starts with A3, it never ACKed our record and
+ * fell back to Tone A 1.5 s later (docs/x2_implementation.md, 19 Oct). */
+static uint8_t align_code(const x2_session_t *s,unsigned position)
+{
+    return s->reneg ? (uint8_t)((s->reneg_config.banks[position][0]&0xff)|0x80) : 0xa5;
+}
 size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 {
     size_t k;
@@ -506,8 +522,8 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             break;
         case X2_RECORD_ALIGN:
             /* C936/C939/C9F8: eight +++--- groups, then one inverted
-             * group. All six current training banks start with A5. */
-            code=(uint8_t)(0xa5^((n%6>=3 ? 1u:0u)<<7));
+             * group, on each position's lowest-level code (align_code). */
+            code=(uint8_t)(align_code(s,n%6)^((n%6>=3 ? 1u:0u)<<7));
             if(n>=48)code^=0x80;
             if(n==53)stage(s,X2_RECORD_TX);
             break;
@@ -530,7 +546,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             if(s->stage==X2_PAYLOAD && s->reneg && s->training_mapper.output_position==6) {
                 /* On the six-sample frame boundary: no source bit is lost. */
                 stage(s,X2_RECORD_ALIGN);
-                code=0xa5;s->stage_samples=1;
+                code=align_code(s,0);s->stage_samples=1;
                 break;
             }
             if(x2_pcm_tx_g711(&s->training_mapper,&code,1)!=1)return k;

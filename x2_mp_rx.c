@@ -126,7 +126,27 @@ int x2_short_record_config(const x2_mp_t *mp,unsigned local_mask,x2_pcm_config_t
     eligible=local_mask&((1u<<ceiling)-1);
     while(eligible){++index;eligible>>=1;}
     if(!index)return -1;
+    return x2_short_profile(index,md,config) ? -1 : (int)index;
+}
+int x2_short_profile(unsigned index,unsigned md,x2_pcm_config_t *config)
+{
+    if(!config||!index||index>15||md>6)return -1;
     x2_pcm_config_t c=x2_short_profiles[index-1];c.independent_signs=(uint8_t)md;
     if(x2_pcm_validate(&c))return -1;
-    *config=c;return (int)index;
+    *config=c;return 0;
+}
+unsigned x2_short_record_rate(unsigned index)
+{
+    if(!index||index>15)return 0;
+    const x2_pcm_config_t *c=&x2_short_profiles[index-1];
+    return (c->amplitude_bits+c->independent_signs)*8000u/6u;
+}
+uint16_t x2_short_record_mask(int min_bps,int max_bps)
+{
+    uint16_t mask=0;
+    for(unsigned index=1;index<=15;++index) {
+        int rate=(int)x2_short_record_rate(index);
+        if((min_bps<=0||rate>=min_bps)&&(max_bps<=0||rate<=max_bps))mask|=(uint16_t)(1u<<(index-1));
+    }
+    return mask;
 }

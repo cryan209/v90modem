@@ -36,4 +36,15 @@ void x2_mp_rx_bit(x2_mp_rx_t *rx, unsigned timing, unsigned phase, unsigned bit)
  * bitmap record is guessed from a short MP. Returns selected local index. */
 int x2_short_record_config(const x2_mp_t *mp, unsigned local_mask,
                            x2_pcm_config_t *config);
+/* One short-record allocation (index 1..15) at a given MD (0..6). */
+int x2_short_profile(unsigned index, unsigned md, x2_pcm_config_t *config);
+/* Draft 0.33 clauses 15/16/22: a frame carries B+MD source bits per six
+ * samples, so short-record index 1..15 runs at (B+MD)*8000/6 bit/s at its
+ * allocation's MD (5 in every captured Courier MP): index 1 = 32000,
+ * index 14 = 54666. Not the supervisor display table (x2_nominal_rate).
+ * Returns 0 outside 1..15. */
+unsigned x2_short_record_rate(unsigned index);
+/* The local PCM index mask (bit 0 = index 1) whose rates lie within
+ * [min_bps, max_bps]; a bound <= 0 is open. */
+uint16_t x2_short_record_mask(int min_bps, int max_bps);
 #endif

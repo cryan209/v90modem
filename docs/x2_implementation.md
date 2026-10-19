@@ -784,3 +784,108 @@ The capture tools now take `X2_HOST_EMU_ROOT` (emulator checkout, so a
 committed export can be used instead of the sibling working tree) and
 `X2_HOST_CAPTURE_PC`, and hook `step`, `step_cycles` and `service_step`
 because the modern bearer advances by cycles.
+
+## LAPM, rate caps and renegotiating from above index 1, 19 October 2026
+
+Tested against a clean export of courier-emu `f1ccd92` (which includes the
+C5x XC/RPTB fix, `186d653`), with the harness defaults (`S39=8`, PCMU,
+`--fast --pty-source --host-pace-samples 16`) and the 1080-byte numbered
+host payload from the 12 October after-change run.
+
+**The index-14 corruption is not a supervisor-speed limit.** Lowering the
+80186's cycles per instruction from 5.93 to 4.5 and 3.5 (a supervisor up to
+70% faster, every real-time clock unchanged) leaves the same corruption.
+courier-emu's `--frame-hz` cannot be used to test the INT0 rate: any value
+other than 2401 stops the firmware booting.
+
+**x2 with V.42 LAPM works.** Every earlier qualification forced the Courier to
+`&M0`. With `--courier-at 'S39=8&M5&K0'` the call reports
+`CONNECT 53333/ARQ/x2/LAPM`. V.42 detection, XID and LAPM come up, and the
+short exchange passes all checks exactly in both directions.
+
+**`AT+MS` now bounds x2 in both directions** (V.250 6.4.1). Until now
+`x2_session` ignored the limits that already pruned the offer: the
+downstream mask was fixed at `7FFF` and the upstream at `3FFF`.
+`me_x2_start_locked()` now derives both masks from the call's limits.
+- **Downstream (TX):** index N runs at (B+MD)·8000/6 bit/s
+  (`x2_short_record_rate`): index 1 is 32000, index 14 is 54666.
+- **Upstream (RX):** mask bit N-1 is N·2400 bit/s.
+- If no rate survives, the call is refused.
+
+The Courier selects under the record's W2 mask, both at startup and at every
+fall forward. Capped at 44000, 48000 and 52000, it fell forward to exactly
+index 6, 9 and 12. This corrects "the record's ceiling field does not limit
+it" above, which tried the ceiling field and not W2.
+
+**Renegotiating from above index 1 (fixed here).** When capped below the
+index it measures, the Courier asks to fall forward again about 1.1 s after
+the first change completes. We answered with the RECORD_ALIGN sign pattern
+on a fixed `A5`, and with the record in the current data banks. Above index 1
+the Courier did not accept this:
+- it sent its MP without the ACK bit (`0378`, where the first change has
+  `8378`);
+- it then fell back to Tone A exactly 1.5 s after its S;
+- we stayed in RECORD_TX for the rest of the call.
+
+Our TX tap had both signals correct. The difference is the banks:
+- **Alignment.** Every training bank and index-1 bank starts with `A5`, but
+  index 6's position 0 starts with `A3`. With the alignment on each
+  position's lowest-level code of the current banks, the Courier detects it
+  and keeps repeating its MP.
+- **Record.** It still never ACKed a record in the index-6 banks or in the
+  training banks. It does ACK one in the index-1 (B=19) allocation at the
+  current MD.
+
+Experiment arms: `x2-20261019-rec1-cap44000` (record in index-1 banks, `A5`
+alignment: no ACK), `-align0-44000` (lowest-code alignment, index-6 record:
+the MP repeats for 2.7 s with no ACK), `-rb-training` (training-bank record:
+the first change fails too) and `-rb-index1` (both changes: completes).
+`-mptrace44000` logs every MP accepted before the fix.
+
+With both changes, the second change completes at every cap (36000 to 52000,
+two requests and two completions each), and the Courier stops asking. The
+reference I-modem renegotiation (pair capture at 25.2 s) starts from index 1,
+where both rules give the same signal as before. So that capture cannot tell
+"index-1 banks" apart from "the call's startup banks". I found no
+in-data renegotiation clause in Draft 0.33; this rests on the Courier's behaviour.
+`x2_session_test` covers the index-6 case.
+
+**Where data now holds**, after both changes
+(`reference-data/artifacts/x2-20261019-*`):
+
+| AT+MS max TX | final index | `&M0` (no EC) | `&M5` LAPM, 32.5 s run |
+|---:|---:|---|---|
+| 32000 | 1 | exact | exact |
+| 36000 | 2 | 17/20 lines | exact |
+| 40000 | 3 | 17/20 lines | exact |
+| 44000 | 6 | 6/20 lines | 611/1080 bytes exact, still retransmitting |
+| 48000 | 9 | 6/20 lines | 621/1080 bytes exact, still retransmitting |
+| 52000 | 12 | 1/20 lines | stalls at 21 bytes |
+| none | 14 | 0/20 lines | stalls at 81 bytes |
+
+A longer LAPM soak at the 40000 cap delivered **15750 of 15750 bytes exactly**
+(250 numbered lines) over 132 s of line time (1,060,000 bearer samples). It ran
+at index 3 (40000 down, 31200 up) through both rate changes, and every check
+passed.
+
+Above index 1 our TX tap decodes byte-exact at every index tried: 6 and 12
+here, and 14 on 12 October. The corruption grows with the rate and is on the
+emulated Courier's receive side. courier-emu's original analog Courier
+against its original I-modem also fails a sustained x2 traffic test
+(`courier-emu/docs/imodem-analog-x2-traffic-20261018.md`, uncommitted
+there). Until that is fixed, or real hardware is available,
+`AT+MS=X2,0,0,40000` with LAPM is the highest rate here that delivers exactly.
+
+One fault remains ours: if the Courier does fall back to Tone A during a rate
+change, we still wait in RECORD_TX until the call ends.
+
+Reproduce (clean courier-emu export in `$EMU`):
+
+```
+X2_HOST_EMU_ROOT=$EMU ../courier-emu/.venv/bin/python tools/probe_x2_host_courier.py \
+  --courier-at 'S39=8&M5&K0' --engine-at 'AT+MS=X2,0,0,40000' \
+  --output artifacts/x2-arq-40000 --fast --pty-source --host-pace-samples 16 \
+  --host-at 220000 --host-message-file reference-data/artifacts/x2-codex-20261012-after-change/host-source.bin
+```
+
+`--engine-at` sends DTE commands to our PTY before the call starts.
