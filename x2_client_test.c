@@ -1,0 +1,145 @@
+/* x2 analogue client against our own x2 server session.
+ *
+ * Downstream: the server's x2_session_tx octets drive x2_client_rx_codewords
+ * from stretch B to payload, at several PCM ceilings; the client must find
+ * the server J, the record alignment, the record (index and upstream N), the
+ * final training frame and then the server's payload bits exactly.
+ *
+ * Upstream: the client's Phase 4 symbols (16-point TRN, MP, MP', E) through
+ * SpanDSP's V.34 modulator must give the server's x2_mp_rx a CRC-valid MP
+ * equal to the client's and then E (Draft 0.33 clauses 20, 21). */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <spandsp.h>
+#include "x2_session.h"
+
+#define CHECK(c) do { if(!(c)){fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#c);exit(1);} } while(0)
+
+typedef struct { uint32_t lfsr; uint8_t *bits; size_t count, max; } source_t;
+static int source_bit(void *context)
+{
+    source_t *s=context;
+    unsigned bit=(s->lfsr^(s->lfsr>>2)^(s->lfsr>>3)^(s->lfsr>>5))&1;
+    s->lfsr=(s->lfsr>>1)|(bit<<15);
+    if(s->count<s->max)s->bits[s->count++]=(uint8_t)bit;
+    return (int)bit;
+}
+typedef struct { uint8_t *bits; size_t count, max; } sink_t;
+static void sink_bit(void *context, unsigned bit)
+{
+    sink_t *s=context;
+    if(s->count<s->max)s->bits[s->count++]=(uint8_t)bit;
+}
+
+static void downstream(uint16_t pcm_mask, unsigned expected_index, unsigned expected_n, unsigned no_align)
+{
+    static x2_session_t server;
+    static x2_client_t client;
+    source_t source={0xace1,malloc(1<<20),0,1<<20};
+    sink_t sink={malloc(1<<20),0,1<<20};
+    CHECK(!x2_session_init(&server));
+    CHECK(!x2_client_init(&client,pcm_mask,0x1ffe,5));
+    x2_client_set_put_bit(&client,sink_bit,&sink);
+    x2_session_set_payload_source(&server,source_bit,&source);
+    /* The server has accepted our marker and heard our Phase 3 J. */
+    server.stage=X2_UPSTREAM_WAIT;
+    x2_session_upstream_j(&server);
+    unsigned mp_given=0,payload_samples=0;
+    for(unsigned n=0;n<200000 && payload_samples<48000;++n) {
+        uint8_t code;
+        x2_session_stage_t before=server.stage;
+        CHECK(x2_session_tx(&server,&code,1)==1);
+        /* Ie030002 sends no alignment word: withhold ours, and the client
+         * must find the record's frame phase itself. */
+        if(!(no_align && before==X2_RECORD_ALIGN))x2_client_rx_codewords(&client,&code,1);
+        /* Our S-to-S-bar answer to its J word. */
+        if(client.j_seen && server.stage==X2_J)x2_session_upstream_s_bar(&server);
+        if(!mp_given && server.stage==X2_TRAIN_C){x2_session_receive_mp(&server,&client.mp);mp_given=1;}
+        /* Our acknowledged MP and E, as the server's MP receiver sees them. */
+        if(client.record_valid && !client.e_sent){client.e_sent=1;server.mp_rx.e_detected=1;}
+        if(server.stage==X2_PAYLOAD)++payload_samples;
+        CHECK(server.stage!=X2_FAILED && client.dn!=X2C_DN_FAILED);
+    }
+    /* Finish the frame whose bits the server has already taken. */
+    while(server.training_mapper.output_position!=6) {
+        uint8_t code;
+        CHECK(x2_session_tx(&server,&code,1)==1);
+        x2_client_rx_codewords(&client,&code,1);
+    }
+    CHECK(client.j_seen && client.record_valid && client.final_seen && client.dn==X2C_DN_DATA);
+    CHECK(client.selected_index==expected_index && server.selected_index==expected_index);
+    CHECK(client.upstream_n==expected_n && server.upstream_rate_n==expected_n);
+    CHECK(client.decode_errors==0);
+    CHECK(x2_client_downstream_rate(&client)==x2_pcm_frame_bits(&server.data_config)*8000u/6u);
+    /* Everything before the server's payload is scrambled ones (its
+     * DATA_STARTUP); then exactly the server's payload bits. */
+    CHECK(source.count>1000 && sink.count>=source.count);
+    size_t offset=sink.count-source.count;
+    for(size_t i=0;i<offset;++i)CHECK(sink.bits[i]==1);
+    for(size_t i=0;i<source.count;++i)CHECK(sink.bits[offset+i]==source.bits[i]);
+    printf("  index %2u (%u bit/s down, upstream N=%u)%s: %zu payload bits exact after %zu ones\n",
+           expected_index,x2_client_downstream_rate(&client),expected_n,
+           no_align?", no alignment word":"",source.count,offset);
+    free(source.bits);free(sink.bits);
+}
+
+static int ones_bit(void *unused) { (void)unused; return 1; }
+static x2_mp_t received_mp;
+static unsigned received_count;
+static void mp_received(void *context, const x2_mp_t *mp)
+{
+    (void)context;received_mp=*mp;++received_count;
+}
+static void upstream(void)
+{
+    static x2_client_t client;
+    static x2_mp_rx_t rx;
+    CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
+    CHECK(client.mp.words[0]==((15u<<2)|(13u<<6)) && client.mp.words[1]==0x1ffe && client.mp.words[3]==0x0500);
+    v34_state_t *v34=v34_init(NULL,3200,31200,true,true,ones_bit,NULL,NULL,NULL);
+    CHECK(v34);
+    v34_tx_power(v34,-10.0f);
+    /* Straight into Phase 4: S, S-bar, then 16-point TRN and MP. */
+    client.up=X2C_UP_S2;client.j_seen=1;
+    CHECK(!v34_tx_start_external_symbols(v34,4,1,x2_client_get_symbol,&client));
+    x2_mp_rx_init(&rx,mp_received,NULL);
+    int16_t audio[160];
+    unsigned acked=0;
+    for(unsigned block=0;block<2000 && !rx.e_detected;++block) {
+        int n=v34_tx(v34,audio,160);
+        for(int i=n;i<160;++i)audio[i]=0;
+        /* Through the G.711 bearer, as the server receives it. */
+        for(int i=0;i<160;++i)audio[i]=ulaw_to_linear(linear_to_ulaw(audio[i]));
+        x2_mp_rx_audio(&rx,audio,160);
+        if(received_count && !client.record_valid) {
+            CHECK(!memcmp(received_mp.words,client.mp.words,sizeof(received_mp.words)));
+            client.record_valid=1;client.ack_pending=1;client.upstream_n=13;
+            /* The engine's handover: B1/data from the symbol after E. */
+            CHECK(!v34_v90_arm_tx_data(v34,13,0,0,0,NULL,x2_client_data_due));
+        }
+        if(received_count && (received_mp.words[0]&0x8000))acked=1;
+    }
+    CHECK(received_count>=2 && acked && rx.e_detected);
+    CHECK(client.up==X2C_UP_DATA && client.e_sent);
+    for(unsigned block=0;block<4;++block)v34_tx(v34,audio,160);
+    CHECK(v34_get_tx_data_mode(v34));
+    printf("  upstream: MP %04x/%04x/%04x/%04x, acknowledged, E detected (%u valid frames)\n",
+           received_mp.words[0]&0x7fff,received_mp.words[1],received_mp.words[2],received_mp.words[3],
+           rx.valid_frames);
+    v34_free(v34);
+}
+
+int main(void)
+{
+    downstream(0x0001,1,13,0);
+    downstream(0x003f,6,13,0);
+    downstream(0x0fff,12,13,0);
+    downstream(0x7fff,15,13,0);
+    downstream(0x0001,1,13,1);
+    downstream(0x7fff,15,13,1);
+    upstream();
+    printf("x2 client: downstream record/final/payload at four ceilings and upstream MP/E passed\n");
+    return 0;
+}

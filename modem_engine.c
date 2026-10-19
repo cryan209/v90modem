@@ -3248,6 +3248,13 @@ static bool g_x2_upstream_prepared, g_x2_upstream_started;
 static bool g_x2_reneg_seen;
 static bool g_x2_data_stack_started;
 static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
+/* x2 analogue client (x2_client.c): SpanDSP's V.34 modulator carries the
+   upstream from the end of the marker; the downstream is decoded from the
+   received codewords. */
+static bool g_x2_client_tx_started, g_x2_client_armed;
+static uint64_t g_x2_client_samples;
+static x2_client_up_t g_x2_client_last_up;
+static x2_client_dn_t g_x2_client_last_dn;
 
 /*
  * Which side of a V.90 call this endpoint offers to be.
@@ -3596,6 +3603,16 @@ bool me_mode_name_valid(const char *mode)
     return mode && *mode && me_offer_from_mode(mode, true, &o);
 }
 
+/* Whether this end receives the PCM direction: the V.90 analogue role, or
+ * the asymmetric x2 client, which is the end that dials (Draft 0.33 3.3). */
+static bool me_offer_pcm_received(const me_offer_t *o, bool calling)
+{
+    const char *role = getenv("ME_V90_ROLE");
+
+    return (o->v90 && role && strcmp(role, "analogue") == 0)
+        || (o->x2 && !o->x2_symmetric && calling);
+}
+
 static bool me_resolve_offer(const char *mode, bool automode)
 {
     const char *role = getenv("ME_V90_ROLE");
@@ -3603,7 +3620,7 @@ static bool me_resolve_offer(const char *mode, bool automode)
 
     if (!me_offer_from_mode(mode, automode, &o))
         return false;
-    if (!me_offer_apply_limits(&o, g_lim, o.v90 && role && strcmp(role, "analogue") == 0))
+    if (!me_offer_apply_limits(&o, g_lim, me_offer_pcm_received(&o, g_state == ME_DIALING)))
         ME_LOG("[ME] AT+MS: no modulation of mode %s connects within %d-%d/%d-%d bit/s\n",
                mode, g_lim[0], g_lim[1], g_lim[2], g_lim[3]);
     g_enable_x2 = o.x2;
@@ -3640,16 +3657,19 @@ int me_set_modulation_offer(const char *mode, bool automode)
 int me_set_modulation_limits(const char *mode, bool automode,
                              int min_tx, int max_tx, int min_rx, int max_rx)
 {
-    const char *role = getenv("ME_V90_ROLE");
     const int l[4] = { min_tx, max_tx, min_rx, max_rx };
     me_offer_t o;
 
     if (!me_offer_from_mode(mode, automode, &o))
         return -1;
     /* V.250 5.4.4.2: a setting this DCE cannot honour is ERROR, not an OK
-     * that leaves the next call unable to connect. */
-    if (!me_offer_apply_limits(&o, l, o.v90 && role && strcmp(role, "analogue") == 0))
-        return -1;
+     * that leaves the next call unable to connect.  Asymmetric x2's PCM
+     * direction depends on whether the next call dials or answers. */
+    if (!me_offer_apply_limits(&o, l, me_offer_pcm_received(&o, false))) {
+        me_offer_from_mode(mode, automode, &o);
+        if (!(o.x2 && !o.x2_symmetric && me_offer_apply_limits(&o, l, true)))
+            return -1;
+    }
     me_offer_from_mode(mode, automode, &o);     /* the name, unpruned */
     pthread_mutex_lock(&g_cfg_mtx);
     snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", o.name);
@@ -5148,6 +5168,10 @@ static int me_start_or_restart_v8_locked(int answer_tone)
          * Courier waveform classifier must also accept the signal. */
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
         v8_parms.jm_cm.pcm_modem_availability = 0;
+        /* The analogue client's CM (Courier e0 c1 45 10 10 0d) clears the
+         * category bit the server's JM (.. 8d) sets. */
+        if (g_calling_party && !g_enable_x2_symmetric)
+            v8_parms.jm_cm.pstn_access        = 0;
     } else {
         v8_parms.jm_cm.pstn_access            = 0;
         v8_parms.jm_cm.pcm_modem_availability = 0;
@@ -10198,6 +10222,80 @@ static void me_x2_symmetric_progress_locked(void)
         }
     }
 }
+static void me_x2_client_put_bit(void *unused,unsigned bit)
+{
+    (void)unused;
+    if(!g_x2_data_stack_started)return;
+    me_data_rx_first_bit();
+    ds_rx_put_bit(&g_data_stack,(int)bit);
+}
+/* The analogue client after its marker (x2_client.c): log each stage, start
+ * the data stack on the server's record, hand the modulator to V.34 B1/data
+ * after our E (Draft 0.33 3.4, 21), and enter DATA once both directions are
+ * in data mode. */
+static void me_x2_client_progress_locked(void)
+{
+    x2_client_t *c=&g_x2.cl;
+    if(c->up!=g_x2_client_last_up || c->dn!=g_x2_client_last_dn) {
+        trace_phase("X2 client up=%s dn=%s (upstream symbol %llu, downstream codeword %llu)",
+                    x2_client_up_name(c->up),x2_client_dn_name(c->dn),
+                    (unsigned long long)c->up_total,(unsigned long long)c->dn_samples);
+        g_x2_client_last_up=c->up;g_x2_client_last_dn=c->dn;
+    }
+    if(g_x2.stage!=X2_CLIENT)return;
+    if(c->dn==X2C_DN_FAILED) {
+        trace_phase("X2 client: record %04x/%04x/%04x not usable (local PCM mask %04x, MP %04x/%04x)",
+                    c->record[0],c->record[1],c->record[2],c->pcm_mask,c->mp.words[0],c->mp.words[1]);
+        x2_session_fail(&g_x2,X2_FAILURE_CLIENT);return;
+    }
+    if(c->record_valid && !g_x2_data_stack_started) {
+        int rate=(int)x2_client_downstream_rate(c);
+        if(data_stack_start_online(rate,true)){x2_session_fail(&g_x2,X2_FAILURE_CLIENT);return;}
+        /* As the server does: V.42's T400 waits for the first downstream
+           bit, which follows our E and the server's final frame. */
+        if(g_data_framing==DS_FRAMING_V42) {
+            ds_v42_restart_t400(&g_data_stack,ME_V42_T400_DEFER_MS);
+            g_data_t400_deferred=true;
+        }
+        g_x2_data_stack_started=true;
+        trace_phase("X2 client record=%04x/%04x/%04x index=%u B=%u MD=%u downstream=%d upstream=%u",
+                    c->record[0],c->record[1],c->record[2],c->selected_index,
+                    c->data.amplitude_bits,c->data.independent_signs,rate,c->upstream_n*2400);
+    }
+    if(c->record_valid && g_v34 && g_x2_client_tx_started && !g_x2_client_armed) {
+        /* The record's flags choose our V.34 data encoder (Draft 0.33 21;
+           courier-emu x2-courier-mp-fields.md, "upstream B1 acquisition":
+           the Courier given F37C sends expanded shaping and 64 states, and
+           its B06E reads bit 13 as the non-linear encoder): bit 14 expanded
+           shaping, bit 12 the 64-state trellis (SpanDSP code 2, else 16
+           states, code 0), bit 13 non-linear. Ie030002 sends F37C, and at
+           31200 decodes our upstream only with all three (19 Oct; linear
+           there prints garbage at its DTE). Our server sends D000 and
+           identifies shaping and trellis from B1. */
+        uint16_t w0=c->record[0];
+        int trellis=(w0&0x1000)?2:0,nonlinear=(w0&0x2000)!=0,expanded=(w0&0x4000)!=0;
+        if(v34_v90_arm_tx_data(g_v34,(int)c->upstream_n,trellis,nonlinear,expanded,NULL,x2_client_data_due)) {
+            x2_session_fail(&g_x2,X2_FAILURE_CLIENT);return;
+        }
+        g_x2_client_armed=true;
+        trace_phase("X2 client upstream: N=%u, %s shaping, %d states, %s encoder",
+                    c->upstream_n,expanded?"expanded":"minimum",trellis?64:16,nonlinear?"non-linear":"linear");
+    }
+    if(g_state==ME_TRAINING && c->dn==X2C_DN_DATA && g_v34 && v34_get_tx_data_mode(g_v34)) {
+        int downstream=(int)x2_client_downstream_rate(c),upstream=(int)c->upstream_n*2400;
+        g_state=ME_DATA;g_phase_start_ms=0;
+        g_report_tx_rate=upstream;g_report_rx_rate=downstream;
+        trace_phase("X2 client enter DATA: downstream=%d upstream=%d",downstream,upstream);
+        if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
+            g_data_connect_reported=true;di_on_connected(downstream);
+        }
+    }
+    /* The Courier reaches data about 7 s after its marker. */
+    if(g_state==ME_TRAINING && g_x2_client_samples>30*8000) {
+        trace_phase("X2 client: no data mode 30 s after the marker");
+        x2_session_fail(&g_x2,X2_FAILURE_CLIENT);
+    }
+}
 static void me_x2_progress_locked(void)
 {
     if(g_x2.a_reversals!=g_x2_last_reversals || g_x2.b_reversed!=g_x2_last_b_reversed) {
@@ -10218,6 +10316,8 @@ static void me_x2_progress_locked(void)
             g_hangup_cause = "Remote (x2: peer retrain, Tone A in data)";
         else if (g_x2.failure == X2_FAILURE_RENEG_TIMEOUT)
             g_hangup_cause = "Modem (x2: rate change not completed)";
+        else if (g_x2.failure == X2_FAILURE_CLIENT)
+            g_hangup_cause = "Modem (x2 client: startup not completed)";
         if (g_x2.failure != X2_FAILURE_NONE)
             trace_phase("X2 failed: %s in %s (renegotiation %u, %llu samples after its S, MP %s, E %s)",
                         x2_session_failure_name(g_x2.failure),
@@ -10244,6 +10344,36 @@ static void me_x2_progress_locked(void)
 static bool me_x2_tx_locked(uint8_t *codewords, int count)
 {
     if (g_mod != ME_MOD_X2 || (g_state != ME_TRAINING && g_state!=ME_DATA)) return false;
+    if (g_x2.client && g_x2.stage == X2_CLIENT) {
+        if (!g_x2_client_tx_started) {
+            /* Draft 0.33 3.4: V.34 at the announced 3200 baud, high carrier. */
+            g_v34 = v34_init(NULL,3200,31200,true,true,me_x2_payload_bit,NULL,v34_put_bit_cb,NULL);
+            if (g_v34) v34_tx_power(g_v34,-10.0f);
+            if (!g_v34 || v34_tx_start_external_symbols(g_v34,4,1,x2_client_get_symbol,&g_x2.cl)) {
+                x2_session_fail(&g_x2,X2_FAILURE_CLIENT);
+            } else {
+                logging_state_t *log = v34_get_logging_state(g_v34);
+                if (log) span_log_set_level(log,me_span_flow_level());
+                g_x2_client_tx_started = true;
+                trace_phase("X2 client marker sent: upstream V.34 3200 high carrier");
+            }
+        }
+        if (g_x2_client_tx_started) {
+            for (int offset = 0; offset < count; ) {
+                int16_t linear[320];
+                int chunk = count - offset, n;
+                if (chunk > 320) chunk = 320;
+                n = v34_tx(g_v34, linear, chunk);
+                for (int i = n < 0 ? 0 : n; i < chunk; i++) linear[i] = 0;
+                for (int i = 0; i < chunk; i++) codewords[offset + i] = linear_to_pcm(linear[i]);
+                offset += chunk;
+            }
+            g_x2_client_samples += (uint64_t)count;
+        } else memset(codewords, pcm_idle(), (size_t)count);
+        me_x2_client_progress_locked();
+        me_x2_progress_locked();
+        return true;
+    }
     x2_session_tx(&g_x2, codewords, (size_t)count);
     if(g_x2.symmetric)me_x2_symmetric_progress_locked();
     me_x2_progress_locked();
@@ -10253,14 +10383,29 @@ static void me_x2_start_locked(void)
 {
     const char *sym=getenv("ME_X2_SYMMETRIC");
     bool symmetric=sym ? atoi(sym)!=0 : g_enable_x2_symmetric;
-    if (!symmetric && (g_calling_party || g_law != ME_LAW_ULAW)) {
-        ME_LOG("[ME] x2 currently requires an answerer; asymmetric x2 requires PCMU\n");
+    bool client = !symmetric && g_calling_party;
+    if (!symmetric && g_law != ME_LAW_ULAW) {
+        ME_LOG("[ME] asymmetric x2 requires PCMU\n");
         g_state = ME_HANGUP;
         return;
     }
     if (g_v34) { v34_free(g_v34); g_v34 = NULL; }
     if(symmetric)x2_session_init_symmetric(&g_x2,g_law==ME_LAW_ALAW && !g_x2_mu_control,!g_calling_party);
-    else {
+    else if(client) {
+        /* AT+MS (V.250 6.4.1): RX bounds the PCM indices our MP's N1 offers,
+           TX the V.34 rates its W2 offers (Draft 0.33 clause 21). */
+        uint16_t pcm=x2_short_record_mask(g_lim[LIM_MIN_RX],g_lim[LIM_MAX_RX]),up=0;
+        for(unsigned n=1;n<=13;++n)
+            if(lim_admits((int)n*2400,g_lim[LIM_MIN_TX],g_lim[LIM_MAX_TX]))up|=(uint16_t)(1u<<(n-1));
+        if(x2_session_init_client(&g_x2,pcm,up,5)) {
+            ME_LOG("[ME] x2: no rate inside AT+MS TX %d-%d, RX %d-%d bit/s\n",
+                   g_lim[LIM_MIN_TX],g_lim[LIM_MAX_TX],g_lim[LIM_MIN_RX],g_lim[LIM_MAX_RX]);
+            g_state=ME_HANGUP;return;
+        }
+        x2_client_set_put_bit(&g_x2.cl,me_x2_client_put_bit,NULL);
+        trace_phase("X2 client: PCM index mask %04x, upstream mask %04x, MP %04x/%04x/%04x/%04x",
+                    pcm,up,g_x2.cl.mp.words[0],g_x2.cl.mp.words[1],g_x2.cl.mp.words[2],g_x2.cl.mp.words[3]);
+    } else {
         x2_session_init(&g_x2);
         /* x2 Draft 0.33 section 20: select N2 from the peer's W2 rates; by
          * default we offer every V.34 rate and the peer's mask decides.  The
@@ -10295,6 +10440,9 @@ static void me_x2_start_locked(void)
     }
     x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
+    g_x2_client_tx_started=g_x2_client_armed=false;
+    g_x2_client_samples=0;
+    g_x2_client_last_up=X2C_UP_DATA;g_x2_client_last_dn=X2C_DN_FAILED;
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;
     g_x2_reneg_seen=false;
@@ -10317,14 +10465,22 @@ static void me_x2_start_locked(void)
             x2_session_rx(&g_x2,history,(size_t)n);offset+=n;
         }
     }
-    ME_LOG("[ME] x2 digital startup: INFO0=3dff; waiting for %s (RX sample %llu)\n",
-           symmetric?"symmetric INFO0/tone exchange":"CRC-valid peer marker",
+    ME_LOG("[ME] x2 %s startup: INFO0=%05x; waiting for %s (RX sample %llu)\n",
+           client?"analogue client":"digital",(unsigned)g_x2.info_body,
+           symmetric?"symmetric INFO0/tone exchange":client?"the server's INFO0 and tone exchange":"CRC-valid peer marker",
            (unsigned long long)g_rx_audio_samples);
     me_x2_progress_locked();
 }
 static void me_x2_rx_locked(const int16_t *samples, int count)
 {
     x2_session_rx(&g_x2, samples, (size_t)count);
+    if(g_x2.client) {
+        /* Phase 2 only: after the marker the downstream is decoded from the
+           codewords (me_rx_g711_impl) and nothing here receives V.34. */
+        me_x2_client_progress_locked();
+        me_x2_progress_locked();
+        return;
+    }
     if(g_x2.mp_valid && !g_x2_data_stack_started && g_x2.stage!=X2_FAILED) {
         unsigned bits=x2_pcm_frame_bits(&g_x2.data_config);
         if(data_stack_start_online((int)(bits*8000/6),false))g_x2.stage=X2_FAILED;
@@ -18243,6 +18399,12 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
+    /* x2 client: the server's script and data mapper are codeword sequences
+       (Draft 0.33 3.5, 10, 11); the linear copy still reaches
+       me_x2_rx_locked below for the stage bookkeeping. */
+    if(g_mod==ME_MOD_X2 && g_x2.client && g_x2.stage==X2_CLIENT
+       && (g_state==ME_TRAINING || g_state==ME_DATA))
+        x2_client_rx_codewords(&g_x2.cl,codewords,(size_t)count);
     if(g_mod==ME_MOD_X2 && g_x2.symmetric && g_x2.stage==X2_SYMMETRIC
        && (g_state==ME_TRAINING || g_state==ME_DATA)) {
         for(int i=0;i<count;++i) {

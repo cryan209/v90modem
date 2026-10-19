@@ -3,9 +3,10 @@
 The recovered payload mapper is implemented and checked against original DSP
 execution. `x2_session.c` now connects capability exchange and downstream
 training to the modem engine's raw-G.711 path. Select `--mode x2` (or
-`ME_MODE=x2` in the engine replay tool). The supported initial profile is an
-answering digital endpoint using PCMU, a 3200-baud high-carrier upstream and
-the recovered low-level training alphabet.
+`ME_MODE=x2` in the engine replay tool). An answering call runs the digital
+server; a call we place runs the analogue client (`x2_client.c`, see "The
+analogue client, 19 October 2026"). Both use PCMU, a 3200-baud high-carrier
+upstream and the recovered low-level training alphabet.
 
 The supported short-record path receives MP, transmits its three-word response,
 waits for upstream E and activates the downstream payload source. Fresh original
@@ -958,3 +959,131 @@ logged hang-up is the bounded answer until a peer is seen to retrain for
 another reason. `x2_session_test` covers the deadline, Tone A in RECORD_TX and
 in PAYLOAD, S during RECORD_TX, and quiet or guard-only tones that must not
 trip it.
+
+## The analogue client, 19 October 2026
+
+We can now be the other end: the analogue x2 client that dials a server, as
+the Courier 403 does. `AT+MS=X2` (or `--mode x2`) on a call we place selects
+it; answering still selects the server. PCMU only, like the server.
+
+**What it sends**, from the Courier's own line output (Draft 0.33 3.3-3.4 and
+`../courier-emu/docs/x2-v90-protocol-selection.md`):
+
+- V.8 as caller, with the x2 carrier-phase signature, and a CM whose
+  GSTN-access octet is present but empty (Courier `e0 c1 45 10 10 0d`; the
+  server's JM sends `8d`). Ie030002's classifier needs that octet as well
+  as the inversions: without it its `de14` ACC read -132648 (rejected),
+  with it +205351.
+- INFO0 `21ff` on 1200 Hz: high carrier, asymmetry and CME clear, so the
+  server's gate (clause 12.2) takes the marker path. Tone B with the caller's
+  reversal (V.34 11.2.1.1), shared with the symmetric caller in
+  `x2_session.c`. A real server sends Tone A with the 1800 Hz guard tone
+  6 dB down (V.34 10.1.2.1; our server does not), so the Tone A detector
+  counts the guard toward the tone's purity.
+- Silence through the server's 160 ms probe, then the marker `4d` (two lead-in
+  ones and the 39-bit frame) at 600 bit/s on 1200 Hz.
+- 60 ms later, V.34 at 3200 baud on the high carrier, through SpanDSP's
+  modulator fed by `x2_client_get_symbol()`: S 128T, S-bar 16T, PP, 6400T of
+  4-point TRN, 440T of 16-point J (`0x89b0`, V.34 Table 18), then silence.
+- On the server's J word, S, S-bar, 16-point TRN and the four-word MP
+  (clause 21): W1 = N1<<2 | N2<<6 with N1 our highest PCM index and N2 our
+  highest V.34 N, W2 the V.34 mask, W4 = MD<<8 (MD 5, as the Courier).
+  N1 is not forced to 1 the way the Courier forces it: our receiver is exact,
+  so we ask for the top of the AT+MS RX range at once.
+- Once the server's record has arrived, two MPs with the ACK bit, E, then
+  B1 and V.34 data via `v34_v90_arm_tx_data()`. The rate is the highest N
+  in our W2 under both the record's V.34 ceiling (bits 6..9) and our N2.
+  The record's flags choose the encoder: bit 14 expanded shaping, bit 12
+  the 64-state trellis, bit 13 the non-linear encoder.
+
+**What it receives** (`x2_client_rx_codewords()`): the bearer delivers the
+server's octets, so the downstream is decoded in the codeword domain with no
+equalizer. Stretch B (`b1`/`31`) is descrambled with GPC until the 12-bit
+script word `09b0` repeats. Through E training all six frame phases are
+decoded; the phase whose descrambled stream holds two identical CRC-valid
+three-word records (training banks, B=19, MD=5) carries the record. Our own
+server's 54-octet RECORD_ALIGN word also sets the phase directly. Both
+record fields are ceilings: the downstream index is the highest the record's
+PCM mask allows under its index field and our N1. After our E the server
+finishes the record, sends one frame of ones on a record boundary (96-bit
+records start on frame boundaries) and switches to the data banks on the next
+frame, keeping parity and scrambler history; from there every frame goes to
+the data stack.
+
+**Results.** `x2_client_test` runs our server's octets into the client at
+indices 1, 6, 12 and 15 and recovers the server's payload bit-exact after its
+DATA_STARTUP ones, and puts the client's MP and E through SpanDSP's modulator
+into the server's MP receiver. `engine_pair_test --both-at AT+MS=X2` connects
+whole engines in about 15 s: CONNECT 56000 both ends, 31200 upstream, DTE text
+both ways, and a 60 s hold. AT+MS caps hold in both directions (client RX
+40000 -> 40000; server TX 44000 -> 44000; client TX 9600 -> upstream 9600 with
+56000 down). These are in the fast tier.
+
+**Two server-side faults the client exposed**, both in `x2_mp_rx.c`, so both
+also affect calls from a real Courier:
+
+- *The carrier phase estimate flipped by 90 degrees.* The MP receiver
+  derotates by atan2 of the fourth-power mean over 4. For the V.34 16-point
+  grid that mean sits at 180 degrees when the carrier offset is zero, so noise
+  flips the estimate between +45 and -45 degrees, and every flip is a
+  differential symbol error on every hypothesis at once. It is now unwrapped
+  per timing hypothesis; valid frames over the same signal rose about 15%.
+- *E was declared early.* Every MP starts 17 ones, a zero, then W1's two low
+  zeros, so one symbol error on bits 16..19 reads as E's 20 ones. With W1
+  `034c` (N1=3) a timing hypothesis rejecting 44% of its frames declared E
+  300 ms before the client sent it, and the call failed. E is now taken only
+  from the hypothesis with the longest unbroken run of valid MPs. Requiring an
+  acknowledged MP first is not an option: the captured Courier's E follows
+  `0344`, its ACK set while the last frame was already on the line.
+
+**AT+MS direction.** The offer pruning assumed our TX is the PCM direction
+unless we are the V.90 analogue role, so an x2 client capped at 9600 TX
+dropped x2 from its V.8 offer. Asymmetric x2 now uses the call direction:
+the dialling end receives the PCM (`me_offer_pcm_received()`).
+
+### The analogue client against Ie030002
+
+`tools/probe_x2_client_imodem.py` runs our client (v90_engine_peer `--call`)
+against the original Ie030002 I-modem firmware answering in courier-emu
+(S58=48: x2, server and symmetric on, V.90 off), byte-exact PCMU, nothing
+recorded on either side. With `ME_ANS_NOTCH_RATIO=3` and `AT\N0`:
+
+- the I-modem prints **CONNECT 57333/x2/NONE** (its display label for index
+  15) and we print CONNECT 56000 (index 15 at B=37, MD=5);
+- its line `IMODEM-X2-SERVER-0123456789` arrives at our DTE exactly (the high
+  bits are its DTE's parity on 7-bit characters), and ours,
+  `OUR-X2-CLIENT-0123456789!`, arrives at its DTE exactly, six copies;
+- upstream 31200 (N=13) by default, and 24000 when AT+MS caps our TX there.
+
+Evidence: `reference-data/artifacts/x2-client-imodem-20261019` (both DTE
+transcripts, our engine log, the I-modem result). Each of these had to change
+before it worked, and each is something our own server had not exercised:
+
+1. **ANSam.** Our caller never recognised the I-modem's ANSam: until its echo
+   canceller settles (about 2 s) its output carries copies of our CI at
+   -30 dB, and SpanDSP's purity test (notch energy under 1/6 of the channel)
+   fails until 4.1 s, leaving two good cycles of the three it needs before
+   the I-modem gives up at 5.3 s. `ME_ANS_NOTCH_RATIO=3` detects it at 3.8 s.
+   The default is unchanged here because it is shared by every peer.
+2. **The CM access octet**, above.
+3. **The guard tone**, above.
+4. **No alignment word.** The I-modem accepted our MP 425 times (CRC at its
+   A9DF) and sent its record from 13.61 s, but in place, on the E-training
+   mapper's frame phase with no 54-octet alignment word. Our server's
+   RECORD_ALIGN is not what Ie030002 does at startup.
+5. **Ceilings, not choices.** The record was `F37C/7FFF/0000` whatever we
+   asked for, N1=1 included.
+6. **The encoder flags.** Linear at 31200 printed garbage at the I-modem's
+   DTE (its decoder ran on our idle marks); the non-linear encoder fixed it.
+
+**Not done:**
+
+- **LAPM against Ie030002.** With V.42 enabled, our XIDs got no response 20
+  times, SABME then UA brought LAPM up on our side, and it fell over. The
+  I-modem never printed CONNECT. Open.
+- **Fall forward and retrain.** The client never starts the in-data fall
+  forward. It doesn't need to, because it asks for its ceiling at startup. It
+  also does not answer a server Tone A retrain.
+- **Bearer.** There is no analogue front end, so the client needs a
+  byte-exact bearer.
+- **Real hardware.** No real server has been tried.

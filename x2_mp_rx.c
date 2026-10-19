@@ -3,6 +3,25 @@
 #include <math.h>
 #include <string.h>
 #define PI 3.14159265358979323846
+static int positive_ulaw(unsigned code)
+{
+    unsigned c = (~code) & 127;
+    return (int)((((c & 15) << 3) + 132) << (c >> 4)) - 132;
+}
+/* Ie030002 D229/D238, CB3D: first nine-entry training alphabet, B=19,
+ * MD=5. The allocation banks used after training are a separate constructor.
+ */
+void x2_training_config(x2_pcm_config_t *c)
+{
+    static const uint8_t codes[] = {0xa5,0xa7,0xad,0xaf,0xb7,0xbd,0xc5,0xcf,0xe5};
+    unsigned i,j;
+    memset(c,0,sizeof(*c)); c->amplitude_bits=19; c->independent_signs=5;
+    for (i=0;i<128;++i) c->levels[i]=(int16_t)(positive_ulaw(128+i)/2);
+    for (i=0;i<6;++i) {
+        c->sizes[i]=9;
+        for(j=0;j<9;++j)c->banks[i][j]=(uint16_t)(codes[j]*257u);
+    }
+}
 void x2_mp_rx_init(x2_mp_rx_t *r,x2_mp_received_t received,void *context)
 {
     if(!r)return;
@@ -27,7 +46,17 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
             /* Draft 0.33 upstream continuation: the same hypothesis must
              * have two agreeing CRC-valid MPs. MP sync is only 17 ones;
              * bits inside a protected record never count toward E. */
-            if(h->ones==20 && h->repeats>=2 && !r->e_detected) {
+            /* Only on the hypothesis tracking the MP best. Every MP begins
+             * 17 ones, 0, then W1's two low zeros, so one symbol error on
+             * bits 16..19 reads as 20 ones: with W1 034c (N1=3) a timing
+             * hypothesis rejecting 44% of its frames declared E 300 ms
+             * early (client pair, 19 Oct). An ACKed MP is not required:
+             * the captured Courier's E follows 0344, its ACK set while the
+             * last frame was already on the line. */
+            unsigned best=0;
+            for(unsigned t=0;t<10;++t)for(unsigned p=0;p<2;++p)
+                if(r->hypotheses[t][p].repeats>best)best=r->hypotheses[t][p].repeats;
+            if(h->ones==20 && h->repeats>=2 && h->repeats>=best && !r->e_detected) {
                 r->e_detected=1;r->e_timing=timing;r->e_phase=phase;
                 r->e_sample=r->samples;
             }
@@ -62,8 +91,19 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
     if(r->samples<1000)return;
     double reference=sqrt(r->power[timing]);
     if(reference<100)return;
+    /* atan2()/4 jumps by 90 degrees when the fourth-power mean crosses 180
+     * degrees -- where the V.34 16-point grid's mean sits at zero carrier
+     * offset -- and each jump is a differential symbol error on every
+     * hypothesis. Track it continuously instead; differential decoding
+     * absorbs the constant 90-degree ambiguity. */
+    double estimate=atan2(r->fourth_im[timing],r->fourth_re[timing])/4;
+    if(r->phase_valid[timing]) {
+        double step=estimate-r->phase[timing];
+        estimate=r->phase[timing]+step-floor(step/(PI/2)+0.5)*(PI/2);
+    }
+    r->phase[timing]=estimate;r->phase_valid[timing]=1;
     for(unsigned p=0;p<2;++p) {
-        double phase=atan2(r->fourth_im[timing],r->fourth_re[timing])/4+p*PI/4;
+        double phase=estimate+p*PI/4;
         double x=re*cos(phase)+im*sin(phase),y=im*cos(phase)-re*sin(phase);
         double angle=atan2(y,x)*180/PI;if(angle<0)angle+=360;
         double radius=sqrt(power);unsigned orbit;double base;

@@ -63,26 +63,7 @@ int x2_session_init_symmetric(x2_session_t *s,unsigned alaw,unsigned answering)
     x2_sym_link_init(&s->sym,answering,NULL,NULL,NULL);
     return 0;
 }
-static int positive_ulaw(unsigned code)
-{
-    unsigned c = (~code) & 127;
-    return (int)((((c & 15) << 3) + 132) << (c >> 4)) - 132;
-}
 static int ones(void *unused) { (void)unused; return 1; }
-/* Ie030002 D229/D238, CB3D: first nine-entry training alphabet, B=19,
- * MD=5. The allocation banks used after training are a separate constructor.
- */
-static void training_config(x2_pcm_config_t *c)
-{
-    static const uint8_t codes[] = {0xa5,0xa7,0xad,0xaf,0xb7,0xbd,0xc5,0xcf,0xe5};
-    unsigned i,j;
-    memset(c,0,sizeof(*c)); c->amplitude_bits=19; c->independent_signs=5;
-    for (i=0;i<128;++i) c->levels[i]=(int16_t)(positive_ulaw(128+i)/2);
-    for (i=0;i<6;++i) {
-        c->sizes[i]=9;
-        for(j=0;j<9;++j)c->banks[i][j]=(uint16_t)(codes[j]*257u);
-    }
-}
 int x2_session_init(x2_session_t *s)
 {
     unsigned i;
@@ -92,7 +73,8 @@ int x2_session_init(x2_session_t *s)
     s->downstream_rate_mask=0x7fff;
     /* Captured I-modem INFO0 body 11111111101111000, first bit first.
      * This is V.34's 17-bit INFO0, not V.90's extended INFO0d. */
-    x2_info_encode(0x3dff,17,s->info_bits);
+    s->info_body=0x3dff;
+    x2_info_encode(s->info_body,17,s->info_bits);
     /* V.34 10.1.2.4/Table 17, 24 periods in 160 ms. The captured x2
        digital-server probe (5.01..5.17 s) has RMS 2450, not ordinary
        analogue L1's 6 dB boost. Preserve that PCM-server level here. */
@@ -106,6 +88,23 @@ int x2_session_init(x2_session_t *s)
     for(i=0;i<40;++i)s->info_rx[i].clock=i*200;
     x2_scrambler_init(&s->training_scrambler,18,0);
     return 0;
+}
+int x2_session_init_client(x2_session_t *s,uint16_t pcm_mask,uint16_t upstream_mask,unsigned md)
+{
+    if(x2_session_init(s))return -1;
+    s->client=1;s->answering=0;
+    /* The Courier's INFO0 (Draft 0.33 3.3, Table 3B): body bits 12..28
+     * 11111111100001000 -- 3200 high carrier (bit 18), asymmetry 0 and CME
+     * clear (bits 21..24), so the server's word differs in bit 24 and its
+     * gate takes the marker path (clause 12.2). */
+    s->info_body=0x21ff;
+    x2_info_encode(s->info_body,17,s->info_bits);
+    /* Clause 5.1: two lead-in ones, then the 39-bit framed marker. Body 4d:
+     * high carrier, PCM (index 6) downstream to us, V.34 index 4 (3200)
+     * upstream -- the originator value the server parse accepts. */
+    s->marker_bits[0]=s->marker_bits[1]=1;
+    if(x2_info_encode(0x4d,7,s->marker_bits+2)!=39)return -1;
+    return x2_client_init(&s->cl,pcm_mask,upstream_mask,md);
 }
 static void mp_received(void *context,const x2_mp_t *mp)
 {
@@ -185,6 +184,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
         s->b_samples=s->b_position=s->b_crossing_valid=0;
     }
     if(next==X2_TRAIN_C)x2_mp_rx_init(&s->mp_rx,mp_received,s);
+    if(next==X2_CLIENT_MARKER)s->info_clock=s->info_position=0;
     if(next==X2_DATA_STARTUP) {
         /* Ie030002 A8F1/C940 (039F bit 7 clear): six final training
          * samples, CFF4 bank selection, 0FF0 mapped samples, then CC02.
@@ -194,7 +194,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
     }
     if(next==X2_TRAIN_B)x2_scrambler_init(&s->training_scrambler,18,0);
     if(next==X2_TRAIN_E) {
-        x2_pcm_config_t c;training_config(&c);
+        x2_pcm_config_t c;x2_training_config(&c);
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,ones,NULL))s->stage=X2_FAILED;
     }
     if(next==X2_RECORD_TX) {
@@ -211,7 +211,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * uses a linear constellation (V.34 9.7). */
         build_record(s);
         s->record_position=0;
-        x2_pcm_config_t c;training_config(&c);
+        x2_pcm_config_t c;x2_training_config(&c);
         /* In data the record rides the index-1 (B=19) data allocation at
          * the current MD, not the training alphabet: the captured I-modem
          * record decodes there (pair capture, 25.2 s, from index 1), and
@@ -228,6 +228,10 @@ static void fail(x2_session_t *s,x2_session_failure_t why)
     if(s->stage==X2_FAILED)return;
     s->failure=why;s->failed_stage=s->stage;stage(s,X2_FAILED);
 }
+void x2_session_fail(x2_session_t *s,x2_session_failure_t why)
+{
+    if(s)fail(s,why);
+}
 static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
 {
     if(!h->count) {
@@ -238,7 +242,7 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     h->bits[h->count-1]=(uint8_t)bit;
     unsigned length=h->count++;
     uint32_t body;
-    if(s->peer_info_valid && length==23 && !x2_info_decode(h->bits,7,&body)) {
+    if(!s->client && s->peer_info_valid && length==23 && !x2_info_decode(h->bits,7,&body)) {
         unsigned index,high;
         if(!x2_marker_parse(body,1,&index,&high)) {
             h->count=0;
@@ -254,6 +258,9 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     if(!(body&0x40))return;
     if(s->symmetric) {
         if(x2_info_role_select(0x3dff,body)!=X2_ROLE_SYMMETRIC)return;
+    } else if(s->client) {
+        /* Clause 12.2 from the client side: the peer must be the server. */
+        if(x2_info_role_select(s->info_body,body)!=X2_ROLE_CLIENT)return;
     } else if(body&0x1800)return;
     unsigned repeated=s->peer_info_valid && s->stage==X2_TONE_A && !s->a_reversals;
     s->peer_capabilities=(uint16_t)body;s->peer_info_valid=1;++s->accepted_frames;
@@ -263,7 +270,7 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
      * on repeated INFO0c before the tone exchange, even without its ACK.
      * Do not reinterpret either frame as a 7-bit marker. */
     if(((body&0x10000) || repeated) && !s->info_bits[28]) {
-        x2_info_encode(0x13dff,17,s->info_bits);
+        x2_info_encode(s->info_body|0x10000,17,s->info_bits);
         s->info_position=s->info_clock=0;
         stage(s,X2_INFO0);
     }
@@ -349,7 +356,7 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
  * directional marker in place of ordinary INFO1 (native 9083). */
 static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
 {
-    double re=0,im=0,energy=0;
+    double re=0,im=0,energy=0,guard_re=0,guard_im=0;
     unsigned j;
     s->b_window[s->b_position++]=sample;
     s->b_position%=40;
@@ -357,9 +364,16 @@ static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
     for(j=0;j<40;++j) {
         double x=s->b_window[(s->b_position+j)%40];
         double phase=2*PI*(s->answering?1200:2400)*(double)((s->rx_samples+1-40+j)%20)/8000;
+        double guard=2*PI*1800*(double)((s->rx_samples+1-40+j)%40)/8000;
         re+=x*cos(phase);im-=x*sin(phase);energy+=x*x;
+        guard_re+=x*cos(guard);guard_im-=x*sin(guard);
     }
     double power=re*re+im*im;
+    /* V.34 10.1.2.1: an answer modem sends Tone A with the 1800 Hz guard
+     * tone, 6 dB down (Ie030002 does; our own server does not). 1800 Hz is
+     * three cycles from 2400 Hz in this window, so it is measured apart and
+     * counts toward the tone's purity; the reversal tests use 2400 alone. */
+    double tone_power=power+(s->answering?0:guard_re*guard_re+guard_im*guard_im);
     double reference=s->b_reference_re*s->b_reference_re+s->b_reference_im*s->b_reference_im;
     double dot=re*s->b_reference_re+im*s->b_reference_im;
     /* V.34 §11.2.1.1.3: caller reverses B 40 ms after the first A
@@ -386,12 +400,24 @@ static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
         }
         return;
     }
-    if(energy<100000 || 2*power<0.90*40*energy) {
+    if(energy<100000 || 2*tone_power<0.90*40*energy) {
         s->b_stable=0;return;
     }
     if(reference>0 && dot<0.90*sqrt(power*reference))s->b_stable=0;
     s->b_reference_re=re;s->b_reference_im=im;
     if(++s->b_stable>=160)s->b_present=1;
+}
+/* Client: V.34 11.2.1.2.5 -- after its second Tone A reversal the server
+ * sends A for 10 ms and then its 160 ms probe (x2_session.c X2_PROBE; the
+ * captured I-modem's at 5.01..5.17 s), and the Courier's marker follows the
+ * probe (5.27 s). Track line energy until the probe has come and gone. */
+static void client_probe_sample(x2_session_t *s,int16_t sample)
+{
+    double x=sample;
+    s->probe_energy+=(x*x-s->probe_energy)/40;
+    if(s->probe_energy>500.0*500.0){++s->probe_loud;s->probe_quiet=0;}
+    else if(s->probe_energy<150.0*150.0 && ++s->probe_quiet>=80 && s->probe_loud>=800)
+        s->probe_ended=1;
 }
 void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
 {
@@ -405,6 +431,7 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
         if(s->stage==X2_TONE_A && s->peer_info_valid)
             phase2_b_sample(s,samples[k],s->tx_samples+k);
         if(s->stage==X2_J && !s->s_bar_seen)upstream_s_sample(s,samples[k]);
+        if(s->stage==X2_CLIENT_PROBE)client_probe_sample(s,samples[k]);
         if(!s->symmetric && (s->stage==X2_PAYLOAD
            || (s->reneg && s->stage>=X2_RECORD_ALIGN && s->stage<=X2_RECORD_TX))) {
             upstream_s_sample(s,samples[k]);
@@ -413,7 +440,7 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
                && s->rx_samples-s->reneg_s_sample>X2_RENEG_DEADLINE)
                 fail(s,X2_FAILURE_RENEG_TIMEOUT);
         }
-        if(s->marker_valid||s->stage==X2_FAILED)continue;
+        if(s->marker_valid||s->stage==X2_FAILED||(s->client && s->stage>=X2_CLIENT_PROBE))continue;
         for(i=0;i<40;++i) {
             x2_info_hypothesis_t *h=&s->info_rx[i];
             h->re+=re;h->im+=im;h->clock+=600;
@@ -488,7 +515,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                 }
             } else if(s->stage==X2_TONE_A) {
                 if(s->a_reversals==(s->answering?2u:1u) && s->tx_samples>=s->second_a_tx_sample+79)
-                    stage(s,s->symmetric?X2_SYMMETRIC:X2_PROBE);
+                    stage(s,s->symmetric?X2_SYMMETRIC:s->client?X2_CLIENT_PROBE:X2_PROBE);
             }
             break;
         }
@@ -501,6 +528,23 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             break;
         case X2_SYMMETRIC:
             x2_sym_link_tx(&s->sym,&code,1);break;
+        case X2_CLIENT_PROBE:
+            /* Silent while the server probes; the marker 60 ms after the
+             * probe ends, or after 1 s if no probe is heard. */
+            if((s->probe_ended && s->probe_quiet>=480) || n>=8000)stage(s,X2_CLIENT_MARKER);
+            break;
+        case X2_CLIENT_MARKER:
+            /* Clause 5.1: the marker is framed like INFO0 and sent the same
+             * way, 600 bit/s DPSK on our 1200 Hz carrier (V.34 10.1.2.2). */
+            if(s->info_clock<600 && s->marker_bits[s->info_position])s->sign^=1;
+            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*1200*(double)(s->tx_samples%20)/8000)));
+            s->info_clock+=600;
+            if(s->info_clock>=8000) {
+                s->info_clock-=8000;
+                if(++s->info_position==41)stage(s,X2_CLIENT);
+            }
+            break;
+        case X2_CLIENT:break;
         case X2_MARKER_WAIT:
         case X2_UPSTREAM_WAIT:break;
         case X2_ZERO:if(n==19)stage(s,X2_PATTERN_A);break;
@@ -589,11 +633,11 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 }
 const char *x2_session_stage_name(x2_session_stage_t s)
 {
-    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","SYMMETRIC","FAILED"};
+    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","SYMMETRIC","CLIENT_PROBE","CLIENT_MARKER","CLIENT","FAILED"};
     return (unsigned)s<sizeof(names)/sizeof(names[0])?names[s]:"INVALID";
 }
 const char *x2_session_failure_name(x2_session_failure_t f)
 {
-    static const char *names[]={"unspecified","stage timeout","peer retrain (Tone A)","rate change timeout (no E)"};
+    static const char *names[]={"unspecified","stage timeout","peer retrain (Tone A)","rate change timeout (no E)","client startup"};
     return (unsigned)f<sizeof(names)/sizeof(names[0])?names[f]:"INVALID";
 }

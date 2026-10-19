@@ -3,21 +3,28 @@
 #include "x2.h"
 #include "x2_mp_rx.h"
 #include "x2_sym.h"
+#include "x2_client.h"
 /* Draft 0.33 clauses 3..6, 12..13 and 21. Asymmetric PCMU digital
- * answerer, or symmetric digital startup in either call role/law. */
+ * answerer, the asymmetric analogue client that calls one (Phase 2 and the
+ * marker here, the rest in x2_client.c), or symmetric digital startup in
+ * either call role/law. */
 typedef enum {
     X2_INFO0, X2_TONE_A, X2_PROBE, X2_MARKER_WAIT, X2_UPSTREAM_WAIT,
     X2_ZERO, X2_PATTERN_A, X2_TRAIN_B, X2_J, X2_J_ACK,
     X2_TRAIN_C, X2_TRAIN_D, X2_TRAIN_E, X2_RECORD_WAIT,
     X2_RECORD_ALIGN, X2_RECORD_TX,
-    X2_FINAL_TRAINING, X2_DATA_STARTUP, X2_PAYLOAD, X2_SYMMETRIC, X2_FAILED
+    X2_FINAL_TRAINING, X2_DATA_STARTUP, X2_PAYLOAD, X2_SYMMETRIC,
+    /* Client: wait out the server's probe, send the marker, then x2_client. */
+    X2_CLIENT_PROBE, X2_CLIENT_MARKER, X2_CLIENT,
+    X2_FAILED
 } x2_session_stage_t;
 /* Why the session reached X2_FAILED, where the cause is known. */
 typedef enum {
     X2_FAILURE_NONE,
     X2_FAILURE_STAGE_TIMEOUT,   /* a startup stage ran 10 s */
     X2_FAILURE_PEER_RETRAIN,    /* the Courier's V.90 9.5.2.1 Tone A in data */
-    X2_FAILURE_RENEG_TIMEOUT    /* no E within X2_RENEG_DEADLINE of its S */
+    X2_FAILURE_RENEG_TIMEOUT,   /* no E within X2_RENEG_DEADLINE of its S */
+    X2_FAILURE_CLIENT           /* client: no usable record, or no data in time */
 } x2_session_failure_t;
 /* Samples after the Courier's S without its E. A completed change takes
  * 0.25 s to E; an unanswered one falls back to Tone A 1.57 s after S. */
@@ -29,7 +36,8 @@ typedef struct {
 } x2_info_hypothesis_t;
 typedef struct {
     x2_session_stage_t stage;
-    unsigned alaw, symmetric, answering;
+    unsigned alaw, symmetric, answering, client;
+    uint32_t info_body;         /* our 17-bit INFO0 body (ITU bits 12..28) */
     x2_sym_link_t sym;
     uint64_t tx_samples, rx_samples;
     unsigned stage_samples, info_position, info_clock, sign;
@@ -74,12 +82,21 @@ typedef struct {
     x2_pcm_config_t reneg_config;
     x2_get_bit_func_t payload_source;
     void *payload_context;
+    /* Client: the server's 160 ms probe (V.34 10.1.2.4) before our marker. */
+    unsigned probe_loud, probe_quiet, probe_ended;
+    double probe_energy;
+    uint8_t marker_bits[41];
+    x2_client_t cl;
 } x2_session_t;
 int x2_info_encode(uint32_t body, unsigned body_bits, uint8_t *bits);
 int x2_info_decode(const uint8_t *bits, unsigned body_bits, uint32_t *body);
 int x2_marker_parse(unsigned marker, unsigned server_answering, unsigned *index, unsigned *high_carrier);
 int x2_session_init(x2_session_t *session);
 int x2_session_init_symmetric(x2_session_t *session, unsigned alaw, unsigned answering);
+/* Asymmetric analogue client (PCMU, calling): INFO0 21ff, marker 4d.
+ * pcm_mask: downstream indices we accept; upstream_mask: V.34 N mask. */
+int x2_session_init_client(x2_session_t *session, uint16_t pcm_mask,
+                           uint16_t upstream_mask, unsigned md);
 void x2_session_rx(x2_session_t *session, const int16_t *samples, size_t count);
 void x2_session_set_payload_source(x2_session_t *session, x2_get_bit_func_t get_bit, void *context);
 void x2_session_receive_mp(x2_session_t *session, const x2_mp_t *mp);
@@ -87,6 +104,7 @@ void x2_session_upstream_j(x2_session_t *session);
 void x2_session_upstream_s_bar(x2_session_t *session);
 /* Non-zero while an in-data rate change is running (engine re-arms B1). */
 unsigned x2_session_renegotiating(const x2_session_t *session);
+void x2_session_fail(x2_session_t *session, x2_session_failure_t why);
 size_t x2_session_tx(x2_session_t *session, uint8_t *octets, size_t count);
 const char *x2_session_stage_name(x2_session_stage_t stage);
 const char *x2_session_failure_name(x2_session_failure_t failure);

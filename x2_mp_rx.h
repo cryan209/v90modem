@@ -14,6 +14,9 @@ typedef struct {
     uint64_t samples;
     double previous_re, previous_im, power[10], fourth_re[10], fourth_im[10];
     double next_symbol[10];
+    /* Carrier phase per timing hypothesis, unwrapped modulo 90 degrees. */
+    double phase[10];
+    unsigned phase_valid[10];
     x2_mp_rx_hypothesis_t hypotheses[10][2];
     x2_mp_received_t received;
     void *context;
@@ -47,4 +50,8 @@ unsigned x2_short_record_rate(unsigned index);
 /* The local PCM index mask (bit 0 = index 1) whose rates lie within
  * [min_bps, max_bps]; a bound <= 0 is open. */
 uint16_t x2_short_record_mask(int min_bps, int max_bps);
+/* Ie030002 D229/D238, CB3D: the server's E training banks (B=19, MD=5,
+ * the nine-entry A5..E5 alphabet in every position), which also carry its
+ * startup record. */
+void x2_training_config(x2_pcm_config_t *config);
 #endif

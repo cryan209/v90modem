@@ -1053,7 +1053,10 @@ static void send_cm_jm(v8_state_t *s)
     if (s->parms.jm_cm.pcm_modem_availability)
         buf[ptr++] = (s->parms.jm_cm.pcm_modem_availability << 5) | V8_PCM_MODEM_AVAILABILITY_TAG;
     /*endif*/
-    if (s->parms.jm_cm.pstn_access)
+    /* The x2 analogue client's CM carries the GSTN-access octet even with no
+       category set: Courier 403 CM "e0 c1 45 10 10 0d" (x2 Draft 0.33 3.3,
+       Table 3B).  Ie030002's answering classifier rejected a CM without it. */
+    if (s->parms.jm_cm.pstn_access  ||  (s->x2_phase_reversal  &&  s->calling_party))
         buf[ptr++] = (s->parms.jm_cm.pstn_access << 5) | V8_PSTN_ACCESS_TAG;
     /*endif*/
     if (s->parms.jm_cm.t66 >= 0)

@@ -8,7 +8,13 @@
 ./fax_v34_preamble_test
 ./legacy_pcm_decode_test
 ./x2_session_test
+./x2_client_test
 ./x2_sym_test
+# x2 analogue client dialling our x2 server, whole engines both ends: open
+# rates (56000/31200), a downstream cap and an upstream-only cap.
+./engine_pair_test --both-at 'AT+MS=X2' --expect X2 --seconds 25
+./engine_pair_test --call-at 'AT+MS=X2,0,0,40000' --answer-at 'AT+MS=X2' --expect X2 --expect-connect 40000 --seconds 25
+./engine_pair_test --call-at 'AT+MS=X2,0,0,9600,0,0' --answer-at 'AT+MS=X2' --expect X2 --seconds 25
 ./k56flex_test
 ./k56flex_startup_test
 ./k56flex_upstream_test
