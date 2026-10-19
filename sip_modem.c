@@ -1682,14 +1682,24 @@ int main(int argc, char *argv[])
         PJ_LOG(3, ("sip_modem", "Binding SIP/RTP to local address %s",
                    bind_addr));
     }
-    status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &trans_cfg, NULL);
-    if (status != PJ_SUCCESS) {
-        PJ_LOG(1, ("sip_modem", "Transport create failed"));
-        if (aud_subsys_inited)
-            pjmedia_aud_subsys_shutdown();
-        pjsua_destroy();
-        me_destroy();
-        return 1;
+    /* RFC 3261 18.1.1: PJSIP switches large requests to TCP (e.g. an
+     * authenticated audio+fax INVITE). Without a TCP transport factory it
+     * fails with PJSIP_EUNSUPTRANSPORT before reaching the peer. Keep UDP
+     * available for ordinary requests; neither choice alters RTP/G.711. */
+    const pjsip_transport_type_e sip_transports[] = {
+        PJSIP_TRANSPORT_UDP, PJSIP_TRANSPORT_TCP
+    };
+    for (unsigned i = 0; i < sizeof(sip_transports)/sizeof(sip_transports[0]); ++i) {
+        status = pjsua_transport_create(sip_transports[i], &trans_cfg, NULL);
+        if (status != PJ_SUCCESS) {
+            PJ_LOG(1, ("sip_modem", "%s transport create failed: %d",
+                       i ? "TCP" : "UDP", status));
+            if (aud_subsys_inited)
+                pjmedia_aud_subsys_shutdown();
+            pjsua_destroy();
+            me_destroy();
+            return 1;
+        }
     }
 
     /* Use null sound device — audio is handled by our media port */
