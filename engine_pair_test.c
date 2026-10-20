@@ -843,7 +843,10 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (!expect_hangup && !no_connect && !(fax_hdlc ? memmem(side[1-k].dte,side[1-k].dte_len,s->payload,s->payload_len) : strstr(side[1 - k].dte, s->payload))) {
+        /* memmem, not strstr: a non-error-correcting DTE can be handed NULs
+           before the payload -- an originator's MNP LRs after V.42
+           detection fails (V.42 7.2.1.2, Appendix I) carry four. */
+        if (!expect_hangup && !no_connect && !memmem(side[1-k].dte,side[1-k].dte_len,s->payload,s->payload_len)) {
             printf("  %-6s FAIL: its DTE text did not arrive intact at the %s side\n",
                    s->name, side[1 - k].name);
             failed = 1;

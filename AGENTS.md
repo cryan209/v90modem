@@ -52,7 +52,7 @@ supported interface; `--mode`/`ME_MODE` set the power-on offer. The `ME_*`,
 ## Orientation
 
 - `modem_engine.c` drives every call; `sip_modem.c` is the SIP/RTP side;
-  `data_interface.c` the AT/PTY side; `data_stack.c` V.14/V.42/V.42bis/V.44.
+  `data_interface.c` the AT/PTY side; `data_stack.c` V.14/V.42/V.42bis/V.44, with MNP (V.42 Annex A) in `mnp.c`.
 - `vpcm_*.c` is the shared V.PCM layer under V.90 and V.92: fix protocol logic
   there, not twice.
 - Not every decoder is live: check `SRCS` in `makefile` before assuming a

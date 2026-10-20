@@ -1266,7 +1266,8 @@ static void info_link(page_t *pg)
         page_put(pg, "Rate               %d\r\n", l.tx_rate);
     page_put(pg, "CONNECT rate       %d\r\n", l.rate);
     if (!l.fax) {
-        page_put(pg, "Error control      %s\r\n", strcmp(l.ec, "LAPM") ? "None (V.14)" : "V.42 LAPM");
+        page_put(pg, "Error control      %s\r\n", !strcmp(l.ec, "LAPM") ? "V.42 LAPM"
+                                                 : !strcmp(l.ec, "ALT") ? "MNP (V.42 Annex A)" : "None (V.14)");
         if (l.dc_scheme == 0 || (!l.dc_tx && !l.dc_rx))
             page_put(pg, "Compression        None\r\n");
         else

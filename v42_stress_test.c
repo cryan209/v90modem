@@ -12,11 +12,18 @@
  *   - a stall: the link stays up but stops carrying data;
  *   - a teardown the line did not force.
  *
+ * The mnp rows run the V.42 Annex A alternative procedure (mnp.c) the same
+ * way: both ends MNP in either data-phase framing, and the two ways into it
+ * from V.42 detection -- an originator whose ODP goes unanswered by an
+ * MNP-only answerer (7.2.1.2), and an answerer that hears an LR during its
+ * detection phase (7.2.1.3).
+ *
  * Usage: v42_stress_test                   run the regression matrix
  *        v42_stress_test <scenario> <seed> run one row, verbosely
  */
 
 #include "data_stack.h"
+#include "mnp.h"
 #include "v44.h"
 
 #include <spandsp.h>
@@ -43,6 +50,11 @@ typedef struct {
     double max_stall_s;     /* longest delivery gap allowed; 0 = 5 s */
     int rx_queue;           /* DTE receive queue, octets; 0 = unbounded */
     int drain_bps;          /* DTE drain rate from that queue, octets/s */
+    int mnp;                /* 0 V.42; MNP: 1 both ends, bit-oriented data
+                               phase; 2 both, octet-oriented; 3 V.42 caller
+                               (detection, alternative allowed) against an
+                               MNP-only answerer; 4 MNP-only caller against a
+                               V.42 answerer watching for LR */
 } scenario_t;
 
 static const scenario_t scenarios[] = {
@@ -69,6 +81,20 @@ static const scenario_t scenarios[] = {
     {"slow-dte-v44", 31200, 60, 2, 0, 0, 0, 0, 0, 0, 60, 7, 0, 16384, 1000},
     {"slow-dte-plain-ber", 14400, 20, 0, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 8192, 1000},
     {"stalled-dte-v42bis", 31200, 60, 1, 0, 0, 0, 0, 0, 0, 60, 0, 30.0, 16384, 1},
+    {"mnp-clean-9600", 9600, 10, 0, 0, 0, 0, 0, 0, 0, 30, 6, 0, 0, 0, 1},
+    {"mnp-octet-clean-9600", 9600, 10, 0, 0, 0, 0, 0, 0, 0, 30, 6, 0, 0, 0, 2},
+    {"mnp-ber1e-4-14400", 14400, 20, 0, 1e-4, 0, 0, 0, 0, 0, 60, 2, 0, 0, 0, 1},
+    {"mnp-octet-ber1e-5-14400", 14400, 20, 0, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 0, 0, 2},
+    {"mnp-bursts-31200", 31200, 100, 0, 0, 500, 64, 0, 0, 0, 60, 10, 0, 0, 0, 1},
+    {"mnp-noise-outage-26400", 26400, 60, 0, 0, 0, 0, 5000, 400, 2, 120, 8, 0, 0, 0, 1},
+    {"mnp-long-outage-21600", 21600, 60, 0, 0, 0, 0, 20000, 4000, 2, 120, 4, 0, 0, 0, 1},
+    {"mnp-long-rtt-48000", 48000, 300, 0, 1e-6, 0, 0, 0, 0, 0, 60, 10, 0, 0, 0, 1},
+    {"mnp-slow-2400-bursts", 2400, 20, 0, 0, 2000, 32, 0, 0, 0, 120, 1, 12.0, 0, 0, 1},
+    /* Credit 0 (A.6.6.2.2) is MNP's receiver busy. */
+    {"mnp-slow-dte-31200", 31200, 60, 0, 0, 0, 0, 0, 0, 0, 60, 7, 0, 16384, 1000, 1},
+    {"mnp-stalled-dte-31200", 31200, 60, 0, 0, 0, 0, 0, 0, 0, 60, 0, 30.0, 16384, 1, 1},
+    {"mnp-from-v42-caller", 14400, 20, 0, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 0, 0, 3},
+    {"mnp-from-v42-answerer", 14400, 20, 0, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 0, 0, 4},
 };
 
 /* xorshift64*: deterministic per seed, independent per user. */
@@ -310,6 +336,25 @@ static int channel_pass(channel_t *c, const scenario_t *sc, uint64_t tick, int b
 
 static int init_end(data_stack_t *ds, end_t *e, const scenario_t *sc, bool caller)
 {
+    bool mnp_only = sc->mnp == 1  ||  sc->mnp == 2
+                    ||  (sc->mnp == 3  &&  !caller)  ||  (sc->mnp == 4  &&  caller);
+
+    if (mnp_only)
+    {
+        if (ds_init_mnp(ds, caller, sc->rate, 0, end_pull, e, end_push, e, end_event, e) != 0)
+            return -1;
+        if (sc->mnp == 2)
+            ds_set_mnp_framing_mode(ds, 2);
+        return 0;
+    }
+    if (sc->mnp)
+    {
+        if (ds_init_v42_ex(ds, caller, true, sc->rate, 0, 1024, 32,
+                           end_pull, e, end_push, e, end_event, e) != 0)
+            return -1;
+        ds_set_alternative(ds, true);
+        return 0;
+    }
     if (sc->compression == 2)
         return ds_init_v44(ds, caller, true, sc->rate, NULL,
                            end_pull, e, end_push, e, end_event, e);
@@ -417,7 +462,8 @@ static result_t run(const scenario_t *sc, uint64_t seed, bool verbose)
              &&  r.stall_s <= allowed_stall
              &&  r.disconnects == 0  &&  r.errors == 0
              &&  r.kbps[0] >= sc->min_kbps  &&  r.kbps[1] >= sc->min_kbps
-             &&  ds_link_is_ready(&ds[0])  &&  ds_link_is_ready(&ds[1]);
+             &&  ds_link_is_ready(&ds[0])  &&  ds_link_is_ready(&ds[1])
+             &&  (!sc->mnp  ||  (ds[0].framing == DS_FRAMING_MNP  &&  ds[1].framing == DS_FRAMING_MNP));
     if (verbose)
     {
         for (int i = 0; i < 2; i++)
@@ -436,6 +482,22 @@ static result_t run(const scenario_t *sc, uint64_t seed, bool verbose)
         printf("  DTE queue overruns %llu/%llu, busy spells %llu/%llu\n",
                (unsigned long long)ep[0].overruns, (unsigned long long)ep[1].overruns,
                (unsigned long long)ds[0].rx_busy_spells, (unsigned long long)ds[1].rx_busy_spells);
+        for (int i = 0; i < 2; i++)
+        {
+            mnp_stats_t st;
+
+            if (!ds[i].mnp)
+                continue;
+            mnp_get_stats(ds[i].mnp, &st);
+            printf("  %s MNP mode %d k %d N401 %d opt %d: LT tx %llu rx %llu, LA tx %llu rx %llu, "
+                   "LR tx %llu rx %llu, resent %llu, T401 %llu, FCS errors %llu, out of sequence %llu\n",
+                   i ? "answerer" : "caller", st.service_class, st.k, st.n401, st.optimisation,
+                   (unsigned long long)st.lt_tx, (unsigned long long)st.lt_rx,
+                   (unsigned long long)st.la_tx, (unsigned long long)st.la_rx,
+                   (unsigned long long)st.lr_tx, (unsigned long long)st.lr_rx,
+                   (unsigned long long)st.retransmitted, (unsigned long long)st.timeouts,
+                   (unsigned long long)st.fcs_errors, (unsigned long long)st.out_of_sequence);
+        }
         printf("  longest stall %.2f s, line flips %llu/%llu\n", r.stall_s,
                (unsigned long long)ch[0].flips, (unsigned long long)ch[1].flips);
     }

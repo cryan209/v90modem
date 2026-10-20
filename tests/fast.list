@@ -34,6 +34,12 @@ python3 tools/test_k56flex_probe_timeout.py
 ./v42_throughput_test
 # docs/v42_reliability.md: LAPM/V.42bis/V.44 across impaired lines and a slow DTE.
 ./v42_stress_test
+# V.42 Annex A alternative procedure (MNP): an MNP-only answerer (+ES ans_fbk 6)
+# under a V.42 caller whose detection fails; an MNP-only caller (+ES orig_rqst 4)
+# heard by a V.42 answerer during detection; MNP credit 0 behind a stalled DTE.
+./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis --answer-at 'AT+ES=3,0,6' --both-at 'AT&A3' --both-at 'AT+ER=1' --call-expect '+ER: ALT|CONNECT 14400/ARQ/V32B/MNP' --answer-expect '+ER: ALT|CONNECT 14400/ARQ/V32B/MNP' --seconds 40
+./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis --call-at 'AT+ES=4,0' --both-at 'AT&A3' --both-at 'AT+ER=1' --call-expect '+ER: ALT|CONNECT 14400/ARQ/V32B/MNP' --answer-expect '+ER: ALT|CONNECT 14400/ARQ/V32B/MNP' --seconds 40
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --answer-at 'AT+ES=3,0,6' --both-at 'AT&A3' --call-expect '/ARQ/V34/MNP' --answer-expect '/ARQ/V34/MNP' --payload-printable X --payload-reps 128 --dte-stall-seconds 6 --seconds 60
 # A DTE that stops reading for 6 s under a 12.5 KB payload: the engine holds it.
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --payload-printable X --payload-reps 128 --dte-stall-seconds 6 --seconds 60
 ./v8bis_test

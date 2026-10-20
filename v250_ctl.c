@@ -12,9 +12,9 @@
 
 /* Supported values, as bit masks over the value (all small). */
 #define BIT(n) (1u << (n))
-#define ES_RQST_OK (BIT(1) | BIT(2) | BIT(3))
-#define ES_ORIG_FBK_OK (BIT(0) | BIT(2) | BIT(3))
-#define ES_ANS_FBK_OK (BIT(1) | BIT(2) | BIT(4) | BIT(5))
+#define ES_RQST_OK (BIT(1) | BIT(2) | BIT(3) | BIT(4))
+#define ES_ORIG_FBK_OK (BIT(0) | BIT(2) | BIT(3) | BIT(4))
+#define ES_ANS_FBK_OK (BIT(1) | BIT(2) | BIT(4) | BIT(5) | BIT(6))
 
 #define DS_DICT_MIN 512
 #define DS_DICT_MAX 65535
@@ -315,7 +315,7 @@ static v250_ctl_result_t es_command(v250_ctl_t *c, const char *arg,
         return V250_CTL_OK;
     }
     if (!strcmp(arg, "=?")) {
-        snprintf(info, len, "+ES: (1-3),(0,2-3),(1-2,4-5)");
+        snprintf(info, len, "+ES: (1-4),(0,2-4),(1-2,4-6)");
         return V250_CTL_OK;
     }
     if (arg[0] != '=')
@@ -420,6 +420,10 @@ void v250_ctl_ec_policy(const v250_ctl_t *c, bool calling_party,
                         v250_ec_policy_t *out)
 {
     memset(out, 0, sizeof(*out));
+    /* Table 20: "either LAPM or Alternative acceptable" unless a value says
+     * only one of them is. */
+    out->lapm = true;
+    out->alternative = true;
     if (calling_party) {
         switch (c->es[0]) {
         case 1:
@@ -429,12 +433,25 @@ void v250_ctl_ec_policy(const v250_ctl_t *c, bool calling_party,
             out->attempt = true;
             out->detect = false;
             break;
+        case 4:
+            /* Initiate the alternative protocol: MNP's LR, no V.42. */
+            out->attempt = true;
+            out->detect = false;
+            out->lapm = false;
+            break;
         default:
             out->attempt = true;
             out->detect = true;
             break;
         }
-        out->required = (c->es[1] == 2 || c->es[1] == 3);
+        out->required = (c->es[1] == 2 || c->es[1] == 3 || c->es[1] == 4);
+        if (c->es[1] == 3)
+            out->alternative = false;
+        else if (c->es[1] == 4)
+            out->lapm = false;
+        /* 4 with "only LAPM acceptable" leaves nothing: run LAPM. */
+        if (!out->lapm && !out->alternative)
+            out->lapm = true;
     } else {
         if (c->es[2] == 1) {
             out->attempt = false;
@@ -442,7 +459,11 @@ void v250_ctl_ec_policy(const v250_ctl_t *c, bool calling_party,
         }
         out->attempt = true;
         out->detect = true;
-        out->required = (c->es[2] == 4 || c->es[2] == 5);
+        out->required = (c->es[2] == 4 || c->es[2] == 5 || c->es[2] == 6);
+        if (c->es[2] == 5)
+            out->alternative = false;
+        else if (c->es[2] == 6)
+            out->lapm = false;
     }
 }
 
@@ -635,7 +656,9 @@ void v250_ctl_connect_suffix(const v250_ctl_t *c, const v250_connect_report_t *r
     if (c->arq >= 2 && r->carrier && r->carrier[0] && used < out_len)
         used += (size_t) snprintf(out + used, out_len - used, "/%s", r->carrier);
     if (c->arq >= 3 && ec && used < out_len) {
-        used += (size_t) snprintf(out + used, out_len - used, "/%s", r->ec);
+        /* +ER says "ALT" (V.250 6.5.5); the CONNECT suffix names it. */
+        used += (size_t) snprintf(out + used, out_len - used, "/%s",
+                                  strcmp(r->ec, "ALT") ? r->ec : "MNP");
         if (r->dc_scheme && used < out_len)
             snprintf(out + used, out_len - used, "/%s", r->dc_scheme == 2 ? "V44" : "V42BIS");
     }

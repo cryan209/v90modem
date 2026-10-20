@@ -57,7 +57,7 @@ suite run on this date. Interop claims come from the dated entries in
 | Fax class 1 / 2.0 (V.17/V.29/V.27ter/V.21) | yes, via T.31 / T.32 | `fax_class_test`, `fax_class2_test` | **none** |
 | x2, K56flex | experimental | receive replay | neither completes a call |
 | V.42 LAPM / V.42bis / V.44 | yes | yes | LAPM + V.42bis live; V.44 never offered by a peer |
-| MNP 2-5 | **absent** | | |
+| MNP 2-4 (V.42 Annex A) | yes (2026-10-21, `docs/mnp.md`); MNP 5 absent | `v42_stress_test`, `engine_pair_test` | none |
 
 ## 3. Gaps, ranked by what blocks the stated goal
 
@@ -118,8 +118,8 @@ suite run on this date. Interop claims come from the dated entries in
      engine glue.
    - Bell 212A is V.22's modulation with a different answer tone and no
      guard tone, so it is a small variant on the V.22bis path.
-7. **No MNP 2-5.** It matters only for peers from before V.42 that do not
-   support LAPM. Low priority, but some V.22bis-era equipment needs it.
+7. **No MNP 5.** MNP 2-4 landed 2026-10-21 (`docs/mnp.md`), against itself
+   only; MNP 5 needs a bit-exact reference first.
 
 ### P1: PCM server mode only works against one peer family
 

@@ -25,6 +25,7 @@
 #include "line_monitor.h"
 #include "at_ms.h"
 #include "data_stack.h"
+#include "mnp.h"
 #include "clear_channel.h"
 #include "clock_recovery.h"
 #include "v34_line_ec.h"
@@ -344,6 +345,11 @@ static volatile bool g_data_loss_recovering = false;
 /* V.250 +ES "optional": no V.42 peer is not a failure, the call carries on as
    buffered V.14 (set per call by me_decide_data_framing()). */
 static bool g_ec_fallback_ok = false;
+/* V.250 Table 20: whether the V.42 Annex A alternative procedure (MNP) is
+   acceptable, and whether it is the only thing that is (+ES orig_rqst 4,
+   orig_fbk 4, ans_fbk 6: no V.42 at all). */
+static bool g_ec_alt_ok = false;
+static bool g_ec_alt_only = false;
 /* The directional rates for +MRR, where the CONNECT rate alone does not say
    them (V.90/V.92).  0 = report the CONNECT rate. */
 static int g_report_tx_rate = 0;
@@ -833,10 +839,16 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     }
+    case DS_LINK_ALTERNATIVE:
+        ME_LOG("[ME] V.42 detection found no LAPM peer; %s (V.42 Annex A)\n",
+               g_data_stack.calling_party ? "trying the MNP alternative procedure (LR)"
+                                          : "the caller sent an MNP LR, answering it");
+        break;
     case DS_LINK_FALLBACK:
         /* +ES says error control is optional: carry on without it. */
-        ME_LOG("[ME] V.42 detection found no error-control peer; continuing in "
-               "buffered V.14 mode (+ES fallback)\n");
+        ME_LOG("[ME] no error-control peer (V.42 detection%s); continuing in "
+               "buffered V.14 mode (+ES fallback)\n",
+               g_ec_alt_ok ? ", then MNP" : "");
         g_data_framing = DS_FRAMING_V14;
         /* x2 host: CONNECT waits for DATA (accepted MP/E and upstream B1),
            which reports it now that the framing is V.14. */
@@ -846,7 +858,16 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     case DS_LINK_CONNECTED:
-        ME_LOG("[ME] V.42 LAPM connected\n");
+        if (g_data_stack.framing == DS_FRAMING_MNP && g_data_stack.mnp) {
+            mnp_stats_t st;
+
+            mnp_get_stats(g_data_stack.mnp, &st);
+            ME_LOG("[ME] MNP connected: framing mode %d (%s), k %d, N401 %d, "
+                   "optimisation 0x%x\n", st.service_class,
+                   st.service_class == 3 ? "bit-oriented" : "octet-oriented",
+                   st.k, st.n401, st.optimisation);
+        } else
+            ME_LOG("[ME] V.42 LAPM connected\n");
         if (!g_data_connect_reported && !g_data_link_failed) {
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
@@ -871,11 +892,14 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
             g_data_link_redetect = true;
             break;
         }
-        ME_LOG("[ME] V.42 detection reported unsupported peer\n");
+        ME_LOG("[ME] %s reported unsupported peer\n",
+               g_data_stack.framing == DS_FRAMING_MNP ? "MNP establishment"
+                                                      : "V.42 detection");
         g_data_link_failed = true;
         break;
     case DS_LINK_DISCONNECTED:
-        ME_LOG("[ME] V.42 LAPM disconnected\n");
+        ME_LOG("[ME] %s disconnected\n",
+               g_data_stack.framing == DS_FRAMING_MNP ? "MNP" : "V.42 LAPM");
         g_data_link_failed = true;
         break;
     case DS_LINK_ERROR:
@@ -974,7 +998,21 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
         detect = false;
         ME_LOG("[ME] V.92 9.2.5/9.3.1: both modems signalled LAPM; ODP/ADP bypassed\n");
     }
-    if (g_data_framing == DS_FRAMING_V42) {
+    if (g_data_framing == DS_FRAMING_V42 && g_ec_alt_only) {
+        /* +ES asked for the alternative protocol alone: MNP's LR exchange
+           (V.42 Annex A A.7.1), no V.42 detection, no LAPM. */
+        result = ds_init_mnp(&g_data_stack, calling_party, bit_rate, 0,
+                             data_stack_pull_dte_byte, NULL,
+                             data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        if (result == 0) {
+            ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+            ds_set_rx_room(&g_data_stack, data_stack_rx_room_v42, NULL,
+                           DATA_RING_SIZE/2, DATA_RING_SIZE*3/4);
+            ME_LOG("[ME] MNP only (+ES): %s\n",
+                   calling_party ? "sending LR" : "waiting for LR");
+        } else
+            g_data_link_failed = true;
+    } else if (g_data_framing == DS_FRAMING_V42) {
         /* Compression: a +DS the DTE has issued governs; otherwise the
            environment (ME_DATA_COMPRESSION), otherwise the shipped default
            (both directions, 1024 codewords, 32-octet strings -- which is also
@@ -1005,6 +1043,9 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0) {
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+            /* V.42 7.2.1.2/7.2.1.3, Annex A: MNP when detection finds no
+               LAPM peer, before the +ES fallback. */
+            ds_set_alternative(&g_data_stack, g_ec_alt_ok);
             /* Busy with half the ring left: one V.42bis frame of 128 octets
                decodes to at most ~28 KB (codewords of 9 bits, strings of
                250), and a frame already accepted cannot be refused. */
@@ -1035,7 +1076,7 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                 result = -1;
         }
         const char *xid_octets = getenv("ME_LAPM_XID_OPTION_OCTETS");
-        if (result == 0 && xid_octets) {
+        if (result == 0 && xid_octets && g_data_stack.v42) {
             if ((strcmp(xid_octets, "auto") != 0
                  && strcmp(xid_octets, "3") != 0 && strcmp(xid_octets, "4") != 0)
                 || v42_set_xid_optional_functions_octets(g_data_stack.v42,
@@ -1062,7 +1103,7 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     /* V.90 digital: our downstream enters data mode ~0.9 s before the upstream
        receiver has found B1 and can deliver a bit, so V.42 7.2.1.3's T400 is
        held until that first bit (bounded) rather than run off our transmit. */
-    if (result == 0 && g_data_framing == DS_FRAMING_V42
+    if (result == 0 && g_data_framing == DS_FRAMING_V42 && g_data_stack.v42
         && g_mod == ME_MOD_V90 && g_v90 != NULL) {
         ds_v42_restart_t400(&g_data_stack, ME_V42_T400_DEFER_MS);
         g_data_t400_deferred = true;
@@ -4590,6 +4631,8 @@ static void me_decide_data_framing(void)
     di_get_v250_settings(&cfg);
     v250_ctl_ec_policy(&cfg, g_calling_party, &pol);
     g_ec_fallback_ok = false;
+    g_ec_alt_ok = false;
+    g_ec_alt_only = false;
     if (cfg.es_set) {
         if (!pol.attempt) {
             g_data_framing = DS_FRAMING_V14;
@@ -4597,21 +4640,28 @@ static void me_decide_data_framing(void)
             g_data_framing = DS_FRAMING_V42;
             g_data_lapm_detect = pol.detect;
             g_ec_fallback_ok = !pol.required;
+            g_ec_alt_ok = pol.alternative;
+            g_ec_alt_only = !pol.lapm;
         }
-        ME_LOG("[ME] DTE framing (+ES %d,%d,%d, %s): %s\n", cfg.es[0], cfg.es[1], cfg.es[2],
+        ME_LOG("[ME] DTE framing (+ES %d,%d,%d, %s): %s%s, %s\n", cfg.es[0], cfg.es[1], cfg.es[2],
                g_calling_party ? "originator" : "answerer",
-               g_data_framing == DS_FRAMING_V42
-                   ? (pol.required ? "V.42 LAPM, required" : "V.42 LAPM, optional")
-                   : "buffered V.14");
+               g_data_framing != DS_FRAMING_V42 ? "buffered V.14"
+                   : g_ec_alt_only ? "MNP only" : "V.42 LAPM",
+               g_data_framing == DS_FRAMING_V42 && g_ec_alt_ok && !g_ec_alt_only
+                   ? " then MNP" : "",
+               pol.required ? "required" : "optional");
         return;
     }
     if (g_data_framing_auto) {
-        /* The factory +ES (3,0,2) always attempts V.42 with detection and
-           allows the buffered fallback; v8_lapm only reports the peer's
+        /* The factory +ES (3,0,2) always attempts V.42 with detection, then
+           (Table 20: "either LAPM or Alternative acceptable") MNP, and allows
+           the buffered fallback; v8_lapm only reports the peer's
            advertisement. */
         g_data_framing = pol.attempt ? DS_FRAMING_V42 : DS_FRAMING_V14;
         g_data_lapm_detect = pol.detect;
         g_ec_fallback_ok = !pol.required;
+        g_ec_alt_ok = pol.attempt && pol.alternative;
+        g_ec_alt_only = pol.attempt && !pol.lapm;
     }
 }
 
@@ -4660,7 +4710,8 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
         ME_LOG("[ME] DTE framing from V.8 protocol%s: %s\n",
                (qc_lapm && result->jm_cm.protocols != V8_PROTOCOL_LAPM_V42)
                    ? " (V.92 QC LAPM bit)" : "",
-               g_data_framing == DS_FRAMING_V42 ? "V.42 LAPM" : "V.14 8N1");
+               g_data_framing != DS_FRAMING_V42 ? "V.14 8N1"
+                   : g_ec_alt_only ? "MNP only" : "V.42 LAPM");
     }
     fprintf(stderr,
             "[ME] V.8 peer summary: protocol=%s, PSTN=%s, PCM=%s, NSF=%s, T.66=%d\n",
@@ -11728,7 +11779,8 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
         }
     }
     if (g_data_framing == DS_FRAMING_V42 && ds_link_is_ready(&g_data_stack)) {
-        r->ec = "LAPM";
+        /* V.250 6.5.5: "ALT" is the alternative protocol (MNP). */
+        r->ec = g_data_stack.framing == DS_FRAMING_MNP ? "ALT" : "LAPM";
         ds_compression_state(&g_data_stack, &scheme, &ctx, &crx);
     }
     r->dc_scheme = scheme;
@@ -11758,10 +11810,22 @@ static void me_link_detail(char *out, size_t len, bool *originate)
     DETAIL("G.711 law          %s\r\n", g_law == ME_LAW_ALAW ? "A-law (PCMA)" : "u-law (PCMU)");
     if (g_report_tx_rate > 0)
         DETAIL("Rate               TX %d  RX %d\r\n", g_report_tx_rate, g_report_rx_rate);
-    DETAIL("Framing            %s\r\n",
-           g_data_framing == DS_FRAMING_V42
-               ? (g_data_lapm_detect ? "V.42 LAPM, detection phase" : "V.42 LAPM, no detection")
-               : "V.14 buffered");
+    DETAIL("Framing            %s%s\r\n",
+           g_data_framing != DS_FRAMING_V42 ? "V.14 buffered"
+               : g_ec_alt_only ? "MNP only (V.42 Annex A)"
+               : g_data_lapm_detect ? "V.42 LAPM, detection phase" : "V.42 LAPM, no detection",
+           g_data_framing == DS_FRAMING_V42 && g_ec_alt_ok && !g_ec_alt_only
+               ? ", MNP alternative" : "");
+    if (g_data_stack.framing == DS_FRAMING_MNP && g_data_stack.mnp) {
+        mnp_stats_t st;
+
+        mnp_get_stats(g_data_stack.mnp, &st);
+        DETAIL("MNP                mode %d, k %d, N401 %d, optimisation 0x%x\r\n",
+               st.service_class, st.k, st.n401, st.optimisation);
+        DETAIL("MNP frames         LT tx %llu (resent %llu) rx %llu, FCS errors %llu\r\n",
+               (unsigned long long) st.lt_tx, (unsigned long long) st.retransmitted,
+               (unsigned long long) st.lt_rx, (unsigned long long) st.fcs_errors);
+    }
     DETAIL("EC fallback        %s\r\n", g_ec_fallback_ok ? "allowed (buffered)" : "disconnect");
     if (g_data_framing == DS_FRAMING_V42 && g_data_stack.v42) {
         v42_negotiated_parameters_t np;
@@ -12251,6 +12315,8 @@ static int me_clear_start_locked(void)
         if (g_data_framing_auto)
             g_data_framing = DS_FRAMING_V14;
         g_ec_fallback_ok = false;
+        g_ec_alt_ok = false;
+        g_ec_alt_only = false;
         if (data_stack_start_online(rate, g_calling_party) != 0)
             return 0;
         cc_init_clear(&g_cc, g_offer_r56, clear_get_bit, clear_put_bit, NULL);
@@ -14764,6 +14830,7 @@ skip_8k_codewords:
                            is worthless -- including "no peer": +ES fallback
                            must not read it as one. */
                         ds_set_fallback_buffered(&g_data_stack, false);
+                        ds_set_alternative(&g_data_stack, false);
                         if (me_v34_reneg_enabled()
                             && v34_start_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "

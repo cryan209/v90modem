@@ -14,6 +14,9 @@
  *                     software; kept for loopback debugging.
  *
  *   DS_FRAMING_V42  — V.42 detection/XID/LAPM framing through SpanDSP.
+ *   DS_FRAMING_MNP  — MNP 2-4 (mnp.c), the V.42 (1988-1996) Annex A
+ *                     alternative procedure: entered when V.42 detection finds
+ *                     no LAPM peer and the alternative is allowed, or directly.
  *
  * Threading: all calls are expected from the engine/RTP clock domain. The
  * DTE-side pull/push callbacks are the boundary to other threads and must
@@ -31,11 +34,13 @@ typedef struct v42bis_state_s v42bis_state_t;
 typedef struct v44_encoder_s v44_encoder_t;
 typedef struct v44_decoder_s v44_decoder_t;
 typedef struct v42_v44_parameters_s v42_v44_parameters_t;
+typedef struct mnp_s mnp_t;
 
 typedef enum {
     DS_FRAMING_RAW = 0,
     DS_FRAMING_V14 = 1,
-    DS_FRAMING_V42 = 2
+    DS_FRAMING_V42 = 2,
+    DS_FRAMING_MNP = 3
 } ds_framing_t;
 
 typedef enum {
@@ -50,7 +55,12 @@ typedef enum {
      * acceptable (V.250 +ES fallback "optional"): it has dropped to V.14
      * buffered mode on the same line rate.  Reported from the next line-side
      * call, never from inside V.42's own callback. */
-    DS_LINK_FALLBACK
+    DS_LINK_FALLBACK,
+    /* V.42 detection found no LAPM peer and the alternative procedure is
+     * allowed: the stack has switched to MNP and is establishing it (the
+     * originator sends LR; the answerer has just received one).  CONNECTED,
+     * UNSUPPORTED or FALLBACK follows. */
+    DS_LINK_ALTERNATIVE
 } ds_link_event_t;
 
 /* Pull one DTE byte to transmit; return -1 when none is pending. */
@@ -91,6 +101,11 @@ typedef struct {
     bool suspended;                /* V.92 9.10.3 modem-on-hold */
     bool fallback_buffered;        /* unsupported peer => V.14 instead of failing */
     bool demote_pending;
+    /* MNP (DS_FRAMING_MNP, or the answerer's LR watch during V.42 detection). */
+    mnp_t *mnp;
+    bool alternative_ok;           /* MNP after V.42 detection finds no LAPM */
+    bool demote_to_mnp;            /* demote_pending's target: MNP, not V.14 */
+    int mnp_framing_mode;          /* offered in LR; 0 = 3 */
     /* V.42 Appendix I.3 b): characters a non-error-correcting peer sent
      * during the failed detection phase, forwarded on fallback. */
     uint8_t detect_rx[2048];
@@ -161,6 +176,25 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
                 ds_pull_byte_fn pull, void *pull_ctx,
                 ds_push_byte_fn push, void *push_ctx,
                 ds_link_event_fn link_event, void *link_event_ctx);
+
+/* MNP only, no V.42 detection (V.250 +ES orig_rqst 4, ans_fbk 6).  The
+ * originator sends LR at once; the answerer waits answer_wait_ms (0 = 10 s)
+ * for one.  ds_set_fallback_buffered() decides what a failure does. */
+int ds_init_mnp(data_stack_t *s, bool calling_party, int line_bit_rate, int answer_wait_ms,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx);
+
+/* V.42 7.2.1.2/7.2.1.3 with the (pre-2002) Annex A alternative procedure:
+ * when detection finds no LAPM peer, try MNP before ds_set_fallback_buffered()
+ * applies.  The answerer also watches the detection-phase bits for an MNP LR
+ * and switches as soon as one arrives.  Call after ds_init_v42*(). */
+void ds_set_alternative(data_stack_t *s, bool enable);
+
+/* The framing mode this end offers in its LR (Annex A A.6.4.1.5): 3 (the
+ * default) asks for the bit-oriented data phase, 2 for octet-oriented.  Call
+ * before the line starts. */
+void ds_set_mnp_framing_mode(data_stack_t *s, int mode);
 
 /* Release protocol resources. Safe after any successful ds_init call. */
 void ds_release(data_stack_t *s);

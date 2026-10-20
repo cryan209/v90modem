@@ -48,7 +48,7 @@ static void test_defaults_and_reads(void)
     cmd(&c, "DR=?", V250_CTL_OK, "+DR: (0,1)");
     /* Test responses list only what is supported (5.4.4.4): no direct mode, no
      * alternative protocol; the V.42bis codec's own limits. */
-    cmd(&c, "ES=?", V250_CTL_OK, "+ES: (1-3),(0,2-3),(1-2,4-5)");
+    cmd(&c, "ES=?", V250_CTL_OK, "+ES: (1-4),(0,2-4),(1-2,4-6)");
     cmd(&c, "DS=?", V250_CTL_OK, "+DS: (0-3),(0,1),(512-65535),(6-250)");
     cmd(&c, "es?", V250_CTL_OK, "+ES: 3,0,2");
     cmd(&c, "ES44?", V250_CTL_UNKNOWN, NULL);   /* a longer name is not +ES */
@@ -140,14 +140,13 @@ static void test_rejection(void)
     cmd(&c, "ES=3,2,5", V250_CTL_OK, "");
     /* One bad field poisons the whole command: the good first field must not
      * be stored. */
-    cmd(&c, "ES=1,4,5", V250_CTL_ERROR, NULL);   /* 4: alternative only */
+    cmd(&c, "ES=1,1,5", V250_CTL_ERROR, NULL);   /* 1: change DTE rate */
     cmd(&c, "ES?", V250_CTL_OK, "+ES: 3,2,5");
     cmd(&c, "ES=0", V250_CTL_ERROR, NULL);       /* direct mode: not offered */
-    cmd(&c, "ES=4", V250_CTL_ERROR, NULL);       /* alternative protocol */
+    cmd(&c, "ES=5", V250_CTL_ERROR, NULL);       /* not a defined value */
     cmd(&c, "ES=3,1", V250_CTL_ERROR, NULL);     /* change DTE rate to line rate */
     cmd(&c, "ES=3,0,0", V250_CTL_ERROR, NULL);   /* ans: direct */
     cmd(&c, "ES=3,0,3", V250_CTL_ERROR, NULL);
-    cmd(&c, "ES=3,0,6", V250_CTL_ERROR, NULL);   /* ans: alternative only */
     cmd(&c, "ES=3,0,7", V250_CTL_ERROR, NULL);
     cmd(&c, "ES=1,2,3,4", V250_CTL_ERROR, NULL);/* too many values */
     cmd(&c, "ES=a", V250_CTL_ERROR, NULL);       /* wrong type */
@@ -213,7 +212,18 @@ static void test_ec_policy(void)
     check(p.required, "orig_fbk 3: LAPM required");
     cmd(&c, "ES=3,0", V250_CTL_OK, "");
     v250_ctl_ec_policy(&c, true, &p);
-    check(!p.required, "orig_fbk 0: optional");
+    check(!p.required && p.lapm && p.alternative, "orig_fbk 0: optional, LAPM or MNP");
+    cmd(&c, "ES=3,3", V250_CTL_OK, "");
+    v250_ctl_ec_policy(&c, true, &p);
+    check(p.lapm && !p.alternative, "orig_fbk 3: no MNP after V.42 detection fails");
+    cmd(&c, "ES=3,4", V250_CTL_OK, "");
+    v250_ctl_ec_policy(&c, true, &p);
+    check(p.required && !p.lapm && p.alternative, "orig_fbk 4: MNP required");
+    cmd(&c, "ES=4,0", V250_CTL_OK, "");
+    v250_ctl_ec_policy(&c, true, &p);
+    check(p.attempt && !p.detect && !p.lapm && p.alternative && !p.required,
+          "orig_rqst 4: initiate the alternative protocol, no V.42");
+    cmd(&c, "ES=3,0", V250_CTL_OK, "");
 
     cmd(&c, "ES=,,1", V250_CTL_OK, "");
     v250_ctl_ec_policy(&c, false, &p);
@@ -226,7 +236,14 @@ static void test_ec_policy(void)
     check(p.attempt && p.required, "ans_fbk 5: required, LAPM only");
     cmd(&c, "ES=,,2", V250_CTL_OK, "");
     v250_ctl_ec_policy(&c, false, &p);
-    check(!p.required, "ans_fbk 2: optional");
+    check(!p.required && p.lapm && p.alternative, "ans_fbk 2: optional, LAPM or MNP");
+    cmd(&c, "ES=,,5", V250_CTL_OK, "");
+    v250_ctl_ec_policy(&c, false, &p);
+    check(p.lapm && !p.alternative, "ans_fbk 5: no MNP");
+    cmd(&c, "ES=,,6", V250_CTL_OK, "");
+    v250_ctl_ec_policy(&c, false, &p);
+    check(p.attempt && p.required && !p.lapm && p.alternative, "ans_fbk 6: required, MNP only");
+    cmd(&c, "ES=,,2", V250_CTL_OK, "");
     /* The originator's fields do not govern an answered call and vice versa. */
     cmd(&c, "ES=1,3,2", V250_CTL_OK, "");
     v250_ctl_ec_policy(&c, false, &p);
@@ -433,6 +450,13 @@ static void test_courier_aliases(void)
     r.ec = "NONE";
     v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
     check(!strcmp(out, "/V34"), "&A3 without error control: modulation only");
+    r.ec = "ALT";
+    r.dc_scheme = 0;
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "/ARQ/V34/MNP"), "&A3 with the alternative protocol: /ARQ/V34/MNP");
+    v250_ctl_reset(&c);
+    c.er = 1;
+    report(&c, &r, "+ER: ALT\r\n", "+ER: ALT for MNP (6.5.5)");
 }
 
 /* 6.8: the V.92 parameters accept only what this DCE honours. */

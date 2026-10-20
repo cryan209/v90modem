@@ -22,15 +22,15 @@
  *
  * What is supported, and why the rest is not:
  *   +ES <orig_rqst> 1 buffered only, 2 V.42 without detection, 3 V.42 with
- *                     detection.  0 (direct mode) needs a DTE rate locked to the
- *                     line rate, which a PTY has no way to offer; 4 (alternative
- *                     protocol, MNP) is not implemented.
- *       <orig_fbk>  0 optional + buffered, 2 required (LAPM is the only protocol
- *                     there is, so "either" = "LAPM only"), 3 required LAPM.
- *                     1 (change the DTE rate, direct mode) and 4 (alternative
- *                     only) are not supported.
- *       <ans_fbk>   1 error control disabled, 2 optional + buffered, 4/5 required.
- *                     0 and 3 (direct) and 6 (alternative only) are not supported.
+ *                     detection, 4 the alternative protocol (V.42 Annex A, MNP:
+ *                     mnp.c).  0 (direct mode) needs a DTE rate locked to the
+ *                     line rate, which a PTY has no way to offer.
+ *       <orig_fbk>  0 optional + buffered, 2 required (LAPM or MNP), 3 required
+ *                     LAPM, 4 required MNP.  1 (change the DTE rate, direct
+ *                     mode) is not supported.
+ *       <ans_fbk>   1 error control disabled, 2 optional + buffered, 4 required
+ *                     (LAPM or MNP), 5 required LAPM, 6 required MNP.  0 and 3
+ *                     (direct) are not supported.
  *   +DS <direction> 0..3 (none / transmit only / receive only / both),
  *       <negotiation> 0 or 1, <max_dict> 512..65535, <max_string> 6..250 -- the
  *       limits of the V.42bis codec in use.
@@ -124,9 +124,11 @@ v250_ctl_result_t v250_ctl_alias(v250_ctl_t *c, const char *text);
 
 /* What +ES asks of the error control layer for a call in this role. */
 typedef struct {
-    bool attempt;           /* run V.42 at all (false: buffered mode only) */
+    bool attempt;           /* error control at all (false: buffered mode only) */
     bool detect;            /* V.42 detection phase (false: straight to SABME) */
     bool required;          /* no error control => disconnect, else fall back */
+    bool lapm;              /* V.42 LAPM acceptable (false: MNP only) */
+    bool alternative;       /* the Annex A alternative (MNP) acceptable */
 } v250_ec_policy_t;
 void v250_ctl_ec_policy(const v250_ctl_t *c, bool calling_party,
                         v250_ec_policy_t *out);
@@ -169,7 +171,7 @@ typedef struct {
     const char *carrier;    /* +MCR, Table 13 */
     int tx_rate;            /* +MRR; 0 = negotiation failed */
     int rx_rate;            /* 0 = same as tx_rate, not reported separately */
-    const char *ec;         /* +ER: "NONE", "LAPM" or "ALT" */
+    const char *ec;         /* +ER: "NONE", "LAPM" or "ALT" (MNP; "/MNP" after CONNECT) */
     int dc_scheme;          /* +DR: 0 none, 1 V.42bis, 2 V.44 */
     bool dc_tx;
     bool dc_rx;

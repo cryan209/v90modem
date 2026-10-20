@@ -99,9 +99,8 @@ octet from the media thread) and the per-call total is logged at teardown.
 
 ## Not done
 
-* **MNP 2-5** is not implemented at all.  V.42 (2002) dropped Annex A, but
-  plenty of answering modems still offer MNP when V.42 detection fails; we
-  fall back to V.14 (+ES) instead.
+* **MNP 5** is not implemented.  MNP 2-4 (V.42 Annex A) now runs when
+  detection finds no LAPM peer, before the +ES fallback: `docs/mnp.md`.
 * **32-bit FCS** (XID HDLC optional functions) is not offered.  It is the
   remaining defence against noise frames that pass the 16-bit FCS with a
   valid address (1 in 2^16 x 1/128 of noise "frames").

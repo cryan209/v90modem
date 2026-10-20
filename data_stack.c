@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include "data_stack.h"
+#include "mnp.h"
 #include "v44.h"
 
 #include <spandsp.h>
@@ -182,7 +183,7 @@ static void ds_rx_flow_check(data_stack_t *s)
     int room;
     bool busy;
 
-    if (!s->rx_room  ||  !s->v42)
+    if (!s->rx_room  ||  (!s->v42  &&  !s->mnp))
         return;
     if (!s->link_ready  ||  s->suspended)
     {
@@ -194,7 +195,10 @@ static void ds_rx_flow_check(data_stack_t *s)
     if (busy != s->rx_busy  &&  busy)
         s->rx_busy_spells++;
     s->rx_busy = busy;
-    v42_set_local_busy_status(s->v42, busy);
+    if (s->v42)
+        v42_set_local_busy_status(s->v42, busy);
+    else
+        mnp_set_local_busy(s->mnp, busy);
 }
 
 void ds_set_rx_room(data_stack_t *s, ds_rx_room_fn room, void *ctx,
@@ -294,6 +298,16 @@ static void ds_v42_status(void *user_data, int status)
     }
     case V42_STATUS_DETECTION_UNSUPPORTED:
         s->link_ready = false;
+        /* V.42 7.2.1.2: "the originator may fall back to non-error-correcting
+         * mode or may attempt to detect the presence of an alternative
+         * error-correcting capability" -- MNP's LR, before any fallback.  The
+         * answerer has been watching for an LR all through T400 (ds_rx_put_bit)
+         * and saw none, so its verdict stands. */
+        if (s->alternative_ok  &&  s->calling_party) {
+            s->demote_pending = true;
+            s->demote_to_mnp = true;
+            return;
+        }
         if (s->fallback_buffered) {
             /* V.42 is still running underneath this callback, so it cannot be
              * torn down here; the next line-side call does it. */
@@ -465,6 +479,10 @@ void ds_release(data_stack_t *s)
         v42_free(s->v42);
         s->v42 = NULL;
     }
+    if (s && s->mnp) {
+        mnp_free(s->mnp);
+        s->mnp = NULL;
+    }
     if (s)
         s->link_ready = false;
 }
@@ -497,13 +515,141 @@ void ds_compression_state(const data_stack_t *s, int *scheme, bool *tx, bool *rx
     }
 }
 
-/* Detection found no V.42 peer and +ES said that is acceptable: continue as a
- * plain async modem.  Same line rate, same callbacks, no error control. */
+/* Framing mode offered in LR (Annex A A.6.4.1.5): 3, the bit-oriented one. */
+#define DS_MNP_SERVICE_CLASS 3
+/* Originator LRs before giving up: after a failed V.42 detection the far end
+ * is most likely not error-correcting at all, and every LR is noise to its
+ * DTE (V.42 Appendix I), so try briefly; asked for MNP directly, try longer. */
+#define DS_MNP_LR_TRIES_AFTER_V42 3
+#define DS_MNP_LR_TRIES_DIRECT 10
+#define DS_MNP_ANSWER_WAIT_MS 10000
+
+static void ds_mnp_status(void *user_data, int status)
+{
+    data_stack_t *s = user_data;
+    ds_link_event_t event;
+
+    switch (status) {
+    case MNP_STATUS_LR_SEEN:
+        /* V.42 7.2.1.3: an alternative procedure protocol frame ends the
+         * answerer's detection phase.  V.42 is running underneath this call
+         * (ds_rx_put_bit feeds both), so switch on the next line-side call. */
+        if (s->framing == DS_FRAMING_V42) {
+            s->demote_pending = true;
+            s->demote_to_mnp = true;
+        }
+        return;
+    case MNP_STATUS_CONNECTED:
+        s->link_ready = true;
+        /* As for LAPM: a successful establishment delivers none of the
+         * detection-phase characters (V.42 Appendix I.3). */
+        s->detect_rx_len = 0;
+        event = DS_LINK_CONNECTED;
+        break;
+    case MNP_STATUS_ESTABLISH_FAILED:
+        s->link_ready = false;
+        if (s->fallback_buffered) {
+            s->demote_pending = true;
+            s->demote_to_mnp = false;
+            return;
+        }
+        event = DS_LINK_UNSUPPORTED;
+        break;
+    case MNP_STATUS_DISCONNECTED:
+        s->link_ready = false;
+        event = DS_LINK_DISCONNECTED;
+        break;
+    default:
+        return;
+    }
+    if (s->link_event)
+        s->link_event(s->link_event_ctx, event);
+}
+
+static mnp_t *ds_mnp_new(data_stack_t *s, int lr_tries, int answer_wait_ms)
+{
+    mnp_t *m = mnp_init(s->calling_party,
+                        s->mnp_framing_mode ? s->mnp_framing_mode : DS_MNP_SERVICE_CLASS,
+                        s->line_bit_rate,
+                        ds_v42_get_frame, ds_v42_put_frame, ds_mnp_status, s);
+
+    if (m)
+        mnp_set_establish_limit(m, lr_tries, answer_wait_ms);
+    return m;
+}
+
+int ds_init_mnp(data_stack_t *s, bool calling_party, int line_bit_rate, int answer_wait_ms,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx)
+{
+    ds_init(s, DS_FRAMING_MNP, pull, pull_ctx, push, push_ctx);
+    s->calling_party = calling_party;
+    s->link_event = link_event;
+    s->link_event_ctx = link_event_ctx;
+    s->line_bit_rate = (line_bit_rate > 0)  ?  line_bit_rate  :  2400;
+    s->mnp = ds_mnp_new(s, DS_MNP_LR_TRIES_DIRECT,
+                        answer_wait_ms > 0  ?  answer_wait_ms  :  DS_MNP_ANSWER_WAIT_MS);
+    return s->mnp  ?  0  :  -1;
+}
+
+void ds_set_alternative(data_stack_t *s, bool enable)
+{
+    s->alternative_ok = enable;
+    if (s->framing != DS_FRAMING_V42)
+        return;
+    if (enable  &&  !s->calling_party  &&  !s->mnp) {
+        /* The LR watch: an answerer that never transmits until it hears one,
+         * with no timeout of its own -- V.42's T400 owns the verdict. */
+        s->mnp = ds_mnp_new(s, 0, 0);
+    } else if (!enable  &&  s->mnp) {
+        mnp_free(s->mnp);
+        s->mnp = NULL;
+    }
+}
+
+void ds_set_mnp_framing_mode(data_stack_t *s, int mode)
+{
+    s->mnp_framing_mode = mode;
+    /* An MNP entity that has not run yet takes the new offer. */
+    if (s->mnp && s->framing == DS_FRAMING_MNP) {
+        mnp_free(s->mnp);
+        s->mnp = ds_mnp_new(s, DS_MNP_LR_TRIES_DIRECT,
+                            s->calling_party ? 0 : DS_MNP_ANSWER_WAIT_MS);
+    } else if (s->mnp) {
+        mnp_free(s->mnp);
+        s->mnp = ds_mnp_new(s, 0, 0);
+    }
+}
+
+/* Detection found no V.42 peer.  With the alternative allowed, the originator
+ * now tries MNP (and the answerer answers the LR it has seen).  Otherwise, or
+ * when MNP fails too, and +ES said that is acceptable: continue as a plain
+ * async modem.  Same line rate, same callbacks, no error control. */
 static void ds_demote(data_stack_t *s)
 {
     int rate = s->line_bit_rate;
 
     s->demote_pending = false;
+    if (s->demote_to_mnp) {
+        s->demote_to_mnp = false;
+        if (s->v42) {
+            v42_free(s->v42);
+            s->v42 = NULL;
+        }
+        ds_compression_release(s);
+        if (!s->mnp)
+            s->mnp = ds_mnp_new(s, DS_MNP_LR_TRIES_AFTER_V42, 0);
+        if (!s->mnp) {
+            if (s->link_event)
+                s->link_event(s->link_event_ctx, DS_LINK_ERROR);
+            return;
+        }
+        s->framing = DS_FRAMING_MNP;
+        if (s->link_event)
+            s->link_event(s->link_event_ctx, DS_LINK_ALTERNATIVE);
+        return;
+    }
     ds_release(s);
     s->framing = DS_FRAMING_V14;
     s->tx_shift = 0;
@@ -526,13 +672,16 @@ static void ds_demote(data_stack_t *s)
 
 bool ds_link_is_ready(const data_stack_t *s)
 {
-    return s && (s->framing != DS_FRAMING_V42 || s->link_ready);
+    return s && ((s->framing != DS_FRAMING_V42 && s->framing != DS_FRAMING_MNP)
+                 || s->link_ready);
 }
 
 void ds_stop_link(data_stack_t *s)
 {
     if (s && s->v42)
         v42_stop(s->v42);
+    else if (s && s->mnp && s->framing == DS_FRAMING_MNP)
+        mnp_stop(s->mnp);
 }
 
 void ds_suspend_link(data_stack_t *s)
@@ -551,6 +700,13 @@ void ds_resume_link(data_stack_t *s, int line_bit_rate)
     s->suspended = false;
     if (s->v42) {
         v42_resume(s->v42, line_bit_rate);
+    } else if (s->mnp) {
+        /* MNP has no suspend procedure: its sequence state is intact, and
+           anything lost in the hold is retransmitted. */
+        if (line_bit_rate > 0) {
+            s->line_bit_rate = line_bit_rate;
+            mnp_set_bit_rate(s->mnp, line_bit_rate);
+        }
     } else {
         /* V.14: a character cut off by the hold is lost; resynchronise on
            the next start bit. */
@@ -567,6 +723,8 @@ void ds_set_line_bit_rate(data_stack_t *s, int line_bit_rate)
     s->line_bit_rate = line_bit_rate;
     if (s->v42)
         v42_set_bit_rate(s->v42, line_bit_rate);
+    if (s->mnp)
+        mnp_set_bit_rate(s->mnp, line_bit_rate);
 }
 
 bool ds_link_is_suspended(const data_stack_t *s)
@@ -590,6 +748,11 @@ void ds_reset(data_stack_t *s)
     s->compression_failed = false;
     if (s->v42)
         v42_restart(s->v42);
+    if (s->mnp && s->framing == DS_FRAMING_MNP) {
+        mnp_free(s->mnp);
+        s->mnp = ds_mnp_new(s, DS_MNP_LR_TRIES_DIRECT,
+                            s->calling_party ? 0 : DS_MNP_ANSWER_WAIT_MS);
+    }
 }
 
 void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate)
@@ -686,6 +849,16 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
         if (s->demote_pending)
             bit = 1;
         if (dump) fputc(bit ? '1' : '0', dump);
+        return bit;
+    }
+    if (s->framing == DS_FRAMING_MNP)
+    {
+        if (s->rx_room  &&  (++s->rx_room_poll & 63) == 0)
+            ds_rx_flow_check(s);
+        bit = s->mnp ? mnp_tx_bit(s->mnp) : 1;
+        /* Falling back to V.14 from inside that call: mark, as for V.42. */
+        if (s->demote_pending)
+            bit = 1;
         return bit;
     }
     if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
@@ -810,8 +983,29 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
                     s->detect_rx_dropped++;
             }
         }
+        /* V.42 7.2.1.3: the answerer's detection also ends on an
+         * alternative-procedure frame; the LR watch sees the same bits. */
+        if (s->mnp && !s->link_ready)
+            mnp_rx_bit(s->mnp, bit);
         if (s->v42)
             v42_rx_bit(s->v42, bit);
+        return;
+    }
+
+    if (s->framing == DS_FRAMING_MNP) {
+        /* Until MNP is up the peer may be a plain async modem, and what it
+         * sends is user data to keep for the fallback (Appendix I.3 b)). */
+        if (s->fallback_buffered && !s->link_ready) {
+            ch = ds_v14_rx_bit(s, bit);
+            if (ch >= 0) {
+                if (s->detect_rx_len < (int) sizeof(s->detect_rx))
+                    s->detect_rx[s->detect_rx_len++] = (uint8_t) ch;
+                else
+                    s->detect_rx_dropped++;
+            }
+        }
+        if (s->mnp)
+            mnp_rx_bit(s->mnp, bit);
         return;
     }
 

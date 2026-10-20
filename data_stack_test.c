@@ -3,6 +3,7 @@
  */
 
 #include "data_stack.h"
+#include "mnp.h"
 #include <spandsp.h>
 
 #include <stdio.h>
@@ -792,6 +793,139 @@ static void test_wire_observer(void)
     ds_release(&tx); ds_release(&rx);
 }
 
+
+/* V.42 A.3.6 / 8.1.1.6.1 against the catalogued check values over
+ * "123456789": CRC-16/ARC 0xBB3D, and CRC-16/X-25 (the LAPM FCS) 0x906E. */
+static void test_mnp_fcs_check_values(void)
+{
+    static const uint8_t check[] = "123456789";
+
+    CHECK(mnp_crc16(0, check, 9) == 0xBB3D,
+          "MNP octet-oriented CRC is x^16+x^15+x^2+1 (A.3.6)");
+    CHECK((uint16_t) ~mnp_fcs16(0xFFFF, check, 9) == 0x906E,
+          "MNP bit-oriented FCS is the 8.1.1.6.1 FCS (A.4.4)");
+}
+
+/* Assemble start-stop octets from a bit source until n are collected. */
+static int collect_async(int (*bit)(void *), void *ctx, uint8_t *out, int n, int max_bits)
+{
+    int got = 0, hunting = 1, bits = 0;
+    uint8_t sh = 0;
+
+    for (int i = 0; i < max_bits && got < n; i++) {
+        int b = bit(ctx);
+
+        if (hunting) {
+            if (b == 0) { hunting = 0; bits = 0; sh = 0; }
+        } else if (bits < 8) {
+            sh |= (uint8_t) (b << bits++);
+        } else {
+            out[got++] = sh;
+            hunting = 1;
+        }
+    }
+    return got;
+}
+
+static int mnp_bit(void *ctx)
+{
+    return mnp_tx_bit((mnp_t *) ctx);
+}
+
+/* Table A.2: the initiating LR, octet-oriented (A.6.4), field by field. */
+static void test_mnp_lr_encoding(void)
+{
+    static const uint8_t want[] = {
+        0x16, 0x10, 0x02,                       /* SYN DLE STX (A.3.1) */
+        23, 1, 2,                               /* LI, LR, constant parameter 1 */
+        1, 6, 1, 0, 0, 0, 0, 255,               /* constant parameter 2 */
+        2, 1, 3,                                /* framing mode 3 */
+        3, 1, 8,                                /* k = 8 */
+        4, 2, 64, 0,                            /* N401 = 64 */
+        8, 1, 3,                                /* 256-octet LTs, fixed-field LT/LA */
+        0x10, 0x03                              /* DLE ETX (A.3.5) */
+    };
+    uint8_t got[sizeof(want) + 2];
+    uint16_t crc;
+    mnp_t *m = mnp_init(true, 3, 9600, NULL, NULL, NULL, NULL);
+    int n = collect_async(mnp_bit, m, got, (int) sizeof(got), 9600);
+
+    crc = mnp_crc16(mnp_crc16(0, want + 3, (int) sizeof(want) - 5), want + sizeof(want) - 1, 1);
+    CHECK(n == (int) sizeof(got) && memcmp(got, want, sizeof(want)) == 0
+          && got[sizeof(want)] == (uint8_t) crc && got[sizeof(want) + 1] == (uint8_t) (crc >> 8),
+          "MNP initiating LR matches Table A.2, octet-oriented with the A.3.6 FCS");
+    mnp_free(m);
+}
+
+/* V.42 7.9: detection fails, the alternative procedure fails (a plain V.14
+ * answerer never answers LR), and only then the buffered fallback.  What the
+ * peer sent meanwhile is still delivered (Appendix I.3 b)), and the caller's
+ * own data flows once V.14 is up. */
+static uint8_t alt_c2p[64], alt_p2c[64];
+static int alt_c2p_pos, alt_p2c_pos;
+static uint8_t alt_at_peer[8192], alt_at_caller[256];
+static int alt_at_peer_len, alt_at_caller_len, alt_events[16];
+
+static int alt_pull_caller(void *ctx)
+{
+    (void) ctx;
+    return alt_c2p_pos < (int) sizeof(alt_c2p) ? alt_c2p[alt_c2p_pos++] : -1;
+}
+static int alt_pull_peer(void *ctx)
+{
+    (void) ctx;
+    return alt_p2c_pos < (int) sizeof(alt_p2c) ? alt_p2c[alt_p2c_pos++] : -1;
+}
+static void alt_push_peer(void *ctx, uint8_t b)
+{
+    (void) ctx;
+    if (alt_at_peer_len < (int) sizeof(alt_at_peer)) alt_at_peer[alt_at_peer_len++] = b;
+}
+static void alt_push_caller(void *ctx, uint8_t b)
+{
+    (void) ctx;
+    if (alt_at_caller_len < (int) sizeof(alt_at_caller)) alt_at_caller[alt_at_caller_len++] = b;
+}
+static void alt_event(void *ctx, ds_link_event_t e)
+{
+    (void) ctx;
+    if ((int) e < 16) alt_events[e]++;
+}
+
+static void test_mnp_alternative_then_v14_fallback(void)
+{
+    data_stack_t caller, peer;
+
+    for (int i = 0; i < 64; i++) {
+        alt_c2p[i] = (uint8_t) ('A' + i % 26);
+        alt_p2c[i] = (uint8_t) ('a' + i % 26);
+    }
+    alt_c2p_pos = alt_p2c_pos = alt_at_peer_len = alt_at_caller_len = 0;
+    memset(alt_events, 0, sizeof(alt_events));
+    ds_init(&peer, DS_FRAMING_V14, alt_pull_peer, NULL, alt_push_peer, NULL);
+    ds_set_v14_rates(&peer, 9600, 9600);
+    if (ds_init_v42(&caller, true, true, 9600, alt_pull_caller, NULL, alt_push_caller, NULL,
+                    alt_event, NULL) != 0) {
+        CHECK(0, "MNP alternative then V.14 fallback");
+        return;
+    }
+    ds_set_fallback_buffered(&caller, true);
+    ds_set_alternative(&caller, true);
+    for (int tick = 0; tick < 9600 * 10; tick++) {
+        ds_rx_put_bit(&peer, ds_tx_get_bit(&caller));
+        ds_rx_put_bit(&caller, ds_tx_get_bit(&peer));
+    }
+    CHECK(alt_events[DS_LINK_ALTERNATIVE] == 1 && alt_events[DS_LINK_FALLBACK] == 1
+          && alt_events[DS_LINK_UNSUPPORTED] == 0 && caller.framing == DS_FRAMING_V14,
+          "V.42 caller tries MNP after detection fails, then falls back to V.14 (7.9)");
+    CHECK(alt_at_caller_len == 64 && memcmp(alt_at_caller, alt_p2c, 64) == 0,
+          "peer data sent during V.42 detection and the MNP attempt reaches the caller's DTE");
+    CHECK(alt_at_peer_len >= 64
+          && memcmp(alt_at_peer + alt_at_peer_len - 64, alt_c2p, 64) == 0,
+          "caller data flows to a V.14 peer after the fallback");
+    ds_release(&caller);
+}
+
 int main(void)
 {
     test_wire_observer();
@@ -819,6 +953,9 @@ int main(void)
     test_lapm_data_stack_case(false, 3, 3, true, false, 65535,
           "V.42bis full two-octet P1 negotiation and transfer");
     test_detection_fallback_forwards_early_data();
+    test_mnp_fcs_check_values();
+    test_mnp_lr_encoding();
+    test_mnp_alternative_then_v14_fallback();
     test_compression_error();
     test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");
     test_v44_stack(3,3,false,true,false,"V.44 retransmission preserves dictionary synchronization");

@@ -26,7 +26,7 @@ in V.8bis. `%19S2` carries an X2 string.
 | **V.32terbo** | **absent.** `AT+MS=V32TERBO` is accepted and falls back to V.32bis |
 | **HST** (USR) | **absent.** same fallback |
 | **V.FC** (Rockwell V.Fast Class) | **absent.** same fallback |
-| **MNP 2-5** | **absent.** MICA and the Courier both carry it; matters for pre-V.42 peers |
+| **MNP 2-5** | MNP 2-4 **yes** (V.42 Annex A, `docs/mnp.md`, 2026-10-21, no foreign peer yet); MNP 5 absent. MICA and the Courier both carry it |
 | V.34 with terbo | not applicable to the datapump; it is a V.8/V.34 negotiation switch in MICA (`%15S0` vs `%15S1`) |
 
 So against both vendor images the missing ones are **V.32terbo, HST, V.FC and
