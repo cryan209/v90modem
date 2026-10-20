@@ -1,0 +1,190 @@
+{
+  "scope": "INFO1a mode/law classification only; no verified connection",
+  "runs": [
+    {
+      "directory": "artifacts/k56flex-hsf-20261021-flags-control",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "audio_seconds": 11.06,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 2.3146354579366744,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": false,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": false,
+        "client_phase2_rejected": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 25,
+          "tx_label": "CallWaitJ",
+          "rx_label": "CALL_INIT_FOR_PH_3_WAIT_70_MS",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "e698f5158bead4581fec7b5e6f99f00005a55f220c6efab4dc2504bc3b4f96d1",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "13d7b0f04f078a5a916c10a4a504ccbee09756946fc20a9dace69e7c81080ae8"
+        }
+      },
+      "classification_events": [
+        {
+          "block": 686,
+          "rx_state": 21,
+          "symbol_path": 0,
+          "handler": "0x1203a3a4",
+          "flex_classifier": "0x1201efa0",
+          "flex_symbol_receiver": 0,
+          "server_k56_flags": 1023,
+          "client_k56_flags": 1,
+          "measured_power": -13.872573852539062,
+          "power_limits": [
+            0,
+            -45
+          ],
+          "power_threshold": -45
+        },
+        {
+          "block": 690,
+          "rx_state": 21,
+          "symbol_path": 1,
+          "handler": "0x1203a3a4",
+          "flex_classifier": "0x1201efa0",
+          "flex_symbol_receiver": 0,
+          "server_k56_flags": 1023,
+          "client_k56_flags": 1,
+          "measured_power": -13.872573852539062,
+          "power_limits": [
+            0,
+            -45
+          ],
+          "power_threshold": -45
+        }
+      ]
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-20261021-flags-fixed",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "audio_seconds": 13.16,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 3.0563071669312194,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "c75248c7896c7c753b25e0f83b22337883c2e8e301c77c1d3ead79490e6af1d1",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "13d7b0f04f078a5a916c10a4a504ccbee09756946fc20a9dace69e7c81080ae8"
+        }
+      },
+      "classification_events": [
+        {
+          "block": 686,
+          "rx_state": 19,
+          "symbol_path": 1,
+          "handler": "0x1203a342",
+          "flex_classifier": "0x1201efa0",
+          "flex_symbol_receiver": 1,
+          "server_k56_flags": 1,
+          "client_k56_flags": 1,
+          "measured_power": -13.872573852539062,
+          "power_limits": [
+            0,
+            -45
+          ],
+          "power_threshold": -45
+        }
+      ]
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-20261021-flags-confirm",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "audio_seconds": 13.16,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 3.0164063330739737,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "5326286116c81254023af44bfe9dd74a94204c2f5f15d737b768001a094590ad",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "13d7b0f04f078a5a916c10a4a504ccbee09756946fc20a9dace69e7c81080ae8"
+        }
+      },
+      "classification_events": [
+        {
+          "block": 686,
+          "rx_state": 19,
+          "symbol_path": 1,
+          "handler": "0x1203a342",
+          "flex_classifier": "0x1201efa0",
+          "flex_symbol_receiver": 1,
+          "server_k56_flags": 1,
+          "client_k56_flags": 1,
+          "measured_power": -13.872573852539062,
+          "power_limits": [
+            0,
+            -45
+          ],
+          "power_threshold": -45
+        }
+      ]
+    }
+  ],
+  "first_differing_server_tx_sample": 87280
+}

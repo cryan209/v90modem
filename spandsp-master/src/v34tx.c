@@ -6615,6 +6615,14 @@ static void info1_baud_init(v34_state_t *s)
     else
     {
         prepare_info1a(s);
+        /* K56flex Draft 0.23 4.1 common Phase 2 uses the V.34 Table 16
+           INFO1a layout, but legacy HSF 1201efa0 interprets bits 40:49 as
+           mode/power/law flags (received INFO1a+0x30), not frequency offset.
+           This explicit mu-law K56 profile must declare K56 enabled, normal
+           power, mu-law: only bit 0 set. A measured -1 instead declares
+           A-law and the peer selects V.34 before the PCM prefix arrives. */
+        if (s->rx.k56_phase2)
+            s->tx.info1a.freq_offset = 1;
         s->tx.txbits = info1a_sequence_tx(&s->tx, &s->tx.info1a);
     }
     /*endif*/

@@ -288,12 +288,54 @@ static void check_spec_encoder(v34_state_t *s)
     }
 }
 
+static void check_k56_info1a_mode_flags(void)
+{
+    /* V.34 Table 16 framing/CRC remains common; K56flex Draft 0.23 4.1
+       startup uses HSF 1201efa0's mode/law interpretation of bits 40:49.
+       Exercise the real INFO1 entry and serialized field with offsets that
+       would otherwise disable K56 or advertise the wrong encoding law. */
+    const int offsets[] = {-512, -1, 0, 4};
+    for (unsigned i = 0; i < sizeof(offsets)/sizeof(offsets[0]); i++)
+    {
+        v34_state_t *s = v34_init(NULL, 3200, 9600, false, true,
+                                  NULL, NULL, NULL, NULL);
+        assert(s);
+        if (offsets[i] != -512)
+        {
+            s->rx.l1_l2_1050_phase_step_count = 1;
+            s->rx.l1_l2_1050_phase_step_sum =
+                offsets[i]*0.02f*(2.0f*3.14159265f*0.020f);
+        }
+        /* Also disable on the same object: ordinary V.34 must resume
+           transmitting the measured offset, with no sticky K56 flags. */
+        for (int k56 = 1; k56 >= 0; k56--)
+        {
+            v34_set_k56_phase2(s, k56);
+            info1_baud_init(s);
+            int bits[70];
+            for (int bit = 0; bit < 70; bit++)
+                bits[bit] = (s->tx.txbuf[bit/8] >> (bit%8)) & 1;
+            unsigned field = 0;
+            for (int bit = 0; bit < 10; bit++)
+                field |= bits[40 + bit] << bit;
+            unsigned crc = 0xffff;
+            for (int bit = 12; bit < 66; bit++)
+                crc = ((crc ^ bits[bit]) & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
+            assert(crc == 0);
+            assert(field == (k56 ? 1u : (unsigned) offsets[i] & 0x3ff));
+        }
+        v34_free(s);
+    }
+    puts("PASS: K56 INFO1a declares mu-law mode independently of V.34 frequency offset");
+}
+
 int main(void)
 {
     v34_state_t *s = v34_init(NULL, 2400, 9600, true, true, NULL, NULL, NULL, NULL);
     int symbols;
 
     assert(s);
+    check_k56_info1a_mode_flags();
     /* Table 18's exact 16-point request was overridden as "nearly tied".
        Exercise the production classifier and the selected MP generator. */
     int distance;

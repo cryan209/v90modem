@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -59,7 +60,41 @@ def main():
     env = dict(os.environ, ME_K56FLEX="probe", ME_MODE="k56", ME_V8="1",
                ME_MEDIA_CLOCK="1", VPCM_G711_TAP_DIR=str(out))
     client = K56Client(modulation="flex", max_upstream_rate=9600)
-    stream = PCMUStream(client)
+    phase2_events = []
+    last_phase2_state = None
+
+    def observe(peer):
+        nonlocal last_phase2_state
+        if peer.pump is None:
+            return
+        # Read-only original K56 diagnostics. 1203a1df branches to state
+        # 0x28/1203b470 (DEMY) on a low-power rejection. Only 1203a3a4
+        # changes RX+66c0 to the actual symbol path after INFO1/70 ms.
+        pump = peer.pump
+        cpu = pump.cpu
+        rx = pump.object + 0x2338
+        config = cpu._read32(rx + 0x4b0)
+        state = (cpu._read32(rx + 0x28), cpu._read32(rx + 0x66c0))
+        if state == last_phase2_state:
+            return
+        last_phase2_state = state
+        floating = lambda address: struct.unpack("<f", cpu._read32(address).to_bytes(4, "little"))[0]
+        limits = struct.unpack("<hh", cpu._read32(config + 0x14).to_bytes(4, "little"))
+        phase2_events.append({"block": peer.block, "rx_state": state[0],
+                              "symbol_path": state[1],
+                              "handler": hex(cpu._read32(rx + 0x14)),
+                              "flex_classifier": hex(cpu._read32(cpu._read32(rx) + 0x84)),
+                              "flex_symbol_receiver": cpu._read32(rx + 0x7f28),
+                              # 1201efa0 compares these original INFO1 fields:
+                              # enable bit 0, server law bit 2/client law bit 3.
+                              "server_k56_flags": cpu._read32(cpu._read32(rx + 0x4ac) + 0x30) & 0x3ff,
+                              "client_k56_flags": cpu._read32(cpu._read32(rx + 0x4a4) + 0x42) & 0x3ff,
+                              # 1203a231 passes RX+a94 as this to 1203d7a0.
+                              "measured_power": floating(rx + 0xa94 + 0x24b4),
+                              "power_limits": list(limits),
+                              "power_threshold": sum(limits)})
+
+    stream = PCMUStream(client, observe)
     upstream, downstream, dte = bytearray(), bytearray(), bytearray()
     fd, frames, end_reason = None, 0, "duration limit"
     start_wall = time.monotonic()
@@ -136,14 +171,19 @@ def main():
         (out / "server-tx.g711").write_bytes(downstream)
         (out / "dte.bin").write_bytes(dte)
         (out / "client-events.json").write_text(json.dumps(client.events, indent=2) + "\n")
+        (out / "client-phase2.json").write_text(json.dumps(phase2_events, indent=2) + "\n")
         server_log = (out / "server.log").read_text(errors="replace")
         if "outgoing (completes ATD)" not in server_log:
             raise RuntimeError("wrong engine role; see server.log")
         notices = [notice for event in client.events
                    for notice in event.get("notifications", [])]
+        phase3_seen = any(e["symbol_path"] == 1 and e["rx_state"] != 0x28
+                          for e in phase2_events)
+        flex_phase3_seen = any(e["symbol_path"] == 1 and e["rx_state"] != 0x28
+                               and e["flex_symbol_receiver"] == 1
+                               for e in phase2_events)
         phase2_handoff = (client.flex_agreed and client.v8_modulations == 1
-                          and client.selected_modulation == "k56"
-                          and any(e.get("rx_label") == "DEMY" for e in client.events)
+                          and client.selected_modulation == "k56" and flex_phase3_seen
                           and "K56flex Phase 2 complete; starting PCM probes" in server_log)
         report = {
             "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
@@ -155,6 +195,9 @@ def main():
             "v8_modulations": client.v8_modulations,
             "selected_modulation": client.selected_modulation,
             "phase2_handoff": phase2_handoff,
+            "client_phase3_seen": phase3_seen,
+            "client_flex_phase3_seen": flex_phase3_seen,
+            "client_phase2_rejected": any(e["rx_state"] == 0x28 for e in phase2_events),
             "final_client_state": final_state, "failure": client.failure,
             "client_tx_training_completed": any(n[0] == 1000 for n in notices),
             "client_rx_training_completed": any(n[0] == 1001 for n in notices),

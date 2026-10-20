@@ -1149,6 +1149,53 @@ but still does not establish a K56flex link. Next: inspect our transmitted
 PCM prefix and the peer's classification/retrain at that boundary; do not
 force gate A or treat the old gate-timeout result as current qualification.
 
+## HSF INFO1a mode/law selection, 21 October 2026
+
+The pending `v34_phase4_16pt_test` additions exercise V.90 Phase-2 wire
+contracts (nominal power, final INFO0d fill, contiguous 109-bit INFO1d),
+not a new Phase-4 defect. The existing Phase-4 J(16)/power regressions pass.
+The native K56flex failure is an independent INFO1a interpretation error.
+
+V.34 Table 16 assigns bits 40:49 to frequency offset. In the K56flex common
+startup (Draft 0.23 clause 4.1), the original HSF classifier `1201efa0`
+reads the same field from received INFO1a+0x30 as proprietary flags:
+bit 0 enables K56, bit 1 enables high power, and bit 2 selects A-law (0 is
+mu-law). It compares these against INFO1c+0x42, whose law is bit 3.
+These bit meanings are recovered from that original classifier, not claimed
+as normative V.34 semantics. A measured offset of -1 serializes as 0x3ff:
+our mu-law server therefore advertised A-law. HSF rejected that law pairing
+and initialized its V.34 symbol receiver before our PCM prefix arrived.
+
+The fix sets this field to 1 only in the explicit mu-law K56 Phase-2
+profile. Ordinary V.34 retains its measured frequency offset. No waveform
+gain, G.711 coding, DSP table, scrambler, sample count or peer state changes.
+`--require-startup` now also requires the original K56 symbol receiver
+selector, so a V.34 symbol-path handoff cannot satisfy it.
+
+Completed native runs, with the same peer-library and diagnostic-tool hashes:
+
+| Local directory under `artifacts/` | Received server/client flags | K56 symbol path | Result |
+|---|---|---|---|
+| `k56flex-hsf-20261021-flags-control` | 1023 / 1 | no, receiver selector 0 | immediate V.34 fallback, 11.06 s; startup check fails |
+| `k56flex-hsf-20261021-flags-fixed` | 1 / 1 | yes, receiver selector 1 | startup check passes; later retrain/fallback, 13.16 s |
+| `k56flex-hsf-20261021-flags-confirm` | 1 / 1 | yes, receiver selector 1 | same later failure, 13.16 s |
+
+The control disables only the two-line INFO1a override. Control and fixed
+server TX taps are byte-identical through sample 87279 (10.91 s); their first
+difference is within INFO1a. The native peer was not modified or forced past
+a gate. Full reports, original state observations and byte-exact PCMU taps
+remain in those disposable directories. A compact hash/state summary is
+retained in `reference-data/artifacts/k56flex-hsf-info1a-20261021/summary.json`.
+
+The serialized-field/CRC regression fails with the override removed and
+passes with it restored. It covers unavailable, negative, zero and positive
+frequency-offset measurements, plus disabling K56 on the same instance.
+The focused runner passes 15 checks: seven K56 tests, Phase-4 generators,
+MP, INFO1 validation, data mapping, and 2400/9600 and 3200/21600 duplex in
+both G.711 laws. This is a Phase-2 interoperability correction only:
+no training completion, CONNECT or verified payload is observed. The later
+K56 training/retrain boundary remains open; no hardware interop is claimed.
+
 ## Mainline integration, 13 October 2026
 
 The `k56flex-rockwell-ns` work was consolidated onto main while retaining
