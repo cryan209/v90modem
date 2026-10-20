@@ -37,17 +37,16 @@ void k56flex_client_free(k56flex_client_t *c)
 
 k56flex_train_phase_t k56flex_client_phase(const k56flex_client_t *c) { return k56flex_train_phase(&c->shadow); }
 
-static void send_status(k56flex_client_t *c, unsigned bits)
+/* Local decoder state only; never a transport for peer signalling. */
+static void mirror_status(k56flex_client_t *c, unsigned bits)
 {
     if (!c->detect) k56flex_train_status(&c->shadow, bits);
-    if (c->cfg.ctl.status) c->cfg.ctl.status(c->cfg.ctl.user, bits);
 }
 
-static void send_report(k56flex_client_t *c)
+static void mirror_report(k56flex_client_t *c)
 {
     k56flex_train_set_report(&c->shadow, c->report_field);
-    if (c->cfg.ctl.report) c->cfg.ctl.report(c->cfg.ctl.user, c->report_field);
-    c->report_sent = 1;
+    c->report_modeled = 1;
 }
 
 /* Find a framed record in x[] at or after `from`: the marker is the one before a zero
@@ -101,8 +100,8 @@ static void try_decode_param(k56flex_client_t *c, k56flex_train_phase_t ph)
                 c->shadow.cfg.rate_bps = c->rate_bps;
             }
             c->rec_end = marker + 2 + 17 * 10;
-            if (!c->resp_sent) { c->resp_sent = 1; send_status(c, 1u << 13); }
-            if (final && !c->done_sent) { c->done_sent = 1; send_status(c, K56FLEX_STATUS_PARAM_DONE); }
+            if (!c->response_modeled) { c->response_modeled = 1; mirror_status(c, 1u << 13); }
+            if (final && !c->final_param_seen) { c->final_param_seen = 1; mirror_status(c, K56FLEX_STATUS_PARAM_DONE); }
             from = c->rec_end;
         }
     }
@@ -151,20 +150,21 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
     }
     if (ph == unknown_from && !c->param_from_set) { c->param_from = c->nbits - c->cp.cfg[3]; c->param_from_set = 1; }
     if (ph >= unknown_from && ph <= K56T_PARAM_2) try_decode_param(c, ph);
-    /* upstream signalling, keyed to the phase the mirror has just entered */
+    /* Decoder timeline bookkeeping only. No report or gate event is sent
+     * to a peer: Draft 0.23 clause 11 signalling must be carried by audio. */
     ph = k56flex_train_phase(sh);
-    if (ph == K56T_GATE_A && !c->gate_a_sent) {
-        c->gate_a_sent = 1;
-        send_report(c);
-        send_status(c, K56FLEX_STATUS_PROBE_PEER);
+    if (ph == K56T_GATE_A && !c->gate_a_modeled) {
+        c->gate_a_modeled = 1;
+        mirror_report(c);
+        mirror_status(c, K56FLEX_STATUS_PROBE_PEER);
     }
-    if (ph == K56T_GATE_B && !c->gate_b_sent && sh->gate_pairs >= c->cfg.gate_b_pairs) {
-        c->gate_b_sent = 1;
-        send_status(c, K56FLEX_STATUS_SILENCE_END);
+    if (ph == K56T_GATE_B && !c->gate_b_modeled && sh->gate_pairs >= c->cfg.gate_b_pairs) {
+        c->gate_b_modeled = 1;
+        mirror_status(c, K56FLEX_STATUS_SILENCE_END);
     }
-    if (ph == K56T_GATE_C && !c->gate_c_sent) {
-        c->gate_c_sent = 1;
-        send_status(c, 1u << 12);
+    if (ph == K56T_GATE_C && !c->gate_c_modeled) {
+        c->gate_c_modeled = 1;
+        mirror_status(c, 1u << 12);
     }
     if (c->fe) k56flex_rxfe_block(c->fe, c->qfirst, known_ref ? exp : lv, 6, known_ref ? 1 : -1);
     c->sym_idx += 6;
@@ -332,7 +332,7 @@ static void fe_sink(void *user, float y)
     }
     if (!c->seek) {
         if (c->qn < 6) return;
-        if (c->done_sent && c->sym_idx % 12 == 0) { c->seek = 1; }   /* wait for a pair boundary */
+        if (c->final_param_seen && c->sym_idx % 12 == 0) { c->seek = 1; }   /* wait for a pair boundary */
         else { training_symbols(c, c->qy); c->qn = 0; return; }
     }
     if (c->qn < 12) return;

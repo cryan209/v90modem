@@ -140,11 +140,14 @@ were exercised with a mocked DOM in Node. The existing Phase 2 decoder and
 V.92 procedure evaluator tests passed. These checks do not verify browser
 layout or hardware interoperability.
 
-The existing `k56flex_client_test` noisy A-law priming case currently fails
+Historical result before the 21 October 2026 removal of peer-control
+callbacks: the `k56flex_client_test` noisy A-law priming case failed
 three assertions in one scenario (failure in PRIME, one priming frame, no
 data bits). It is recorded in `docs/gap_analysis_2026-10.md`; it also failed
 on this macOS/ARM validation run. The new offline tests pass, and none of
-the existing K56flex receiver or channel implementations were changed.
+the existing K56flex receiver or channel implementations were changed in that
+export update. The current audio/G.711-only prefix tests no longer exercise
+that synthetic priming path; its failure has not been repaired.
 
 ## Gough Lui corpus check, 2026-10-05
 

@@ -5,8 +5,8 @@
 sequencer), `k56flex_client.c` / `k56flex_rxfe.c` (a client for our own server, over G.711
 octets or over linear audio) and `k56flex_channel.c` (a simulated analogue loop for it),
 exercised by `make k56flex-test`, `k56flex_v8bis_test`, `k56flex_probe_test`,
-`k56flex_train_test` and `k56flex_client_test`. The client is test-only and not
-linked into the modem. It is the digital-side (server) downstream payload core
+`k56flex_train_test` and `k56flex_client_test`. The client is a receive model for tests and capture analysis, without a live
+analogue DATA role. It is the digital-side (server) downstream payload core
 and its exact inverse, plus the V.8bis capability frame, the parameter record
 and the accepted-report logic. `AT+MS=K56` (automode enabled) selects the
 V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
@@ -119,9 +119,36 @@ probe still supplies its legacy FFFF fixture value. The priming frames' handling
 bits and the scrambler history across the hand-off follow the firmware flow
 only approximately. A live call stops at gate A at best.
 
-## Client (loopback against our own server)
+## Audio/G.711-only peer boundary, 21 October 2026
 
-`k56flex_client.c` receives the server's raw G.711 and runs the whole startup
+The client API no longer exposes `ctl.status` or `ctl.report`. Neither
+immediate callbacks nor delayed event queues may transfer a report or release
+a peer's training gate. Draft 0.23 clauses 4.10-4.12 and 11 require the
+actual upstream signalling; its complete waveform generation/reception
+remains unfinished. No replacement tones or invented signalling are used.
+The remaining `ctl.data` callback delivers decoded payload to the local host;
+it is not connected to a peer's protocol state.
+
+`k56flex_client_test` now tests the downstream prefix through G.711 or a
+simulated analogue channel, in both laws at 32000/56000 bit/s. All eight
+cases acquire/check the prefix and verify the server stays at gate A until
+its configured timeout, with no received status/report and no DATA.
+`legacy_pcm_decode_test` records that unanswered prefix and requires P1
+acquisition without a parameter-record claim. Neither test uses callbacks
+to construct its input dialogue. These replace the former synthetic full
+handshake/data tests below; their old payload/SNR results are component-model
+history, not current duplex qualification. Mapper, parameter checksum and
+sequencer primitive tests remain separate unit tests, not interoperability
+proof. The raw receiver's internal timeline bookkeeping never reaches a peer.
+
+The independent HSF pairing tool already exchanges only byte-exact PCMU
+between endpoints. Its original-pump reads are diagnostics only. That native
+path remains the interoperability check; a full Flex connection is still
+unverified.
+
+## Historical client loopback using a side channel
+
+Before removal of the side channel, `k56flex_client.c` received the server's raw G.711 and ran the whole startup
 against `k56flex_train`: it follows the training timeline, checks every fixed
 stage against the original-primitive stream, inverts each training block back to
 its source bits by exhaustive search (unambiguous for the identification, P1, P3

@@ -174,7 +174,7 @@ int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
     if (!client) return -1;
     /* Draft 0.23 4.10..4.12; receiver acquisition and observed transitions
      * are described in docs/k56flex_implementation.md. The client has no
-     * upstream callbacks here: received audio alone must release its gates. */
+     * upstream signalling API: received audio alone must release its gates. */
     for (size_t n = 0; n < count && !client->failed; n++) {
         processed = n + 1;
         k56flex_client_rx_linear(client, samples + n, 1);

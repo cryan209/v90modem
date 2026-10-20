@@ -76,32 +76,24 @@ static void x2_tests(void)
     assert(r.digital==1 && !r.marker && !r.mp && !r.e);
     puts("PASS: x2 INFO0/marker and captured qualified MP/E with offset");
 }
-static void status(void *user,unsigned bits){k56flex_train_status(user,bits);}
-static void report(void *user,unsigned bits){k56flex_train_set_report(user,bits);}
 static void flex_test(k56flex_law_t law,int rate)
 {
-    k56flex_train_t server;k56flex_train_cfg_t tc={0};k56flex_client_cfg_t cc={0};
-    k56flex_client_t *peer;results_t r={0};
-    int16_t *audio=calloc(64000,sizeof(*audio));unsigned pos=800,guard=0;
+    k56flex_train_t server;k56flex_train_cfg_t tc={0};results_t r={0};
+    int16_t *audio=calloc(64000,sizeof(*audio));unsigned pos=800;
     tc.law=law;tc.rate_bps=rate;tc.training_word=0xffff;
-    tc.param.extra=5;tc.param.control=0x123;tc.param.u=1;
-    assert(!k56flex_train_init(&server,&tc));
-    cc.law=law;cc.report_word=0x8880;cc.gate_b_pairs=2;
-    cc.ctl.status=status;cc.ctl.report=report;cc.ctl.user=&server;
-    peer=k56flex_client_new(&cc);assert(peer&&audio);
-    /* Generate a dialogue with the decision-level peer, then throw away
-     * its state. The offline receiver gets ONLY the recorded linear audio. */
-    while(k56flex_train_phase(&server)<K56T_PRIME && guard++<12000) {
+    tc.gate_timeout_pairs=500;
+    assert(audio && !k56flex_train_init(&server,&tc));
+    /* Draft 0.23 4.10-4.12/11: record the real TX prefix with no upstream
+     * waveform. Never use a decoder callback to advance the transmitter. */
+    while(k56flex_train_phase(&server)!=K56T_FAILED && pos+6<=64000) {
         uint8_t buf[6];size_t n=k56flex_train_g711(&server,buf,6);
-        assert(n==6 && pos+n<=64000);
+        assert(n==6);
         for(size_t j=0;j<n;j++)audio[pos++]=(int16_t)k56flex_level_from_g711(law,buf[j]);
-        k56flex_client_rx(peer,buf,n);assert(!peer->failed);
     }
-    assert(k56flex_train_phase(&server)==K56T_PRIME);
-    k56flex_client_free(peer);
+    assert(server.phase==K56T_FAILED && !server.status && !server.cfg.report_field);
     assert(!legacy_pcm_decode_flex(audio,pos,law==K56FLEX_LAW_A,event,&r));
-    printf("flex %s %d: probes=%u params=%u decoded_rate=%d\n",law?"alaw":"ulaw",rate,r.probe,r.param,r.rate);
-    assert(r.probe==1 && r.param==1 && r.rate==rate);
+    printf("flex %s %d: probes=%u params=%u (unanswered upstream gate)\n",law?"alaw":"ulaw",rate,r.probe,r.param);
+    assert(r.probe==1 && !r.param);
     free(audio);
 }
 int main(void)

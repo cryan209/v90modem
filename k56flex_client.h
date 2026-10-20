@@ -7,12 +7,11 @@
  * (the spec leaves those open) and it assumes it was listening from the start of
  * the server's stream.
  *
- * The upstream path (the signals that set the server's DM 8F31 bits 10..14 and
- * deliver the report) is not recovered, so it is a side channel here: the client
- * calls ctl->status() and ctl->report(), and the loopback test wires those
- * straight to the server.  Delivery must be immediate, because the client
- * mirrors the server's phase machine and both must see an event at the same
- * pair boundary.
+ * This receiver has no upstream signalling transmitter. Peer control must
+ * cross the audio/G.711 boundary (Draft 0.23 clauses 4.10-4.12 and 11);
+ * it cannot release a server gate or deliver a report through host callbacks.
+ * The raw-octet path keeps a local timeline model for decoder diagnostics;
+ * that model is not evidence of a completed duplex handshake.
  */
 #ifndef K56FLEX_CLIENT_H
 #define K56FLEX_CLIENT_H
@@ -21,8 +20,6 @@
 #include "k56flex_train.h"
 
 typedef struct {
-    void (*status)(void *user, unsigned bits);          /* upstream: DM 8F31 bits */
-    void (*report)(void *user, unsigned report_field);  /* upstream: accepted report (8FEF) */
     void (*data)(void *user, const uint8_t *bits, unsigned n);  /* descrambled data bits */
     void *user;
 } k56flex_client_ctl_t;
@@ -46,7 +43,7 @@ typedef struct {
     unsigned nbits, rec_end, param_from;
     int param_from_set;
     unsigned report_field;
-    int report_sent, gate_a_sent, gate_b_sent, gate_c_sent, resp_sent, done_sent;
+    int report_modeled, gate_a_modeled, gate_b_modeled, gate_c_modeled, response_modeled, final_param_seen;
     int param_ok;
     k56flex_param_t param;       /* decoded record fields */
     int rate_bps;
