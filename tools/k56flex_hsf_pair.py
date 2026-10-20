@@ -44,11 +44,18 @@ def main():
     ap.add_argument("--cruft", type=Path, default=ROOT.parent / "cruft")
     ap.add_argument("--seconds", type=int, default=35)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--engine", type=Path, default=ROOT / "audio_sock_modem")
+    ap.add_argument("--dac-taps", type=int, default=129,
+                    help="analogue peer reconstruction FIR length (DS0 remains unchanged)")
     ap.add_argument("--require-startup", action="store_true",
                     help="fail unless native K56 reaches Phase 3 through real V.8/INFO1")
+    ap.add_argument("--require-audio-gates", action="store_true",
+                    help="require audio-derived S/S-bar/report gates and native Phase 4 (not CONNECT)")
     args = ap.parse_args()
     if not 1 <= args.seconds <= 120:
         ap.error("--seconds must be 1..120")
+    if not 9 <= args.dac_taps <= 513 or args.dac_taps % 4 != 1:
+        ap.error("--dac-taps must be 4n+1 in 9..513")
     cruft = args.cruft.resolve()
     sys.path.insert(0, str(cruft))
     from native.hsf.k56_client import K56Client, PCMUStream
@@ -56,15 +63,17 @@ def main():
 
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
-    executable = ROOT / "audio_sock_modem"
+    executable = args.engine.resolve()
     env = dict(os.environ, ME_K56FLEX="probe", ME_MODE="k56", ME_V8="1",
                ME_MEDIA_CLOCK="1", VPCM_G711_TAP_DIR=str(out))
-    client = K56Client(modulation="flex", max_upstream_rate=9600)
+    client = K56Client(modulation="flex", max_upstream_rate=9600, dac_taps=args.dac_taps)
     phase2_events = []
+    symbol_events = []
     last_phase2_state = None
+    last_symbol_state = None
 
     def observe(peer):
-        nonlocal last_phase2_state
+        nonlocal last_phase2_state, last_symbol_state
         if peer.pump is None:
             return
         # Read-only original K56 diagnostics. 1203a1df branches to state
@@ -74,6 +83,43 @@ def main():
         cpu = pump.cpu
         rx = pump.object + 0x2338
         config = cpu._read32(rx + 0x4b0)
+        # Original K56 symbol state machine (12022710 onward). Read only;
+        # these diagnostics never feed a gate, decision, or waveform.
+        symbol_state = (cpu._read32(rx + 0x94f4), cpu._read32(rx + 0x97d8))
+        if (cpu._read32(rx + 0x66c0) or last_symbol_state is not None) and (
+                symbol_state != last_symbol_state or peer.block % 16 == 0
+                or cpu._read32(rx + 0x7f2c) > 16000
+                or symbol_state[1] == 12
+                or (symbol_state[1] == 7 and cpu._read32(rx + 0x7f2c) > 8000)):
+            last_symbol_state = symbol_state
+            floating_at = lambda address: struct.unpack("<f", cpu._read32(address).to_bytes(4, "little"))[0]
+            signed_at = lambda address: struct.unpack("<i", cpu._read32(address).to_bytes(4, "little"))[0]
+            dfe = cpu._read32(rx + 0x7370)
+            dfe_taps = [signed_at(dfe + 4*i)*floating_at(0x1200621c) for i in range(16)]
+            dfe_reference = floating_at(0x12006210) - sum(dfe_taps)*floating_at(0x12006220)
+            symbol_events.append({
+                "block": peer.block, "handler": hex(symbol_state[0]),
+                "state": symbol_state[1], "clock": cpu._read32(rx + 0x8060),
+                "counter": cpu._read32(rx + 0x7f2c),
+                "receiver": cpu._read32(rx + 0x7f28),
+                "loop6_variance": sum((x - dfe_reference)**2 for x in dfe_taps),
+                "loop6_threshold": floating_at(0x12006224),
+                "dfe_taps": dfe_taps,
+                "training_generator": [cpu._read32(rx + 0x97e0 + 4*i) for i in range(10)],
+                "training_level_table": [struct.unpack("<h", bytes(cpu._read8(0x12009a54 + 2*i + j) for j in range(2)))[0] for i in range(12)],
+                "pad_level_table": [struct.unpack("<h", bytes(cpu._read8(0x12009b34 + 2*i + j) for j in range(2)))[0] for i in range(8)],
+                "training_mode": cpu._read32(cpu._read32(rx + 0x94d8) + 0xde8),
+                "probe_drift": floating_at(rx + 0x7d74),
+                "resampler_rate": signed_at(rx + 0x7164),
+                "resampler_correction": signed_at(rx + 0x809c),
+                "r_detector": [cpu._read32(rx + 0x9788 + 4*i) for i in range(13)],
+                "equalized_sample": struct.unpack("<h", bytes(cpu._read8(rx + 0x8090 + j) for j in range(2)))[0],
+                "sliced_sample": struct.unpack("<h", bytes(cpu._read8(rx + 0x7d70 + j) for j in range(2)))[0],
+                "pad_statistics": [[cpu._read32(rx + 0x9580 + group + 4*i) for i in range(6)]
+                                   for group in (0x154, 0x16c, 0x184, 0x19c, 0x1b4)],
+                "pad_decisions": [[signed_at(rx + 0x9580 + 20*i + 4*j) for j in range(5)] for i in range(6)],
+                "policy": peer.pump.link_diagnostics(),
+            })
         state = (cpu._read32(rx + 0x28), cpu._read32(rx + 0x66c0))
         if state == last_phase2_state:
             return
@@ -172,6 +218,7 @@ def main():
         (out / "dte.bin").write_bytes(dte)
         (out / "client-events.json").write_text(json.dumps(client.events, indent=2) + "\n")
         (out / "client-phase2.json").write_text(json.dumps(phase2_events, indent=2) + "\n")
+        (out / "client-symbols.json").write_text(json.dumps(symbol_events, indent=2) + "\n")
         server_log = (out / "server.log").read_text(errors="replace")
         if "outgoing (completes ATD)" not in server_log:
             raise RuntimeError("wrong engine role; see server.log")
@@ -185,9 +232,15 @@ def main():
         phase2_handoff = (client.flex_agreed and client.v8_modulations == 1
                           and client.selected_modulation == "k56" and flex_phase3_seen
                           and "K56flex Phase 2 complete; starting PCM probes" in server_log)
+        native_phase4 = any(13 <= e["state"] <= 20 and e["receiver"] == 1
+                            for e in symbol_events)
+        sbar_from_audio = "K56flex upstream S/S-bar from audio" in server_log
+        report_from_audio = "K56flex upstream report from audio" in server_log
+        end_from_audio = "K56flex upstream 899F from audio" in server_log
         report = {
             "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
             "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+            "dac_taps": args.dac_taps,
             "audio_seconds": frames / 50, "end_reason": end_reason,
             "wall_seconds": time.monotonic() - start_wall,
             "flex_agreed": client.flex_agreed,
@@ -198,6 +251,10 @@ def main():
             "client_phase3_seen": phase3_seen,
             "client_flex_phase3_seen": flex_phase3_seen,
             "client_phase2_rejected": any(e["rx_state"] == 0x28 for e in phase2_events),
+            "client_phase4_seen": native_phase4,
+            "server_sbar_from_audio": sbar_from_audio,
+            "server_report_from_audio": report_from_audio,
+            "server_jtag_from_audio": end_from_audio,
             "final_client_state": final_state, "failure": client.failure,
             "client_tx_training_completed": any(n[0] == 1000 for n in notices),
             "client_rx_training_completed": any(n[0] == 1001 for n in notices),
@@ -211,6 +268,9 @@ def main():
         print(json.dumps(report, indent=2))
         if args.require_startup and not phase2_handoff:
             raise SystemExit("K56flex V.8/Phase-2 startup requirement failed")
+        if args.require_audio_gates and not (phase2_handoff and native_phase4
+                                             and sbar_from_audio and report_from_audio):
+            raise SystemExit("K56flex audio-gate/Phase-4 requirement failed")
     finally:
         client.close()
         if proc is not None and proc.poll() is None:

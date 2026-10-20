@@ -1,5 +1,5 @@
-/* Offline PCM regression, Draft 0.23 clause 11. Synthesized MICA research
- * TX fixture, not a hardware recording or proof of live K56flex interop. */
+/* PCM regression, Draft 0.23 clause 11. Synthesized MICA research TX and
+ * original native HSF audio fixtures; no hardware or payload qualification. */
 #include "k56flex_upstream_pcm.h"
 #include <spandsp/telephony.h>
 #include <spandsp/bit_operations.h>
@@ -121,10 +121,88 @@ static void negatives(const int16_t pcm[SAMPLES], const int16_t wrong[SAMPLES])
           && r.ext == 0x63 && r.report == 0x8990, "call reset/recovery");
 }
 
+static void streaming(const int16_t *pcm, int count, int high, int want_end)
+{
+    const int chunks[] = {1, 80, 160};
+    for (unsigned c = 0; c < sizeof(chunks)/sizeof(chunks[0]); c++) {
+        k56flex_upstream_pcm_t *rx = k56flex_upstream_pcm_new(4, high, 18);
+        k56flex_upstream_pcm_result_t r;
+        int reports = 0, ends = 0, acquired = 0, sbars = 0;
+        CHECK(rx != NULL, "stream allocation");
+        if (!rx) continue;
+        for (int offset = 0; offset < count; ) {
+            int n = count - offset;
+            if (n > chunks[c]) n = chunks[c];
+            int events = k56flex_upstream_pcm_rx(rx, pcm + offset, n, &r);
+            CHECK(events >= 0, "stream rejected valid chunk");
+            if (events < 0) break;
+            reports += !!(events & K56U_REPORT);
+            ends += !!(events & K56U_REPORT_END);
+            acquired += !!(events & K56U_ACQUIRED);
+            sbars += !!(events & K56U_SBAR);
+            offset += n;
+        }
+        CHECK(sbars == 1 && acquired == 1 && reports == 1 && ends == want_end && r.acquired,
+              "stream high%d chunk%d reports%d ends%d acquired%d corr%.3f",
+              high, chunks[c], reports, ends, r.acquired, r.correlation);
+        CHECK(r.ext == (high ? 0 : 0x63) && r.report == (high ? 0x89b0 : 0x8990),
+              "stream decoded %02x/%04x", r.ext, r.report);
+        k56flex_upstream_pcm_free(rx);
+    }
+}
+
+static void native_hsf_stream(int with_jtag)
+{
+    /* Original HSF audio after receiving Jd, not synthesized report bits or
+     * a client-control callback. Negotiated 3200/high; S/PP/TRN validation
+     * must precede its repeated report. The second capture contains exactly
+     * the original single-word J'a before the next TRN, not three repeats. */
+    FILE *f = fopen(with_jtag ? "reference-data/k56flex-hsf/upstream-jtag-ulaw.g711"
+                             : "reference-data/k56flex-hsf/upstream-report-ulaw.g711", "rb");
+    CHECK(f != NULL, "native HSF fixture");
+    if (!f) return;
+    int16_t pcm[16000];
+    int count = 0, octet;
+    while (count < 16000 && (octet = fgetc(f)) != EOF) pcm[count++] = ulaw_to_linear(octet);
+    CHECK(count == 16000 && fgetc(f) == EOF, "native fixture length");
+    fclose(f);
+    streaming(pcm, count, 1, with_jtag);
+}
+
+static void streaming_negatives(const int16_t *s_fixture)
+{
+    for (int kind = 0; kind < 3; kind++) {
+        k56flex_upstream_pcm_t *rx = k56flex_upstream_pcm_new(4, 0, 18);
+        k56flex_upstream_pcm_result_t r;
+        unsigned events = 0;
+        CHECK(rx != NULL, "negative stream allocation");
+        if (!rx) continue;
+        for (int offset = 0; offset < 6400; offset += 160) {
+            int16_t pcm[160];
+            for (int n = 0; n < 160; n++) {
+                /* V.34 S's steady waveform has a 100-sample period at
+                 * 3200/low. Repeat its interior WITHOUT any S-bar reversal. */
+                pcm[n] = kind == 0 ? 0 : kind == 1
+                       ? (int16_t)(4000*cos(2*3.14159265358979323846*1680*(offset+n)/8000))
+                       : s_fixture[80 + (offset+n)%100];
+            }
+            int ev = k56flex_upstream_pcm_rx(rx, pcm, 160, &r);
+            CHECK(ev >= 0, "negative stream input");
+            if (ev >= 0) events |= (unsigned)ev;
+        }
+        CHECK(!events, "silence/tone/unreversed S kind%d released a gate: %u", kind, events);
+        k56flex_upstream_pcm_free(rx);
+    }
+}
+
 int main(void)
 {
     int16_t pcm[SAMPLES], wrong[SAMPLES];
     if (load(3200, pcm) && load(2400, wrong)) {
+        streaming(pcm, SAMPLES, 0, 1);
+        streaming_negatives(pcm);
+        native_hsf_stream(0);
+        native_hsf_stream(1);
         matrix(pcm);
         negatives(pcm, wrong);
     }

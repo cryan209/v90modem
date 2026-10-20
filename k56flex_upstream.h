@@ -18,6 +18,7 @@ typedef struct {
     uint64_t symbols;
     uint64_t end_window;
     unsigned end_bits;
+    unsigned end_phase;
     int ended;
 } k56flex_upstream_t;
 
@@ -28,8 +29,9 @@ int k56flex_upstream_init(k56flex_upstream_t *rx, unsigned tap);
  * change). Amplitude is not used; callers own gain and decision confidence.
  * Any fixed quarter-turn phase ambiguity cancels in differential decoding.
  * REPORT exposes report.ext/report.report; k56flex_report_field() converts it
- * to the downstream mapper field. END requires three repeated 899F words
- * AFTER a report, a conservative receiver policy, not a recovered threshold.
+ * to the downstream mapper field. END requires one complete 899F word
+ * AFTER a report, aligned to its recovered report-word boundary (original
+ * HSF 120342c0 transmits eight dibits, not three repetitions).
  * MP/E must be handed to a different decoder after END. */
 int k56flex_upstream_symbol(k56flex_upstream_t *rx, float real, float imag);
 

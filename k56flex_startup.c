@@ -160,3 +160,11 @@ void k56flex_startup_tx(k56flex_startup_t *s, int16_t *pcm, int count)
 
 int k56flex_startup_state(const k56flex_startup_t *s) { return s->state; }
 const char *k56flex_startup_failure(const k56flex_startup_t *s) { return s->failure; }
+
+int k56flex_startup_upstream_profile(const k56flex_startup_t *s, int *baud_code, int *high_carrier)
+{
+    if (!s || s->state != K56S_READY || !s->phase2 || !baud_code || !high_carrier) return -1;
+    *baud_code = s->phase2->tx.info1a.baud_rate_c_to_a;
+    *high_carrier = s->phase2->tx.info1a.use_high_carrier;
+    return 0;
+}

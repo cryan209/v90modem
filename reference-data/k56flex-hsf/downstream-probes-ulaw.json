@@ -1,0 +1,31 @@
+{
+  "source": "artifacts/k56flex-hsf-pad-reference-20261021/server-tx.g711",
+  "source_sha256": "329c14e0b77feea2122940cf0b586030a9d7ae27aff1dc33cf0e30fe9b0e71ef",
+  "first_sample": 87840,
+  "check": {
+    "capture": "reference-data/k56flex-hsf/downstream-probes-ulaw.g711",
+    "sha256": "7bafd8f1544cf0c1b2928646a1b12906d023c932d1c065bfe70e255b7373cbc7",
+    "p1_start_sample": 852,
+    "verified_connection": false,
+    "p1": {
+      "samples": 16368,
+      "required": 16368,
+      "mismatches": 0,
+      "first_mismatch": null,
+      "negative": 8238,
+      "positive": 8130,
+      "zero": 0
+    },
+    "p2": {
+      "samples": 8448,
+      "required": 8448,
+      "mismatches": 0,
+      "first_mismatch": null,
+      "negative": 4161,
+      "positive": 4287,
+      "zero": 0
+    },
+    "passed": true
+  },
+  "reference": "Original HSF K56.VXD 12022500/120225d0, no production probe tables imported"
+}

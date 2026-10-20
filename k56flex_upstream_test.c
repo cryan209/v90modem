@@ -44,7 +44,7 @@ static void vectors(void)
                     }
                     if (events & K56U_REPORT_END) {
                         ++ends;
-                        CHECK(n >= 896 + 23 && n < 896 + 32,
+                        CHECK(n >= 896 + 7 && n < 896 + 9,
                               "terminator at %u (starts at 896)", n);
                     }
                 }
@@ -105,13 +105,15 @@ static void boundaries(void)
         CHECK(tx.reports == 1 && !tx.ends, "report event at bit offset %u", offset);
         CHECK(rx.report.ext == 0x63 && rx.report.report == 0x8990,
               "report content at bit offset %u", offset);
-        /* Two words and a corrupted third are insufficient. */
+        /* A complete unaligned marker and an aligned corrupt marker must
+         * not end the report. Each negative occupies a whole 24-bit record. */
+        source_bit(&tx, &rx, 0);
         source_word(&tx, &rx, 0x899f, 16);
-        source_word(&tx, &rx, 0x899f, 16);
+        source_word(&tx, &rx, 0, 7);
+        CHECK(!tx.ends, "unaligned terminator accepted");
         source_word(&tx, &rx, 0x899e, 16);
-        CHECK(!tx.ends, "corrupt third terminator accepted");
-        source_word(&tx, &rx, 0x899f, 16);
-        source_word(&tx, &rx, 0x899f, 16);
+        source_word(&tx, &rx, 0, 8);
+        CHECK(!tx.ends, "corrupt terminator accepted");
         source_word(&tx, &rx, 0x899f, 15);
         CHECK(!tx.ends, "short terminator accepted");
         source_bit(&tx, &rx, 1); /* bit 15 of 899F */

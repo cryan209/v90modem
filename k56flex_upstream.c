@@ -33,14 +33,29 @@ int k56flex_upstream_symbol(k56flex_upstream_t *rx, float real, float imag)
                        ^ ((rx->report.hist >> 22) & 1);
         int accepted = rx->report.accepted;
         k56flex_report_rx_bit(&rx->report, (int)y);
-        if (!accepted && rx->report.accepted) events |= K56U_REPORT;
+        if (!accepted && rx->report.accepted) {
+            events |= K56U_REPORT;
+            /* Report acquisition rotates [report16, extension8] to
+             * [extension8, report16]. Recover that bit phase so an isolated
+             * 899F inside other data cannot terminate the exchange. */
+            unsigned win = sizeof(rx->report.window);
+            uint32_t want = ((uint32_t)rx->report.report << 8) | rx->report.ext;
+            for (unsigned k = 0; k < 24; k++) {
+                uint32_t word = 0;
+                for (unsigned b = 0; b < 24; b++)
+                    word |= (uint32_t)rx->report.window[(rx->report.pos + win - 24 + (k+b)%24)%win] << b;
+                if (word == want) { rx->end_phase = k; break; }
+            }
+        }
         if (!accepted) continue;
-        /* Resident 153D/1676/1DDC waits for 899F following the repeated
-         * report. Blind bit alignment, LSB first, with continuous 18/23
-         * history: do not reset the descrambler at the report boundary. */
-        rx->end_window = (rx->end_window >> 1) | ((uint64_t)x << 47);
-        if (rx->end_bits < 48) ++rx->end_bits;
-        if (rx->end_bits == 48 && rx->end_window == UINT64_C(0x899f899f899f)) {
+        /* Draft 0.23 11 / resident 153D/1676/1DDC: J'a follows Ja.
+         * Original HSF 120342c0 emits just eight dibits (one 899F), then
+         * resets for TRN. Keep continuous descrambler/differential history
+         * through that word; require its recovered packet boundary. */
+        rx->end_window = (rx->end_window >> 1) | ((uint64_t)x << 15);
+        ++rx->end_bits;
+        if (rx->end_bits >= 16 && rx->end_bits%24 == rx->end_phase
+            && rx->end_window == UINT64_C(0x899f)) {
             rx->ended = 1;
             events |= K56U_REPORT_END;
         }

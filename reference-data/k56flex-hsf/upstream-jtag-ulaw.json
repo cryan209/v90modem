@@ -1,0 +1,48 @@
+{
+  "source": "artifacts/k56flex-hsf-sbar-gates-dac65-20261021/client-tx.g711",
+  "source_sha256": "768e3e8c362ab7f95f99617fd38aba6c35dd412775fabe3e39c589a6766c5389",
+  "first_sample": 139200,
+  "samples": 16000,
+  "sha256": "a95296eb6660ee86bce8ca1265fe16468bd0ab4c67a88ab0531aa523ea3b244e",
+  "carrier": "3200 baud high, negotiated INFO1a",
+  "tap": 18,
+  "expected_report": "00/89b0",
+  "expected_end": true,
+  "transport": "Only PCMU between endpoints; original HSF pump; S/S-bar and report release server gates from audio",
+  "native_run_report": {
+    "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+    "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+    "dac_taps": 65,
+    "audio_seconds": 28.46,
+    "end_reason": "engine closed audio socket",
+    "wall_seconds": 8.804781083017588,
+    "flex_agreed": true,
+    "v8_started": true,
+    "v8_modulations": 1,
+    "selected_modulation": "k56",
+    "phase2_handoff": true,
+    "client_phase3_seen": true,
+    "client_flex_phase3_seen": true,
+    "client_phase2_rejected": false,
+    "final_client_state": {
+      "active_modulation": "k56",
+      "tx_state": 2,
+      "tx_label": "CallB",
+      "rx_label": "CALL_ADETECT1",
+      "data": 0,
+      "info0_received": 1,
+      "info0_error_recovery": 0
+    },
+    "failure": null,
+    "client_tx_training_completed": false,
+    "client_rx_training_completed": false,
+    "server_dte_connect": false,
+    "verified_connection": false,
+    "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+    "inputs": {
+      "/private/tmp/k56-audio-build-gm3i54es/audio_sock_modem": "be3fadb2499851319cb7baac89e35a2c59253129eef70ccf5bd9923457d95d11",
+      "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+      "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "c617488edbf3fbbc2920980632acabbea62e52ff2fc2e81a1325d8bad5dd2cfa"
+    }
+  }
+}

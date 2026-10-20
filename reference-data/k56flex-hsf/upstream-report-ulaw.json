@@ -1,0 +1,48 @@
+{
+  "source": "artifacts/k56flex-hsf-jd8990-dac65-20261021/client-tx.g711",
+  "source_sha256": "dda59ad5197285060b16ad45c46b3345d8b7f3fbbea0d5e077fdade1bf0d4b00",
+  "first_sample": 139200,
+  "samples": 16000,
+  "sha256": "3d9b5ef98d925f9424844fc1853b7534f8da4521f41967378a8ce42f5639167e",
+  "carrier": "3200 baud high, negotiated INFO1a",
+  "tap": 18,
+  "expected_report": "00/89b0",
+  "expected_end": false,
+  "transport": "Only PCMU between endpoints; original HSF pump, no forced states/gates",
+  "native_run_report": {
+    "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+    "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+    "dac_taps": 65,
+    "audio_seconds": 24.24,
+    "end_reason": "engine closed audio socket",
+    "wall_seconds": 6.311472249915823,
+    "flex_agreed": true,
+    "v8_started": true,
+    "v8_modulations": 1,
+    "selected_modulation": "k56",
+    "phase2_handoff": true,
+    "client_phase3_seen": true,
+    "client_flex_phase3_seen": true,
+    "client_phase2_rejected": false,
+    "final_client_state": {
+      "active_modulation": "k56",
+      "tx_state": 2,
+      "tx_label": "CallB",
+      "rx_label": "CALL_ADETECT1",
+      "data": 0,
+      "info0_received": 1,
+      "info0_error_recovery": 0
+    },
+    "failure": null,
+    "client_tx_training_completed": false,
+    "client_rx_training_completed": false,
+    "server_dte_connect": false,
+    "verified_connection": false,
+    "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+    "inputs": {
+      "/private/tmp/k56-audio-build-gm3i54es/audio_sock_modem": "877c436e05fc1ce974033177a63e744bd1315e3995bdb553f4cf8a9389460f97",
+      "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+      "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "857f3870a7d5f6f88a1bc3f22199fa2f6a3d2b65fa786c3b4858123bada9149d"
+    }
+  }
+}

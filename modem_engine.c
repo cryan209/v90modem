@@ -34,6 +34,7 @@
 #include "v8bis_modem.h"
 #include "k56flex_train.h"
 #include "k56flex_startup.h"
+#include "k56flex_upstream_pcm.h"
 #include "v91.h"
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
@@ -4794,6 +4795,7 @@ static bool me_v8_no_ci(void)
 static k56flex_v8bis_t *g_k56 = NULL;
 static k56flex_train_t *g_k56_train = NULL;
 static k56flex_startup_t *g_k56_startup = NULL;
+static k56flex_upstream_pcm_t *g_k56_upstream = NULL;
 static bool g_k56_negotiated = false;
 static k56flex_train_phase_t g_k56_last_phase = K56T_FAILED;
 
@@ -4845,6 +4847,8 @@ static void me_k56_start_locked(void)
     }
     if (g_k56)
         k56flex_v8bis_free(g_k56);
+    k56flex_upstream_pcm_free(g_k56_upstream);
+    g_k56_upstream = NULL;
     g_k56_negotiated = false;
     g_k56_last_phase = K56T_FAILED;
     g_k56 = k56flex_v8bis_new(&cfg);
@@ -4862,7 +4866,12 @@ static bool me_k56_probe_start_locked(void)
     memset(&tc, 0, sizeof(tc));
     tc.law = g_law == ME_LAW_ULAW ? K56FLEX_LAW_MU : K56FLEX_LAW_A;
     tc.rate_bps = rate ? atoi(rate) : 56000;
-    tc.training_word = 0xffff;
+    /* K56flex Draft 0.23 4.10: DBA8 appends B31D's Jd word after
+     * probing. Request four-point upstream training (V.34 10.1.3.3,
+     * Table 18). Original HSF 120236a0/12035bf0 waits for 0x8990 or
+     * 0x89b0 before starting its upstream transmitter; FFFF cannot release
+     * that wait. This is transmitted through the PCM scrambler, not a gate. */
+    tc.training_word = 0x8990;
     /* a pair is 12 samples = 1.5 ms */
     tc.gate_timeout_pairs = (unsigned)((gate ? atoi(gate) : 8000) * 2 / 3);
     g_k56_train = calloc(1, sizeof(*g_k56_train));
@@ -4889,6 +4898,12 @@ static void me_k56_startup_progress_locked(void)
         trace_phase("K56flex startup failed (no data fallback)");
     } else {
         trace_phase("K56flex Phase 2 complete; starting PCM probes");
+        int baud_code, high_carrier;
+        if (k56flex_startup_upstream_profile(g_k56_startup, &baud_code, &high_carrier) < 0
+            || !(g_k56_upstream = k56flex_upstream_pcm_new(baud_code, high_carrier, 18))) {
+            ME_LOG("[ME] K56flex: cannot initialize negotiated upstream audio receiver\n");
+            st = K56S_FAILED;
+        }
     }
     k56flex_startup_free(g_k56_startup);
     g_k56_startup = NULL;
@@ -12048,6 +12063,7 @@ void me_destroy(void)
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
     k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
+    k56flex_upstream_pcm_free(g_k56_upstream); g_k56_upstream = NULL;
     v21_release();
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
@@ -12616,6 +12632,7 @@ void me_on_sip_disconnected_status(int sip_status)
     if (g_k56) { k56flex_v8bis_free(g_k56); g_k56 = NULL; }
     if (g_k56_train) { free(g_k56_train); g_k56_train = NULL; }
     k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
+    k56flex_upstream_pcm_free(g_k56_upstream); g_k56_upstream = NULL;
     g_k56_negotiated = false;
     g_k56_last_phase = K56T_FAILED;
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
@@ -13808,6 +13825,34 @@ void me_rx_audio(const int16_t *amp, int len)
     if (g_k56_startup) {
         k56flex_startup_rx(g_k56_startup, amp, len);
         me_k56_startup_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_k56_train && g_k56_upstream) {
+        k56flex_upstream_pcm_result_t result;
+        int events = k56flex_upstream_pcm_rx(g_k56_upstream, amp, len, &result);
+        /* Draft 0.23 4.10/11, resident MICA 1258/126C -> 0FFE:
+         * S/S-bar releases DBA8 (bit 11); the accepted report releases
+         * DB22 (bit 10). 899F belongs to the subsequent exchange, not DB22.
+         * Every event comes from audio, never a client callback or timer. */
+        if (events < 0) {
+            ME_LOG("[ME] K56flex upstream audio acquisition exhausted\n");
+            g_state = ME_HANGUP;
+        } else {
+            if (events & K56U_SBAR) {
+                k56flex_train_status(g_k56_train, K56FLEX_STATUS_PROBE_PEER);
+                trace_phase("K56flex upstream S/S-bar from audio at sample %d", result.sbar_sample);
+            }
+            if (events & K56U_REPORT) {
+                k56flex_train_set_report(g_k56_train, k56flex_report_field(result.ext, result.report));
+                k56flex_train_status(g_k56_train, K56FLEX_STATUS_SILENCE_END);
+                trace_phase("K56flex upstream report from audio %02x/%04x at sample %d",
+                            result.ext, result.report, result.report_sample);
+            }
+            if (events & K56U_REPORT_END) {
+                trace_phase("K56flex upstream 899F from audio at sample %d", result.end_sample);
+            }
+        }
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }

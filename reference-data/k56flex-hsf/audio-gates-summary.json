@@ -1,0 +1,340 @@
+{
+  "purpose": "Native HSF Jd and audio-derived startup gates; no CONNECT or payload qualification",
+  "runs": [
+    {
+      "directory": "artifacts/k56flex-hsf-jd-control-dac65-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 21.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 5.826961499988101,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 2,
+          "tx_label": "CallB",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-audio-build-gm3i54es/audio_sock_modem": "505003b28849bedb3222064d1c1b5708aaca6faef8227ebd945f22434323f180",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "857f3870a7d5f6f88a1bc3f22199fa2f6a3d2b65fa786c3b4858123bada9149d"
+        }
+      },
+      "traces": [
+        "[ME] K56flex probe: phase GATE_A (3507 pairs sent)"
+      ],
+      "tap_sha256": {
+        "server-tx.g711": "da2c0ca97c414459d413208623826050e14f68d6ad4a675c65461f84ac24c501",
+        "client-tx.g711": "b65725c8bb71af2dcacbc0107d9fa8353e2e0e1f3b643cbc548ed88458a42f2d"
+      },
+      "native_transitions": [
+        {
+          "block": 686,
+          "handler": "0x12022710",
+          "state": 1,
+          "receiver": 1
+        },
+        {
+          "block": 689,
+          "handler": "0x120227b0",
+          "state": 2,
+          "receiver": 1
+        },
+        {
+          "block": 692,
+          "handler": "0x12022a10",
+          "state": 4,
+          "receiver": 1
+        },
+        {
+          "block": 693,
+          "handler": "0x12022c70",
+          "state": 5,
+          "receiver": 1
+        },
+        {
+          "block": 694,
+          "handler": "0x12022ec0",
+          "state": 6,
+          "receiver": 1
+        },
+        {
+          "block": 822,
+          "handler": "0x12023120",
+          "state": 7,
+          "receiver": 1
+        },
+        {
+          "block": 888,
+          "handler": "0x120235b0",
+          "state": 8,
+          "receiver": 1
+        },
+        {
+          "block": 919,
+          "handler": "0x120236a0",
+          "state": 10,
+          "receiver": 1
+        },
+        {
+          "block": 1076,
+          "handler": "0x120218a0",
+          "state": 0,
+          "receiver": 1
+        }
+      ]
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-current-audio-gates-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 28.46,
+        "end_reason": "engine closed audio socket",
+        "wall_seconds": 8.947071417002007,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 2,
+          "tx_label": "CallB",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "0e19159f6468f45bb6f5e956dd8ca96546602a47fb22f3e719669bd5384c27d1",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "79dec298c92dafa971a2fda2d9c032a628c87594b7a2f4fb2d7b564db667ca5d"
+        }
+      },
+      "traces": [
+        "[ME] K56flex probe: phase GATE_A (3507 pairs sent)",
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[ME] K56flex probe: phase GATE_B (3880 pairs sent)",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[ME] K56flex probe: phase GATE_C (6320 pairs sent)"
+      ],
+      "tap_sha256": {
+        "server-tx.g711": "c5fca623dae22475a67f711f507df75a99cb736c48102f5ffcf2c45b4ee347d2",
+        "client-tx.g711": "768e3e8c362ab7f95f99617fd38aba6c35dd412775fabe3e39c589a6766c5389"
+      },
+      "native_transitions": [
+        {
+          "block": 686,
+          "handler": "0x12022710",
+          "state": 1,
+          "receiver": 1
+        },
+        {
+          "block": 689,
+          "handler": "0x120227b0",
+          "state": 2,
+          "receiver": 1
+        },
+        {
+          "block": 692,
+          "handler": "0x12022a10",
+          "state": 4,
+          "receiver": 1
+        },
+        {
+          "block": 693,
+          "handler": "0x12022c70",
+          "state": 5,
+          "receiver": 1
+        },
+        {
+          "block": 694,
+          "handler": "0x12022ec0",
+          "state": 6,
+          "receiver": 1
+        },
+        {
+          "block": 822,
+          "handler": "0x12023120",
+          "state": 7,
+          "receiver": 1
+        },
+        {
+          "block": 888,
+          "handler": "0x120235b0",
+          "state": 8,
+          "receiver": 1
+        },
+        {
+          "block": 919,
+          "handler": "0x120236a0",
+          "state": 10,
+          "receiver": 1
+        },
+        {
+          "block": 1016,
+          "handler": "0x12023810",
+          "state": 9,
+          "receiver": 1
+        },
+        {
+          "block": 1045,
+          "handler": "0x12023920",
+          "state": 11,
+          "receiver": 1
+        },
+        {
+          "block": 1177,
+          "handler": "0x12023a10",
+          "state": 12,
+          "receiver": 1
+        },
+        {
+          "block": 1180,
+          "handler": "0x12022950",
+          "state": 3,
+          "receiver": 1
+        },
+        {
+          "block": 1182,
+          "handler": "0x12023b20",
+          "state": 13,
+          "receiver": 1
+        },
+        {
+          "block": 1247,
+          "handler": "0x12023dc0",
+          "state": 14,
+          "receiver": 1
+        },
+        {
+          "block": 1341,
+          "handler": "0x12024160",
+          "state": 15,
+          "receiver": 1
+        },
+        {
+          "block": 1529,
+          "handler": "0x120218a0",
+          "state": 0,
+          "receiver": 1
+        }
+      ]
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-current-default129-retry-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 13.16,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 2.493181874975562,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "0e19159f6468f45bb6f5e956dd8ca96546602a47fb22f3e719669bd5384c27d1",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "79dec298c92dafa971a2fda2d9c032a628c87594b7a2f4fb2d7b564db667ca5d"
+        }
+      },
+      "traces": [],
+      "tap_sha256": {
+        "server-tx.g711": "29d19097af68fa0629d0a4c4177b82c2231e2897f3c1e9cdaaac7876affbccb4",
+        "client-tx.g711": "705464b419ffd8bb2e238c839c20be8dda17143869286f12fe758c5e69c4a658"
+      },
+      "native_transitions": [
+        {
+          "block": 686,
+          "handler": "0x12022710",
+          "state": 1,
+          "receiver": 1
+        },
+        {
+          "block": 689,
+          "handler": "0x120227b0",
+          "state": 2,
+          "receiver": 1
+        },
+        {
+          "block": 692,
+          "handler": "0x12022a10",
+          "state": 4,
+          "receiver": 1
+        },
+        {
+          "block": 694,
+          "handler": "0x12022ec0",
+          "state": 6,
+          "receiver": 1
+        },
+        {
+          "block": 822,
+          "handler": "0x120218a0",
+          "state": 0,
+          "receiver": 1
+        }
+      ]
+    }
+  ]
+}

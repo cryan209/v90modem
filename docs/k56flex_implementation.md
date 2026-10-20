@@ -10,8 +10,10 @@ analogue DATA role. It is the digital-side (server) downstream payload core
 and its exact inverse, plus the V.8bis capability frame, the parameter record
 and the accepted-report logic. `AT+MS=K56` (automode enabled) selects the
 V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
-probe. Neither is a complete live K56flex data connection: the upstream
-gates are still unrecovered (Draft 0.23, Table 1a and clause 11).
+probe. Neither is a complete live K56flex data connection. The first two
+upstream gates now follow received S/S-bar and the accepted report; MP and
+parameter exchange remain incomplete (Draft 0.23, Table 1a and clause 11).
+See the 21 October audio-gate qualification below for the native-peer limits.
 
 **Read first:** MICA overlay 8E is the V.32/V.32bis datapump, not K56flex,
 and the resident QAM engine once lifted here under the K56flex name is now in
@@ -1222,6 +1224,67 @@ MP, INFO1 validation, data mapping, and 2400/9600 and 3200/21600 duplex in
 both G.711 laws. This is a Phase-2 interoperability correction only:
 no training completion, CONNECT or verified payload is observed. The later
 K56 training/retrain boundary remains open; no hardware interop is claimed.
+
+## Native HSF Jd and audio-derived gates, 21 October 2026
+
+The next failure was in our own transmitted handshake. The engine configured
+`training_word=FFFF`, so the original HSF `120236a0` / `12035bf0` waited in
+FindJD/CallWaitJ without starting upstream training. Send `8990` instead:
+the recovered DBA8/B31D Jd exchange (Draft 0.23 clause 4.10), requesting
+four-point upstream training as defined by V.34 10.1.3.3/Table 18. This goes
+through the existing PCM scrambler and sample generator.
+
+Before changing that word, an independent oracle checked our complete P1
+and P2 against original HSF `12022500` / `120225d0`: 16368 and 8448 samples,
+zero mismatches, with balanced sign histograms. The retained PCMU prefix and
+stdlib checker are `reference-data/k56flex-hsf/downstream-probes-ulaw.*`
+and `tools/k56flex_hsf_probe_check.py`. This checks our transmit tap, rather
+than assuming the peer's probe detector is defective.
+
+The server also lacked audio-derived progress at its first two gates.
+Resident MICA `1258 -> 0FFE` posts `0800` after `13DE` S/S-bar acquisition;
+`126C -> 0FFE` posts `0400` after `13BE` report acceptance. The incremental
+receiver now observes V.34 10.1.3.7 S/S-bar to release DBA8, then validates
+S/PP/held-out TRN and repeated report bits to release DB22. Waiting until
+the full 512T TRN was a failed control: Jd continued into native echo training,
+and HSF then failed to recognize our second identification. The early S/S-bar
+event fixes that timing. Its 0.92 correlation floor is a local confidence
+threshold, not a recovered ITU constant.
+
+Original HSF `120342c0` sends one aligned `899F` J'a, followed by TRN.
+The old local detector required three repeats. Accept one complete word at
+the phase established by the accepted 24-bit report (V.34 10.1.3.4 also
+defines J' as a single transmission; the K56 word is recovered behavior).
+Unaligned, corrupted and partial markers remain rejected. Native report-only
+and report-plus-J'a PCMU fixtures test incremental chunks of 1, 80 and 160
+samples alongside the earlier 36-case impaired-waveform matrix.
+
+The normal current engine completed this native run:
+
+```
+python3 tools/k56flex_hsf_pair.py --seconds 35 --dac-taps 65 \
+  --output artifacts/k56flex-hsf-current-audio-gates-20261021 \
+  --require-audio-gates
+```
+
+Only lockstep 8 kHz PCMU crosses between endpoints. Original-state reads are
+diagnostics; they neither release gates nor configure a waveform. Engine
+trace: S/S-bar at +16800 ms, report `00/89b0` at +18880 ms, and J'a at
++18960 ms. HSF recognizes the second identification, enters TRN2 and MP
+receive (state 15), and emits repeated upstream MP. An independent offline
+4-point MP decoder finds 161 CRC-valid, unacknowledged type-0 records in
+client tap seconds 20.5..24.4 (3200 baud/high carrier, 1920 Hz).
+
+**Qualification limit:** the server still waits at GATE_C and closes at
+28.46 s. There is no training completion, CONNECT or checked payload.
+The 65-tap option changes only the native client's analogue reconstruction;
+byte-exact DS0 and the tool's 129-tap default are preserved. At default 129,
+HSF still fails earlier at its Loop6 check (about 0.85 versus threshold
+0.36); 65 taps passes that check (about 0.08). The original HSF library is
+known to connect against the original MICA server at 129 taps, so this is
+an unresolved interoperability limit, not grounds for changing that default.
+The first two gates are fixed; live MP/parameter, E/B1 and payload remain
+separate unfinished work. No hardware interoperability is claimed.
 
 ## Mainline integration, 13 October 2026
 

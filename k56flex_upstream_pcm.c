@@ -1,9 +1,11 @@
-/* See k56flex_upstream_pcm.h. This is an offline, fixed-rate acquisition
- * experiment; it does not replace or configure the live V.34 receiver. */
+/* See k56flex_upstream_pcm.h. Fixed-rate preamble/report acquisition in
+ * batch or incremental chunks; it does not replace the V.34 data receiver. */
 #include "k56flex_upstream_pcm.h"
 #include "p3_demod.h"
 
 #include <math.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Nine complex T/2 observations, solved as two real-output FIRs. Allowing
@@ -94,6 +96,37 @@ static double error(point_t a, point_t b)
     return (a.re-b.re)*(a.re-b.re) + (a.im-b.im)*(a.im-b.im);
 }
 
+static int validate_training(const p3_result_t *r, int start,
+                             const point_t ref[TRN], const double w[COLS][2],
+                             k56flex_upstream_pcm_result_t *out)
+{
+    double e = 0;
+    for (int n = 288; n < 480; ++n)
+        e += error(equalize(r, start+2*n, w), ref[n]);
+    out->trn_rms = sqrt(e/192);
+    if (out->trn_rms > 0.25) return 0;
+    e = 0;
+    for (int n = 16; n < 272; ++n) {
+        /* V.34 10.1.3.6, 48-symbol PP, repeated six times. */
+        int k = (n%48)/4, i = n%4;
+        double angle = 3.14159265358979323846 * (k*i + (k%3 == 1 ? 4 : 0))/6;
+        point_t pp = {cos(angle), sin(angle)};
+        e += error(equalize(r, start - 2*288 + 2*n, w), pp);
+    }
+    out->pp_rms = sqrt(e/256);
+    e = 0;
+    for (int n = -64; n < 16; ++n) {
+        /* S alternates (++,-+); S-bar alternates (--,+-). */
+        point_t s = {(n&1) ? -0.7071067811865475 : 0.7071067811865475,
+                     0.7071067811865475};
+        if (n >= 0) { s.re = -s.re; s.im = -s.im; }
+        e += error(equalize(r, start - 2*(288+16) + 2*n, w), s);
+    }
+    out->s_rms = sqrt(e/80);
+    if (out->pp_rms > 0.3 || out->s_rms > 0.3) return 0;
+    return 1;
+}
+
 int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
                                k56flex_upstream_pcm_result_t *out)
 {
@@ -105,6 +138,7 @@ int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     out->trn_sample = out->report_sample = out->end_sample = -1;
+    out->sbar_sample = -1;
     if (!pcm || count <= 0 || count > 80000 || (tap != 5 && tap != 18)) return -1;
     r = p3_result_alloc(count + 100, 0);
     if (!r) return -1;
@@ -141,30 +175,7 @@ int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
      * thresholds. Held-out training and the preceding preamble must agree
      * before report bits are ever examined. */
     if (start < 0 || best < 0.65 || !train(r, start, ref, w)) goto done;
-    double e = 0;
-    for (int n = 288; n < 480; ++n)
-        e += error(equalize(r, start+2*n, w), ref[n]);
-    out->trn_rms = sqrt(e/192);
-    if (out->trn_rms > 0.25) goto done;
-    e = 0;
-    for (int n = 16; n < 272; ++n) {
-        /* V.34 10.1.3.6, 48-symbol PP, repeated six times. */
-        int k = (n%48)/4, i = n%4;
-        double angle = 3.14159265358979323846 * (k*i + (k%3 == 1 ? 4 : 0))/6;
-        point_t pp = {cos(angle), sin(angle)};
-        e += error(equalize(r, start - 2*288 + 2*n, w), pp);
-    }
-    out->pp_rms = sqrt(e/256);
-    e = 0;
-    for (int n = -64; n < 16; ++n) {
-        /* S alternates (++,-+); S-bar alternates (--,+-). */
-        point_t s = {(n&1) ? -0.7071067811865475 : 0.7071067811865475,
-                     0.7071067811865475};
-        if (n >= 0) { s.re = -s.re; s.im = -s.im; }
-        e += error(equalize(r, start - 2*(288+16) + 2*n, w), s);
-    }
-    out->s_rms = sqrt(e/80);
-    if (out->pp_rms > 0.3 || out->s_rms > 0.3) goto done;
+    if (!validate_training(r, start, ref, w, out)) goto done;
     out->acquired = 1;
     /* p3's timestamps subtract 32T for its full equalizer. Here we use
      * only its matched-filter output: restore that bookkeeping offset. */
@@ -185,5 +196,137 @@ int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
     }
 done:
     p3_result_free(r);
+    return events;
+}
+
+/* Incremental version of the same acquired-reference decoder. Candidate
+ * windows are examined once after their held-out tail arrives; later chunks
+ * retain carrier/filter and descrambler state. No media samples are inserted
+ * or removed and no caller-supplied stage boundary or report is accepted. */
+struct k56flex_upstream_pcm_s {
+    p3_demod_t demod;
+    p3_result_t *observations;
+    point_t ref[TRN];
+    double weights[COLS][2];
+    k56flex_upstream_t control;
+    k56flex_upstream_pcm_result_t result;
+    int samples, search_at, next_symbol, s_search_at, sbar_seen, timestamp_delay;
+};
+
+k56flex_upstream_pcm_t *k56flex_upstream_pcm_new(int baud_code, int high_carrier,
+                                               unsigned tap)
+{
+    if (baud_code < 0 || baud_code > 5 || (tap != 5 && tap != 18)) return NULL;
+    k56flex_upstream_pcm_t *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->observations = p3_result_alloc(80100, 0);
+    if (!s->observations) { free(s); return NULL; }
+    p3_demod_init(&s->demod, baud_code, high_carrier != 0, 8000);
+    s->timestamp_delay = (int)lround(32.0*8000/s->demod.baud_rate);
+    s->demod.use_rrc_frontend = true;
+    s->demod.emit_half_baud = true;
+    s->demod.bypass_equalizer = true;
+    s->demod.cma_freeze_after_sample = 0;
+    s->demod.rrc_agc_gain = 0.0001f;
+    s->demod.ted_low_coeff[2] = s->demod.ted_high_coeff[2] = s->demod.ted_mixed_coeff = 0;
+    reference(s->ref, tap);
+    k56flex_upstream_init(&s->control, tap);
+    s->result.trn_sample = s->result.report_sample = s->result.end_sample = -1;
+    s->result.sbar_sample = -1;
+    s->search_at = 2*(288+16+64);
+    return s;
+}
+
+void k56flex_upstream_pcm_free(k56flex_upstream_pcm_t *s)
+{
+    if (!s) return;
+    p3_result_free(s->observations);
+    free(s);
+}
+
+int k56flex_upstream_pcm_rx(k56flex_upstream_pcm_t *s, const int16_t *pcm, int count,
+                           k56flex_upstream_pcm_result_t *out)
+{
+    int events = 0;
+    if (!s || !pcm || count < 0 || !out) return -1;
+    if (s->control.ended) { *out = s->result; return 0; }
+    if (count > 80000 || count > INT_MAX - s->samples
+        || (!s->result.acquired && count > 80000 - s->samples)) return -1;
+    p3_result_t *r = s->observations;
+    if (s->result.acquired && s->next_symbol > TAPS/2) {
+        /* Keep the FIR's history and unprocessed lookahead; timestamps and
+         * demodulator/sample clocks remain absolute and uninterrupted. */
+        int discard = s->next_symbol - TAPS/2;
+        memmove(r->symbols, r->symbols + discard,
+                (r->symbol_count - discard)*sizeof(r->symbols[0]));
+        r->symbol_count -= discard;
+        s->next_symbol -= discard;
+    }
+    p3_demod_process(&s->demod, pcm, count, s->samples, r);
+    s->samples += count;
+    /* V.34 10.1.3.7 S/S-bar, used by K56flex's initial upstream
+     * preamble: observe the last 64T of S and 16T of S-bar. MICA 13DE/1258
+     * releases the downstream Jd wait here, BEFORE PP/TRN and echo training.
+     * Waiting for the full 512T training check leaves Jd up during MD.
+     * 0.92 is a local normalized-correlation confidence floor, not an ITU
+     * timing constant. An unreversed S scores only 0.6 in this window. */
+    while (!s->sbar_seen && s->s_search_at + 2*80 + TAPS/2 < r->symbol_count) {
+        int at = s->s_search_at++;
+        double cr = 0, ci = 0, dr = 0, di = 0, power = 0;
+        for (int n = 0; n < 80; n++) {
+            double re = (n & 1) ? -0.7071067811865475 : 0.7071067811865475;
+            double im = 0.7071067811865475;
+            if (n >= 64) { re = -re; im = -im; }
+            const p3_symbol_t *p = &r->symbols[at + 2*n];
+            cr += p->re*re + p->im*im;
+            ci += p->im*re - p->re*im;
+            dr += p->re*re - p->im*im;
+            di += p->im*re + p->re*im;
+            power += p->re*p->re + p->im*p->im;
+        }
+        double corr = power > 1e-12 ? sqrt(fmax(cr*cr+ci*ci, dr*dr+di*di)/(80*power)) : 0;
+        if (corr >= 0.92) {
+            s->sbar_seen = 1;
+            s->result.sbar_sample = r->symbols[at + 2*64].sample_index + s->timestamp_delay;
+            events |= K56U_SBAR;
+        }
+    }
+    while (!s->result.acquired && s->search_at + 2*TRN + TAPS < r->symbol_count) {
+        int at = s->search_at++;
+        double cr = 0, ci = 0, dr = 0, di = 0, power = 0;
+        for (int n = 32; n < 160; ++n) {
+            const p3_symbol_t *p = &r->symbols[at + 2*n];
+            cr += p->re*s->ref[n].re + p->im*s->ref[n].im;
+            ci += p->im*s->ref[n].re - p->re*s->ref[n].im;
+            dr += p->re*s->ref[n].re - p->im*s->ref[n].im;
+            di += p->im*s->ref[n].re + p->re*s->ref[n].im;
+            power += p->re*p->re + p->im*p->im;
+        }
+        double corr = power > 1e-12 ? sqrt(fmax(cr*cr+ci*ci, dr*dr+di*di)/(128*power)) : 0;
+        if (corr > s->result.correlation) s->result.correlation = corr;
+        if (corr < 0.65 || !train(r, at, s->ref, s->weights)
+            || !validate_training(r, at, s->ref, s->weights, &s->result)) continue;
+        s->result.acquired = 1;
+        events |= K56U_ACQUIRED;
+        s->result.trn_sample = r->symbols[at].sample_index + s->timestamp_delay;
+        s->next_symbol = at;
+    }
+    if (s->result.acquired) {
+        while (s->next_symbol + TAPS/2 < r->symbol_count && !s->control.ended) {
+            int at = s->next_symbol;
+            point_t y = equalize(r, at, s->weights);
+            int ev = k56flex_upstream_symbol(&s->control, (float)y.re, (float)y.im);
+            s->next_symbol += 2;
+            if (ev < 0) continue;
+            if (ev & K56U_REPORT) {
+                s->result.ext = s->control.report.ext;
+                s->result.report = s->control.report.report;
+                s->result.report_sample = r->symbols[at].sample_index + s->timestamp_delay;
+            }
+            if (ev & K56U_REPORT_END) s->result.end_sample = r->symbols[at].sample_index + s->timestamp_delay;
+            events |= ev;
+        }
+    }
+    *out = s->result;
     return events;
 }

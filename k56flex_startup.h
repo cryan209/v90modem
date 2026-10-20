@@ -18,4 +18,6 @@ void k56flex_startup_rx(k56flex_startup_t *s, const int16_t *pcm, int count);
 void k56flex_startup_tx(k56flex_startup_t *s, int16_t *pcm, int count);
 int k56flex_startup_state(const k56flex_startup_t *s);
 const char *k56flex_startup_failure(const k56flex_startup_t *s);
+/* Actual INFO1a upstream selection, available only after READY. */
+int k56flex_startup_upstream_profile(const k56flex_startup_t *s, int *baud_code, int *high_carrier);
 #endif
