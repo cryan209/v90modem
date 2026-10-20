@@ -481,6 +481,8 @@ static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
         if (d->requests >= 4) { d->early_commit = true; return; }
         d->widths[d->requests++] = p[7];
         if (d->peer_octets == -3 && d->requests > 1) return;
+        /* Ie030002: a four-octet options PL is dropped without a reply. */
+        if (d->peer_octets == 30 && p[7] == 4) return;
         if (d->ep->xid_negotiated || d->ep->connected) d->early_commit = true;
         /* Return the recorded RasFinder private group, including its P0=3.
            Change only the options length to exercise a modern/invalid peer. */
@@ -492,7 +494,7 @@ static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
         uint8_t frame[64];
         memcpy(frame, reply, 11);
         int length = sizeof(reply);
-        int options = d->peer_octets < 0 ? 3 : d->peer_octets;
+        int options = d->peer_octets < 0 || d->peer_octets == 30 ? 3 : d->peer_octets;
         int shift = options - 3;
         if (shift == 1) frame[11] = 0;
         memcpy(frame + 11 + shift, reply + 11, sizeof(reply) - 11);
@@ -534,12 +536,13 @@ static bool run_xid_dialogue(int forced, int peer_octets)
     if (!caller || !d.peer || !wire) goto done;
     v42_set_status_callback(caller,status_changed,&ep);
     v42_set_compression(caller,3,1024,32);
-    if (peer_octets < 0) v42_set_bit_rate(caller,2400);
+    bool timed = peer_octets < 0 || peer_octets == 30;
+    if (timed) v42_set_bit_rate(caller,2400);
     if (forced) v42_set_xid_optional_functions_octets(caller,forced);
     v42_restart(caller);
     hdlc_tx_flags(d.peer,16);
     bool data_sent = false;
-    for (int i=0; i<(peer_octets < 0 ? 100000 : 4096); i++) {
+    for (int i=0; i<(timed ? 100000 : 4096); i++) {
         hdlc_rx_put_bit(wire,v42_tx_bit(caller));
         v42_rx_bit(caller,hdlc_tx_get_bit(d.peer));
         if (ep.connected && !data_sent) {
@@ -548,7 +551,8 @@ static bool run_xid_dialogue(int forced, int peer_octets)
         }
         if (ep.connected && ep.rx_len >= 4 && d.acknowledgement_checks >= 2) break;
     }
-    int expected = peer_octets == -4 ? 3 : !forced && peer_octets == 3 ? 2 : 1;
+    int expected = peer_octets == -4 ? 3
+                 : !forced && (peer_octets == 3 || peer_octets == 30) ? 2 : 1;
     if (peer_octets == -3 || peer_octets <= -5)
         /* Initial offer, compatibility offer, then the configured N400=5. */
         ok = ep.link_error && !ep.xid_negotiated && !ep.connected
@@ -563,7 +567,7 @@ static bool run_xid_dialogue(int forced, int peer_octets)
           && ep.rx_len == 4 && memcmp(ep.rx,"RFPF",4) == 0
           && d.acknowledgement_checks == 2 && !d.bad_acknowledgement;
     /* A new link must start with the configured format, not retain fallback. */
-    if (ok && !forced && peer_octets == 3) {
+    if (ok && !forced && (peer_octets == 3 || peer_octets == 30)) {
         ep.xid_negotiated = ep.connected = false;
         d.requests = d.sabme = 0; d.early_commit = false;
         v42_restart(caller);
@@ -806,6 +810,7 @@ int main(void)
     CHECK(v42_set_xid_optional_functions_octets(NULL, 3) == -1,
           "V.42 XID length rejects a missing context");
     CHECK(run_xid_dialogue(0,3), "V.42 automatically retries legacy XID before SABME and resets on a new link");
+    CHECK(run_xid_dialogue(0,30), "V.42 retries an unanswered four-octet XID with three (Ie030002)");
     CHECK(run_xid_dialogue(0,4), "V.42 modern XID establishes without a compatibility retry");
     CHECK(run_xid_dialogue(4,3), "V.42 forced four-octet XID bypasses automatic adaptation");
     CHECK(run_xid_dialogue(3,3), "V.42 forced three-octet XID needs no extra exchange");

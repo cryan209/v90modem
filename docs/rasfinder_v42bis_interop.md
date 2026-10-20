@@ -56,6 +56,12 @@ settles those parameters, then normal establishment initializes the codec.
 An answering endpoint mirrors a three-octet initial command in its response.
 There is no peer-name, address or banner lookup.
 
+Some peers do not answer a four-octet command at all, so there is no reply
+to learn the width from. USR's Ie030002 I-modem is one
+(`docs/x2_implementation.md`, "The analogue client against Ie030002"). For
+those, automatic mode alternates three and four on each T401 retransmission
+of an initial XID that has had no response (V.42 8.10.2).
+
 V.42 8.10.1/8.10.2 define the negotiation/indication exchange and permit another
 XID command before SABME. The shortened encoding remains a compatibility
 exception to Table 11a, not a normative V.42 requirement. T401/N400 bound the

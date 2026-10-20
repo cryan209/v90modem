@@ -13,8 +13,9 @@ waits for upstream E and activates the downstream payload source. Fresh original
 Courier 403 feedback reaches native CONNECT and upstream B1 acquisition.
 The PCM response-mask correction below establishes complete messages in both
 directions against that emulator. The engine enters DATA after accepted MP/E
-and upstream B1 acquisition; LAPM and sustained hardware operation remain
-unqualified.
+and upstream B1 acquisition. LAPM is qualified against emulated peers in
+both roles (Courier as client, Ie030002 as server); sustained hardware
+operation remains unqualified.
 
 ## Implemented
 
@@ -1076,11 +1077,47 @@ before it worked, and each is something our own server had not exercised:
 6. **The encoder flags.** Linear at 31200 printed garbage at the I-modem's
    DTE (its decoder ran on our idle marks); the non-linear encoder fixed it.
 
+**LAPM (20 October 2026).** With V.42 left on, both ends now print CONNECT
+with LAPM: the I-modem `CONNECT 57333/ARQ/x2/LAPM/V42BIS`, ours (`AT&A3`)
+`CONNECT 56000/ARQ/X2/LAPM/V42BIS`. Both lines arrive exactly, ten copies of
+ours, and V.42bis P0=3 P1=1024 P2=32 is negotiated. Evidence:
+`reference-data/artifacts/x2-client-imodem-lapm-20261020`.
+
+The cause was **the width of our XID's HDLC optional-functions parameter**,
+not the emulator and not the I-modem's settings. The data link was fine before
+the change. Decoding both bit streams (`DS_TX_BIT_DUMP`/`DS_RX_BIT_DUMP`) showed:
+
+- our ODP was correct;
+- the I-modem answered with ADP (`E`,`C` alternating, V.42 8.10.4) and then
+  flags, and switched its DSP to HDLC (mailbox `000a:0003`);
+- all 20 of our XID commands were CRC-valid and got **no response at all**;
+- our SABME got UA, and our I-frames were acknowledged (RR, N(R) rising).
+  But the I-modem never printed CONNECT and never passed a byte to its DTE.
+  Its supervisor will not go to data without a completed XID exchange.
+
+Our XID uses V.42 (03/2002) Table 11a's four-octet optional-functions field
+(`03 04 8a 89 00 00`, GL 20). The Courier's XID, which this I-modem does
+answer (`x2-20261019-arq-short`, upstream), uses three (`03 03 8e 89 00`,
+GL 19). Ie030002 silently discards the four-octet form. A one-variable pair
+on the same build:
+
+| our XID | V.42bis offered | I-modem |
+|---|---|---|
+| 4 octets | yes | no XID response ×20, no CONNECT |
+| 4 octets | no (`AT+DS=0`) | no XID response, no CONNECT |
+| 3 octets (`ME_LAPM_XID_OPTION_OCTETS=3`) | yes | XID response to the first command, CONNECT ARQ/LAPM/V42BIS |
+
+The RasFinder compatibility (`docs/rasfinder_v42bis_interop.md`) learns the
+width from a three-octet *reply*. This peer sends no reply to learn from.
+In automatic mode, `v42.c` now alternates 4 and 3 on each T401 retransmission
+of an unanswered initial XID (V.42 8.10.2). A modern peer that only lost a
+frame still gets four on every other attempt. With the defaults, the I-modem
+answers the second command, after one T401. `v42_link_test` has a peer that
+drops four-octet commands; without the change that test fails.
+`ME_ANS_NOTCH_RATIO=3` is still needed (item 1 above).
+
 **Not done:**
 
-- **LAPM against Ie030002.** With V.42 enabled, our XIDs got no response 20
-  times, SABME then UA brought LAPM up on our side, and it fell over. The
-  I-modem never printed CONNECT. Open.
 - **Fall forward and retrain.** The client never starts the in-data fall
   forward. It doesn't need to, because it asks for its ceiling at startup. It
   also does not answer a server Tone A retrain.

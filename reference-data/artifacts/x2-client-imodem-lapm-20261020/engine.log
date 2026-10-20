@@ -1,0 +1,474 @@
+[ME] V.34 datapath: floating point
+[ME] Modem mode: x2 (V.8 offer V34|V32|V22)
+[ME] DTE framing: V.14 8N1
+[ME] V.92 TRN2u receiver: 4-point PAM, L_U=8000
+[ME] V.8 answer tone: ANSam/
+[ME] V.34 start profile: 3200 baud / 31200 bps
+[ME] env: ME_ANS_NOTCH_RATIO=3
+[ME] env: ME_MODE=x2
+[DI] modem PTY slave: /dev/ttys013 (symlink: /private/tmp/x2-client-imodem-lapm-a3-pty)
+[ME] PCM law set to u-law (PCMU)
+[TRACE +0ms] SIP media connected: role=caller
+[TRACE +0ms] enter V8: mode=x2 advertised mods=V34|V32|V22
+[ME] SIP connected as caller, starting V.8 handshake
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=0.0 (8000 samples) — WARNING: near-silence, check conference bridge
+[ME] V.8 tx: RMS=0.0 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=404.4 (8000 samples) — audio OK
+[ME] V.8 tx: RMS=2276.3 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=2022.9 (8000 samples) — audio OK
+[ME] V.8 tx: RMS=2276.3 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=2032.6 (8000 samples) — audio OK
+[ME] V.8 tx: RMS=3220.1 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=1905.7 (8000 samples) — audio OK
+[ME] V.8 tx: RMS=3220.2 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 rx: RMS=2696.2 (8000 samples) — audio OK
+[ME] V.8 tx: RMS=3185.0 (8000 samples)
+[ME] TX path: state=2 mod=0 fax_active=0 v34=0x0 v22bis=0x0
+[ME] V.8 result: status=2, modulations=0xA04 pstn_access=0x4
+[TRACE +2590ms] V8 result: status=V.8 call negotiation successful (2) mods=V34|V22|V32 (0xA04) protocol=0x1 pstn=0x4 pcm=0x0
+[ME] V.8 peer offer: call function=V series modem data, modulations=V.22/V.22bis duplex,V.32/V.32bis duplex,V.34 duplex
+[ME] DTE framing from V.8 protocol: V.42 LAPM
+[ME] V.8 peer summary: protocol=LAPM, PSTN=DCE on digital, PCM=PCM unavailable, NSF=absent, T.66=-1
+[TRACE +2590ms] X2 client: PCM index mask 7fff, upstream mask 1fff, MP 037c/1fff/0000/0500
+[ME] x2 analogue client startup: INFO0=021ff; waiting for the server's INFO0 and tone exchange (RX sample 48429)
+[TRACE +2591ms] X2 stage=INFO0 tx_sample=0 rx_sample=8000
+[TRACE +2591ms] X2 client up=SILENCE dn=WAIT_B (upstream symbol 0, downstream codeword 0)
+[TRACE +2632ms] X2 stage=TONE_A tx_sample=654 rx_sample=8653
+[TRACE +2675ms] X2 Phase2: A reversals=0 B reversed=1 B present=1 second A sample=1690
+[TRACE +2691ms] X2 Phase2: A reversals=1 B reversed=1 B present=1 second A sample=1690
+[TRACE +2695ms] X2 stage=CLIENT_PROBE tx_sample=1770 rx_sample=9769
+[TRACE +2847ms] X2 stage=CLIENT_MARKER tx_sample=4081 rx_sample=12080
+[TRACE +2882ms] X2 stage=CLIENT tx_sample=4628 rx_sample=12627
+[TRACE +2883ms] X2 client marker sent: upstream V.34 3200 high carrier
+[TRACE +2911ms] X2 client up=S dn=WAIT_B (upstream symbol 192, downstream codeword 480)
+[TRACE +2930ms] X2 client up=S_BAR dn=WAIT_B (upstream symbol 320, downstream codeword 800)
+[TRACE +2932ms] X2 client up=PP dn=WAIT_B (upstream symbol 336, downstream codeword 840)
+[TRACE +2982ms] X2 client up=TRN dn=WAIT_B (upstream symbol 624, downstream codeword 1560)
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[TRACE +3946ms] X2 client up=J dn=WAIT_B (upstream symbol 7024, downstream codeword 17560)
+[TRACE +3982ms] X2 client up=J dn=B (upstream symbol 7280, downstream codeword 18201)
+[TRACE +4008ms] X2 client up=WAIT_J dn=B (upstream symbol 7464, downstream codeword 18660)
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[TRACE +5119ms] X2 client up=WAIT_J dn=TRAIN (upstream symbol 15276, downstream codeword 38192)
+[TRACE +5119ms] X2 client up=S2 dn=TRAIN (upstream symbol 15277, downstream codeword 38193)
+[TRACE +5138ms] X2 client up=S_BAR2 dn=TRAIN (upstream symbol 15405, downstream codeword 38513)
+[TRACE +5140ms] X2 client up=TRN16 dn=TRAIN (upstream symbol 15421, downstream codeword 38553)
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[TRACE +5838ms] X2 client up=MP dn=TRAIN (upstream symbol 19821, downstream codeword 49553)
+[ME] TX path: state=3 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[TRACE +6248ms] X2 client up=MP dn=RECORD (upstream symbol 22344, downstream codeword 55863)
+[ME] V.42 detection started
+[TRACE +6248ms] X2 client record=f37c/7fff/0000 index=15 B=37 MD=5 downstream=56000 upstream=31200
+[TRACE +6248ms] X2 client upstream: N=13, expanded shaping, 64 states, non-linear encoder
+[TRACE +6261ms] X2 client up=E dn=RECORD (upstream symbol 22421, downstream codeword 56053)
+[TRACE +6262ms] X2 client up=DATA dn=RECORD (upstream symbol 22426, downstream codeword 56065)
+[TRACE +6267ms] X2 client up=DATA dn=DATA (upstream symbol 22426, downstream codeword 56133)
+[TRACE +6267ms] X2 client enter DATA: downstream=56000 upstream=31200
+[TRACE +6267ms] data RX first bit; V.42 T400 started
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] V.42 detection succeeded; entering LAPM establishment
+[V42] Abort len=-8 state=1 (previous status repeated 0 times)
+[V42] tx U XID   addr=03 (our cmd/their rsp) ctrl=af ctrl2=82 len=44 state=1 vs=0 vr=0 va=0
+[V42] Framing OK len=-6 state=1 (previous status repeated 109 times)
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx U XID   addr=03 (our cmd/their rsp) ctrl=af ctrl2=82 len=43 state=1 vs=0 vr=0 va=0
+[V42] rx U XID   addr=03 (our cmd/their rsp) ctrl=af ctrl2=82 len=52 state=1 vs=0 vr=0 va=0
+[ME] V.42 XID encoding: options=3 octets
+[ME] V.42 XID negotiated: V.42bis P0=3 P1=1024 P2=32
+[V42] tx U SABME addr=03 (our cmd/their rsp) ctrl=7f ctrl2=00 len=2 state=2 vs=0 vr=0 va=0
+[V42] rx U UA    addr=03 (our cmd/their rsp) ctrl=73 ctrl2=00 len=2 state=2 vs=0 vr=0 va=0
+[ME] V.42 LAPM connected
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=02 len=3 state=3 vs=1 vr=1 va=0
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=04 len=3 state=3 vs=1 vr=2 va=0
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=06 len=3 state=3 vs=1 vr=3 va=0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=02 len=3 state=3 vs=1 vr=3 va=0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=03 len=3 state=3 vs=1 vr=3 va=1
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=1 vr=3 va=1
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=04 len=3 state=3 vs=2 vr=3 va=1
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=05 len=3 state=3 vs=2 vr=3 va=2
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=2 vr=3 va=2
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=06 len=3 state=3 vs=3 vr=3 va=2
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=3 vr=3 va=3
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=3 vr=3 va=3
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=08 len=3 state=3 vs=4 vr=3 va=3
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=09 len=3 state=3 vs=4 vr=3 va=4
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=4 vr=3 va=4
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=0a len=3 state=3 vs=5 vr=3 va=4
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=0b len=3 state=3 vs=5 vr=3 va=5
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=5 vr=3 va=5
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=0c len=3 state=3 vs=6 vr=3 va=5
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=0d len=3 state=3 vs=6 vr=3 va=6
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=6 vr=3 va=6
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=0e len=3 state=3 vs=7 vr=3 va=6
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=0f len=3 state=3 vs=7 vr=3 va=7
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=7 vr=3 va=7
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=10 len=3 state=3 vs=8 vr=3 va=7
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=11 len=3 state=3 vs=8 vr=3 va=8
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=8 vr=3 va=8
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=12 len=3 state=3 vs=9 vr=3 va=8
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=13 len=3 state=3 vs=9 vr=3 va=9
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=9 vr=3 va=9
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=14 len=3 state=3 vs=10 vr=3 va=9
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] Abort len=-8 state=3 (previous status repeated 0 times)
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+[V42] rx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=01 (their cmd/our rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] tx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=07 len=3 state=3 vs=10 vr=3 va=10
+[V42] rx S RR    addr=03 (our cmd/their rsp) ctrl=01 ctrl2=15 len=3 state=3 vs=10 vr=3 va=10
+[ME] TX path: state=4 mod=5 fax_active=0 v34=0x4e4400000 v22bis=0x0
+closed loop: samples=1833614 state=DATA modulation=X2 rx=1833614 tx=1833614

@@ -1,0 +1,31 @@
+{
+  "imodem_dte": "\r\nOK\r\n\r\nOK\r\n\r\nCONNECT 57333/ARQ/x2/LAPM/V42BIS\r\nOUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!OUR-X2-CLIENT-0123456789!",
+  "engine_dte": "\r\nCONNECT 56000/ARQ/X2/LAPM/V42BIS\r\n\u00c9M\u00cfD\u00c5M-\u00d8\u00b2-S\u00c5\u00d2V\u00c5\u00d2-0\u00b1\u00b23\u00b456\u00b7\u00b89",
+  "imodem_connect": true,
+  "engine_connect": true,
+  "upstream_delivered": true,
+  "downstream_delivered": true,
+  "engine": {
+    "frames": 1798027,
+    "octets_sent": 1833614,
+    "octets_received": 1833614,
+    "sent_non_ff": 1815549,
+    "received_non_ff": 1796143,
+    "error": null,
+    "wall_clock_paced": false,
+    "environment": {
+      "ME_ANS_NOTCH_RATIO": "3",
+      "ME_MODE": "x2"
+    },
+    "engine_sha256": "897b71ba44036a1730b6a3af9d5db8806e6d8253509d3069f5ab13ceb23a75c1",
+    "stages": [
+      "INFO0",
+      "TONE_A",
+      "CLIENT_PROBE",
+      "CLIENT_MARKER",
+      "CLIENT"
+    ],
+    "accepted_markers": [],
+    "engine_exit": 0
+  }
+}

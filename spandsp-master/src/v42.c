@@ -929,6 +929,18 @@ static void t401_expired(v42_state_t *ss)
     s->retry_count++;
     if (s->configuring)
     {
+        /* V.42 8.10.2: T401 expired with no XID response.  Some older peers
+           (USR's Ie030002 I-modem) silently discard a command whose HDLC
+           optional-functions PL is Table 11a's four, and answer three at once,
+           so a peer that has said nothing cannot teach the automatic mode its
+           width.  Alternate the two on retransmission: a modern peer that only
+           lost a frame still gets four every other attempt. */
+        if (ss->config.xid_optional_functions_octets == 0
+            &&  !s->xid_response_seen  &&  s->state == LAPM_IDLE)
+        {
+            s->xid_optional_functions_octets = (s->xid_optional_functions_octets == 4)  ?  3  :  4;
+        }
+        /*endif*/
         transmit_xid(ss, s->cmd_addr);
     }
     else
