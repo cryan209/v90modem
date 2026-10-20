@@ -68,6 +68,25 @@ without unexplained errors.
 |---|---|---:|---:|---:|---:|---:|---:|---|---|
 | _pending_ | _pending_ | - | - | - | - | - | - | - | - |
 
+### Wired RasFinder matrix, 20 October 2026
+
+The outbound digital-role calls on wired vmhost CT 117 are recorded in
+[`rasfinder_modulation_tests_20261020.md`](rasfinder_modulation_tests_20261020.md).
+Across extensions 6311–6313, three V.90 offers produced one V.34 fallback,
+one white-decoding V.90 DATA entry followed by retrain, and one V.90
+48000/21600 LAPM login held about 61 s. All three direct V.34 calls reached
+24000/LAPM/login; all three V.32bis calls timed out training. V.22bis reached
+2400/LAPM/login on two lines; the third completed physical training and
+V.42 detection but not LAPM.
+
+This is a 12-call current-state snapshot, not a controlled acquisition A/B,
+checked bulk-payload result, or two-fresh-call qualification. The source was
+`3d21a8ff` plus archived working-tree changes, **not a clean main build**.
+Use the snapshot manifest and binary hash in that note when reproducing it.
+The soak script's default extension is still historical 8416: explicitly
+set `RF_EXT=6311`, `6312` or `6313` for these routes rather than copying its
+default. Keep account, SIP/RTP ports and PTY isolated per concurrent call.
+
 ### Conexant CX93001 direct Apple waveform leg, 18 October 2026
 
 USB `0572:1349`, firmware `CX93001-EIS_V0.2013-V92`, originates into our

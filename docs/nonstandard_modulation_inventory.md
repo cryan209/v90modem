@@ -1,6 +1,6 @@
 # Non-standard modulations: what exists, what we lack
 
-Written 2026-10-12. Sources: our `at_ms.c` carrier table, the Courier
+Written 2026-10-12; capability summary updated 2026-10-20. Sources: our `at_ms.c` carrier table, the Courier
 firmware notes (`courier_firmware_analysis.md`), and the strings and loader
 stubs of the Cisco MICA portware image (`MicaEmu/mica-portware-map.bin`).
 
@@ -20,8 +20,8 @@ in V.8bis. `%19S2` carries an X2 string.
 
 | Modulation | State here |
 |---|---|
-| K56flex | V.8bis, payload core, training stream, client; upstream gates unrecovered (`k56flex_implementation.md`) |
-| x2 | session, symbol and MP receive; qualified against a Courier (`x2_implementation.md`) |
+| K56flex | V.8bis, negotiated V.8/common Phase 2, payload/training core, test-only downstream client and offline upstream report recovery. Native HSF reaches the symbol path but then falls back; live gates/DATA remain unqualified (`k56flex_implementation.md`). |
+| x2 | Asymmetric digital server and byte-exact-bearer analogue client, plus symmetric DS0 mode. Checked traffic against original Courier/I-modem firmware, including client LAPM/V.42bis; rate and role limits remain (`x2_implementation.md`). |
 | V.32bis, V.22(bis), V.21, V.23, Bell 103/212A, V.110, V.120 | wired |
 | **V.32terbo** | **absent.** `AT+MS=V32TERBO` is accepted and falls back to V.32bis |
 | **HST** (USR) | **absent.** same fallback |
@@ -30,8 +30,12 @@ in V.8bis. `%19S2` carries an X2 string.
 | V.34 with terbo | not applicable to the datapump; it is a V.8/V.34 negotiation switch in MICA (`%15S0` vs `%15S1`) |
 
 So against both vendor images the missing ones are **V.32terbo, HST, V.FC and
-MNP**. x2 and K56flex exist but are incomplete. The three proprietary
-datapumps are the real gap; MNP is a protocol layer, not a modulation.
+MNP**. x2 has checked firmware-peer data results, but not universal rate,
+role, bearer or hardware qualification; K56flex still has no complete live
+DATA link. Do not equate its own-model client loopback with independent
+interop, or native HSF's `DEMY` label with accepted Phase 2 (that label can
+also mean rejection). The three absent proprietary datapumps are a separate
+gap; MNP is a protocol layer, not a modulation.
 
 ## MICA overlay map (loader stubs in the C53 program)
 

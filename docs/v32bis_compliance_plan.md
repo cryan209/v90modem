@@ -5,6 +5,24 @@ teaching modem or a "V.32bis-like" approximation. The local normative source is:
 
 - [T-REC-V.32bis-199102-I!!PDF-E.pdf](/Users/scottcryan/v90modem/ITU%20Docs/T-REC-V.32bis-199102-I!!PDF-E.pdf)
 
+## Current RasFinder hardware boundary (2026-10-20)
+
+Three bounded outbound offers on the wired vmhost CT 117 failed to reach
+V.32bis DATA: extensions 6311 and 6312 selected V.32bis through V.8, while
+6313 took Annex A USB1 → Tc → AC into training. All three ended at the
+60 s TRAINING timeout with NO CARRIER. The same snapshot reached V.34
+24000/LAPM/login on all three lines and V.22bis 2400/LAPM/login on two.
+Thus successful mode selection or Annex A entry is not successful physical
+training, and neither offline duplex passes nor another mode's login
+qualify V.32bis against this peer.
+
+See [`rasfinder_modulation_tests_20261020.md`](rasfinder_modulation_tests_20261020.md)
+for source/binary fingerprints, pacing and local RTP continuity checks. The
+snapshot includes uncommitted DSP changes; it is not a clean-main verdict
+or an isolated cause of the timeout. No clause 7/8 behavior was exercised in
+these failed calls because none reached DATA. Inspect our TX and peer RX
+before assigning the training failure to the RasFinder.
+
 ## Clause 7 retrain (2026-10-05)
 
 Clause 7 did not exist: nothing in data mode listened for a retrain, so a far

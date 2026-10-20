@@ -36,6 +36,29 @@ is K56flex" at the end. The K56flex PCM module is overlay 8C/8D.
 - Parameter record: both record lengths, reflected-8408 checksum, the marker /
   separator framing as queued by DA56, and a validating parser.
 
+## Diagnostic controls and precedence
+
+These controls describe the experimental path, not a supported K56flex DATA
+configuration. Prefer `AT+MS` for normal modulation policy (V.250 6.4.1).
+
+| Control | Current behavior |
+|---|---|
+| `AT+MS=K56` | Enables the V.8bis exchange when `ME_K56FLEX` is unset/empty; does not by itself enable PCM probes. |
+| `ME_K56FLEX=0` | Disables the K56flex path even if AT+MS offers it. |
+| `ME_K56FLEX=1` | Exchange only, then ordinary V.8. Any nonempty value other than `probe` or a value beginning with `0` also selects exchange-only. |
+| `ME_K56FLEX=probe` | Enables negotiated startup plus transmit probes when agreed; otherwise the legacy transmit-only probe followed by ordinary V.8. Exact lowercase spelling matters. |
+| `ME_K56FLEX_RATE` | Probe downstream mapper rate, default 56000 bit/s; invalid/unsupported configurations fail initialization. Not a negotiated upstream rate. |
+| `ME_K56FLEX_GATE_MS` | Gate wait, default 8000 ms; converted to 12-sample pairs (`ms * 2 / 3`). Not the generic V.8 timeout. |
+| `ME_K56FLEX_ROLE=client` | Sends the client-model V.8bis capability octet. Does not select an implemented analogue DATA role or override the SIP call direction. |
+| `ME_K56FLEX_BLIND` | Nonempty value not beginning with `0` enables blind V.8bis exchange; leave unset for the normal detected exchange. |
+| `VPCM_G711_TAP_DIR` | Retains the byte-exact bearer both ways; use a fresh directory per run. |
+
+V.8bis initiator/responder is normally chosen from SIP call direction. After
+an agreed exchange, V.8 calling/answering follows the MS direction (V.8bis
+9.9), while common Phase 2 remains the digital, answer-shaped prelude. These
+are three separate role decisions; a socket initiator is not necessarily the
+V.8 caller. `ME_K56FLEX_ROLE=client` changes none of those role rules.
+
 ## V.8bis exchange (live, opt-in)
 
 `ME_K56FLEX=1` makes the engine run the V.8bis exchange before V.8 (Draft 0.23

@@ -46,7 +46,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_BPS` | modem_engine.c | V.34 start bit rate ceiling (0 = the symbol rate's maximum). |
 | `ME_V90_MAX_TX_DBM0_CODE` | v34tx.c, v90.c | INFO0d bits 33:37, the transmit power we can honour. |
 | `ME_V92_MH` | modem_engine.c | 1 arms V.92 modem-on-hold (9.10). |
-| `ME_K56FLEX` | modem_engine.c | 1 runs the K56flex path (experimental). |
+| `ME_K56FLEX` | modem_engine.c | Experimental: 0 disables; 1 exchanges V.8bis then ordinary V.8; probe adds negotiated startup/PCM probes. Overrides AT+MS=K56; no complete K56flex DATA link. |
 | `ME_CLEARMODE` | sip_modem.c | 1 offers RFC 4040 CLEARMODE for CLEAR/V.110/V.120. |
 | `ME_V110_SYNC` | modem_engine.c | 1 runs V.110 synchronous. |
 | `ME_V120_ACK` | modem_engine.c | 1 runs V.120 acknowledged mode. |
@@ -69,14 +69,14 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_G711_CAPTURE` | modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 
-## Live-path switches (51, 2 with no test/script/doc reference)
+## Live-path switches (51, 1 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
 | `ME_IO_SCHEDULE` | modem_engine.c |  | sdh | 0 unchecked, 1 open, -1 off |
 | `ME_LAPM_XID_OPTION_OCTETS` | modem_engine.c |  | sd | V.250 +EWIND / +EFRAM: what this end offers in XID. |
 | `ME_LEC_NO_TRACK` | modem_engine.c |  | d | ME_LEC_NO_TRACK=1 holds the line echo canceller's |
-| `ME_MEDIA_CLOCK` | modem_engine.c |  | ct | the two clocks agree; leave it unset there. |
+| `ME_MEDIA_CLOCK` | modem_engine.c |  | cts | the two clocks agree; leave it unset there. |
 | `ME_RX_CLOCK_SLIP` | modem_engine.c |  | sdh | the connection and closes no loop, so it is off unless asked for. |
 | `ME_SLOW_CALLBACK_US` | modem_engine.c |  | d | ME_SLOW_CALLBACK_US lowers the threshold (diagnostic): a replay on a |
 | `ME_V34_B1_RATE_MARGIN_DB` | modem_engine.c |  | d | TRN picked the rate we asked for; B1 re-reads the same SNR a moment |
@@ -97,7 +97,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_JA_HEURISTIC_FALLBACK_MS` | modem_engine.c | 500 | tsdh | clause, so it is a knob with both measurements beside it. |
 | `ME_V90_JD_RESYNC_SYMBOLS` | v90.c, vpcm_loopback_test.c |  | ct | Keep this test deterministic even when it is run from a live-modem |
 | `ME_V90_P3_JA_SCAN_SYNC` | modem_engine.c |  | cd | 0 = off, 1 = one pass every 160 ms (default), 2 = the old full scan. |
-| `ME_V90_P3_UINFO_DELTA` | v90.c |  | - | on a live call.  Not a setting: §9.3.1.3 transmits U_INFO. |
+| `ME_V90_P3_UINFO_DELTA` | v90.c |  | d | on a live call.  Not a setting: §9.3.1.3 transmits U_INFO. |
 | `ME_V90_PHASE_CONFIRM` | v34rx.c |  | sdh |  |
 | `ME_V90_PHASE_NO_MARKS` | v34rx.c |  | sdh |  |
 | `ME_V90_RENEG` | modem_engine.c |  | sdh | broad loss policy.  ME_V90_RENEG_AFTER_MS remains the healthy-call probe. |
@@ -105,15 +105,15 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_RETRAIN_ON_LOSS` | modem_engine.c |  | sdh | How far this call has backed off the receive rate it asks for in MP.  See |
 | `ME_V90_SWEEP_EYE_ABS` | v34rx.c |  | sdh | ME_V90_SWEEP_EYE_ABS=1 restores the absolute eye test that used to gate the |
 | `ME_V90_SWEEP_NEEDS_EVIDENCE` | v34rx.c |  | sdh |  |
-| `ME_V90_T3_CPPRIME_LOOKAHEAD` | v34rx.c | 0 | d | Experimental CP′ search lookahead in internal T/3 samples, 0..4800; 4800 restores the old wait for A/B comparisons. Not the physical codec rate. |
+| `ME_V90_T3_CPPRIME_LOOKAHEAD` | v34rx.c |  | d | CP' is decoded behind the physical input: B1 may already be in |
 | `ME_V90_T3_NO_BLIND` | v34rx.c |  | d |  |
 | `ME_V90_TRN1D_SYMBOLS` | v90.c |  | sdh | 24796T (3.1 s) of Jd wait. |
 | `ME_V90_TRN2D_SYMBOLS` | v90.c |  | sdh |  |
 | `ME_V90_UPSTREAM_MAX_BPS` | modem_engine.c |  | tsd | for the whole call. |
 | `ME_V90_UPSTREAM_STEP` | modem_engine.c |  | d | A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0 |
 | `ME_V91_CONTROL_CHANNEL` | modem_engine.c |  | sd | 6.4: optional; on by default, it gives slip detection and in-band |
-| `ME_V91_SPECIFY_DIL` | modem_engine.c | 0 | sd | Positive value requests the default descriptor explicitly via INFO bit 26 = 1 and J, in either call role (V.91 7.8-7.10, 8.2.1.5-8.2.1.7). The peer sends the DIL we request; our TX follows its INFO/J. |
-| `ME_V91_TRANSPARENT` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
+| `ME_V91_SPECIFY_DIL` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
+| `ME_V91_TRANSPARENT` | modem_engine.c |  | sd | Law is carried by INFO bit 39, and CP bit 35 is reserved in V.91. |
 | `ME_V92_ENABLE` | modem_engine.c | 0 | td | under the ME_V92_ENABLE compatibility alias.  False for an unknown name. |
 | `ME_V92_JD_EXTRA_REPS` | v90.c |  | d | to move everything after Jd without changing the upstream path. |
 | `ME_V92_JD_SKIP_REPS` | v90.c |  | d | reps (ME_V92_JD_EXTRA_REPS) with no shift in time. |
@@ -125,21 +125,21 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V92_CP_LAW_STRICT` | v92_cp_rx.c |  | ctd |  |
 | `VPCM_V90_PP_PHASE` | v34rx.c |  | c | vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. |
 
-## Kept on purpose (60, 33 with no test/script/doc reference)
+## Kept on purpose (60, 29 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
-| `ME_ANS_NOTCH_RATIO` | modem_connect_tones.c |  | - | interop: lets ANSam through band noise on a poor line (a caller otherwise sends CI all call) |
-| `ME_K56FLEX_BLIND` | modem_engine.c |  | - | K56flex: area under active work, not touched in the knob clean-up |
-| `ME_K56FLEX_GATE_MS` | modem_engine.c |  | d | K56flex: area under active work |
-| `ME_K56FLEX_RATE` | modem_engine.c |  | - | K56flex: area under active work, not touched in the knob clean-up |
-| `ME_K56FLEX_ROLE` | modem_engine.c |  | - | K56flex: area under active work, not touched in the knob clean-up |
+| `ME_ANS_NOTCH_RATIO` | modem_connect_tones.c |  | sd | interop: lets ANSam through band noise on a poor line (a caller otherwise sends CI all call) |
+| `ME_K56FLEX_BLIND` | modem_engine.c |  | d | experimental V.8bis: nonempty/nonzero-prefix enables blind exchange; normally unset |
+| `ME_K56FLEX_GATE_MS` | modem_engine.c |  | sd | experimental probe gate wait, default 8000 ms, quantized to 12-sample pairs |
+| `ME_K56FLEX_RATE` | modem_engine.c |  | d | experimental PCM probe mapper rate, default 56000 bit/s; not an upstream rate |
+| `ME_K56FLEX_ROLE` | modem_engine.c |  | d | client selects client-model V.8bis capability octet, not an analogue DATA role |
 | `ME_SOUNDER` | modem_engine.c |  | d | measurement mode: transmit the channel sounder instead of a modem |
 | `ME_SOUNDER_RMS` | v90_sounder.c |  | - | measurement: level of the channel sounder (ME_SOUNDER) |
 | `ME_TRAINING_TIMEOUT_MS` | modem_engine.c |  | - | interop: lengthens the 60 s training cap for multi-retrain calls |
 | `ME_V34_TX_PREEMP` | v34tx.c |  | - | diagnostic: forces Phase 3 pre-emphasis to measure a peer against a flat spectrum |
 | `ME_V8_TE_MS` | v8.c |  | dh | open experiment: enforce V.8's Te silence (live A/B owed) |
-| `ME_V8_X2_PHASE_REVERSAL` | modem_engine.c |  | d | x2: alongside K56flex, area under active work |
+| `ME_V8_X2_PHASE_REVERSAL` | modem_engine.c |  | d | 0 disables proprietary V.8 phase signature; default on for x2 offers without V.90 |
 | `ME_V90A_8K_FEED` | modem_engine.c |  | - | open investigation: V.90 analogue role over a real loop |
 | `ME_V90A_DIL_REQUIRE_PLAN` | modem_engine.c |  | - | open investigation: V.90 analogue role over a real loop |
 | `ME_V90A_SLOT_LEVELS` | modem_engine.c | 1 | d | V.90 analogue role: configuration and the open real-loop investigation |
@@ -179,9 +179,9 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V92_MH_GRANT` | modem_engine.c | 1 | h | test hook: V.92 9.10 modem-on-hold grant/deny |
 | `ME_V92_MH_INITIATE` | modem_engine.c |  | h | test hook: provokes V.92 9.10 modem-on-hold against a real peer |
 | `ME_V92_MH_T1` | modem_engine.c | 0x3 | dh | test hook: V.92 9.10 modem-on-hold T1 code |
-| `ME_X2_SYMMETRIC` | modem_engine.c |  | - | x2: alongside K56flex, not touched in the knob clean-up |
-| `ME_X2_UPSTREAM_ACQUIRE` | modem_engine.c |  | d | x2: alongside K56flex, area under active work |
-| `ME_X2_UPSTREAM_MAX_RATE` | modem_engine.c |  | d | x2: alongside K56flex, area under active work |
+| `ME_X2_SYMMETRIC` | modem_engine.c |  | - | diagnostic override of AT+MS=X2S: nonzero selects symmetric DS0 mode |
+| `ME_X2_UPSTREAM_ACQUIRE` | modem_engine.c |  | d | default on: 0 disables server V.34 upstream B1/DATA acquisition for comparison |
+| `ME_X2_UPSTREAM_MAX_RATE` | modem_engine.c |  | d | server upstream diagnostic ceiling, default 33600; 2400..33600 in 2400 steps; AT+MS also bounds rates |
 | `P3_LEGACY_FRONTEND` | p3_demod.c |  | d | offline decoders compare the old Phase 3 front end |
 | `V32BIS_DATA_EYE` | v32bis.c |  | d | diagnostic: V.32bis data-mode eye log |
 | `V32BIS_TRN_SYMBOLS` | v32bis.c |  | - | test hook: a far end that sends long TRN (slmodemd runs to ~8000) |

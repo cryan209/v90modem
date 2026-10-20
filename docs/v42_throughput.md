@@ -5,6 +5,25 @@ V.42bis on) carried about 20 kbit/s of DTE data in *both* directions.  Equal
 figures in two directions with line rates 1.75x apart said the line was not
 the limit.
 
+## Before measuring throughput: prove XID establishment
+
+LAPM frames on the wire do not by themselves prove that a peer's DTE has
+entered DATA. The Ie030002 x2-client experiment (20 October 2026) received
+UA to SABME and RR acknowledgements to I-frames, yet the peer printed no
+CONNECT and delivered no DTE bytes: it had silently ignored our initial
+four-octet optional-functions XID. Removing V.42bis did not fix it; using
+three option octets did.
+
+Automatic initial XID now starts at four octets and alternates three/four
+on unanswered T401 retries (V.42 8.10.2; compatibility exception to Table
+11a). Forced `ME_LAPM_XID_OPTION_OCTETS=3` or `4` suppresses adaptation;
+leave it unset/`auto` for normal use. This affects establishment, not the
+steady-state k × N401 / RTT limit or compression dictionary contents.
+See [`rasfinder_v42bis_interop.md`](rasfinder_v42bis_interop.md) for reply-width
+learning and bounds, and [`x2_implementation.md`](x2_implementation.md),
+"The analogue client against Ie030002", for the no-reply experiment and
+checked duplex text. Those short transfers are not throughput measurements.
+
 ## Instrument
 
 `V42_STATS=<seconds>` (spandsp-master/src/v42.c, `stats_report()`) prints one
