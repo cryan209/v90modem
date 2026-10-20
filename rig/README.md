@@ -4,6 +4,14 @@ Files here support the live V.90 interop test against a real SmartLink
 softmodem DSP, used to validate the digital-modem server against an actual
 analogue-modem peer without physical hardware.
 
+## Physical MultiTech USB peer (macOS)
+
+The Lucent-based MT5634MU (`06e0:f103`) needs the vendor-endpoint PTY bridge,
+not macOS's nonfunctional CDC tty. See
+[`docs/mt5634mu_usb_modem.md`](../docs/mt5634mu_usb_modem.md) for build/run,
+carrier polling, hangup behavior and the **persistent USB data-path gate**
+warning. Its observed RasFinder V.34 calls do not qualify V.90 against us.
+
 ## Local, without SIP: `slm_bridge/slm_bridge.c` + `audio_sock_modem`
 
 The same SmartLink DSP can be run on this machine against the engine with no

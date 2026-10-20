@@ -171,6 +171,36 @@ This is the right place for:
 
 This is not the place to jump into V.91 `SCR/CP/B1`.
 
+### Phase-2 transmitter wire contracts (19 October 2026)
+
+The current `v34tx.c` changes cover three independent signalling defects:
+
+- **INFO0d nominal power** (V.90 Table 7, bits 29:32) follows the selected
+  `v34_tx_power()` gain calibration, including the fixed-point correction,
+  rather than always declaring -13 dBm0. Codes are clamped to 0..15
+  (-6..-21 dBm0). This changes metadata, not waveform gain; it does not
+  substitute for measuring the G.711 TX tap.
+- **INFO0d final fill** (Table 7, bits 58:61) remains all ones. The emitted
+  differential point is saved before a completion handler initializes the
+  next tone or repeat; otherwise that initialization can turn the last fill
+  bit into zero. No extra baud or line sample is added.
+- **INFO1d repetitions** are contiguous **109-bit** messages (V.90
+  8.2.3.2/Table 9; contiguous repetition in 8.2.3.1; V.92 9.3/Table 17),
+  not 120-bit byte-padded buffers with eleven intervening zeros. Generic
+  non-digital INFO1 buffer rounding is unchanged.
+
+`v34_phase4_16pt_test` now also checks these Phase-2 generator contracts:
+nominal declarations at -6, -10, -14 and -21 dBm0 in both laws; INFO0d CRC
+and fill at the transition; and four identical INFO1d repetitions with
+sync, CRC and fill in both laws and both V.90/V.92 modes. It is in the fast
+tier. These are differential-symbol generator tests, not a waveform,
+fixed-point-build, hardware or complete-call qualification.
+
+```sh
+make v34_phase4_16pt_test
+./v34_phase4_16pt_test
+```
+
 ## Phase 3
 
 This is the first major place where V.90 diverges sharply from V.91.

@@ -1017,7 +1017,13 @@ local experimental limits) and fails closed. Disconnect frees the preflight,
 startup and probe objects; probe-log state is per call, not function-static.
 The exchange-only `ME_K56FLEX=1` policy is unchanged.
 
-### The short upstream L1 probe
+### Superseded short-probe interpretation
+
+**Correction:** the short-probe workaround and startup-pass claim below were
+superseded by inspection of the original HSF receiver. See "Corrected native
+HSF qualification" below; `DEMY` alone was a false-positive handoff criterion.
+The following records the intermediate experiment, not current behavior.
+
 
 The first native run after fixing V.8 starts the real K56 pump and exchanges
 INFO0, but misses INFO1c. The original HSF client sends L1 for about 160 ms,
@@ -1075,6 +1081,50 @@ Final and intermediate native traces remain local under
 or driver-derived captures are published. Next: inspect the native client's
 actual Phase-3 response and recover the gate/report handoff; do not satisfy
 gate A just because Phase 2 completed.
+
+## Corrected native HSF qualification (19 October 2026)
+
+The original receiver's `DEMY` label is ambiguous: handler `1203a1df` can
+reject low measured power and enter RX state **0x28**, handler `1203b470`,
+without ever enabling the symbol receiver. The former `--require-startup`
+criterion accepted that rejection. The baseline above therefore does **not**
+prove successful Phase 2, regardless of our CRC-valid INFO1 or probe-start log.
+
+`tools/k56flex_hsf_pair.py` now writes read-only original-pump observations to
+`client-phase2.json`: RX state, handler, symbol-path flag (`RX+66c0`), classifier,
+symbol-receiver selector, measured power and configured limits. A handoff now
+requires V.8bis agreement, V.8 intersection 1, K56 selection, our probe-start
+log, and an observed symbol-path flag of 1 outside rejection state 0x28.
+`client_phase2_rejected` is reported separately. This remains an intermediate
+startup diagnostic, not a successful connection or immunity to later fallback.
+
+The concurrent INFO1/L1-only measurement workaround has been removed:
+ordinary L2-only analysis and the full 420 ms receive window apply again.
+`v34_set_k56_phase2()` now controls **TX CC-to-probe alignment only**. Per
+V.34 11.2.1.2.5, the reversed Tone A must persist 10 ms on the wire. CC goes
+through a nine-symbol shaper; L1 bypasses it. The K56 answer-shaped prelude
+therefore drains approximately four bauds (53 samples at 8 kHz) of CC before
+switching to L1, preserving continuous external sample accounting. This is
+not a gain change, a fabricated INFO1, or an RX measurement exception.
+
+Local completed diagnostic runs (each directory contains `report.json`,
+`client-phase2.json`, engine log and untouched PCMU taps):
+
+| Directory under `artifacts/` | Observation | Outcome |
+|---|---|---|
+| `k56flex-hsf-power-diag` | measured power -49.06 against -45 threshold; state 0x28, symbol path 0 | Phase-2 rejection, despite `DEMY` |
+| `k56flex-hsf-normal-probe` | ordinary RX measurement; power -13.87, symbol path 1 | handoff seen, then V.34 fallback at 11.06 s |
+| `k56flex-hsf-cc-tail` | CC-tail alignment; power -13.87, symbol path 1 at client block 672 | handoff seen, then retrain/fallback at 12.94 s |
+
+An earlier `power-baseline` snapshot read the wrong power-object address and
+reported 147.18; use the corrected `power-diag` measurement, not that value.
+These scratch runs are not retained regression fixtures, and their binary
+hashes differ: they are diagnostic history, not a controlled pass-rate A/B.
+All report no TX/RX training completion, no DTE CONNECT and
+`verified_connection=false`. The CC-tail run reaches the actual symbol path
+but still does not establish a K56flex link. Next: inspect our transmitted
+PCM prefix and the peer's classification/retrain at that boundary; do not
+force gate A or treat the old gate-timeout result as current qualification.
 
 ## Mainline integration, 13 October 2026
 
