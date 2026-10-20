@@ -1459,7 +1459,15 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
             best = parity;
         }
     }
-    if (best < 0  ||  best_metric > 0.08f)
+    /* V.32bis 5.2.1 / 6.1: acquire S before the line equalizer is trained.
+       This is a receiver-fit tolerance, not a prescribed ITU signal value.
+       The RasFinder/MP-114 captures in reference-data/v32bis-rf-s/ have
+       stable alternating S states (within-state residual 0.0014), but their
+       unequal line response leaves 0.09 residual against one complex gain.
+       0.08 rejected all three lines before TRN or R1.  0.12 admits them;
+       AC (opposite states, no carrier component) still has residual 0.5.
+       The consecutive Table 5 rate-word check remains the startup gate. */
+    if (best < 0  ||  best_metric > 0.12f)
         return false;
     s->startup_rx_gain = gains[best];
 #if !defined(SPANDSP_USE_FIXED_POINTx)
@@ -1962,6 +1970,19 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
     switch (s->startup_rx_stage)
     {
     case V32BIS_RX_SEARCH_S:
+        /* V.32bis 6.2: the answer modem sends its second conditioning
+           signal only after detecting our R2.  While we send the NT probe
+           and our conditioning signal (6.1), it is silent.  On a delayed
+           hybrid, our own S returns here; AGC makes that weak echo look
+           like a full-level S, and training on it pulls the carrier and
+           equalizer away before the real answer signal arrives. */
+        if (s->reactive_startup && s->calling_party
+            && s->tx_step > 0 && s->tx_step < 3)
+        {
+            s->startup_rx_acq_count = 0;
+            return -1;
+        }
+        /*endif*/
         if (s->rx_hold_symbols > 0)
         {
             s->rx_hold_symbols--;
@@ -3555,6 +3576,15 @@ SPAN_DECLARE(int) v32bis_start_retrain(v32bis_state_t *s)
 SPAN_DECLARE(int) v32bis_retrain_count(v32bis_state_t *s)
 {
     return (s != NULL)  ?  s->retrain_count  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.32bis 6.1/6.2: our first conditioning signal precedes R2/R1;
+   the far end cannot answer it until that rate signal has been sent. */
+SPAN_DECLARE(bool) v32bis_echo_training_window(v32bis_state_t *s)
+{
+    return s && s->reactive_startup
+        && s->tx_phase == V32BIS_TX_PHASE_COND && s->tx_cond_quiet;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -23,6 +23,98 @@ or an isolated cause of the timeout. No clause 7/8 behavior was exercised in
 these failed calls because none reached DATA. Inspect our TX and peer RX
 before assigning the training failure to the RasFinder.
 
+## 2026-10-20: RasFinder caller startup and network echo fixed
+
+The preceding modulation matrix timed out V.32bis training on all three
+RasFinder lines (6311–6313). Three separate receiver defects were exposed
+in order; all fixes follow V.32bis 5.2.1 and 6.1/6.2, without changing the
+ITU waveform, scrambler, constellation, rate words or sample accounting.
+
+1. **S rejected before equalization.** The first S has stable alternating
+   states (normalized within-state residual about 0.0014 on 6311), but the
+   single complex-gain model's residual is about 0.09. The acquisition
+   tolerance of 0.08 rejected every line before TRN/R1. This receiver-fit
+   tolerance is now 0.12; the unrelated ITU signal values are untouched.
+   All three original recordings then decode the same valid R1 rate mask
+   0x1660. Acquisition alone gives a live 4800 LAPM/login, but not 9600 or
+   14400 interoperability.
+2. **Our own S trained the receiver.** After R1 the caller sends its
+   NT-long S probe and first conditioning signal. The answer modem is
+   silent and does not send its next conditioning signal until R2 (6.2).
+   Our S returns through the delayed hybrid while we are listening, AGC
+   amplifies it, and the receiver falsely enters S-bar/TRN. Replaying the failed
+   14400 call pulls its carrier to roughly 1792 Hz before the real S
+   arrives; an independent line fit measures the actual carrier within
+   0.03 Hz of nominal. Caller S acquisition is now held off during that
+   protocol-defined interval, and cleared windows cannot accumulate the
+   echo. A fresh call then completes 14400 physical training, but still
+   does not deliver usable data.
+3. **The near-end canceller cannot span the bearer.** The library's
+   256-sample canceller spans only 32 ms; this bearer returns our own TX
+   about 225–240 ms later. The engine now reuses `v34_line_ec` over the
+   first local conditioning/TRN window in which 6.1/6.2 has the far end
+   silent, closing before our following R2/R1. The retained tail excludes
+   the preceding peer signal. Live fits remove 27–29 dB of echo and retain
+   the bulk-delay filter through DATA. Once a fit is in force, the
+   library's earlier near-end estimate is disabled to avoid subtracting it
+   twice. The new per-call state is reset at each training start. A path
+   with no useful echo fit retains the original near-end canceller.
+
+### Fresh wired results
+
+The isolated `/root/rf-current-20261020` build in vmhost CT 117 uses the
+same vendored dependencies and source snapshot as the modulation matrix,
+plus these fixes. Each call has its own account, SIP/RTP port and PTY;
+PCMU is forced and the harness allows 90 seconds after dialling. The
+modulation/rate pairs use the V.32bis power-on offer with ceiling 14400,
+and the V.32-only offer with ceilings 9600 and 4800. No credentials were
+submitted and no bulk transfer was attempted.
+
+| Build | 14400 V.32bis / 6311 | 9600 V.32 / 6312 | 4800 V.32 / 6313 |
+| --- | --- | --- | --- |
+| S-fit tolerance only | R1 recovered; later startup timeout | Physical training and V.42 detection; no LAPM | LAPM + readable login |
+| Plus clause-6 acquisition gate | Physical training; no usable data | Physical training; no LAPM | LAPM + readable login |
+| Plus bulk-delay canceller | **LAPM + readable login** | **LAPM + readable login** | **LAPM + readable login** |
+
+The final three calls train around +12.9 s and remain connected until
+harness termination at +88.6 s (about 76 seconds after physical training),
+with no logged retrain or LAPM disconnect. Bulk echo delays are 1841,
+1841 and 1801 samples, with 27.4, 29.1 and 27.9 dB ERLE respectively.
+A rotated repeat on the same binary reaches LAPM/login at 14400 on 6312
+and 4800 on 6311. The 14400 repeat later enters clause-8 exchanges and
+ends in a V.42 link failure at +88.411 s, so it is not a second clean
+long-hold pass. The 9600 repeat on 6313 instead falls back to buffered
+V.14: a readable login prefix is followed by corrupt bytes, no LAPM is
+established, and the call disconnects at +21.636 s. Its fit removes only
+10 dB of echo, versus 29.1 dB on the successful 9600/6312 call; the repeat's
+other fits are also weaker (12.0/12.2 dB), so that correlation alone does
+not establish the cause. V.32 9600 reliability and longer 14400 sessions are still open. Do not count
+its bare CONNECT or login prefix as an error-controlled pass.
+
+The original failed-call replays are valid only until the corrected
+transmitter first diverges: R1 in the original captures, R3 in the later
+echo fixture. Fresh login prompts, not replay DATA state or CONNECT alone,
+are the live success evidence. These are short hardware connection tests;
+error-free bidirectional payload transfer and long-duration operation
+remain unqualified.
+
+### Regression coverage and retained evidence
+
+Four small byte-exact PCMU prefixes in `reference-data/v32bis-rf-s/` pin
+S/R1 acquisition across all three lines, R3 after our own echoed S, and a
+bulk-delay fit near 240 ms. `tools/test_v32bis_rasfinder_acquisition.py` is
+in the fast tier. The final focused run passes 20 rows, including native
+smoke/duplex, both-law V.8 and automode engine pairs, retrain, the new
+hardware fixtures and `v34_line_ec_test`. The separate reference and
+datapump suites pass 112 and 17 tests. Logs are retained with the evidence.
+
+Full taps, RTP traces, PTY bytes, stage logs, runners, tested binary/source
+and build logs are retained locally in
+`reference-data/artifacts/v32bis-rf-fixes-20261020/`, in `sfit`, `gate`,
+`lec` and `confirm` subdirectories. The exact tested remote source is
+included because unrelated V.34/V.42 work was ongoing in the shared local
+tree; the live result does not depend on those later local edits.
+
 ## Clause 7 retrain (2026-10-05)
 
 Clause 7 did not exist: nothing in data mode listened for a retrain, so a far

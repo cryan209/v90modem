@@ -498,6 +498,8 @@ V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=3 V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_
 V34_HDX_ANSWER_SOURCE=1 V34_HDX_CONTROL_RETRAIN=3 V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_DELAY_MS=200 V34_HDX_NOISE_PEAK=8 ./v34_hdx_test 3200 9600 alaw 30
 V34_HDX_ANSWER_SOURCE=1 V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=3 V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_DELAY_MS=200 V34_HDX_NOISE_PEAK=8 ./v34_hdx_test 3200 9600 alaw 30
 @group
+# Foreign RASfinder S acquisition before our first divergent transmission.
+python3 tools/test_v32bis_rasfinder_acquisition.py
 ./v32bis_spandsp_test
 ./v32bis_duplex_test
 ./v32bis_engine_pair_test ulaw v8

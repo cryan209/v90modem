@@ -1228,6 +1228,10 @@ static bool            g_v8_answer_tone_retry_done = false;
 /* SpanDSP modem contexts */
 static v8_state_t     *g_v8      = NULL;
 static v32bis_state_t *g_v32bis  = NULL;
+/* V.32bis 6.1/6.2 supplies the same echo-only first-TRN interval as
+   V.34's Phase 3. The library's 256-sample near-end canceller cannot span
+   the ~240 ms network/hybrid return on the RasFinder SIP bearer. */
+static v34_line_ec_t g_v32bis_lec;
 static v34_state_t    *g_v34     = NULL;
 
 /* V.90 state (Phase 3/4 TX and data mode) */
@@ -9210,6 +9214,7 @@ static void start_v32bis_training(const char *why, int hold_samples)
     g_v32bis_usb1_watch = false;
     g_mod   = ME_MOD_V32BIS;
     g_state = ME_TRAINING;
+    v34_line_ec_reset(&g_v32bis_lec);
     g_v32bis_trained = false;
     g_v32bis_rate = 0;
     g_v32bis_hold_samples = hold_samples;
@@ -9730,7 +9735,23 @@ static void v32bis_engine_rx(const int16_t *amp, int len)
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
-    v32bis_rx(g_v32bis, amp, len);
+    for (int off = 0; off < len; ) {
+        int16_t clean[160];
+        char ec_log[256];
+        int count = len - off < 160 ? len - off : 160;
+        memcpy(clean, amp + off, (size_t)count * sizeof(*clean));
+        if (v34_line_ec_rx(&g_v32bis_lec, clean, count,
+                          v32bis_echo_training_window(g_v32bis),
+                          ec_log, sizeof(ec_log))) {
+            ME_LOG("[ME] V.32bis line EC: %s\n", ec_log);
+            /* A fitted bulk filter already includes the near-end echo.
+               Do not subtract the library's old estimate a second time. */
+            if (g_v32bis_lec.fitted)
+                v32bis_set_echo_canceller(g_v32bis, false);
+        }
+        v32bis_rx(g_v32bis, clean, count);
+        off += count;
+    }
     if (g_v32bis_trained && v32bis_retrain_count(g_v32bis) != g_v32bis_retrains_seen) {
         /* Clause 7, by either end.  7.3 keeps circuits 107 and 109 ON
            throughout, so the data stack and the DTE's CONNECT stand; the
@@ -9783,9 +9804,10 @@ static void v32bis_engine_rx(const int16_t *amp, int len)
 static void v32bis_engine_tx(int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
-    if (g_mod == ME_MOD_V32BIS && g_v32bis && g_v32bis_running)
+    if (g_mod == ME_MOD_V32BIS && g_v32bis && g_v32bis_running) {
         v32bis_tx(g_v32bis, amp, len);
-    else
+        v34_line_ec_tx(&g_v32bis_lec, amp, len);
+    } else
         memset(amp, 0, sizeof(int16_t)*(size_t)len);
     pthread_mutex_unlock(&g_state_mtx);
 }

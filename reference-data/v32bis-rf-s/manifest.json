@@ -1,0 +1,22 @@
+{
+  "6311": {
+    "source": "reference-data/artifacts/rf-modulation-20261020/r2-v32bis-6311/live-rx.g711",
+    "bytes": 136000,
+    "sha256": "be9d57bbfb92795ba91327ebe4953c7723fb40b5bc39a873c8191d8224f73579"
+  },
+  "6312": {
+    "source": "reference-data/artifacts/rf-modulation-20261020/r3-v32bis-6312/live-rx.g711",
+    "bytes": 136000,
+    "sha256": "4407ae816007e225f9aa0250f87d78f877aa8c88b8e4dba8315637046ae30139"
+  },
+  "6313": {
+    "source": "reference-data/artifacts/rf-modulation-20261020/r1-v32bis-6313/live-rx.g711",
+    "bytes": 136000,
+    "sha256": "8a45d50dad1fc29d1344d902825d716bc8880ff8803eb6ab38f97a14e3ae75b2"
+  },
+  "6311-echo": {
+    "source": "reference-data/artifacts/v32bis-rf-fixes-20261020/sfit/v32bis-14400-6311/live-rx.g711",
+    "bytes": 136000,
+    "sha256": "57acf0e62e3b5aa7efebc9dbaf3d768b3908685efbeff2da537f4787a1f215b8"
+  }
+}
