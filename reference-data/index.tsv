@@ -382,3 +382,4 @@ reference-data/artifacts/x2-20261019-align0-44000	13	5284788	docs/x2_implementat
 reference-data/artifacts/x2-20261019-rb-index1	13	5615700	docs/x2_implementation.md
 reference-data/artifacts/x2-20261019-rb-training	13	4862207	docs/x2_implementation.md
 reference-data/artifacts/x2-20261019-rec1-cap44000	13	5226499	docs/x2_implementation.md
+reference-data/artifacts/rf-modulation-20261020	117	52465270	docs/rasfinder_modulation_tests_20261020.md; 12 wired RasFinder calls, four modulation offers across 6311-6313; exact source snapshot, binary, logs, PTY bytes and RTP/G.711 taps; local hardware evidence, not a regression dependency

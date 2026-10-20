@@ -1381,3 +1381,15 @@ scored S-first 4/12 in the earlier batch and 8/12 here, 1.5 hours apart: **the r
 2x between batches on identical code**, so only interleaved arms within one batch are comparable. Phase 3 level is
 closed as a lever; the transmit side has now been shown identical, conformant, pace-neutral, and level-neutral
 above U_INFO.
+
+
+## 2026-10-20: current working-tree modulation checks
+
+See `rasfinder_modulation_tests_20261020.md` for the 12-call wired CT 117
+matrix over 6311–6313, including source/binary provenance and retained taps.
+Direct V.34 reaches LAPM/login on 3/3 at 24000 (6312 later loses decoding);
+V.22bis on 2/3 at 2400. V.32bis times out training on 3/3. V.90 delivers
+login at 48000/21600 on 6313 and holds about 61 s without a logged resync;
+6312 reaches 45333/21600 but decodes white and follows a peer retrain, while
+6311 reaches login only through V.34 fallback. No improvement in V.90
+success rate is demonstrated by this small historical comparison.
