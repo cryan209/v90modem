@@ -106,6 +106,9 @@ typedef struct
     bool local_busy;
     bool far_busy;
     bool rejected;
+    /*! \brief An I frame was discarded in the own-receiver busy condition, so
+               its clearance must be an REJ rather than an RR (V.42 8.4.7). */
+    bool busy_discarded;
     int retry_count;
 
     /* The control frame buffer, and its pointers */

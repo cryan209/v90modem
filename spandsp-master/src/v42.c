@@ -1167,7 +1167,11 @@ static void receive_information_frame(v42_state_t *ss, const uint8_t *frame, int
     ack_info(ss, frame[2] >> 1);
     if (s->local_busy)
     {
-        /* 8.4.7 */
+        /* 8.4.7: discarded after updating V(A); P=1 is answered RNR F=1.
+           A frame in sequence that is discarded here is an N(S) gap the
+           clearance has to report, or the peer only resends it on T401. */
+        if ((frame[1] >> 1) == s->vr)
+            s->busy_discarded = true;
         if ((frame[2] & 0x1))
             tx_supervisory_frame(s, s->rsp_addr, LAPM_S_RNR, 1);
         return;
@@ -1353,11 +1357,13 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
         switch (s->state)
         {
         case LAPM_IDLE:
-            if (!(frame[1] & 0x10))
-            {
-                /* TODO: notify CF */
-                report_rx_status_change(ss, SIG_STATUS_LINK_CONNECTED);
-            }
+            /* Table 9: a DM response with F=0 in the disconnected state asks
+               for the connection to be established.  This reported the link
+               connected without establishing anything: the control function
+               went online over a LAPM entity still in the disconnected state,
+               which discarded every I frame it was then given. */
+            if (!(frame[1] & 0x10)  &&  !s->configuring)
+                lapm_connect(ss);
             break;
         case LAPM_ESTABLISH:
         case LAPM_RELEASE:
@@ -1410,8 +1416,20 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
         /* Reset vars */
         break;
     case LAPM_U_FRMR:
-        /* Non-recoverable error */
-        /* TODO: */
+        /* V.42 8.5.6: "Upon receipt of an FRMR response frame in the connected
+           state, the error-correcting entity shall initiate termination"
+           (8.4.9.2).  Ignoring it left both ends deaf to each other -- the
+           peer that sent it discards everything until a reset -- until N400
+           polls had run out, ~20 s later. */
+        if (s->state == LAPM_DATA)
+        {
+            fprintf(stderr, "[V42] disconnect: FRMR received (8.5.6) vs=%d va=%d vr=%d\n",
+                    s->vs, s->va, s->vr);
+            s->state = LAPM_IDLE;
+            reset_lapm(ss);
+            t401_stop(ss);
+            report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
+        }
         break;
     case LAPM_U_XID:
         s->xid_response_seen = true;
@@ -1494,7 +1512,20 @@ static void lapm_frame_log(const v42_state_t *ss, const char *dir, const uint8_t
         return;
     }
     if ((frame[1] & 0x01) == 0)
+    {
+        /* I-frames only at V42_FRAME_LOG=2: one per frame is far too many
+           for a live call, but offline it is the only way to see N(S). */
+        static int iframes = -1;
+
+        if (iframes < 0)
+            iframes = (atoi(getenv("V42_FRAME_LOG")) >= 2);
+        if (iframes)
+            fprintf(stderr, "[V42] t=%.3f %s I ns=%d nr=%d p=%d len=%d state=%d vs=%d vr=%d va=%d retry=%d\n",
+                    stats_ms((v42_state_t *) ss, ss->stats.tx_bits)/1000.0, dir,
+                    frame[1] >> 1, frame[2] >> 1, frame[2] & 1, len,
+                    ss->lapm.state, ss->lapm.vs, ss->lapm.vr, ss->lapm.va, ss->lapm.retry_count);
         return;
+    }
     if ((frame[1] & 0x03) == LAPM_FRAMETYPE_S)
     {
         kind = "S";
@@ -1522,8 +1553,8 @@ static void lapm_frame_log(const v42_state_t *ss, const char *dir, const uint8_t
         default: name = "?"; break;
         }
     }
-    fprintf(stderr, "[V42] %s %s %-5s addr=%02x %s ctrl=%02x ctrl2=%02x len=%d state=%d vs=%d vr=%d va=%d\n",
-            dir, kind, name, frame[0],
+    fprintf(stderr, "[V42] t=%.3f %s %s %-5s addr=%02x %s ctrl=%02x ctrl2=%02x len=%d state=%d vs=%d vr=%d va=%d\n",
+            stats_ms((v42_state_t *) ss, ss->stats.tx_bits)/1000.0, dir, kind, name, frame[0],
             (frame[0] == ss->lapm.cmd_addr) ? "(our cmd/their rsp)" : "(their cmd/our rsp)",
             frame[1], (len > 2) ? frame[2] : 0, len,
             ss->lapm.state, ss->lapm.vs, ss->lapm.vr, ss->lapm.va);
@@ -1627,6 +1658,19 @@ SPAN_DECLARE(void) lapm_receive(void *user_data, const uint8_t *frame, int len, 
         lapm_frame_log(ss, "rx-BAD-FCS", frame, len);
         return;
     }
+    /* V.42 8.1.3: discard invalid frames with no action.  b) a frame that
+       carries sequence numbers (I, S) needs three octets ahead of a 16-bit
+       FCS and one that does not (U) two; e) the address must be DLCI 0 with
+       EA set, i.e. 0x01 or 0x03.  Neither was checked, so a short frame was
+       parsed from stale buffer octets, and a burst of line noise that
+       happened to pass the FCS was acted on whatever its address: it is the
+       address check that turns most such frames back into nothing. */
+    if (len < 2  ||  (frame[0] & 0xFD) != 0x01)
+        return;
+    if ((frame[1] & LAPM_FRAMETYPE_MASK) != LAPM_FRAMETYPE_U  &&  len < 3)
+        return;
+    if ((frame[1] & LAPM_FRAMETYPE_MASK) == LAPM_FRAMETYPE_S  &&  len != 3)
+        return;
     lapm_frame_log(ss, "rx", frame, len);
 
     switch ((frame[1] & LAPM_FRAMETYPE_MASK))
@@ -1712,6 +1756,8 @@ static void reset_lapm(v42_state_t *ss)
     /* Reset the LAP.M state */
     s->local_busy = false;
     s->far_busy = false;
+    s->busy_discarded = false;
+    s->rejected = false;
     s->vs = 0;
     s->va = 0;
     s->vr = 0;
@@ -2219,10 +2265,38 @@ SPAN_DECLARE(int) v42_get_negotiated_parameters(const v42_state_t *s,
 
 SPAN_DECLARE(bool) v42_set_local_busy_status(v42_state_t *s, bool busy)
 {
+    lapm_state_t *l;
     bool previous_busy;
 
-    previous_busy = s->lapm.local_busy;
-    s->lapm.local_busy = busy;
+    l = &s->lapm;
+    previous_busy = l->local_busy;
+    /* An XID exchange inside the connected state owns the busy condition
+       (lapm_config) and clears it on the response. */
+    if (l->configuring)
+        return previous_busy;
+    l->local_busy = busy;
+    if (busy == previous_busy  ||  l->state != LAPM_DATA)
+        return previous_busy;
+    if (busy)
+    {
+        /* V.42 8.4.7: "shall transmit an RNR frame at the earliest
+           opportunity".  This only set the flag, so the peer went on sending
+           I frames that were discarded unseen until its own T401 poll drew
+           an RNR -- a frame window of retransmission per busy spell. */
+        l->busy_discarded = false;
+        tx_supervisory_frame(l, l->rsp_addr, LAPM_S_RNR, 0);
+    }
+    else
+    {
+        /* 8.4.7: clearance is an RR, or an REJ with N(R) = V(R) if an N(S)
+           sequence error (here, a frame discarded while busy) has not been
+           reported.  Without it the peer stayed in its peer-busy condition
+           until it next polled, ~T401 per busy spell. */
+        tx_supervisory_frame(l, l->rsp_addr, (l->busy_discarded  &&  !l->rejected)  ?  LAPM_S_REJ  :  LAPM_S_RR, 0);
+        if (l->busy_discarded)
+            l->rejected = true;
+        l->busy_discarded = false;
+    }
     return previous_busy;
 }
 /*- End of function --------------------------------------------------------*/

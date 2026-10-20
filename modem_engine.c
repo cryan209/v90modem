@@ -243,7 +243,9 @@ static inline uint8_t pcm_idle(void)
 /* Ring buffers for data exchange between threads                      */
 /* ------------------------------------------------------------------ */
 
-#define DATA_RING_SIZE 16384
+/* 64 KiB: room for the V.42 receive reserve below (data_stack_rx_room_v42)
+ * as well as a DTE that is merely slow. */
+#define DATA_RING_SIZE 65536
 
 typedef struct {
     uint8_t  buf[DATA_RING_SIZE];
@@ -269,6 +271,36 @@ static int dring_write(data_ring_t *r, const uint8_t *d, int len) {
     }
     pthread_mutex_unlock(&r->mtx);
     return n;
+}
+
+static int dring_peek(data_ring_t *r, uint8_t *buf, int max) {
+    pthread_mutex_lock(&r->mtx);
+    int n = 0, pos = r->tail;
+    while (n < max && pos != r->head) {
+        buf[n++] = r->buf[pos];
+        pos = (pos + 1) % DATA_RING_SIZE;
+    }
+    pthread_mutex_unlock(&r->mtx);
+    return n;
+}
+
+static void dring_consume(data_ring_t *r, int n) {
+    pthread_mutex_lock(&r->mtx);
+    r->tail = (r->tail + n) % DATA_RING_SIZE;
+    pthread_mutex_unlock(&r->mtx);
+}
+
+static int dring_used(data_ring_t *r) {
+    pthread_mutex_lock(&r->mtx);
+    int used = (r->head - r->tail + DATA_RING_SIZE) % DATA_RING_SIZE;
+    pthread_mutex_unlock(&r->mtx);
+    return used;
+}
+
+static void dring_clear(data_ring_t *r) {
+    pthread_mutex_lock(&r->mtx);
+    r->head = r->tail = 0;
+    pthread_mutex_unlock(&r->mtx);
 }
 
 static int dring_read(data_ring_t *r, uint8_t *buf, int max) {
@@ -693,11 +725,24 @@ static int data_stack_pull_dte_byte(void *user_data)
     return byte;
 }
 
+/* Octets lost to a full receive ring this call (reset by me_call_end_rings). */
+static uint64_t g_rx_ring_overruns;
+
 static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
 {
+    uint64_t overruns;
+
     (void)user_data;
-    if (dring_write(&upstream_ring, &byte, 1) != 1)
-        ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
+    /* With V.42 the busy condition keeps this from happening; without error
+       control there is no way to hold the far end off.  One line per
+       doubling, not per octet: a DTE that has stopped reading at 50 kbit/s
+       would otherwise log thousands a second from the media thread. */
+    if (dring_write(&upstream_ring, &byte, 1) != 1) {
+        overruns = ++g_rx_ring_overruns;
+        if ((overruns & (overruns - 1)) == 0)
+            ME_LOG("[ME] DTE RX ring overrun; %llu octet(s) discarded so far\n",
+                   (unsigned long long)overruns);
+    }
 }
 
 static void data_stack_rx_room(void *user_data, int *free_bytes, int *size)
@@ -708,6 +753,36 @@ static void data_stack_rx_room(void *user_data, int *free_bytes, int *size)
         - (upstream_ring.head - upstream_ring.tail + DATA_RING_SIZE) % DATA_RING_SIZE;
     pthread_mutex_unlock(&upstream_ring.mtx);
     *size = DATA_RING_SIZE - 1;
+}
+
+/* V.42 8.4.7: free octets in the receive ring, for ds_set_rx_room(). */
+static int data_stack_rx_room_v42(void *user_data)
+{
+    (void)user_data;
+    return DATA_RING_SIZE - 1 - dring_used(&upstream_ring);
+}
+
+/* Received octets to the DTE.  A PTY takes what it has room for -- about a
+ * kilobyte on macOS -- and a write that comes up short is backpressure, not
+ * loss: the rest stays queued for the next pass.  Every drain site used to
+ * read the ring and drop whatever the write did not take, which cost bytes
+ * whenever the downstream outran the DTE for a moment (the x2 "940-byte
+ * downstream incomplete" that a paced test hid).  With V.42 the queue that
+ * builds up here is what asserts the receiver-busy condition. */
+static void me_drain_rx_to_dte(void)
+{
+    uint8_t buf[1024];
+    int n;
+
+    while ((n = dring_peek(&upstream_ring, buf, sizeof(buf))) > 0) {
+        int written = di_write_data(buf, n);
+
+        if (written <= 0)
+            break;
+        dring_consume(&upstream_ring, written);
+        if (written < n)
+            break;
+    }
 }
 
 static void data_stack_link_event(void *user_data, ds_link_event_t event)
@@ -822,6 +897,7 @@ static void data_stack_prepare(int bit_rate)
             data_stack_pull_dte_byte, NULL,
             data_stack_push_dte_byte, NULL);
     ds_set_v14_rates(&g_data_stack, bit_rate, bit_rate);
+    dring_clear(&upstream_ring);
 }
 
 /* Start the selected link protocol once the datapump data clock is stable. */
@@ -885,6 +961,11 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     g_data_rx_first_bit_seen = false;
     g_data_t400_deferred = false;
     ds_release(&g_data_stack);
+    /* Whatever the training-time placeholder framing (data_stack_prepare)
+       assembled from the line is not data.  It used to vanish because every
+       drain dropped what a DTE not yet online could not take; now that the
+       drain keeps it, it has to be discarded here, where data starts. */
+    dring_clear(&upstream_ring);
     g_data_connect_rate = bit_rate;
     g_data_connect_reported = false;
     g_data_link_failed = false;
@@ -922,8 +1003,14 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
             result = ds_init_v42(&g_data_stack, calling_party, detect, bit_rate,
                                  data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
-        if (result == 0)
+        if (result == 0) {
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+            /* Busy with half the ring left: one V.42bis frame of 128 octets
+               decodes to at most ~28 KB (codewords of 9 bits, strings of
+               250), and a frame already accepted cannot be refused. */
+            ds_set_rx_room(&g_data_stack, data_stack_rx_room_v42, NULL,
+                           DATA_RING_SIZE/2, DATA_RING_SIZE*3/4);
+        }
         if (result == 0 && g_data_stack.v42) {
             /* V.250 6.6.2 +DS44: V.44 as well, the responder choosing. */
             v250_v44_t v44;
@@ -8665,6 +8752,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         if (g_retrain_from_data) {
                             g_retrain_from_data = false;
                             g_data_connect_rate = downstream_rate;
+                            ds_set_line_bit_rate(&g_data_stack, downstream_rate);
                             ME_LOG("[ME] V.90 retrain complete; resuming the "
                                    "existing data link (%d bps)\n",
                                    downstream_rate);
@@ -8702,6 +8790,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     if (g_retrain_from_data && !g_data_link_redetect) {
                         g_retrain_from_data = false;
                         g_data_connect_rate = rate;
+                        ds_set_line_bit_rate(&g_data_stack, rate);
                         ME_LOG("[ME] V.34 retrain complete; resuming the "
                                "existing data link (%d bps)\n", rate);
                     } else {
@@ -12408,6 +12497,46 @@ void me_on_sip_connected(void)
     }
 }
 
+/* Per call, not per process: one server handles many calls, and these rings
+ * were only ever initialised at start-up, so what one call left queued -- DTE
+ * octets it never sent, received octets the DTE never read -- went out on, or
+ * came up from, the next.  Received octets were acknowledged to the far end,
+ * so give a DTE that is still reading a bounded moment to take them before
+ * NO CARRIER; then both directions are discarded (data_transfer_plan.md,
+ * "carrier loss discards queues"). */
+static void me_call_end_rings(void)
+{
+    int64_t start = (int64_t)trace_now_ms();
+    int64_t last_progress = start;
+    int left = dring_used(&upstream_ring);
+
+    while (left > 0) {
+        int64_t now;
+
+        me_drain_rx_to_dte();
+        now = (int64_t)trace_now_ms();
+        if (dring_used(&upstream_ring) < left) {
+            left = dring_used(&upstream_ring);
+            last_progress = now;
+        }
+        if (left == 0 || now - start >= 500 || now - last_progress >= 100)
+            break;
+        usleep(5000);
+    }
+    if (left > 0)
+        ME_LOG("[ME] call ended with %d received octets the DTE did not take; discarded\n",
+               left);
+    if (dring_used(&downstream_ring) > 0)
+        ME_LOG("[ME] call ended with %d DTE octets unsent; discarded\n",
+               dring_used(&downstream_ring));
+    if (g_rx_ring_overruns)
+        ME_LOG("[ME] call lost %llu received octets to a full DTE ring\n",
+               (unsigned long long)g_rx_ring_overruns);
+    g_rx_ring_overruns = 0;
+    dring_clear(&upstream_ring);
+    dring_clear(&downstream_ring);
+}
+
 /* Called by sip_modem.c when the SIP call is torn down */
 void me_on_sip_disconnected(void)
 {
@@ -12468,6 +12597,7 @@ void me_on_sip_disconnected_status(int sip_status)
     g_calling_party = false;
     pthread_mutex_unlock(&g_state_mtx);
     trace_phase("SIP disconnected: prev_state=%d -> IDLE", prev);
+    me_call_end_rings();
 
     /* ME_HANGUP too: it is the engine's own teardown (a V.42 failure, +ES/+DS
        "required" not met, a training failure) and the DTE is owed NO CARRIER
@@ -13637,10 +13767,7 @@ void me_rx_audio(const int16_t *amp, int len)
         if (g_mod == ME_MOD_X2 && (g_state == ME_TRAINING || g_state == ME_DATA))
             me_x2_rx_locked(amp,len);
         pthread_mutex_unlock(&g_state_mtx);
-        uint8_t buf[256];
-        int n;
-        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
-            di_write_data(buf, n);
+        me_drain_rx_to_dte();
         return;
     }
 
@@ -13648,17 +13775,13 @@ void me_rx_audio(const int16_t *amp, int len)
      * here exactly once. Physical 8 kHz linear input uses this same seam. */
     pthread_mutex_lock(&g_state_mtx);
     if (g_v92a && (g_state == ME_TRAINING || g_state == ME_DATA)) {
-        uint8_t buf[256];
-        int n;
-
         v92a_rx(g_v92a, amp, len);
         me_v92a_progress_locked();
         pthread_mutex_unlock(&g_state_mtx);
         /* Every other datapump's return path drains the received octets to
            the DTE; this one never did, so a bit-exact downstream reached
            LAPM and stopped there. */
-        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
-            di_write_data(buf, n);
+        me_drain_rx_to_dte();
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
@@ -14931,10 +15054,7 @@ skip_8k_codewords:
 
         /* In DATA mode, flush received bytes to the PTY */
         if (state == ME_DATA) {
-            uint8_t buf[256];
-            int n;
-            while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
-                di_write_data(buf, n);
+            me_drain_rx_to_dte();
         }
         break;
 
@@ -16201,6 +16321,7 @@ static void enter_v90_data_locked(void)
            only the rate is refreshed. */
         g_retrain_from_data = false;
         g_data_connect_rate = downstream_rate;
+        ds_set_line_bit_rate(&g_data_stack, downstream_rate);
         ME_LOG("[ME] V.90 retrain complete; resuming the existing data link "
                "(downstream %d bps)\n", downstream_rate);
     } else {
@@ -18435,13 +18556,11 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         }
         pthread_mutex_unlock(&g_state_mtx);
         if(g_g711_rx_tap)(void)fwrite(codewords,1,(size_t)count,g_g711_rx_tap);
-        uint8_t buf[256];int n;
-        while((n=dring_read(&upstream_ring,buf,sizeof(buf)))>0)di_write_data(buf,n);
+        me_drain_rx_to_dte();
         return;
     }
     if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
-        uint8_t buf[256];
-        int n, connect = 0;
+        int connect = 0;
 
         cc_rx(&g_cc, codewords, count);
         if (g_cc.mode == CC_V110)
@@ -18451,8 +18570,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
             di_on_connected(connect);
         if (g_g711_rx_tap)
             (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
-        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
-            di_write_data(buf, n);
+        me_drain_rx_to_dte();
         return;
     }
     if (g_qc_watch) {
@@ -18735,11 +18853,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
 
     if (raw_v91) {
-        uint8_t buf[256];
-        int n;
-
-        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
-            di_write_data(buf, n);
+        me_drain_rx_to_dte();
         return;
     }
 

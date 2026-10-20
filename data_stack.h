@@ -58,6 +58,8 @@ typedef int (*ds_pull_byte_fn)(void *ctx);
 /* Push one received DTE byte. */
 typedef void (*ds_push_byte_fn)(void *ctx, uint8_t byte);
 typedef void (*ds_link_event_fn)(void *ctx, ds_link_event_t event);
+/* Free octets in the queue that ds_push_byte_fn feeds. */
+typedef int (*ds_rx_room_fn)(void *ctx);
 
 /* ds_tx_get_bit() returns this when framing is RAW and no data is pending.
  * V.14 and V.42 always return a clocked line bit. */
@@ -111,6 +113,15 @@ typedef struct {
     int rx_hunting;      /* 1 = waiting for a start bit */
     uint8_t rx_shift;
     int rx_bits;
+
+    /* V.42 8.4.7 receive flow control (ds_set_rx_room). */
+    ds_rx_room_fn rx_room;
+    void *rx_room_ctx;
+    int rx_busy_below;             /* enter busy with less room than this */
+    int rx_clear_above;            /* leave it with at least this much */
+    bool rx_busy;
+    unsigned rx_room_poll;
+    uint64_t rx_busy_spells;
 
     /* Statistics */
     uint64_t tx_chars;
@@ -179,6 +190,22 @@ void ds_stop_link(data_stack_t *s);
 void ds_suspend_link(data_stack_t *s);
 void ds_resume_link(data_stack_t *s, int line_bit_rate);
 bool ds_link_is_suspended(const data_stack_t *s);
+
+/* V.42 receive flow control.  A DTE that drains slower than the link
+ * delivers must not lose octets that LAPM has already acknowledged, so with
+ * error control the stack enters the own-receiver busy condition (RNR, V.42
+ * 8.4.7) once room() reports fewer than busy_below free octets, and clears it
+ * (RR/REJ) at clear_above.  busy_below must cover one I frame's worth of
+ * decompressed output, since a frame already accepted cannot be refused.
+ * Without error control there is nothing to tell the peer, and the queue's
+ * own overrun handling applies.  Call after ds_init_v42*()/ds_init_v44(). */
+void ds_set_rx_room(data_stack_t *s, ds_rx_room_fn room, void *ctx,
+                    int busy_below, int clear_above);
+
+/* A retrain changed the line rate under a link that stays up (V.34 11.5,
+ * V.90 9.5): V.42's timers run on the transmit bit clock, so T401/T403 must
+ * be re-expressed in bits at the new rate.  Nothing else changes. */
+void ds_set_line_bit_rate(data_stack_t *s, int line_bit_rate);
 
 /* Reset framing state (e.g. on retrain) without dropping callbacks. */
 void ds_reset(data_stack_t *s);

@@ -2094,6 +2094,8 @@ void di_on_disconnected_cause(const char *cause, int originate)
 recorded:
     local_hangup = 0;
     connected = 0;
+    /* DTE octets the call never sent must not open the next one. */
+    ring_clear(&upstream_ring);
     diagnostic_reset(false);
     di_mode = 0;
     esc_count = 0;

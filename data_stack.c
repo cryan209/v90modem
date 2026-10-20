@@ -174,6 +174,39 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
     return len;
 }
 
+/* V.42 8.4.7 own-receiver busy, with hysteresis, from the DTE queue's room.
+   Only while the link is up: before that there is no connected state to be
+   busy in, and reset_lapm() clears the condition on every establishment. */
+static void ds_rx_flow_check(data_stack_t *s)
+{
+    int room;
+    bool busy;
+
+    if (!s->rx_room  ||  !s->v42)
+        return;
+    if (!s->link_ready  ||  s->suspended)
+    {
+        s->rx_busy = false;
+        return;
+    }
+    room = s->rx_room(s->rx_room_ctx);
+    busy = s->rx_busy  ?  (room < s->rx_clear_above)  :  (room < s->rx_busy_below);
+    if (busy != s->rx_busy  &&  busy)
+        s->rx_busy_spells++;
+    s->rx_busy = busy;
+    v42_set_local_busy_status(s->v42, busy);
+}
+
+void ds_set_rx_room(data_stack_t *s, ds_rx_room_fn room, void *ctx,
+                    int busy_below, int clear_above)
+{
+    s->rx_room = room;
+    s->rx_room_ctx = ctx;
+    s->rx_busy_below = busy_below;
+    s->rx_clear_above = (clear_above > busy_below)  ?  clear_above  :  busy_below;
+    s->rx_busy = false;
+}
+
 static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
 {
     data_stack_t *s = user_data;
@@ -194,6 +227,8 @@ static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
     }
     else
         ds_decoded_output(s, msg, len);
+    /* Before the next frame can be accepted. */
+    ds_rx_flow_check(s);
 }
 
 static void ds_v42_status(void *user_data, int status)
@@ -525,6 +560,15 @@ void ds_resume_link(data_stack_t *s, int line_bit_rate)
     }
 }
 
+void ds_set_line_bit_rate(data_stack_t *s, int line_bit_rate)
+{
+    if (!s  ||  line_bit_rate <= 0)
+        return;
+    s->line_bit_rate = line_bit_rate;
+    if (s->v42)
+        v42_set_bit_rate(s->v42, line_bit_rate);
+}
+
 bool ds_link_is_suspended(const data_stack_t *s)
 {
     return s && s->suspended;
@@ -541,6 +585,7 @@ void ds_reset(data_stack_t *s)
     s->rx_bits = 0;
     s->detect_rx_len = 0;
     s->link_ready = false;
+    s->rx_busy = false;
     ds_compression_release(s);
     s->compression_failed = false;
     if (s->v42)
@@ -628,6 +673,10 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
             tried = true;
             if (path && *path) dump = fopen(path, "w");
         }
+        /* The DTE drains in its own time: look for clearance every so often
+           on the line clock (a room() call takes the queue's lock). */
+        if (s->rx_room  &&  (++s->rx_room_poll & 63) == 0)
+            ds_rx_flow_check(s);
         bit = s->v42 ? v42_tx_bit(s->v42) : 1;
         /* Detection can conclude inside that call (T400 runs on the bit
            clock).  The bit it then returns belongs to an entity that has just

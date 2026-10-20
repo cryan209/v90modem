@@ -58,6 +58,12 @@
  * --hold-seconds N keeps the call in data mode N seconds longer after the
  * payload, before any --X-after command.
  *
+ * --dte-stall-seconds N stops the answering side's DTE reading its PTY for N
+ * seconds from the moment the payloads start, as a busy terminal or a full
+ * PPP stack does.  What the PTY cannot hold must wait in the engine and still
+ * arrive intact (--payload-printable with many --payload-reps makes it more
+ * than a PTY holds).
+ *
  * ENGINE_PAIR_KEEP_LOGS=1 keeps both engines' logs after a passing call too,
  * to compare a passing configuration against a failing one.
  */
@@ -411,6 +417,8 @@ int main(int argc, char **argv)
     int alaw = 0;
     double seconds = 40.0;
     double hold_seconds = 0.0;
+    double dte_stall_seconds = 0.0;
+    int stall_until = -1;
     const char *expect = NULL;
     const char *expect_connect = NULL;
     uint8_t tx[2][2*FRAME];     /* a linear side's are int16 */
@@ -477,6 +485,8 @@ int main(int argc, char **argv)
             fdm_tap = argv[++i];
         } else if (!strcmp(argv[i], "--fdm-call-linear")) {
             fdm_call_linear = 1;
+        } else if (!strcmp(argv[i], "--dte-stall-seconds") && i + 1 < argc) {
+            dte_stall_seconds = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--fax-hdlc")) {
             fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
@@ -639,10 +649,13 @@ int main(int argc, char **argv)
         for (int k = 0; k < 2; k++) {
             side_t *s = &side[k];
 
-            poll_dte(s, f);
+            if (k == 0 || f >= stall_until)
+                poll_dte(s, f);
             /* Half a second after both ends report CONNECT, each DTE sends. */
             if (!s->sent && side[0].connect_frame >= 0 && side[1].connect_frame >= 0
                 && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25) {
+                if (stall_until < 0)
+                    stall_until = f + (int) (dte_stall_seconds*8000.0/FRAME);
                 /* The PTY is non-blocking and holds about 1 KB: a longer
                    payload goes in as the engine drains it, frame by frame. */
                 ssize_t n = write(s->pty_fd, s->payload + s->sent_len,
