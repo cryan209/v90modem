@@ -162,7 +162,18 @@ both are needed. `v22bis_s1_test` (fast tier) checks:
 2400 at 14060 ms, after 32 descrambled ones at 2400 from the CX
 (6.3.1.1.2 e)). That shows the CX really was at 2400. A replay cannot show
 what the CX would do after our S1, because that is our first divergent
-transmission. The live re-check is still to do.
+transmission.
+
+**Live re-check, 2026-10-21 (later): 4 of 4.** The CX (`AT\N2`,
+`AT+MS=V22B`, `tools/cx_hold_dial.py ... 2904 35`) dialled the CT 117
+answerer (`tools/soak/answer_ec_call.sh`, 5b12ad73's `v22bis_rx.c`) four
+times. Every call trained at 2400 at 13760-13801 ms, just after the CX's
+S1, where the old code had committed to 1200. The CX reported `CONNECT
+2400`, `PROTOCOL LAPM`, `COMPRESSION V42Bis`. 20 of 20 lines arrived each
+way on every call. Three calls ended with a LAPM disconnect at the CX's
+scheduled `+++ATH`. On the fourth, the SIP hang-up arrived before the CX's
+DISC frame, after all the data had arrived. Before the fix, the same setup
+connected on 1 call of 4. Evidence: `/root/s1-live1`..`4` on CT 117.
 
 V.8 was not the problem. The CX never sent a CM: in both V.8 windows its
 V.21 low channel stays at the line-noise floor (about 63 dB, against 131 dB
