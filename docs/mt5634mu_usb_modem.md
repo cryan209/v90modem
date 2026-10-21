@@ -123,3 +123,93 @@ are executed once the path reopens; here that included a queued
 `ATI11` (two pages of a pager) gives last-call diagnostics: modulation, rates,
 LAPM/V.42bis, levels, echo, retrains, and the termination cause (0 after a
 normal call, 3 after a 62 s `NO CARRIER` on 6311).
+
+## Repeatable single-call diagnostic
+
+With an idle bridge running and no other DTE holding its slave open:
+
+```bash
+python3 tools/mt5634mu_diag.py --number 6311 --out artifacts/mt5634mu-6311-a
+python3 tools/mt5634mu_diag.py --number 6312 --out artifacts/mt5634mu-6312-a
+```
+
+Use a new output directory for each call. The stdlib-only driver records
+monotonic timestamps and exact TX/RX bytes in `transcript.jsonl`, and identity,
+active `AT&V` profile, dial result/time and complete `ATI11` in `summary.json`.
+It sends `ATM0` before dialling (V.250 (07/2003) 6.3.14, Table 12) to keep the
+speaker muted. It sets verbose results/echo but does not reset the modem,
+write NVRAM, change modulation/error-control policy, or issue USB requests.
+Both pagers are advanced with one space per prompt, including prompts split
+across reads. A missing final `OK` stops the run before another command.
+
+The default dial deadline is 80 s; after CONNECT it listens for 5 s without
+sending login data, then explicitly escapes/hangs up before collecting ATI11.
+On timeout it requests dial cancellation with CR and requires confirmation
+before ATH (V.250 5.6.1/6.3.1). Timeout, USB failure or interruption is an
+inconclusive run; inspect the modem before redialling. Do not depend on PTY
+close to cancel training. Keep the bridge stderr log alongside the results.
+Use the same profile and alternate the line order on repeat comparisons;
+allow the ATA/line to recover between calls. A `NO DIALTONE` attempt does not
+grade either RasFinder port's training.
+
+`python3 tools/mt5634mu_diag_test.py` checks fragmented pager/result parsing,
+failed-call diagnostic preservation, CONNECT cleanup, timeout cancellation,
+and the BUSY-then-voicemail CDR case below.
+It is in `tests/fast.list`; these tests qualify the driver, not hardware.
+
+For a saved headerless Asterisk `cdr-csv/Master.csv` snapshot, this command
+does **not** open the PTY or dial:
+
+```bash
+python3 tools/mt5634mu_diag.py --number 6311 --cdr-csv /path/to/Master.csv \
+    --out artifacts/mt5634mu-route-6311
+```
+
+It selects the latest recorded 6004-to-number call and groups its legs by
+uniqueid. `voicemail_after_busy` distinguishes the failed modem leg from an
+`ANSWERED` voicemail leg; `modem_route_answered` only establishes a PBX answer,
+not physical training. Use a fresh snapshot after the call has ended, and
+correlate its timestamps/ID with the AT transcript, especially with concurrent
+callers. The parser assumes the standard 18-column Master.csv layout.
+
+## 21 October 2026: reproduced failure is BUSY followed by voicemail
+
+The physical MT5634MU originated from the user-confirmed line 6004; 6311,
+6312 and 6313 are separate ports on the same RasFinder. No DSP, G.711, gateway
+gain/echo settings, NVRAM or USB protocol behavior was changed. `ATM0` was
+acknowledged, and every complete call's AT&V confirms Speaker Control Off.
+
+| Attempt | DTE result / dial time | Last-call / PBX evidence |
+|---|---|---|
+| 6311-c | NO CARRIER / 52.683 s | ATI11 rates/modulation/protocol NA, frames/retrains 0, termination 2. CDR `1792543928.1895`: Dial BUSY immediately, then VoiceMail ANSWERED for 50 s. |
+| 6312-a | NO DIALTONE / 14.093 s | No training result; excluded from the port comparison. |
+| 6312-b | CONNECT 33600 V42bis / 31.906 s | ATI11 V.34 33600/33600, LAPM, V42bis, 0 retrains/errors, round trip 358 ms; termination 0 after our ATH. CDR `1792544047.1899`: modem Dial leg ANSWERED, 35 s. |
+| 6311-d | NO CARRIER / 56.420 s | Same NA/zero/termination-2 diagnostic. CDR `1792544136.1902`: immediate Dial BUSY, then 50 s VoiceMail ANSWERED. Live channel snapshot also shows VoiceMail, not AppDial. |
+
+The repeated 6311 failures therefore occur before a modem-to-modem handshake:
+the destination route is busy and the caller reaches voicemail. The long
+wait is not evidence of failed V.34 equalization, LAPM or a USB byte-path
+defect. The active profiles match across both lines, and 6312 establishes a
+physical/error-control link through the same bridge. Its five-second passive
+DATA window contained no login banner; this does not qualify payload transfer.
+
+This identifies the immediate cause of **these calls**, not why the 6311 port
+reports busy, nor the cause of the 19 October termination-3 attempt. An earlier
+attempt here lost the USB device (`e00002ed`, device not responding) about
+3 s after dialling and is excluded. Its corresponding CDR shows a 0-second
+answered 6311 leg; a stuck port after that interruption is a hypothesis, not
+established evidence. Check the 6311 gateway/line's hook/busy state before
+another training investigation; registration/OPTIONS availability alone does
+not establish line availability. Do not change DSP or disable dial-tone
+detection to conceal these outcomes.
+
+Retained local evidence: `reference-data/artifacts/mt5634mu-20261021/`
+(exact AT transcripts, summaries, bridge logs/counters, filtered CDRs and PBX
+route/channel snapshots; `manifest.json` hashes the files). No packet capture
+was taken: automatic approval review rejected the proposed gateway-wide
+SIP/RTP capture because it could include other calls' sensitive payloads;
+the diagnosis uses modem diagnostics and PBX call metadata instead.
+
+Validation: bridge builds with `make mt5634mu_bridge`; the fast-tier diagnostic
+row passes all seven hardware-free tests. The live calls above establish the
+observed routing and V.34/LAPM results only, not V.90 interoperation.
