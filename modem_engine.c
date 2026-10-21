@@ -6672,11 +6672,89 @@ static bool v34_reneg_timed_out_locked(void)
     }
 }
 
+/* The upstream rate a T/3 4-point SNR supports.  Empirical, like the 3429
+ * table in v34_rx_training_rate() (V.34 11.4 leaves it to the
+ * implementation): 31200 at 3200 baud (9.75 bits/symbol) needs 35.0 dB,
+ * and each 0.75 bit/symbol less needs 2.0 dB less.  Calibrated on
+ * replays with the real echo reference: the SmartLink rig reads 36.9-37.3
+ * dB and the RasFinder 35.4-36.4 dB, both carrying 31200; a Conexant
+ * CX93001 reads 28.4-28.5 dB and never decoded 31200, while 24000 (which
+ * would need 29.0) decoded on one call of two.  0 = no measurement. */
+static int me_v90_upstream_rate_for_snr(float snr, int baud)
+{
+    float bits;
+    int n;
+
+    if (!(snr > 0.0f) || baud <= 0)
+        return 0;
+    bits = 9.75f + (snr - 35.0f)*0.75f/2.0f;
+    n = (int) floorf(bits*baud/2400.0f);
+    if (n < 2)
+        n = 2;
+    if (n > 14)
+        n = 14;
+    return n*2400;
+}
+
+/* Phase 4 measurement of the analogue modem's upstream, per Phase 4. */
+static bool g_v90_up_snr_started = false;
+static bool g_v90_up_snr_done = false;
+static uint64_t g_v90_up_snr_start = 0;
+
 static void v90_reset_upstream_data_arming(void)
 {
     g_v34_upstream_data_armed = false;
     g_v34_upstream_data_started = false;
     g_v90_upstream_e_run = 0;
+    g_v90_up_snr_started = false;
+    g_v90_up_snr_done = false;
+}
+
+/* Measure the analogue modem's upstream before MP offers it a rate.
+ * §9.4.2.4 has it transmit at the highest rate both modems enable, up to
+ * MP bits 24:27, and nothing before this measured the upstream at all: MP
+ * offered the 3200-baud maximum, 31200, on every call.  A Conexant CX93001
+ * line that carries ~29 dB cannot be decoded at 31200 (B1 template 60%,
+ * data white) and was decoded at 24000 (template 100%, LAPM up).  The
+ * signal is there to measure: after CPt the analogue modem sends CPt, SCR
+ * and CP, all 4-point (§8.5.2, our Jd bit 47 = 0), during the 500 ms of
+ * our TRN2d.  Capture it on the T/3 branch from CPt acceptance, train the
+ * T/3 equalizer on the newest 600 symbols, and read its decision error. */
+static void v90_upstream_measure_locked(void)
+{
+    float snr;
+
+    if (g_v90_up_snr_done || !g_v34 || !g_v90 || g_v92_active)
+        return;
+    if (v90_get_tx_phase(g_v90) != V90_TX_TRN2D)
+        return;
+    if (!g_v90_up_snr_started) {
+        if (v34_v90_upstream_capture_early(g_v34) != 0) {
+            g_v90_up_snr_done = true;
+            return;
+        }
+        g_v90_up_snr_started = true;
+        g_v90_up_snr_start = g_g711_rx_octets;
+        return;
+    }
+    /* 300 ms: 960 symbols at 3200 baud, room for 600 and the filter edges. */
+    if (g_g711_rx_octets - g_v90_up_snr_start < 2400)
+        return;
+    g_v90_up_snr_done = true;
+    snr = v34_v90_upstream_4point_snr(g_v34, 600);
+    {
+        int offer = v90_mp_upstream_max_bps(g_v90);
+        int baud = v90_selected_upstream_baud_locked() == 3 ? 3000 : 3200;
+        int cap = me_v90_upstream_rate_for_snr(snr, baud);
+
+        ME_LOG("[ME] V.90 upstream 4-point SNR %.1f dB before MP: carries "
+               "about %d bps; MP offered %d bps\n", snr, cap, offer);
+        if (cap > 0 && offer > 0 && cap < offer && !getenv("ME_V90_UPSTREAM_NO_SNR_CAP")) {
+            v90_set_upstream_rate_limit(g_v90, cap);
+            ME_LOG("[ME] V.90 upstream: MP now offers %d bps (§9.4.2.4, MP bits 24:27)\n",
+                   v90_mp_upstream_max_bps(g_v90));
+        }
+    }
 }
 
 /* V.90 §6.2 requires the digital modem to support both 3000 and 3200 baud;
@@ -14578,6 +14656,8 @@ skip_8k_codewords:
                     }
                     ME_CB_PROF(1, v34_rx(g_v34, filtered, len));
                     me_rx_accounting_check();
+                    if (g_mod == ME_MOD_V90 && g_state == ME_TRAINING)
+                        v90_upstream_measure_locked();
                     /* The T/3 interpolator is exact-rational 6/5 and begins
                      * counting input samples at the arm, so which of its five
                      * phases a call runs on is fixed by the bearer index it

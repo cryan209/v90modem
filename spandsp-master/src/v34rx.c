@@ -11717,16 +11717,30 @@ static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
    here is what gives the loop a continuous actuator, and without it the
    residual timing error can never be smaller than half a sample -- a sixth
    of a symbol -- which is enough to keep the loop's integrator permanently
-   wound up.  Linear interpolation is adequate: the signal is already
-   band-limited by the receive RRC, and the fractionally spaced equalizer
-   downstream adapts around whatever this leaves. */
+   wound up.
+
+   It must be a flat fractional delay, not linear interpolation.  At 3200
+   baud the signal reaches ~0.21 of this branch's sample rate, where linear
+   interpolation at a fraction of 0.5 passes cos(0.21*pi) = 0.79 and at 0
+   passes 1: a fraction that sweeps (any clock offset; 45 ppm on a Conexant
+   CX93001 sweeps it through a whole sample every 2.1 s) makes the channel
+   the equalizer sees change gain at the band edge continuously.  Measured
+   on that call's 21600 upstream: the radial error grew 0.17 -> 0.37 with a
+   gain wander of +2% then -4% while rotation stayed at 0, the input level
+   held to 0.15 dB, and the eye closed at 4.1 s -- every time, whatever the
+   adaptation step (a faster LMS only delayed it).  An 8-tap
+   Blackman-windowed sinc (index-3 .. index+4) is flat to well under 1% to
+   0.25 of the rate.  A fraction of 0 still returns the sample itself. */
 static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
                                       int64_t index,
                                       float frac)
 {
-    complexf_t a;
-    complexf_t b;
-    complexf_t z;
+    enum { H = 4 };
+    /* The coefficients depend on the fraction alone; every tap of a symbol
+       shares one, so remember the last set (a pure function of frac). */
+    static float cached_frac = -1.0f;
+    static float h[2*H];
+    complexf_t z = {0.0f, 0.0f};
 
     if (frac < 0.0f)
     {
@@ -11734,13 +11748,40 @@ static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
         frac += 1.0f;
     }
     /*endif*/
-    a = v90_t3_raw_get(s, index);
     if (frac <= 1e-4f)
-        return a;
+        return v90_t3_raw_get(s, index);
     /*endif*/
-    b = v90_t3_raw_get(s, index + 1);
-    z.re = a.re + frac*(b.re - a.re);
-    z.im = a.im + frac*(b.im - a.im);
+    if (frac >= 1.0f - 1e-4f)
+        return v90_t3_raw_get(s, index + 1);
+    /*endif*/
+    if (frac != cached_frac)
+    {
+        float sum = 0.0f;
+
+        for (int k = -H + 1;  k <= H;  k++)
+        {
+            double d = (double) k - frac;
+            double sinc = sin(M_PI*d)/(M_PI*d);
+            double win = 0.42 + 0.5*cos(M_PI*d/H) + 0.08*cos(2.0*M_PI*d/H);
+
+            h[k + H - 1] = (float) (sinc*win);
+            sum += h[k + H - 1];
+        }
+        /*endfor*/
+        for (int k = 0;  k < 2*H;  k++)
+            h[k] /= sum;
+        /*endfor*/
+        cached_frac = frac;
+    }
+    /*endif*/
+    for (int k = -H + 1;  k <= H;  k++)
+    {
+        complexf_t x = v90_t3_raw_get(s, index + k);
+
+        z.re += h[k + H - 1]*x.re;
+        z.im += h[k + H - 1]*x.im;
+    }
+    /*endfor*/
     return z;
 }
 
@@ -11983,7 +12024,8 @@ static float v90_t3_offset_rotation(const v34_rx_state_t *s, float offset)
    one, whatever the fraction (it is held under 1.5 by the loop's clamp). */
 static int v90_t3_frac_lookahead(float frac)
 {
-    return (frac > 1e-4f) ? 1 : 0;
+    /* v90_t3_raw_get_frac()'s windowed sinc reads up to four samples on. */
+    return (fabsf(frac) > 1e-4f) ? 4 : 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -12234,7 +12276,7 @@ static bool v90_t3_slip_resync(v34_rx_state_t *s)
     /* The frame phase survives a whole-sample move -- the symbol stream is
        the same, sampled correctly again -- but the loops that froze on the
        way down have to be let go of. */
-    s->v90_t3_gardner.freq = 0.0f;
+    s->v90_t3_gardner.freq = s->v90_t3_freq_seed;
     s->v90_t3_gardner.hold = 0;
     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream slip of %+.2f sample(s) corrected "
@@ -12907,7 +12949,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    the fault the search below is there to undo.  Keeping the
                    frequency instead was measured slightly worse (30 clean
                    windows against 50, reference-data/artifacts/goal-v90-073744Z). */
-                s->v90_t3_gardner.freq = 0.0f;
+                s->v90_t3_gardner.freq = s->v90_t3_freq_seed;
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -13631,6 +13673,69 @@ static void v90_t3_cma_abandon(v34_rx_state_t *rx);
 
 enum { V90_T3_SEARCH_FORWARD = 4800 };
 
+/* The far end's symbol clock against ours, from the history before B1.
+   |x|^2 of the matched-filter output carries a line at the symbol rate,
+   fs/3 on this branch; its phase drifts at the clock offset.  On a Conexant
+   CX93001 the drift is a smooth 56 degrees a second (~48 ppm, no slips:
+   tools/measure_timing_slips.py), and a loop started at zero frequency took
+   ~2.5 s to pull in, by which time the sampling instant had fallen 1.4 T/3
+   samples behind and the 24000 upstream collapsed.  A phase that grows by
+   dphi degrees per T/3 sample is a timing drift of 3*dphi/360 samples per
+   sample, i.e. -dphi/40 samples per symbol in v34_gardner terms.  Returns
+   0 (no seed) without at least six 0.2 s windows. */
+static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to)
+{
+    enum { W = 1920, STEP = 960, MAXW = 32 };
+    static const float c3[3] = {1.0f, -0.5f, -0.5f};
+    static const float s3[3] = {0.0f, -0.8660254f, 0.8660254f};
+    double ph[MAXW];
+    double x[MAXW];
+    int n = 0;
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    double slope;
+    float freq;
+
+    for (int64_t b = from;  b + W <= to  &&  n < MAXW;  b += STEP)
+    {
+        double re = 0.0, im = 0.0;
+
+        for (int64_t k = b;  k < b + W;  k++)
+        {
+            complexf_t v = v90_t3_raw_get(s, k);
+            float p = v.re*v.re + v.im*v.im;
+            int m = (int) (k % 3);
+
+            re += p*c3[m];
+            im += p*s3[m];
+        }
+        ph[n] = atan2(im, re);
+        if (n > 0)
+        {
+            while (ph[n] - ph[n - 1] > M_PI)
+                ph[n] -= 2.0*M_PI;
+            while (ph[n] - ph[n - 1] < -M_PI)
+                ph[n] += 2.0*M_PI;
+        }
+        x[n] = (double) (b + W/2 - from);
+        n++;
+    }
+    if (n < 6)
+        return 0.0f;
+    for (int i = 0;  i < n;  i++)
+    {
+        sx += x[i];
+        sy += ph[i];
+        sxx += x[i]*x[i];
+        sxy += x[i]*ph[i];
+    }
+    slope = (n*sxy - sx*sy)/(n*sxx - sx*sx);
+    freq = (float) (-(slope*180.0/M_PI)/40.0);
+    if (fabsf(freq) > 0.0015f)
+        return 0.0f;
+    return freq;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
     /* The E handover is only a coarse anchor: it is detected on the CP bit
@@ -14077,6 +14182,23 @@ search:
             bool retries_left = (s->v90_t3_acq_retries
                                      < V34_V90_T3_ACQ_MAX_RETRIES);
 
+            /* A retry is for a window that may hold a different B1 (E lags,
+               so the first window can miss it).  When it finds B1 at the same
+               place and passes the same verdict, it is the same evaluation
+               again: the samples, the fit and the result are all the same,
+               and the remaining retries would only repeat it.  On a Conexant
+               CX93001 at 21600 every window read 0.00206 against the 0.002
+               "good" line (passable by a factor of two), the call spent all
+               six retries -- 3 s -- before settling for it, and each look was
+               a 25-44 ms media callback, which moved the gateway's playout
+               and our echo 5 ms a time until the upstream broke.  Settle now
+               instead. */
+            bool same_again = passable
+                              &&  s->v90_t3_acq_best_valid
+                              &&  llabs((long long) (best_first - s->v90_t3_acq_best_first)) <= 3
+                              &&  fabs(rel - s->v90_t3_acq_best_rel)
+                                      <= 0.1*s->v90_t3_acq_best_rel;
+
             /* Remember the best window seen, so that running out of retries
                settles for the best rather than for whichever came last. */
             if (passable
@@ -14095,7 +14217,7 @@ search:
                 s->v90_t3_acq_best_valid = true;
             }
             /*endif*/
-            if (!good  &&  !retries_left  &&  s->v90_t3_acq_best_valid)
+            if (!good  &&  (!retries_left  ||  same_again)  &&  s->v90_t3_acq_best_valid)
             {
                 /* Out of retries: take the best window this call offered. */
                 memcpy(best_coeff, s->v90_t3_acq_best_coeff,
@@ -14266,6 +14388,23 @@ commit:
             v34_gardner_init(&s->v90_t3_gardner,
                              V34_GARDNER_DEFAULT_MU,
                              V34_GARDNER_DEFAULT_BETA);
+            {
+                int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
+                               + V34_V90_T3_FSE_TAPS;
+                int64_t to = best_first - 3*16;
+                int64_t from = to - 14400;   /* 1.5 s */
+
+                if (from < oldest)
+                    from = oldest;
+                if (from < 0)
+                    from = 0;
+                s->v90_t3_freq_seed = v90_t3_clock_freq(s, from, to);
+                s->v90_t3_gardner.freq = s->v90_t3_freq_seed;
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream clock offset before B1: %+.6f "
+                         "samples/symbol (%+.0f ppm); timing loop starts there\n",
+                         s->v90_t3_freq_seed, s->v90_t3_freq_seed/3.0e-6);
+            }
             /* Which timing error detector.  Non-data-aided Gardner is the
                one this loop was built on, and it is the wrong one once a
                dense constellation is carrying data: see v34_gardner.h and
@@ -17318,6 +17457,7 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 /*- End of function --------------------------------------------------------*/
 
 static bool v90_t3_start(v34_rx_state_t *rx);
+static bool v34_build_expected_b1(v34_rx_state_t *s);
 
 SPAN_DECLARE(int) v34_set_rx_data_scrambler(v34_state_t *s, int tap)
 {
@@ -17429,13 +17569,82 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
         return 0;
     }
     /*endif*/
-    if (!s->rx.v90_t3_active  &&  !v90_t3_start(&s->rx))
+    if (s->rx.v90_t3_active)
+    {
+        /* Capturing since Phase 4 (v34_v90_upstream_capture_early()): keep
+           the ring, and rebuild only the B1 template, for the rate and
+           trellis just selected. */
+        if (!v34_build_expected_b1(&s->rx))
+        {
+            s->rx.v90_t3_prepared = false;
+            return -1;
+        }
+        /*endif*/
+    }
+    else if (!v90_t3_start(&s->rx))
     {
         s->rx.v90_t3_prepared = false;
         return -1;
     }
     /*endif*/
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Start the T/3 ring at Phase 4, capture only, so the analogue modem's
+   4-point CPt/SCR/CP (8.5.2/V.90; 4-point because our Jd bit 47 is 0) can be
+   measured before MP offers it an upstream rate, and is still in the ring
+   when B1 is looked for.  Started at CP' it held as little as 1280 samples
+   before E. */
+SPAN_DECLARE(int) v34_v90_upstream_capture_early(v34_state_t *s)
+{
+    if (!s  ||  !s->rx.v90_mode)
+        return -1;
+    /*endif*/
+    if (s->rx.v90_t3_active)
+        return 0;
+    /*endif*/
+    if ((s->rx.baud_rate != V34_BAUD_RATE_3000
+         &&  s->rx.baud_rate != V34_BAUD_RATE_3200)
+        ||  v90_upstream_t2_enabled())
+    {
+        return -1;
+    }
+    /*endif*/
+    return v90_t3_start(&s->rx)  ?  0  :  -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* SNR of the newest `symbols` symbols of the T/3 ring as a 4-point signal:
+   the T/3 equalizer is trained on them and its decision error is the noise
+   it leaves.  0 if the ring does not hold them. */
+SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
+{
+    complexf_t w[V34_V90_T3_FSE_TAPS];
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    int phase = 0;
+    int64_t oldest;
+    int64_t base;
+    int64_t end;
+    float err;
+
+    if (!s  ||  !s->rx.v90_t3_active  ||  symbols <= 0)
+        return 0.0f;
+    /*endif*/
+    oldest = s->rx.v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
+    if (oldest < pre + 4)
+        oldest = pre + 4;
+    /*endif*/
+    end = s->rx.v90_t3_raw_count - pre - 8;
+    base = end - 3*(int64_t) symbols;
+    if (base < oldest)
+        return 0.0f;
+    /*endif*/
+    err = v90_t3_train_4point(&s->rx, base, end, w, &phase);
+    if (!(err > 0.0f))
+        return 0.0f;
+    /*endif*/
+    return -10.0f*log10f(err);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -18025,6 +18234,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
     v90_t3_cma_abandon(rx);
+    rx->v90_t3_freq_seed = 0.0f;
     rx->v90_t3_blind_tried = false;
     rx->v90_t3_srch_running = false;
     rx->v90_t3_acq_abandoned = false;

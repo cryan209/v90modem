@@ -1473,6 +1473,8 @@ int v90_copy_jd_bits(const v90_state_t *s, uint8_t *bits, int max_bits)
     return n;
 }
 
+static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge);
+
 void v90_set_upstream_rate_limit(v90_state_t *s, int bps)
 {
     if (!s || bps < 0)
@@ -1480,6 +1482,13 @@ void v90_set_upstream_rate_limit(v90_state_t *s, int bps)
     if (bps != s->upstream_rate_limit_bps)
         fprintf(stderr, "[V90] MP upstream rate cap: %d bps\n", bps);
     s->upstream_rate_limit_bps = bps;
+    /* The first MP is built when CPt is accepted, before TRN2d.  A cap set
+     * during TRN2d must reach it, or the group's first MP would offer one
+     * rate and the rest another (§8.6.3: MPs in a group carry identical
+     * parameters). */
+    if (!s->v92_mode && s->phase4_mapper_ready
+        && (s->tx_phase == V90_TX_TRN2D || s->tx_phase == V90_TX_RI_ACK))
+        (void) v90_build_mp_type0(s, false);
 }
 
 static bool v90_cp_mask_is_exact(const uint8_t mask[VPCM_CP_MASK_BYTES],

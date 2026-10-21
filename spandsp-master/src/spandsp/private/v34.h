@@ -1492,6 +1492,10 @@ typedef struct
     /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
     v34_gardner_state_t v90_t3_gardner;
+    /*! The far end's symbol clock against ours, measured off the T/3 ring
+        before B1 (samples per symbol, as v90_t3_gardner.freq): the loop
+        starts there, and returns there when a closed eye resets it. */
+    float v90_t3_freq_seed;
     /*! \brief First published upstream data bits, for structure checks. */
     uint32_t v90_t3_first_word;
     int v90_t3_first_bits;

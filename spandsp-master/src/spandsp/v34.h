@@ -827,6 +827,15 @@ SPAN_DECLARE(int) v34_set_rx_data_scrambler(v34_state_t *s, int tap);
     timing/equalizer solution from the known B1 frame (9 kHz at 3000 baud,
     9.6 kHz at 3200 baud). */
 SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s);
+
+/*! Start capturing the V.90 upstream on the T/3 branch at Phase 4, before the
+    data parameters are known (capture only; v34_v90_prepare_upstream_data()
+    later keeps the ring). */
+SPAN_DECLARE(int) v34_v90_upstream_capture_early(v34_state_t *s);
+
+/*! SNR (dB) of the newest symbols captured on the T/3 branch, measured as a
+    4-point signal; 0 if not available. */
+SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols);
 /* Drop the T/3 upstream lock so the next v34_v90_prepare_upstream_data()
    restarts capture and v34_begin_rx_data() acquires a fresh B1: an x2
    in-data rate change ends in E and B1 at the newly selected rate. */

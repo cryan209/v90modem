@@ -230,11 +230,59 @@ recognised our MP (`cxfixnone-2/-3`, `cxup-21600`). It recognised MP on 2
 of 5 Phase 4 attempts. That gate is downstream, and the B1 work does not
 touch it.
 
-Not yet done: choosing the MP upstream rate from a measurement. V.34's
-§11.4 model (`v34_rx_training_rate`) gives 21600 at 28.8 dB, 3200 baud.
-The V.90 path also needs a §9.6 step-down when B1 never acquires. Both
-are policy changes that also affect peers that do carry 31200
-(SmartLink, the RasFinder).
+**Measured rate, and the data path behind it (22 October 2026).** Five
+changes, each checked offline against the recordings and then live:
+
+1. **The MP's upstream offer is measured (`v90_upstream_measure_locked()`).**
+   The T/3 capture now starts when CPt is accepted, not at CP′. During our
+   500 ms TRN2d the CX sends CPt/SCR/CP, all 4-point (our Jd bit 47 is 0).
+   The T/3 equaliser is trained on the newest 600 symbols, and the SNR
+   caps the offer. Calibration, replayed with the real echo reference:
+   SmartLink 36.9–37.3 dB, RasFinder 35.4–36.4 dB (both carry 31200),
+   CX93001 28.1–28.6 dB. The rule: 31200 needs 35.0 dB, and each
+   2400 bit/s less needs 2.0 dB less, so the CX is offered 21600 and the
+   others are not capped. `ME_V90_UPSTREAM_NO_SNR_CAP=1` turns it off.
+   Live at 21600, B1 is acquired at a 99.9% template fit, the upstream
+   settles at 0.044, LAPM comes up and lines cross both ways
+   (`cxfull-2`). An attempt to use the T/2 receiver's Phase 3 TRN for this
+   was discarded: it read 4.6 dB on six unrelated calls.
+2. **The timing loop starts at the measured clock offset.** The baud-line
+   phase of the T/3 history before B1 gives −44 to −46 ppm on the CX,
+   matching what the loop converged to. Before this, the loop took ~2.5 s
+   to pull in from zero.
+3. **The fractional timing actuator is a windowed sinc, not linear
+   interpolation.** At 0.21 of the T/3 rate, linear interpolation passes
+   0.79 at a fraction of 0.5 and 1 at a fraction of 0. A −45 ppm offset
+   sweeps the fraction through a whole sample every 2.1 s, so the
+   equaliser chased a gain change at the band edge. On the CX's 21600
+   recording the radial error grew 0.17 → 0.37, with the gain wandering
+   +2% then −4%, while the input level held to 0.15 dB. With the 8-tap
+   sinc, the gain holds to ±0.2% and the error stays at 0.05.
+4. **A repeated, identical B1 window settles at once.** The out-of-sample
+   check read 0.00206 against a 0.002 "good" line (passable by a factor
+   of two) on all seven windows of `cxfull-2`. Each window was the same
+   B1 at the same place. The call spent six retries, 3 s, before
+   settling, and each look was a 25–44 ms media callback.
+5. **(Step-back, CP framing: see above.)**
+
+**What still breaks the CX upstream, measured.**
+
+- **Our callback stalls move the gateway's playout, and with it our
+  echo.** In `cxfull-2` our RTP sends stalled 53–64 ms every 0.54 s from
+  23.9 s to 26.6 s. Over the same period the echo on the wire moved in
+  5 ms steps: 1882 → 1922 → 2042 → 2082 → 2122 samples. The line echo
+  canceller's tracker followed each move, but too late, and the upstream
+  broke every ~6.4 s, each time just after a move. Change 4 removes most
+  of those stalls. One template fit is still a 25–44 ms callback.
+  Holding the tracker (`ME_LEC_NO_TRACK=1`) is worse, because the Phase 3
+  fit is already stale by data mode.
+- **The CX recognises our MP on about 40% of Phase 4 attempts.** It
+  retrains exactly 2.0 s after our TRN2d starts. At 8000T TRN2d, 2 of 3
+  attempts got past MP. Too few calls to decide.
+- **A false E can fire when the CX never acknowledges.** Accepting its
+  plain CP early arms our E watch. If the CX then degrades (it is about
+  to retrain), the watch fires and we go to DATA with no B1 to find
+  (`cxsnr-3`, `cxsettle-2`).
 
 ## Eicon, 8 October 2026: clean LAN results and native V.34 corrections
 
