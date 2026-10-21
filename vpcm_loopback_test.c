@@ -392,6 +392,7 @@ static bool test_v90_shaped_phase4(v91_law_t law);
 static bool test_v90_codec_output_constellation_mapping(void);
 static bool test_v90_smartlink_dummy_cpt_repair(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
+static bool test_v90_cp_short_fill_back_to_back(void);
 static bool test_v90_v34_rx_stage_isolation(void);
 static bool test_v90_v90cp_upstream_data_reconfiguration(void);
 static bool test_v90_upstream_t3_b1_acquisition(void);
@@ -4585,6 +4586,56 @@ done:
     }
     vpcm_log("PASS: V.92 native mapped Phase 4 (CPt/SUVu/CPu over TRN2u, %s)",
              alaw ? "alaw" : "ulaw");
+    return true;
+}
+
+/* Table 14 ends a CP frame with three zero fill bits.  A Conexant CX93001
+ * (6314, 2026-10-21) sends ONE and starts the next frame's 17-one sync
+ * straight after it: on its taps the CRC sits at 273:288 (remainder 0), bit
+ * 289 is 0 and bits 290:306 are the next sync.  The framer threw every such
+ * frame away on its fill bits, and the two ones it had read as fill left
+ * the next sync two short, so CP' sat on the line 2.9 s before we accepted
+ * one and the peer retrained.  Fill carries nothing the CRC does not cover. */
+static bool test_v90_cp_short_fill_back_to_back(void)
+{
+    vpcm_cp_frame_t cp;
+    v90_cp_rx_t rx;
+    v90_cp_test_capture_t capture;
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int nbits;
+    enum { COPIES = 6 };
+
+    vpcm_log("Test: V.90 CP frames with one fill bit, back to back");
+    memset(&capture, 0, sizeof(capture));
+    vpcm_cp_init(&cp);
+    cp.v90_compatibility = false;   /* CPt */
+    cp.drn = 9;
+    cp.upstream_rate_mask = 0x1FFF;
+    cp.constellation_count = 1;
+    vpcm_cp_enable_odd_ucodes(cp.masks[0]);
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits) || nbits != 292
+        || bits[289] || bits[290] || bits[291]) {
+        fprintf(stderr, "could not build a 292-bit 4-point CPt\n");
+        return false;
+    }
+    v90_cp_rx_init(&rx, 4, false, v90_cp_test_frame_handler, &capture);
+    for (int copy = 0;  copy < COPIES;  copy++)
+    {
+        for (int i = 0;  i < 290;  i++)
+            v90_cp_rx_put_bit(&rx, bits[i]);
+    }
+    /* The last frame's two missing bits are the start of whatever follows. */
+    v90_cp_rx_put_bit(&rx, 1);
+    v90_cp_rx_put_bit(&rx, 1);
+    if (capture.count != COPIES || rx.valid_frames != COPIES
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr, "short-fill CP: %d of %d frames accepted (sync %u, "
+                "structure rejects %u)\n", capture.count, COPIES,
+                (unsigned) rx.sync_candidates,
+                (unsigned) rx.structure_rejected_frames);
+        return false;
+    }
+    vpcm_log("  PASS: %d back-to-back one-fill-bit CPt frames accepted", COPIES);
     return true;
 }
 
@@ -11097,6 +11148,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_smartlink_dummy_cpt_repair()
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
+        && test_v90_cp_short_fill_back_to_back()
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)
         && test_v90_negotiated_data_rates(V91_LAW_ALAW)
         && test_v90_spectral_shaping(V91_LAW_ULAW)

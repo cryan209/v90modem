@@ -1612,6 +1612,10 @@ typedef struct
         1 = built, 3 = end of the 4-point signal located (held in _first),
         2 = done or not wanted; its B1 start (-1 = none) and taps. */
     int v90_t3_srch_blind_stage;
+    /*! Stage 1's search back from E for the 4-point CP'/E: the raw index
+        the next training window ends at (-1 = start at E), one window per
+        packet (v90_t3_blind_locate()). */
+    int64_t v90_t3_srch_blind_back;
     /*! Stage 0 built the MP template WITH its constellation power
         (v90_t3_cma_*), so reloading that same template after a failed
         search can skip the 32000-symbol measurement. */

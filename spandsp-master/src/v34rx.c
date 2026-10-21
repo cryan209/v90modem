@@ -13450,10 +13450,12 @@ static int64_t v90_t3_4point_end(const v34_rx_state_t *s,
    the 4-point signal stops, and start data there.  Returns the raw index of
    the first B1 symbol, or -1. */
 enum { V90_T3_BLIND_TRAIN = 600, V90_T3_BLIND_LOOKAHEAD = 96 };
+/* How far before E the 4-point signal may end: 1 s at 3200 baud. */
+enum { V90_T3_BLIND_BACK = 3200 };
 
-/* First half of v90_t3_blind_acquire(), in a packet of its own: train well
+/* First half of v90_t3_blind_acquire(), in packets of its own: train well
    clear of E and find roughly where the 4-point signal ends.  Returns that
-   raw index, or -1. */
+   raw index, -1 if there is none, or -2 to be called again next packet. */
 static int64_t v90_t3_blind_locate(v34_rx_state_t *s)
 {
     enum { TRAIN = V90_T3_BLIND_TRAIN, LOOKAHEAD = V90_T3_BLIND_LOOKAHEAD };
@@ -13468,14 +13470,37 @@ static int64_t v90_t3_blind_locate(v34_rx_state_t *s)
 
     if (oldest < pre + 4)
         oldest = pre + 4;
-    /* E is recognised a few dozen symbols after the 4-point signal ends, by
-       an amount that varies; start well clear of it, find where the signal
-       really ends, and train again right up to that point. */
-    end = s->v90_t3_e_anchor - 3*60;
+    /* E is recognised some time after the 4-point signal ends, by an amount
+       that varies; start well clear of it, find where the signal really
+       ends, and train again right up to that point.  "A few dozen symbols"
+       held on the RasFinder, but a Conexant CX93001 (6314, 2026-10-21) is
+       recognised ~380 symbols after its CP'/E ends: a window ending 60
+       symbols before E is then mostly B1 and data, it trained to 0.27, and
+       the call was left to a B1 template that cannot fit a 31200 signal to
+       95%.  So step back from E, one window per packet (each is a training
+       run), until one trains cleanly or V90_T3_BLIND_BACK is reached. */
+    if (s->v90_t3_srch_blind_back < 0)
+        s->v90_t3_srch_blind_back = s->v90_t3_e_anchor - 3*60;
+    /*endif*/
+    end = s->v90_t3_srch_blind_back;
     base = (end - 3*TRAIN > oldest)  ?  end - 3*TRAIN  :  oldest;
+    if (end - base < 3*TRAIN/2)
+        return -1;
+    /*endif*/
     err = v90_t3_train_4point(s, base, end, w, &phase);
     if (err > 0.05f)
-        return -1;
+    {
+        s->v90_t3_srch_blind_back -= 3*TRAIN/2;
+        if (s->v90_t3_e_anchor - s->v90_t3_srch_blind_back > 3*V90_T3_BLIND_BACK)
+            return -1;
+        /*endif*/
+        return -2;
+    }
+    /*endif*/
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 T/3 4-point CP'/E found %lld symbols before E "
+             "(decision error %.4f)\n",
+             (long long) ((s->v90_t3_e_anchor - end)/3), err);
     return v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
 }
 /*- End of function --------------------------------------------------------*/
@@ -13689,6 +13714,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_srch_step = 0;
     s->v90_t3_srch_built = false;
     s->v90_t3_srch_blind_first = -1;
+    s->v90_t3_srch_blind_back = -1;
     s->v90_t3_srch_mp_cma_measured = false;
     v90_t3_cma_abandon(s);
     s->v90_t3_srch_blind_stage =
@@ -13750,6 +13776,13 @@ search:
         {
             (void) v90_t3_cma_continue(s, 2*(V34_V90_T3_CMA_MEASURE_SYMBOLS/3));
             s->v90_t3_srch_blind_first = v90_t3_blind_locate(s);
+            if (s->v90_t3_srch_blind_first == -2)
+            {
+                /* Not found yet: the next window back, next packet. */
+                s->v90_t3_srch_blind_first = -1;
+                return;
+            }
+            /*endif*/
             s->v90_t3_srch_blind_stage = (s->v90_t3_srch_blind_first >= 0)  ?  3  :  2;
             if (s->v90_t3_srch_blind_stage == 2)
             {

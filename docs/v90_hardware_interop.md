@@ -166,6 +166,76 @@ INFO0d bits 29:32 declare −13 dBm0 while the tap shows Phase 2 at about
 −10 dBm0 (L2 −10.2, Tone B −9.9). `v90_info0d_nominal_power_code()` is meant
 to declare the actual level. Why it does not is not yet investigated.
 
+### Conexant CX93001 upstream: CP framing, B1 location and rate, 21 October 2026
+
+"B1 giving up; the upstream has no carrier" on the CX was three separate
+faults. The first two were ours and are fixed. The third is a rate policy.
+
+**1. We discarded every CP frame the CX sent (fixed).** The CX's CP′
+frames were on the line, valid, from 20.53 s, one every 181 ms. We
+accepted the first one at 23.37 s. On the calls where that took longer
+than about 2 s, the CX retrained. To establish this I demodulated the CX's
+upstream independently, outside the receiver: blind CMA, 4-point
+decisions, GPA descrambler, Table 14 framing. Its frames carry the CRC at
+273:288 (remainder 0), then **one** zero fill bit, and the next frame's
+sync starts at bit 290. Table 14 asks for three fill bits. Our framer
+rejected every such frame on its fill bits (`structure` reject). The two
+ones it had read as fill also left the next sync two ones short, so that
+frame was missed as well. Fill bits now gate nothing (`vpcm_cp.c`, like
+the reserved bits). Ones read as fill go back to the sync counter
+(`v90_cp_rx.c`). `vpcm_loopback_test`'s new short-fill case accepts 0 of
+6 back-to-back frames on the old code (3 syncs, 3 structure rejects,
+exactly the live signature) and 6 of 6 now. Live, the renegotiation's CP
+now decodes on every frame (`source=spandsp`, every 60-80 ms). In
+replay, CP′ is accepted at 20.88 s instead of 23.16 s.
+
+**2. The 4-point locator trained in the wrong place (fixed).**
+`v90_t3_blind_locate()` assumed E is recognised a few dozen symbols after
+the 4-point CP′/E ends, and trained on the 600 symbols ending 60 before
+E. On the CX, E is recognised about 380 symbols after that, so the window
+was mostly B1 and data. It trained to 0.27 and returned −1 without
+logging. It now steps back one window per packet, up to 1 s, until a
+window trains cleanly. Offline it finds the CX's CP′/E at a 0.0013
+decision error (28.8 dB), ending exactly where the template search put
+B1.
+
+**3. 31200 is more than this upstream carries (open).** We always offer
+the 3200-baud maximum in MP. Nothing measures the upstream before MP.
+At 28.8 dB a 31200 constellation (power ≈ 725, about 1000 points) is
+noise-limited. The template fits 60% (95% is needed), and the data
+decodes white (distance to grid 0.68) at every rate the receiver
+assumes. The same line with `ME_V90_UPSTREAM_MAX_BPS=24000`, live
+(`cxfix24000-b1`):
+
+- **B1 template fit 100%**, B1-era distance to grid 0.077, data symbol
+  error 0.12-0.19.
+- V.42 LAPM connected. The CX reported **`CONNECT 50667`**: its first
+  V.90 connection.
+
+The cap alone is not the fix. Of three 24000 calls, one is above. One was
+declined at INFO1a. On the third (`cxfix24000-b3`) the template again fit
+only 60%. The step-back found no 4-point CP′/E either: with CP′ now
+accepted early, the T/3 capture was armed only 1280 samples before E, so
+the CX's CP′/E was never in the receiver's history. The three 31200 calls
+reached DATA twice. Neither acquired B1.
+
+It did not last. The upstream symbol clock is about −127 ppm from ours,
+and the decision error crept from 0.12 to 0.34 over 3 s. That set off two
+§9.6 renegotiations (to 21600, then 19200). The CX retrained during the
+second, and the call fell back to V.34. Holding that timing in data mode
+is the next layer after B1.
+
+The CX also retrains exactly 2.0 s after our TRN2d starts if it has not
+recognised our MP (`cxfixnone-2/-3`, `cxup-21600`). It recognised MP on 2
+of 5 Phase 4 attempts. That gate is downstream, and the B1 work does not
+touch it.
+
+Not yet done: choosing the MP upstream rate from a measurement. V.34's
+§11.4 model (`v34_rx_training_rate`) gives 21600 at 28.8 dB, 3200 baud.
+The V.90 path also needs a §9.6 step-down when B1 never acquires. Both
+are policy changes that also affect peers that do carry 31200
+(SmartLink, the RasFinder).
+
 ## Eicon, 8 October 2026: clean LAN results and native V.34 corrections
 
 Using our analogue caller against Eicon endpoints 7910 (PCMU) and 7900

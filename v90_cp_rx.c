@@ -255,7 +255,22 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
                 }
             }
         }
-        v90_cp_rx_reset(rx);
+        {
+            /* Table 14 ends a CP frame with three zero fill bits, but a
+             * Conexant CX93001 sends one and starts the next frame's sync
+             * straight after it.  The ones read as fill are then the start of
+             * that sync, and dropping them left 15 of its 17 ones, so every
+             * second frame was lost along with the first (V.90 8.5.2,
+             * 9.4.2.3-.4: CP' was on the line 2.9 s before we accepted one). */
+            int trailing_ones = 0;
+
+            for (int b = rx->target_bits - 1;
+                 b >= rx->target_bits - 3  &&  rx->bits[b];
+                 b--)
+                trailing_ones++;
+            v90_cp_rx_reset(rx);
+            rx->sync_ones = trailing_ones;
+        }
     }
     return accepted;
 }

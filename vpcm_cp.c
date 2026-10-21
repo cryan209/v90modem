@@ -390,7 +390,11 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
                    /* Table 14 reserved bits are not interpreted by the digital
                     * modem; reserved_bits_ok stays a diagnostic. */
                    && diag->v90_compat_ok
-                   && diag->fill_ok
+                   /* Nor are the fill bits, which carry nothing the CRC does
+                    * not already cover: a Conexant CX93001 ends its 4-point
+                    * CP frames after ONE zero fill bit, not Table 14's three,
+                    * and starts the next frame's sync there.  fill_ok stays a
+                    * diagnostic. */
                    && diag->crc_remainder == 0);
     return true;
 }
@@ -519,7 +523,11 @@ static bool vpcm_cp_decode_diag_impl(const uint8_t *bits, int nbits, vpcm_cp_dia
                    /* Table 14 reserved bits are not interpreted by the digital
                     * modem; reserved_bits_ok stays a diagnostic. */
                    && diag->v90_compat_ok
-                   && diag->fill_ok
+                   /* Nor are the fill bits, which carry nothing the CRC does
+                    * not already cover: a Conexant CX93001 ends its 4-point
+                    * CP frames after ONE zero fill bit, not Table 14's three,
+                    * and starts the next frame's sync there.  fill_ok stays a
+                    * diagnostic. */
                    && diag->crc_remainder == 0
                    && vpcm_cp_validate(&diag->frame, NULL, 0));
     return diag->valid;
