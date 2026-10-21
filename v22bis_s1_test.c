@@ -17,10 +17,17 @@
  *   1. each of those four calls' received signal (12.9-14.9 s of the
  *      receive tap, reference-data/artifacts/cx93001-v22bis-s1) trains a
  *      fresh 2400 bit/s answerer at 2400;
+ *
+ *   The fifth tap (2026-10-22) has S1 at the decision eye's crossing;
+ *   the other T/2 eye must find it (6.3.1.1.2 b)) without changing the
+ *   sample grid. The sixth tap needs that eye selected for receive
+ *   training too (6.3.1.1.2 e)); a transmit-side success alone is not enough.
+ *
  *   2. a SpanDSP V.22bis caller into the answerer over a short dispersive
  *      channel trains at 2400 for every one-way delay from 0 to 14 samples
  *      (each sample turns the 1200 Hz carrier 54 degrees against the symbol
- *      timing, so the sweep puts S1 at every angle to the slicer).
+ *      timing, so the sweep puts S1 at every angle to the slicer). The
+ *      same sweep with a genuine 1200 bit/s caller must stay at 1200.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -47,17 +54,20 @@ static int ones_bit(void *user)
     return 1;
 }
 
-static void drop_bit(void *user, int bit)
-{
-    (void) user;
-    (void) bit;
-}
-
 /* The rate the datapump reports when it says it has trained, 0 if not. */
 typedef struct {
     v22bis_state_t *m;
     int trained_rate;
+    int rx_bits;
 } watch_t;
+
+static void received_bit(void *user, int bit)
+{
+    watch_t *w = user;
+
+    if (bit >= 0)
+        w->rx_bits++;
+}
 
 static void status(void *user, int st)
 {
@@ -67,10 +77,10 @@ static void status(void *user, int st)
         w->trained_rate = v22bis_get_current_bit_rate(w->m);
 }
 
-static v22bis_state_t *make_modem(bool caller, watch_t *w)
+static v22bis_state_t *make_modem(bool caller, watch_t *w, int rate)
 {
-    v22bis_state_t *m = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, caller,
-                                    ones_bit, NULL, drop_bit, NULL);
+    v22bis_state_t *m = v22bis_init(NULL, rate, V22BIS_GUARD_TONE_NONE, caller,
+                                    ones_bit, NULL, received_bit, w);
 
     if (!m) {
         fprintf(stderr, "v22bis_init failed\n");
@@ -78,11 +88,12 @@ static v22bis_state_t *make_modem(bool caller, watch_t *w)
     }
     w->m = m;
     w->trained_rate = 0;
+    w->rx_bits = 0;
     v22bis_set_modem_status_handler(m, status, w);
     return m;
 }
 
-static int fixture_rate(const char *name)
+static int fixture_rate(const char *name, int *rx_bits)
 {
     char path[512];
     uint8_t ulaw[FRAME];
@@ -98,7 +109,7 @@ static int fixture_rate(const char *name)
         perror(path);
         exit(2);
     }
-    m = make_modem(false, &w);
+    m = make_modem(false, &w, 2400);
     while ((n = fread(ulaw, 1, FRAME, f)) > 0) {
         for (size_t i = 0; i < n; i++)
             rx[i] = ulaw_to_linear(ulaw[i]);
@@ -106,6 +117,7 @@ static int fixture_rate(const char *name)
         v22bis_tx(m, tx, (int) n);
     }
     fclose(f);
+    *rx_bits = w.rx_bits;
     v22bis_free(m);
     return w.trained_rate;
 }
@@ -113,14 +125,14 @@ static int fixture_rate(const char *name)
 /* Caller into answerer over h[] with `delay` samples of one-way delay each
    way.  Returns the answerer's trained rate in *ans and the caller's in
    *call. */
-static void pair_rates(int delay, int *call, int *ans)
+static void pair_rates(int delay, int rate, int *call, int *ans)
 {
     static const float h[] = {1.0f, 0.45f, -0.2f, 0.1f};
     enum { HL = sizeof(h)/sizeof(h[0]), SECONDS = 4, DMAX = 64 };
     watch_t wc;
     watch_t wa;
-    v22bis_state_t *c = make_modem(true, &wc);
-    v22bis_state_t *a = make_modem(false, &wa);
+    v22bis_state_t *c = make_modem(true, &wc, rate);
+    v22bis_state_t *a = make_modem(false, &wa, 2400);
     float c_hist[DMAX + HL] = {0};
     float a_hist[DMAX + HL] = {0};
     int16_t ct[FRAME];
@@ -149,33 +161,43 @@ static void pair_rates(int delay, int *call, int *ans)
         v22bis_rx(a, ar, FRAME);
         v22bis_rx(c, cr, FRAME);
     }
-    *call = wc.trained_rate;
-    *ans = wa.trained_rate;
+    *call = (wc.rx_bits >= 256) ? wc.trained_rate : 0;
+    *ans = (wa.rx_bits >= 256) ? wa.trained_rate : 0;
     v22bis_free(c);
     v22bis_free(a);
 }
 
 int main(void)
 {
-    static const char *calls[] = {"call1-rx.ulaw", "call2-rx.ulaw", "call3-rx.ulaw", "call4-rx.ulaw"};
+    static const char *calls[] = {"call1-rx.ulaw", "call2-rx.ulaw", "call3-rx.ulaw", "call4-rx.ulaw", "call5-rx.ulaw", "call6-rx.ulaw"};
     char what[128];
 
     printf("CX93001 S1, live receive taps (V.22bis 6.3.1.1.2 b)):\n");
-    for (int i = 0; i < 4; i++) {
-        int rate = fixture_rate(calls[i]);
+    for (size_t i = 0; i < sizeof(calls)/sizeof(calls[0]); i++) {
+        int rx_bits;
+        int rate = fixture_rate(calls[i], &rx_bits);
 
         snprintf(what, sizeof(what), "%s: answerer trained at %d (want 2400)", calls[i], rate);
         check(rate == 2400, what);
+        /* Calls 2 and 6 captured a peer that received our S1. The other
+           recordings diverge at our first changed transmission, so their
+           later receive-training outcome is not a valid assertion. */
+        if (i == 1 || i == 5) {
+            snprintf(what, sizeof(what), "%s: receive training completed and delivered at least 128 bits", calls[i]);
+            check(rx_bits >= 128, what);
+        }
     }
 
     printf("caller -> answerer, dispersive channel, delay sweep:\n");
-    for (int d = 0; d <= 14; d++) {
-        int call;
-        int ans;
+    for (int rate = 1200; rate <= 2400; rate += 1200) {
+        for (int d = 0; d <= 14; d++) {
+            int call;
+            int ans;
 
-        pair_rates(d, &call, &ans);
-        snprintf(what, sizeof(what), "delay %2d: caller %d, answerer %d (want 2400, 2400)", d, call, ans);
-        check(call == 2400 && ans == 2400, what);
+            pair_rates(d, rate, &call, &ans);
+            snprintf(what, sizeof(what), "delay %2d: caller %d, answerer %d (want %d, %d)", d, call, ans, rate, rate);
+            check(call == rate && ans == rate, what);
+        }
     }
 
     if (failures) {

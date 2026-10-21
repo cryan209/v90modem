@@ -183,33 +183,95 @@ through the answer tone. "modulations=none" is the summary of a CM that
 never arrived, not an unreadable one. The two V.8 attempts cost 11.9 s
 before USB1, and the CX waits that long.
 
-### Re-check preparation, 2026-10-22 (fresh live calls pending)
+### Live re-check, 2026-10-22: another acquisition eye
 
-Reviewed main `6783ae58` against the four retained S1 fixtures and the
-`/root/s1-live1`..`4` logs on vmhost CT 117. Rebuilt and ran
-`v22bis_s1_test`: all four receive taps train at 2400, and all 15
-dispersive-channel delays (0..14 samples) train both ends at 2400. The
-V.22bis sources match main; unrelated local V.34 working-tree changes
-were present, so this focused check is not a clean-main full-suite result.
-Logs and fixture hashes: `artifacts/cx93001-s1-recheck-20261022/`.
+Built isolated main `5decc31b` on wired vmhost CT 117, using its vendored
+SpanDSP and pjproject, after `make clean`. The Mac's unrelated V.34
+working-tree changes were not deployed. G.711 remained PCMU (RTP payload
+0), passthrough codecs enabled, RX clock-recovery slips disabled; no DSP
+constants, resampling, gain or sample accounting were changed. The CX
+identified as `CX93001-EIS_V0.2013-V92` on
+`/dev/cu.usbmodem246802461`, calling 2904 through ATA L2/6005. Both ends
+used the same procedure as the four earlier successful calls:
+`answer_ec_call.sh ... v22 "ATE0;AT&A3;AT+ER=1;ATS0=1"`, and
+`cx_hold_dial.py ... 2904 35 'AT\N2' 'AT+MS=V22B'`.
 
-The retained successful calls report training at 13760, 13801, 13760 and
-13761 ms, respectively, consistent with the S1 response path in
-6.3.1.1.2 b), rather than the 1200-bit/s commit in 6.3.1.2.2 b).
-The attached `/dev/cu.usbmodem246802461` answers ATI3 with
-`CX93001-EIS_V0.2013-V92`. CT 117 is reachable and the test SIP ports are
-idle, but its checkout is older (`7663df9a`); it cannot be treated as a
-current-main build. The root filesystem has only about 296 MiB free;
-an isolated build can use its `/tmp` tmpfs with the vendored libraries.
+Main did not connect reliably: the first call trained our TX at 1200 and
+the CX never reported CONNECT; the second connected at 2400/LAPM/V.42bis
+and delivered all 20 exact numbered lines each way. Both had continuous
+RTP sequence numbers and 160-sample timestamp steps. S1 was present on
+the first call, as it was in the original failing recordings. Our own TX
+held USB1 and committed to 1200, so this was our acquisition failure.
 
-No fresh call was placed: automatic approval review blocked copying the
-main source patch to vmhost pending explicit source-transfer approval.
-The planned comparison remains two fresh `AT\\N2`, `AT+MS=V22B` calls
-using `answer_ec_call.sh` on wired CT 117 and `cx_hold_dial.py` on the CX,
-with both raw G.711 taps, negotiated-rate reports, numbered payloads and
-RTP accounting retained. This preparation does not add a live success or
-re-verify the MNP carrier hold. No DSP change is supported by these results;
-the existing S1 comments cite 2.5.2.2/Table 1 and 6.3.1.1.2 b).
+The first call adds a case absent from the four original fixtures.
+Gardner's acquisition correction alternated -16/0, ending at 0 instead
+of the original fixture's -64 (units are 1/12 sample). At the end of
+acquisition, consecutive decision outputs differed by about 1-12 degrees,
+versus 70-72 degrees on original fixture 1. The decision eye was near
+S1's crossing; the other T/2 eye still resolved its alternating 00/11.
+The phase-change detector correctly returned 01 at the decision eye,
+so the previous slicer-phase fix could not find this S1.
+
+The initial candidate searched the other eye independently and inhibited
+carrier/equalizer adaptation while either eye saw an S1 run. One call
+connected at 2400/LAPM/V.42bis, with 20/20 exact lines each way; a single
+missing 20 ms RTP packet was held without a retrain. The next call sent
+our S1 and trained TX at 2400, but never acquired receive-side scrambled
+ones. V.42 detection expired, our DTE fell back to V.14, and the CX never
+reported CONNECT. A TX TRAINING_SUCCEEDED event alone is not receive
+training or a hardware connection.
+
+The revised candidate also selects the T/2 eye that found S1 for the
+remaining acquisition. It changes which existing half-baud samples are
+used for decisions during training; it inserts/removes no input samples
+and changes no timing-loop constants. New state resets in
+`v22bis_rx_restart()`. Comments cite V.22bis Table 1/2.5.2.2 and
+6.3.1.1.2 b)-e): respond to S1, then acquire the 2400-bit/s scrambled ones
+before declaring receive readiness.
+
+`v22bis_s1_test` now retains the first failing call as `call5-rx.ulaw`
+(12.9-14.9 s) and the TX-only candidate failure as `call6-rx.ulaw`
+(12.9-15.5 s). It checks rates on all six, actual delivered receive bits
+on original call 2 and new call 6, and both directions at 1200 and 2400
+across all 15 dispersive-channel delays (both sides must deliver at least
+256 bits as well as report the right rate). All pass locally. Negative
+control: detecting on both eyes without selecting the detected eye still
+reports TX 2400 on call 6 but fails its receive-bit assertion. The other
+recordings diverge at our first changed transmission, so receive readiness
+after that point is not asserted from those replays.
+
+After another clean build, the revised candidate passed all five focused
+rig test rows: S1, the three MNP gap/S10 cases, and `bell212a_test`.
+The final build then completed **three consecutive fresh calls** (calls
+5-7), all CX `CONNECT 2400`, last TX/RX 2400/2400, LAPM and V.42bis.
+Each delivered exactly 20 numbered lines, in order and once each, in both
+directions (1160 upstream bytes, 1280 downstream bytes). Training was at
+14040, 14060 and 14060 ms; every call ended with the scheduled hang-up,
+after the payload arrived. No call retrained in data.
+
+RX RTP losses were 11, 1 and 0 packets respectively; TX had none. Call 5
+had two four-packet gaps and one three-packet gap (80/80/60 ms), with
+logged carrier holds of 60/60/10 ms; LAPM delivered the exact payload.
+There were no reordered/duplicate packets or timestamp steps unexplained
+by sequence loss on any final call. These are LAPM calls, not a fresh
+MNP-only carrier-hold qualification.
+
+The final calls' pre-response S1 replays all selected the original eye.
+Thus the new eye-selection path is covered by the retained failing
+hardware waveform and receive-readiness regression, but did not recur in
+these three final live calls. This small call set is not a controlled
+acquisition A/B or a statistical pass-rate estimate.
+Evidence and SHA-256 manifest are retained locally in
+`reference-data/artifacts/cx93001-s1-recheck-20261022/`.
+
+The recorded successful calls trained at 13760-13801 ms, while today's
+successful calls trained at 14040-14060 ms. Comparing our own TX taps
+shows the same S1/scrambled-ones sequence with an approximately 300 ms
+call-timeline offset (the original first successful TX and today's main
+success match 99.4% of codewords over the aligned 0.8 s handshake window).
+Today's failed main call has no corresponding S1 burst in our TX. Two
+V.8 attempts still end without a CM before USB1, consistent with the
+previous recordings; the negotiated rate on genuine CONNECTs is unchanged.
 
 ## Other datapumps (surveyed 2026-10-21, not changed)
 

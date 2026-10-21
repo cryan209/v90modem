@@ -390,26 +390,26 @@ static int decode_baudx(v22bis_state_t *s, int nearest)
    one slicer region, the absolute decisions differenced to 01 01 01, and
    the answerer committed to 1200 bit/s. */
 #if defined(SPANDSP_USE_FIXED_POINT)
-static int differential_dibit(v22bis_state_t *s, const complexi16_t *z)
+static int differential_dibit(const complexi16_t *previous, const complexi16_t *z)
 {
     int64_t re;
     int64_t im;
 
-    re = (int64_t) z->re*s->rx.last_z.re + (int64_t) z->im*s->rx.last_z.im;
-    im = (int64_t) z->im*s->rx.last_z.re - (int64_t) z->re*s->rx.last_z.im;
+    re = (int64_t) z->re*previous->re + (int64_t) z->im*previous->im;
+    im = (int64_t) z->im*previous->re - (int64_t) z->re*previous->im;
     if (llabs(im) > llabs(re))
         return (im > 0)  ?  0x0  :  0x3;
     /*endif*/
     return (re >= 0)  ?  0x1  :  0x2;
 }
 #else
-static int differential_dibit(v22bis_state_t *s, const complexf_t *z)
+static int differential_dibit(const complexf_t *previous, const complexf_t *z)
 {
     float re;
     float im;
 
-    re = z->re*s->rx.last_z.re + z->im*s->rx.last_z.im;
-    im = z->im*s->rx.last_z.re - z->re*s->rx.last_z.im;
+    re = z->re*previous->re + z->im*previous->im;
+    im = z->im*previous->re - z->re*previous->im;
     if (fabsf(im) > fabsf(re))
         return (im > 0.0f)  ?  0x0  :  0x3;
     /*endif*/
@@ -543,7 +543,46 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
         s->rx.eye_report(s->rx.eye_user_data, sample, &eye, s->rx.baud_phase ^ 1);
     }
     if ((s->rx.baud_phase ^= 1))
+    {
+        /* V.22bis 6.3.1.1.2 b), Table 1: find S1 on either T/2 eye.
+           On the CX93001's two-point S1, Gardner can settle with the
+           decision eye at the crossing: consecutive outputs then differ
+           by almost zero degrees, while the other eye still shows 00/11.
+           Observe that eye independently. If it alone finds S1, use it
+           for the remaining training (6.3.1.1.2 c)-e)); finding S1 while
+           continuing to decide at the crossing can leave the receiver
+           unable to acquire the 2400 bit/s scrambled ones. No sampling
+           instant is moved and no input sample is inserted or removed. */
+        if (!s->calling_party
+            && s->negotiated_bit_rate == 1200
+            && s->rx.training == V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200)
+        {
+            z = equalizer_get(s);
+            s1_bits = differential_dibit(&s->rx.s1_other_z, &z);
+            if ((s->rx.s1_other_bits ^ s1_bits) == 0x3)
+            {
+                s->rx.s1_other_repeats++;
+            }
+            else
+            {
+                if (s->rx.s1_other_repeats >= 15
+                    && (s->rx.s1_other_bits == 0x0 || s->rx.s1_other_bits == 0x3)
+                    && s->bit_rate == 2400)
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW, "+++ S1 detected on other T/2 eye (%d long)\n", s->rx.s1_other_repeats);
+                    s->tx.training = V22BIS_TX_TRAINING_STAGE_U0011;
+                    s->tx.training_count = 0;
+                    s->negotiated_bit_rate = 2400;
+                    s->rx.baud_phase ^= 1;
+                    s->rx.last_z = z;
+                }
+                s->rx.s1_other_repeats = 0;
+            }
+            s->rx.s1_other_bits = s1_bits;
+            s->rx.s1_other_z = z;
+        }
         return;
+    }
     /*endif*/
 
     symbol_sync(s);
@@ -738,15 +777,16 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
         break;
     case V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200:
         target = &v22bis_constellation[nearest];
-        s1_bits = differential_dibit(s, &z);
-        /* While an S1 run is in progress, do not adapt.  S1 has only two
+        s1_bits = differential_dibit(&s->rx.last_z, &z);
+        /* While an S1 run is in progress on either eye, do not adapt.  S1 has only two
            points, and before the equalizer has trained they arrive closer
            than 90 degrees apart; when the slicer puts both in one region,
            decision-directed carrier and equalizer updates drag them together
            (the CX93001's went from 72 to 22 degrees apart in 20 symbols),
            which would hide S1 from any detector.  Scrambled ones resume the
            training when S1 ends. */
-        if (s->negotiated_bit_rate != 1200  ||  s->rx.pattern_repeats < 2)
+        if (s->negotiated_bit_rate != 1200
+            || (s->rx.pattern_repeats < 2 && s->rx.s1_other_repeats < 2))
         {
             track_carrier(s, &z, target);
             tune_equalizer(s, &z, target);
@@ -1217,6 +1257,10 @@ int v22bis_rx_restart(v22bis_state_t *s)
     s->rx.pattern_repeats = 0;
     s->rx.last_raw_bits = 0;
     s->rx.s1_last_bits = 0x1;
+    s->rx.s1_other_bits = 0x1;
+    s->rx.s1_other_repeats = 0;
+    s->rx.s1_other_z.re = 0;
+    s->rx.s1_other_z.im = 0;
     s->rx.last_z.re = 0;
     s->rx.last_z.im = 0;
     s->rx.gardner_integrate = 0;
