@@ -27,6 +27,7 @@
 .libs/
 
 # Project binaries
+vfc_mapper_test
 sip_v90_modem
 modem_gui_native
 Modem GUI.app/

@@ -25,7 +25,7 @@ in V.8bis. `%19S2` carries an X2 string.
 | V.32bis, V.22(bis), V.21, V.23, Bell 103/212A, V.110, V.120 | wired |
 | **V.32terbo** | **absent.** `AT+MS=V32TERBO` is accepted and falls back to V.32bis |
 | **HST** (USR) | **absent.** same fallback |
-| **V.FC** (Rockwell V.Fast Class) | **absent.** same fallback |
+| **V.FC** (Rockwell V.Fast Class) | No callable datapump; same fallback. The isolated symbol mapper now matches original firmware vectors (`vfc_implementation.md`, 2026-10-22); startup, framing and receiver remain absent. |
 | **MNP 2-5** | MNP 2-4 **yes** (V.42 Annex A, `docs/mnp.md`, 2026-10-21, no foreign peer yet); MNP 5 absent. MICA and the Courier both carry it |
 | V.34 with terbo | not applicable to the datapump; it is a V.8/V.34 negotiation switch in MICA (`%15S0` vs `%15S1`) |
 
@@ -1080,8 +1080,10 @@ up from a program-memory table in the modulator.
    16800/19200, and what its data-mode signal looks like. Only then decide on a V.32terbo datapump. The rate signalling (R words
    above 14400) is not in any ITU document here, so without MICA or Courier
    code we cannot write it from a spec.
-4. HST and V.FC have no overlay in MICA's list; the Courier DSP image is the
-   only source and its base address is unresolved
-   (`courier_firmware_analysis.md`, "Datapump is present").
+4. HST and V.FC have no overlay in MICA's list. The sibling Courier emulator
+   now identifies and executes V.FC overlay 7; the old unresolved-base note
+   is superseded by its `docs/vfc.md` and `docs/datapump-slots.md`.
+   The isolated C symbol mapper matches 3,584 firmware vectors, but no V.FC
+   call has been established (`vfc_implementation.md`).
 5. MNP 2-5 is specified publicly and can be written independently; it is the
    one gap here that needs no reverse engineering.

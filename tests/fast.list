@@ -8,6 +8,10 @@
 # MT5634MU diagnostic transport only; does not require or qualify hardware.
 python3 tools/mt5634mu_diag_test.py
 
+# Proprietary V.FC c749..c788 mapper, against original Courier firmware vectors.
+# This qualifies symbol coding only, not training or a V.FC modem connection.
+./vfc_mapper_test
+
 ./fax_v34_preamble_test
 ./legacy_pcm_decode_test
 ./x2_session_test
