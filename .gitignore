@@ -28,6 +28,10 @@
 
 # Project binaries
 vfc_mapper_test
+vfc_signature_test
+vfc_frame_test
+vfc_frame_codec_test
+vfc_trellis_test
 sip_v90_modem
 modem_gui_native
 Modem GUI.app/

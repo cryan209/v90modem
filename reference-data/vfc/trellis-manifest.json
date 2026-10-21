@@ -1,0 +1,11 @@
+{
+  "rom_sha256": "f1c91621fbf14aad34547056feb4425e64fcf0b38ec5d57f86c9f432ca999db6",
+  "vectors": 3584,
+  "scope": "isolated original firmware symbol mapper before precoding",
+  "emulator_commit": "f1ccd929fae0abdd5ddddcef508fd2985268f338",
+  "native_library_sha256": "39cf170e64c9241990bed1b7449d0f4e5d74525fdba3d01e741d6d429e6d4814",
+  "stream_symbols": 8192,
+  "stream_point_indices": 96,
+  "stream_initial_state": "zero trellis and differential state",
+  "emulator_worktree_dirty": true
+}

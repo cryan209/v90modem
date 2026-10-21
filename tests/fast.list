@@ -11,6 +11,10 @@ python3 tools/mt5634mu_diag_test.py
 # Proprietary V.FC c749..c788 mapper, against original Courier firmware vectors.
 # This qualifies symbol coding only, not training or a V.FC modem connection.
 ./vfc_mapper_test
+./vfc_signature_test
+./vfc_frame_test
+./vfc_frame_codec_test
+./vfc_trellis_test
 
 ./fax_v34_preamble_test
 ./legacy_pcm_decode_test

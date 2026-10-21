@@ -394,8 +394,10 @@ reference-data/artifacts/cx93001-s1-recheck-20261022	116	12395126	docs/carrier_l
 reference-data/artifacts/vfc-firmware-native-s27-20261022\t8\t8181745\tdocs/vfc_implementation.md; original Courier V.FC startup attempts and V.32bis control; native terminal/audio/mailbox evidence, local retention
 reference-data/artifacts/vfc-firmware-v32-control-20261022\t8\t7923656\tdocs/vfc_implementation.md; original Courier V.FC startup attempts and V.32bis control; native terminal/audio/mailbox evidence, local retention
 reference-data/artifacts/vfc-firmware-v8-20261022\t8\t8182805\tdocs/vfc_implementation.md; original Courier V.FC startup attempts and V.32bis control; native terminal/audio/mailbox evidence, local retention
-reference-data/vfc\t2\t78298\tvfc_mapper_test.c; 3584 independent Courier firmware mapper vectors and provenance; tracked regression fixtures
+reference-data/vfc\t10\t266532\tV.FC mapper/signature/frame/trellis tests; independent original-firmware vectors and provenance; tracked fixtures
 reference-data/artifacts/vfc-firmware-automode-20261022\t8\t7923217\tdocs/vfc_implementation.md; completed native V.FC negotiation comparisons and final venv V.32bis control; local evidence, no V.FC CONNECT
 reference-data/artifacts/vfc-firmware-auto-v8-20261022\t8\t7809360\tdocs/vfc_implementation.md; completed native V.FC negotiation comparisons and final venv V.32bis control; local evidence, no V.FC CONNECT
 reference-data/artifacts/vfc-firmware-final-20261022\t8\t8181680\tdocs/vfc_implementation.md; completed native V.FC negotiation comparisons and final venv V.32bis control; local evidence, no V.FC CONNECT
 reference-data/artifacts/vfc-firmware-final-control-20261022\t8\t7923612\tdocs/vfc_implementation.md; completed native V.FC negotiation comparisons and final venv V.32bis control; local evidence, no V.FC CONNECT
+reference-data/artifacts/vfc-no-v8-20261022\t10\t7855016\tdocs/vfc_implementation.md; native Courier 28800/VFC/NONE calls, bidirectional markers and original firmware state; local evidence, not our datapump interop
+reference-data/artifacts/vfc-native-qualified-start-20261022\t14\t9121145\tdocs/vfc_implementation.md; native Courier 28800/VFC/NONE calls, bidirectional markers and original firmware state; local evidence, not our datapump interop

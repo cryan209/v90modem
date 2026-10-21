@@ -1,0 +1,7 @@
+{
+  "rom_sha256": "f1c91621fbf14aad34547056feb4425e64fcf0b38ec5d57f86c9f432ca999db6",
+  "library_sha256": "39cf170e64c9241990bed1b7449d0f4e5d74525fdba3d01e741d6d429e6d4814",
+  "tx_packets": 16,
+  "rx_cases": 1280,
+  "scope": "isolated original firmware signature bit routines"
+}

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 from pathlib import Path
 import struct
 import sys
@@ -22,6 +23,8 @@ def main():
     parser.add_argument('--library', type=Path, required=True,
                         help='prebuilt courier C5x library (no sibling rebuild)')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--streams', action='store_true',
+                        help='also generate two continuous native trellis streams')
     args = parser.parse_args()
     os.environ['COURIER_C5X_LIBRARY'] = str(args.library.resolve(strict=True))
     sys.dont_write_bytecode = True
@@ -69,7 +72,7 @@ def main():
         core.load_program(struct.pack('<7H', *driver), 0)
         core.set_mpmc_pin(0)
 
-        def capture(code, state, quadrant, index, dibit):
+        def capture(code, state, quadrant, index, dibit, record=True):
             nonlocal count
             # n=6 uncoded low bits, with remaining index bits in the frame's
             # shell output word. We bypass frame construction intentionally.
@@ -92,9 +95,11 @@ def main():
                 if value % 512:
                     raise RuntimeError('mapper point left the expected lattice')
                 coordinates.append(value // 512)
-            rows.append(','.join(map(str, (code, state, quadrant, index, dibit,
-                        core.data(0x3b6), core.data(0x3da), *coordinates))))
-            count += 1
+            result = (core.data(0x3b6), core.data(0x3da), *coordinates)
+            if record:
+                rows.append(','.join(map(str, (code, state, quadrant, index, dibit, *result))))
+                count += 1
+            return result
 
         for code in (8, 32):
             # Every encoded state, differential state and input dibit.
@@ -107,10 +112,23 @@ def main():
                 for state in (0, 1):
                     for dibit in range(4):
                         capture(code, state, 0, index, dibit)
+        if args.streams:
+            rng = random.Random(0x564643)
+            stream = ['# code,index,dibit,i,q; continuous native c749..c788, initial states zero']
+            for code in (8, 32):
+                state = quadrant = 0
+                for _ in range(4096):
+                    index, dibit = rng.randrange(96), rng.randrange(4)
+                    state, quadrant, i, q = capture(code, state, quadrant, index, dibit, False)
+                    stream.append(f'{code},{index},{dibit},{i},{q}')
+            (args.output / 'trellis-stream.csv').write_text('\n'.join(stream) + '\n')
     (args.output / 'mapper.csv').write_text('\n'.join(rows) + '\n')
     manifest = {'rom_sha256': digest, 'vectors': count,
                 'scope': 'isolated original firmware symbol mapper before precoding',
                 'emulator_commit': None, 'native_library_sha256': None}
+    if args.streams:
+        manifest.update(stream_symbols=8192, stream_point_indices=96,
+                        stream_initial_state='zero trellis and differential state')
     import subprocess
     manifest['emulator_commit'] = subprocess.check_output(
         ['git', '-C', str(args.emulator), 'rev-parse', 'HEAD'], text=True).strip()
