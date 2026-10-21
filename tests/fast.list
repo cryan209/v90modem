@@ -759,6 +759,7 @@ python3 tools/pcm_ber_regression.py
 # Bell 212A: V.22's 1200 bit/s DPSK with the 2225 Hz answer tone.  The
 # datapump alone (tone, handshake, delayed bearer), then two engines.
 ./bell212a_test
+./v22bis_s1_test
 ./engine_pair_test --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --both-at AT+MS=B212,0,1200,1200 --call-log "answer tone heard" --call-log "answer tone ended" --both-after ATI6 --both-expect "Modulation         B212"
 ./engine_pair_test --alaw --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B212,0,1200,1200
 # A 212A caller must not train on a Bell 103 answerer's 2225 Hz mark; a 212A

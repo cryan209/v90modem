@@ -112,6 +112,66 @@ live CX does not survive that restart.
   The parity fix is still unverified live in an MNP data call: 1 of the 4
   calls reached CONNECT 2400.
 
+## Why calls 1, 3 and 4 trained at 1200 (fixed 2026-10-21)
+
+The fault was ours: our answerer missed the CX's S1. The CX sent the same
+handshake on all four calls. It detected our USB1 at 12.45 s, then 611 ms
+later (6.3.1.1.1 b)) sent S1, the unscrambled double dibit 00/11 (+90 and
++270 degrees, Table 1/V.22bis), for 100 ms at 13.14-13.25 s. Then it sent
+scrambled ones, and went to 16-point 600 ms after that (6.3.1.1.1 d)).
+Demodulating its tap with phase differences shows S1 cleanly on every call.
+Our transmit tap is right for what we decided: call 2 sends S1 back at
+13.25 s, while calls 1, 3 and 4 hold USB1 to the 270 ms commit (6.3.1.2.2 b))
+and then send scrambled ones at 1200. The CX does not fall back to 1200 as
+6.3.1.1.1 c) says it should. It stays at 2400, so the two ends never meet.
+
+SpanDSP's answerer spends the first 40 symbols of S1 on symbol acquisition,
+which leaves about 25 to find S1 in before the equalizer has trained. It
+read S1 by slicing each point to a quadrant and differencing the quadrants.
+On this line S1's two points arrive only about 70 degrees apart (dispersion
+the untrained equalizer has not removed). The 1200 bit/s slicer region for
+point 00 is -26.6..63.4 degrees, around (3,1) at 18.4 degrees. On call 2 the
+points sat at 67 and -3 degrees, either side of the boundary, and decoded as
+00 11. On calls 1, 3 and 4 they sat at 53..63 and -9..-19 degrees, both in
+one region, and decoded as 01 01 01. The decision-directed carrier loop and
+equalizer then pulled them together (72 down to 22 degrees apart in 20
+symbols), because both had the same target. Timing was identical on all
+four calls (total correction -64/80 of a half-baud). Only the carrier phase
+against the slicer differed, so whether a call connected was a coin flip
+on that phase.
+
+Fix (`v22bis_rx.c`, `SCRAMBLED_ONES_AT_1200`): the S1 search takes each
+dibit from the angle between consecutive equalizer outputs, rounded to the
+nearest Table 1 phase change, so it no longer depends on where the points
+fall against the slicer. While an S1 run is in progress, the carrier loop
+and equalizer do not adapt, so the two points stay apart. Scrambled ones
+resume training when S1 ends. Each half alone fails every case below, so
+both are needed. `v22bis_s1_test` (fast tier) checks:
+
+- The four calls' receive taps (12.9-14.9 s, in
+  `reference-data/artifacts/cx93001-v22bis-s1`) into a fresh answerer: old
+  code 1200/2400/1200/1200, exactly as live; fixed, 2400 on all four.
+- A SpanDSP caller into the answerer over `{1, 0.45, -0.2, 0.1}` at every
+  delay from 0 to 14 samples. Each sample turns the carrier 54 degrees
+  against the symbol timing. Old code: both ends at 1200 at every delay,
+  and one echo tap of 0.2 is enough to cause it. A clean channel passes
+  either way, which is why no loopback test caught this. Fixed: 2400 at
+  every delay.
+
+`v90_engine_replay --sync --echo-ref` of calls 1, 3 and 4 now trains at
+2400 at 14060 ms, after 32 descrambled ones at 2400 from the CX
+(6.3.1.1.2 e)). That shows the CX really was at 2400. A replay cannot show
+what the CX would do after our S1, because that is our first divergent
+transmission. The live re-check is still to do.
+
+V.8 was not the problem. The CX never sent a CM: in both V.8 windows its
+V.21 low channel stays at the line-noise floor (about 63 dB, against 131 dB
+once it transmits), and the RMS 64 the log reports is our own ANSam echo at
+2100 Hz. With `AT+MS=V22B` it is a plain V.25 caller that stays silent
+through the answer tone. "modulations=none" is the summary of a CM that
+never arrived, not an unreadable one. The two V.8 attempts cost 11.9 s
+before USB1, and the CX waits that long.
+
 ## Other datapumps (surveyed 2026-10-21, not changed)
 
 Measured with `engine_pair_test --gap-ms` (V.42 LAPM, `AT+DS=0` so the

@@ -209,6 +209,14 @@ struct v22bis_state_s
 
         int pattern_repeats;
         int last_raw_bits;
+        /*! \brief The previous symbol's dibit by phase change (Table 1/V.22bis), for the S1 search. */
+        int s1_last_bits;
+        /*! \brief The previous equalizer output, for those phase changes. */
+#if defined(SPANDSP_USE_FIXED_POINT)
+        complexi16_t last_z;
+#else
+        complexf_t last_z;
+#endif
     } rx;
 
     /* Transmit section */

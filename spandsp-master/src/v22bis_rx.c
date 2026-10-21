@@ -378,6 +378,46 @@ static int decode_baudx(v22bis_state_t *s, int nearest)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The dibit carried by the phase change from the preceding signal element
+   to this one, rounded to the nearest of V.22bis Table 1/V.22bis's four
+   (2.5.2.2: 00 = +90, 01 = 0, 11 = +270, 10 = +180 degrees).  This
+   depends only on the angle between two equalizer outputs, not on where
+   they fall against the slicer's boundaries.  S1 (6.3.1.1.2 b)'s
+   unscrambled double dibit 00 and 11) must be found in the first ~25
+   symbols after symbol acquisition, before the equalizer has trained, and
+   there the CX93001's two S1 points arrive only ~70 degrees apart.  On 3 of
+   4 live calls (v90modem docs/carrier_loss.md, 2026-10-21) both fell inside
+   one slicer region, the absolute decisions differenced to 01 01 01, and
+   the answerer committed to 1200 bit/s. */
+#if defined(SPANDSP_USE_FIXED_POINT)
+static int differential_dibit(v22bis_state_t *s, const complexi16_t *z)
+{
+    int64_t re;
+    int64_t im;
+
+    re = (int64_t) z->re*s->rx.last_z.re + (int64_t) z->im*s->rx.last_z.im;
+    im = (int64_t) z->im*s->rx.last_z.re - (int64_t) z->re*s->rx.last_z.im;
+    if (llabs(im) > llabs(re))
+        return (im > 0)  ?  0x0  :  0x3;
+    /*endif*/
+    return (re >= 0)  ?  0x1  :  0x2;
+}
+#else
+static int differential_dibit(v22bis_state_t *s, const complexf_t *z)
+{
+    float re;
+    float im;
+
+    re = z->re*s->rx.last_z.re + z->im*s->rx.last_z.im;
+    im = z->im*s->rx.last_z.re - z->re*s->rx.last_z.im;
+    if (fabsf(im) > fabsf(re))
+        return (im > 0.0f)  ?  0x0  :  0x3;
+    /*endif*/
+    return (re >= 0.0f)  ?  0x1  :  0x2;
+}
+#endif
+/*- End of function --------------------------------------------------------*/
+
 static __inline__ void symbol_sync(v22bis_state_t *s)
 {
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -478,6 +518,7 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
     int nearest;
     int bitstream;
     int raw_bits;
+    int s1_bits;
 
     z.re = sample->re;
     z.im = sample->im;
@@ -697,8 +738,20 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
         break;
     case V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200:
         target = &v22bis_constellation[nearest];
-        track_carrier(s, &z, target);
-        tune_equalizer(s, &z, target);
+        s1_bits = differential_dibit(s, &z);
+        /* While an S1 run is in progress, do not adapt.  S1 has only two
+           points, and before the equalizer has trained they arrive closer
+           than 90 degrees apart; when the slicer puts both in one region,
+           decision-directed carrier and equalizer updates drag them together
+           (the CX93001's went from 72 to 22 degrees apart in 20 symbols),
+           which would hide S1 from any detector.  Scrambled ones resume the
+           training when S1 ends. */
+        if (s->negotiated_bit_rate != 1200  ||  s->rx.pattern_repeats < 2)
+        {
+            track_carrier(s, &z, target);
+            tune_equalizer(s, &z, target);
+        }
+        /*endif*/
         raw_bits = phase_steps[((nearest >> 2) - (s->rx.constellation_state >> 2)) & 3];
         bitstream = decode_baudx(s, nearest);
         span_log(&s->logging, SPAN_LOG_FLOW, "+++ Rx 0x%x\n", bitstream);
@@ -706,14 +759,15 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
 //span_log(&s->logging, SPAN_LOG_FLOW, "S11 0x%02x 0x%02x 0x%X %d %d %d %d %d\n", raw_bits, nearest, bitstream, s->rx.scrambled_ones_to_date, 0, 0, 0, s->rx.training_count);
         if (s->negotiated_bit_rate == 1200)
         {
-            /* Search for the S1 signal */
-            if ((s->rx.last_raw_bits ^ raw_bits) == 0x3)
+            /* Search for the S1 signal, by the phase changes themselves
+               (see differential_dibit()). */
+            if ((s->rx.s1_last_bits ^ s1_bits) == 0x3)
             {
                 s->rx.pattern_repeats++;
             }
             else
             {
-                if (s->rx.pattern_repeats >= 15  &&  (s->rx.last_raw_bits == 0x3  ||  s->rx.last_raw_bits == 0x0))
+                if (s->rx.pattern_repeats >= 15  &&  (s->rx.s1_last_bits == 0x3  ||  s->rx.s1_last_bits == 0x0))
                 {
                     /* We should get a full run of 00 11 (about 60 bauds) at the calling modem, but only about 20
                        at the answering modem, as the first 40 are TED settling time. */
@@ -799,6 +853,7 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
             /*endif*/
         }
         /*endif*/
+        s->rx.s1_last_bits = s1_bits;
         break;
     case V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200_SUSTAINING:
         target = &v22bis_constellation[nearest];
@@ -843,6 +898,7 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
     }
     /*endswitch*/
     s->rx.last_raw_bits = raw_bits;
+    s->rx.last_z = z;
     if (s->rx.qam_report)
         s->rx.qam_report(s->rx.qam_user_data, &z, target, s->rx.constellation_state);
     /*endif*/
@@ -1160,6 +1216,9 @@ int v22bis_rx_restart(v22bis_state_t *s)
 
     s->rx.pattern_repeats = 0;
     s->rx.last_raw_bits = 0;
+    s->rx.s1_last_bits = 0x1;
+    s->rx.last_z.re = 0;
+    s->rx.last_z.im = 0;
     s->rx.gardner_integrate = 0;
     s->rx.gardner_step = 256;
     s->rx.baud_phase = 0;
