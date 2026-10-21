@@ -359,7 +359,9 @@ static int spawn(side_t *s, int alaw)
 
 static int open_pty(side_t *s)
 {
-    for (int i = 0; i < 200; i++) {
+    /* 10 s, not 2: at the head of a parallel fast.list run the x2 rows
+     * failed here ("could not start"), passing alone in 0.7 s. */
+    for (int i = 0; i < 1000; i++) {
         s->pty_fd = open(s->pty_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (s->pty_fd >= 0)
             return 0;
