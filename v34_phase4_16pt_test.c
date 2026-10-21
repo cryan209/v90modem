@@ -288,6 +288,30 @@ static void check_spec_encoder(v34_state_t *s)
     }
 }
 
+static void check_k56_probe_window(void)
+{
+    /* V.34 10.1.2.4/11.2.1.2.6: the K56 common-startup probe must
+       keep HSF's final timing-estimation window on L2, within the 550 ms
+       bound. Check the real waveform, including the 6 dB L1/L2 transition. */
+    v34_state_t *s = v34_init(NULL, 3200, 9600, false, true,
+                              NULL, NULL, NULL, NULL);
+    assert(s);
+    assert(l2_cycles(s) == 20);
+    v34_set_k56_phase2(s, true);
+    int16_t probe[6400];
+    l1_l2_signal_init(s);
+    int count = tx_l1_l2(s, probe, 6400);
+    /* The legacy generator reports the last written index on a stage
+       transition. Allow that one-sample bookkeeping difference here. */
+    assert(count >= 160*(8+27)-1 && count <= 160*(8+27));
+    for (int i = 0; i < 160; i++)
+        assert(abs(2*probe[8*160+i] - probe[i]) <= 1);
+    v34_set_v90_mode(s, 0);
+    assert(l2_cycles(s) == 15);
+    v34_free(s);
+    puts("PASS: K56 L2 covers the native timing window; V.34/V.90 durations unchanged");
+}
+
 static void check_k56_cc_tail_sample_boundary(void)
 {
     /* V.34 11.2.1.2.5: ending the CC tail exactly at a block boundary
@@ -364,6 +388,7 @@ int main(void)
     assert(s);
     check_k56_info1a_mode_flags();
     check_k56_cc_tail_sample_boundary();
+    check_k56_probe_window();
     /* Table 18's exact 16-point request was overridden as "nearly tied".
        Exercise the production classifier and the selected MP generator. */
     int distance;

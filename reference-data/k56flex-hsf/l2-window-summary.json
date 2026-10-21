@@ -1,0 +1,884 @@
+{
+  "purpose": "Default-129 K56 startup clock-estimation and sustained duplex correction; only audio/PCMU between peers",
+  "protocol_clauses": [
+    "K56 Draft 0.23 4.1",
+    "V.34 10.1.2.4",
+    "V.34 11.2.1.2.6"
+  ],
+  "first_server_tx_divergence_sample": 79346,
+  "first_client_tx_divergence_sample": null,
+  "runs": [
+    {
+      "directory": "artifacts/k56flex-hsf-tail-only-default129-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 12.94,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 2.5006498330039904,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "abstract_state",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 0,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 0,
+        "downstream_serial_bytes": 0,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": false,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "a1b00174c817f560eeccb4016d10507b7503818c445fbc99c83d07bd12a9b5d7",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "probe_clock": null,
+      "sha256": {
+        "server-tx.g711": "931d9bd66062a0112b3930084fafd14c2a61e09401ab10ef49e0a8aeaf067537",
+        "client-tx.g711": "bbba74d2f700c99e4409628e58494b43ba360fa7dae7d94f60da20d15551fca8",
+        "dte.bin": "eedf601bb36392d53b574c1703477b2e155a5a6db8c797102e9137175fd05b57",
+        "client-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "server-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "last_trn1": {
+        "block": 807,
+        "probe_drift": 0.00023133783543016762,
+        "resampler_rate": 134186678,
+        "loop6_variance": 0.610410093425598,
+        "loop6_threshold": 0.36000001430511475
+      },
+      "all_serial_octet_values": {
+        "client-received-serial.bin": 0,
+        "server-received-serial.bin": 0
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-clock129-window-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 13.16,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 2.7084341250592843,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 0,
+        "payload_bytes_requested": 0,
+        "upstream_serial_bytes": 0,
+        "downstream_serial_bytes": 0,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": false,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "508ebea702f1d6f204911c07a876ee5850191b7a30aaba22ee80b895cc7fa965",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "9ff6c22a7eff33d0b4f7b05421694ac10b9f8ac2af8f4f5f2eead6404b1ca762"
+        }
+      },
+      "probe_clock": [
+        {
+          "block": 591,
+          "part": 0,
+          "count": 1,
+          "stage": 5,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 596,
+          "part": 1,
+          "count": 1,
+          "stage": 2,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 601,
+          "part": 1,
+          "count": 2,
+          "stage": 2,
+          "frequency_offset": -0.0019320487044751644,
+          "timing_sum": -9.122358278546017e-06,
+          "tone_phase_differences": [
+            0.0003415358660276979,
+            0.0010769510408863425,
+            -0.0021992367692291737,
+            -0.0040565854869782925,
+            -0.001345811178907752,
+            -0.00037376992986537516,
+            -0.0011381469666957855,
+            0.0010692927753552794,
+            0.0005980751011520624
+          ]
+        },
+        {
+          "block": 606,
+          "part": 1,
+          "count": 3,
+          "stage": 4,
+          "frequency_offset": 5.399082147050649e-05,
+          "timing_sum": -9.354888788948301e-06,
+          "tone_phase_differences": [
+            -2.7642495297186542e-06,
+            7.699881825828925e-05,
+            -2.353611125727184e-05,
+            1.6187395885935985e-05,
+            -5.2916315326001495e-05,
+            0.00010985655535478145,
+            -5.245341162662953e-05,
+            5.646875797538087e-05,
+            -8.373149466933683e-05
+          ]
+        },
+        {
+          "block": 612,
+          "part": 1,
+          "count": 4,
+          "stage": 2,
+          "frequency_offset": -7.99107801867649e-05,
+          "timing_sum": -8.858802175382152e-06,
+          "tone_phase_differences": [
+            1.830144719860982e-05,
+            -1.9071474525844678e-05,
+            1.098413940781029e-05,
+            -4.329738294472918e-05,
+            5.704338036593981e-05,
+            -9.780451364349574e-06,
+            5.554437302635051e-05,
+            5.460879401653074e-05,
+            9.903466707328334e-05
+          ]
+        },
+        {
+          "block": 617,
+          "part": 1,
+          "count": 5,
+          "stage": 4,
+          "frequency_offset": -7.637702219653875e-05,
+          "timing_sum": -8.374980097869411e-06,
+          "tone_phase_differences": [
+            1.879596311482601e-05,
+            -1.439326206309488e-05,
+            1.1215748600079678e-05,
+            -4.413640272105113e-05,
+            5.938463073107414e-05,
+            -7.176957296906039e-06,
+            5.6404438510071486e-05,
+            5.4208921937970445e-05,
+            9.756546933203936e-05
+          ]
+        },
+        {
+          "block": 623,
+          "part": 1,
+          "count": 6,
+          "stage": 5,
+          "frequency_offset": -1.1659818887710571,
+          "timing_sum": 0.012492243200540543,
+          "tone_phase_differences": [
+            3.637727737426758,
+            -1.104599118232727,
+            4.7918620109558105,
+            -2.018930673599243,
+            -0.5621973276138306,
+            2.4378013610839844,
+            -8.323074340820312,
+            11.541015625,
+            2.8577322959899902
+          ]
+        }
+      ],
+      "sha256": {
+        "server-tx.g711": "498d7a479398f0847ecc0c91f262940d209b32c02d799f2c235be41b9c191b52",
+        "client-tx.g711": "15add5c24b13bd1d1a300e0059ce9907f0ac70eb7ef9b6bfe580e20a474a6e3e",
+        "dte.bin": "eedf601bb36392d53b574c1703477b2e155a5a6db8c797102e9137175fd05b57",
+        "client-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "server-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "last_trn1": {
+        "block": 821,
+        "probe_drift": 0.00023133783543016762,
+        "resampler_rate": 134186678,
+        "loop6_variance": 0.6108506447419199,
+        "loop6_threshold": 0.36000001430511475
+      },
+      "all_serial_octet_values": {
+        "client-received-serial.bin": 0,
+        "server-received-serial.bin": 0
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-l2-540-default129-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 16.898084957967512,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 116328,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "dda69eb6a019bad4df46696876894a301b1dff5c14f119429796a5a19ec3296c",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "9ff6c22a7eff33d0b4f7b05421694ac10b9f8ac2af8f4f5f2eead6404b1ca762"
+        }
+      },
+      "probe_clock": [
+        {
+          "block": 591,
+          "part": 0,
+          "count": 1,
+          "stage": 5,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 596,
+          "part": 1,
+          "count": 1,
+          "stage": 2,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 601,
+          "part": 1,
+          "count": 2,
+          "stage": 2,
+          "frequency_offset": -0.0019320487044751644,
+          "timing_sum": -9.122358278546017e-06,
+          "tone_phase_differences": [
+            0.0003415358660276979,
+            0.0010769510408863425,
+            -0.0021992367692291737,
+            -0.0040565854869782925,
+            -0.001345811178907752,
+            -0.00037376992986537516,
+            -0.0011381469666957855,
+            0.0010692927753552794,
+            0.0005980751011520624
+          ]
+        },
+        {
+          "block": 606,
+          "part": 1,
+          "count": 3,
+          "stage": 4,
+          "frequency_offset": 5.399082147050649e-05,
+          "timing_sum": -9.354888788948301e-06,
+          "tone_phase_differences": [
+            -2.7642495297186542e-06,
+            7.699881825828925e-05,
+            -2.353611125727184e-05,
+            1.6187395885935985e-05,
+            -5.2916315326001495e-05,
+            0.00010985655535478145,
+            -5.245341162662953e-05,
+            5.646875797538087e-05,
+            -8.373149466933683e-05
+          ]
+        },
+        {
+          "block": 612,
+          "part": 1,
+          "count": 4,
+          "stage": 2,
+          "frequency_offset": -7.99107801867649e-05,
+          "timing_sum": -8.858802175382152e-06,
+          "tone_phase_differences": [
+            1.830144719860982e-05,
+            -1.9071474525844678e-05,
+            1.098413940781029e-05,
+            -4.329738294472918e-05,
+            5.704338036593981e-05,
+            -9.780451364349574e-06,
+            5.554437302635051e-05,
+            5.460879401653074e-05,
+            9.903466707328334e-05
+          ]
+        },
+        {
+          "block": 617,
+          "part": 1,
+          "count": 5,
+          "stage": 4,
+          "frequency_offset": -7.637702219653875e-05,
+          "timing_sum": -8.374980097869411e-06,
+          "tone_phase_differences": [
+            1.879596311482601e-05,
+            -1.439326206309488e-05,
+            1.1215748600079678e-05,
+            -4.413640272105113e-05,
+            5.938463073107414e-05,
+            -7.176957296906039e-06,
+            5.6404438510071486e-05,
+            5.4208921937970445e-05,
+            9.756546933203936e-05
+          ]
+        },
+        {
+          "block": 623,
+          "part": 1,
+          "count": 6,
+          "stage": 5,
+          "frequency_offset": -7.944132084958255e-05,
+          "timing_sum": -7.880288649175782e-06,
+          "tone_phase_differences": [
+            1.7774562365957536e-05,
+            -1.8640521375345998e-05,
+            1.0820087481988594e-05,
+            -4.362261461210437e-05,
+            5.8978355809813365e-05,
+            -8.621207598480396e-06,
+            5.664824857376516e-05,
+            5.3447496611624956e-05,
+            9.815781231736764e-05
+          ]
+        }
+      ],
+      "sha256": {
+        "server-tx.g711": "8f23cb668bed527b7b5b66afda9372c34a744b857ac3e00c5d08414d380fc173",
+        "client-tx.g711": "ba7fed1ed2dfd73038e407bbd9eda4abc831c25216e86c71b717bf87804fd279",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177"
+      },
+      "last_trn1": {
+        "block": 821,
+        "probe_drift": -1.4593126707040938e-07,
+        "resampler_rate": 134217747,
+        "loop6_variance": 0.0009270085676490367,
+        "loop6_threshold": 0.36000001430511475
+      },
+      "all_serial_octet_values": {
+        "client-received-serial.bin": 256,
+        "server-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-l2-540-mainline-64k-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 120.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 60.2644314999925,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 637752,
+        "payload_bytes_requested": 65536,
+        "upstream_serial_bytes": 65536,
+        "downstream_serial_bytes": 65536,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "ce7c5c6605315adce2f6b8390b48445c5d3854d20fb59ff596d7681ecce0a8db",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "e24e3e7ae0056b1e346c309799a6da4dd2c461e02e4a3b611714e5f9f503ae0f"
+        }
+      },
+      "probe_clock": [
+        {
+          "block": 591,
+          "part": 0,
+          "count": 1,
+          "stage": 5,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 596,
+          "part": 1,
+          "count": 1,
+          "stage": 2,
+          "frequency_offset": 0.004392456728965044,
+          "timing_sum": -1.5101696590136271e-05,
+          "tone_phase_differences": [
+            3.169613478348765e-07,
+            -0.0016850571846589446,
+            0.0032194070518016815,
+            0.007450812496244907,
+            0.004136158153414726,
+            -1.2519549272838049e-06,
+            0.0013959232019260526,
+            -0.002118615200743079,
+            -0.0015588054666295648
+          ]
+        },
+        {
+          "block": 601,
+          "part": 1,
+          "count": 2,
+          "stage": 2,
+          "frequency_offset": -0.0019320487044751644,
+          "timing_sum": -9.122358278546017e-06,
+          "tone_phase_differences": [
+            0.0003415358660276979,
+            0.0010769510408863425,
+            -0.0021992367692291737,
+            -0.0040565854869782925,
+            -0.001345811178907752,
+            -0.00037376992986537516,
+            -0.0011381469666957855,
+            0.0010692927753552794,
+            0.0005980751011520624
+          ]
+        },
+        {
+          "block": 606,
+          "part": 1,
+          "count": 3,
+          "stage": 4,
+          "frequency_offset": 5.399082147050649e-05,
+          "timing_sum": -9.354888788948301e-06,
+          "tone_phase_differences": [
+            -2.7642495297186542e-06,
+            7.699881825828925e-05,
+            -2.353611125727184e-05,
+            1.6187395885935985e-05,
+            -5.2916315326001495e-05,
+            0.00010985655535478145,
+            -5.245341162662953e-05,
+            5.646875797538087e-05,
+            -8.373149466933683e-05
+          ]
+        },
+        {
+          "block": 612,
+          "part": 1,
+          "count": 4,
+          "stage": 2,
+          "frequency_offset": -7.99107801867649e-05,
+          "timing_sum": -8.858802175382152e-06,
+          "tone_phase_differences": [
+            1.830144719860982e-05,
+            -1.9071474525844678e-05,
+            1.098413940781029e-05,
+            -4.329738294472918e-05,
+            5.704338036593981e-05,
+            -9.780451364349574e-06,
+            5.554437302635051e-05,
+            5.460879401653074e-05,
+            9.903466707328334e-05
+          ]
+        },
+        {
+          "block": 617,
+          "part": 1,
+          "count": 5,
+          "stage": 4,
+          "frequency_offset": -7.637702219653875e-05,
+          "timing_sum": -8.374980097869411e-06,
+          "tone_phase_differences": [
+            1.879596311482601e-05,
+            -1.439326206309488e-05,
+            1.1215748600079678e-05,
+            -4.413640272105113e-05,
+            5.938463073107414e-05,
+            -7.176957296906039e-06,
+            5.6404438510071486e-05,
+            5.4208921937970445e-05,
+            9.756546933203936e-05
+          ]
+        },
+        {
+          "block": 623,
+          "part": 1,
+          "count": 6,
+          "stage": 5,
+          "frequency_offset": -7.944132084958255e-05,
+          "timing_sum": -7.880288649175782e-06,
+          "tone_phase_differences": [
+            1.7774562365957536e-05,
+            -1.8640521375345998e-05,
+            1.0820087481988594e-05,
+            -4.362261461210437e-05,
+            5.8978355809813365e-05,
+            -8.621207598480396e-06,
+            5.664824857376516e-05,
+            5.3447496611624956e-05,
+            9.815781231736764e-05
+          ]
+        }
+      ],
+      "sha256": {
+        "server-tx.g711": "4fc781fcf5a057db1799a354bbff1310d548af12fab55847195752f1e31f252c",
+        "client-tx.g711": "617c2c8c502847f3cc79545700c439ac943c638d1c46cc07c13301ca920bd396",
+        "dte.bin": "6018c411f3c34a91823f36b7c6bbea9b9a8fe0fae00d5d22ebcdd309c24a357b",
+        "client-received-serial.bin": "735d925a958593b5192c3b92d75e242b92528a585a6bd09cda0975654ddeb85c",
+        "server-received-serial.bin": "6d1bdec40f31ed1bf9b37da73c9c70eaa82f362d2c8c7afcf0983da36386574c"
+      },
+      "last_trn1": {
+        "block": 807,
+        "probe_drift": -1.4593126707040938e-07,
+        "resampler_rate": 134217747,
+        "loop6_variance": 0.0009287613623759557,
+        "loop6_threshold": 0.36000001430511475
+      },
+      "all_serial_octet_values": {
+        "client-received-serial.bin": 256,
+        "server-received-serial.bin": 256
+      }
+    }
+  ],
+  "original_mica_control": {
+    "directory": "artifacts/k56flex-mica-clock129-windows-20261021",
+    "probe_clock": [
+      {
+        "block": 526,
+        "part": 0,
+        "count": 1,
+        "stage": 5,
+        "frequency_offset": 0.006410273257642984,
+        "timing_sum": -2.8452072001527995e-05,
+        "tone_phase_differences": [
+          0.002123170765116811,
+          0.0037195875775069,
+          -0.0021451041102409363,
+          0.009751017205417156,
+          -0.0047502219676971436,
+          -0.0021142149344086647,
+          -0.0011780846398323774,
+          -0.0006443075253628194,
+          -0.0011283202329650521
+        ]
+      },
+      {
+        "block": 531,
+        "part": 1,
+        "count": 1,
+        "stage": 2,
+        "frequency_offset": 0.006410273257642984,
+        "timing_sum": -2.8452072001527995e-05,
+        "tone_phase_differences": [
+          0.002123170765116811,
+          0.0037195875775069,
+          -0.0021451041102409363,
+          0.009751017205417156,
+          -0.0047502219676971436,
+          -0.0021142149344086647,
+          -0.0011780846398323774,
+          -0.0006443075253628194,
+          -0.0011283202329650521
+        ]
+      },
+      {
+        "block": 536,
+        "part": 1,
+        "count": 2,
+        "stage": 2,
+        "frequency_offset": 0.0,
+        "timing_sum": -2.8452072001527995e-05,
+        "tone_phase_differences": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "block": 541,
+        "part": 1,
+        "count": 3,
+        "stage": 4,
+        "frequency_offset": 2.0183511878713034e-05,
+        "timing_sum": -2.8598577046068385e-05,
+        "tone_phase_differences": [
+          -6.486608583600173e-08,
+          -6.705486885039136e-05,
+          -1.614448228792753e-05,
+          -3.1477949960390106e-05,
+          4.4859149056719616e-05,
+          0.0001239138509845361,
+          1.395986691932194e-05,
+          -5.530591806746088e-05,
+          -0.00010939296043943614
+        ]
+      },
+      {
+        "block": 547,
+        "part": 1,
+        "count": 4,
+        "stage": 2,
+        "frequency_offset": -7.76176166255027e-05,
+        "timing_sum": -2.8108430342399515e-05,
+        "tone_phase_differences": [
+          1.6949987184489146e-05,
+          -1.4653915968665387e-05,
+          1.123794663726585e-05,
+          -4.222415736876428e-05,
+          5.8164732763543725e-05,
+          -6.24082758804434e-06,
+          5.8029847423313186e-05,
+          5.37205851287581e-05,
+          9.773542842594907e-05
+        ]
+      },
+      {
+        "block": 552,
+        "part": 1,
+        "count": 5,
+        "stage": 4,
+        "frequency_offset": -7.526737317675725e-05,
+        "timing_sum": -2.762450822046958e-05,
+        "tone_phase_differences": [
+          2.0400467803938227e-07,
+          3.377226448719739e-06,
+          1.1104807526862714e-05,
+          -2.1214464140939526e-05,
+          6.807499448768795e-05,
+          -3.1377054256154224e-05,
+          5.903190321987495e-05,
+          3.877449125866406e-05,
+          0.00011406830162741244
+        ]
+      },
+      {
+        "block": 558,
+        "part": 1,
+        "count": 6,
+        "stage": 5,
+        "frequency_offset": -8.001863170647994e-05,
+        "timing_sum": -2.7126539862365462e-05,
+        "tone_phase_differences": [
+          1.6725318346288987e-05,
+          -1.4836870832368731e-05,
+          6.92536696078605e-06,
+          -4.292490484658629e-05,
+          5.886177677894011e-05,
+          -9.716882232169155e-06,
+          5.921756383031607e-05,
+          5.3771742386743426e-05,
+          9.794867946766317e-05
+        ]
+      }
+    ],
+    "sha256": {
+      "server-tx.g711": "9a5177651d88cb29b1cea6504331faf5b5d6c4187e8ed8ccbfaceac4f0a81569",
+      "client-tx.g711": "3385c286f3ee0cae36c27af8ce2e150237982b134e58d20fd2f7a42b71de6602",
+      "symbols.json": "ecd229248a0500cd267ef7c94b92b4efc7d5233323f082807e020cb9f106e589",
+      "probe-clock.json": "1ca01ccdf84568e624cafbd0593a4a76e6f6bf68506de52ab9425a16e82a683a"
+    },
+    "last_trn1": {
+      "block": 768,
+      "phase2": 19,
+      "path": 1,
+      "state": 6,
+      "clock": 16256,
+      "counter": 15287,
+      "drift": -5.023433118367393e-07,
+      "accumulator": -2.7126539862365462e-05,
+      "acc_count": 6,
+      "rate": 134217795,
+      "dfe_variance": 0.0008944486865081002,
+      "dfe_taps": [
+        -0.06180552812293172,
+        -0.04308875370770693,
+        -0.060342198703438044,
+        -0.04011337039992213,
+        -0.05430624168366194,
+        -0.04533016122877598,
+        -0.06141521641984582,
+        -0.0432548001408577,
+        -0.06018628505989909,
+        -0.05213766358792782,
+        -0.05879292031750083,
+        -0.042505824472755194,
+        -0.05454751895740628,
+        -0.044787777587771416,
+        -0.050999704748392105,
+        -0.045643980614840984
+      ]
+    }
+  },
+  "client_tx_compared_samples": 103520
+}

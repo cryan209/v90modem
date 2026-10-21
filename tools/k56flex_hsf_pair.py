@@ -60,8 +60,8 @@ def main():
         ap.error("--seconds must be 1..120")
     if not 9 <= args.dac_taps <= 513 or args.dac_taps % 4 != 1:
         ap.error("--dac-taps must be 4n+1 in 9..513")
-    if not 0 <= args.payload_bytes <= 32768 or (args.require_payload and not args.payload_bytes):
-        ap.error("--payload-bytes must be 0..32768, and nonzero with --require-payload")
+    if not 0 <= args.payload_bytes <= 65536 or (args.require_payload and not args.payload_bytes):
+        ap.error("--payload-bytes must be 0..65536, and nonzero with --require-payload")
     cruft = args.cruft.resolve()
     sys.path.insert(0, str(cruft))
     from native.hsf.k56_client import K56Client, PCMUStream
@@ -76,12 +76,14 @@ def main():
     client = K56Client(modulation="flex", max_upstream_rate=9600, dac_taps=args.dac_taps)
     phase2_events = []
     symbol_events = []
+    probe_clock_events = []
+    last_probe_clock = None
     last_phase2_state = None
     last_symbol_state = None
     carrier_seen, carrier_active, carrier_interruptions = False, False, 0
 
     def observe(peer):
-        nonlocal last_phase2_state, last_symbol_state, carrier_seen, carrier_active, carrier_interruptions
+        nonlocal last_phase2_state, last_symbol_state, carrier_seen, carrier_active, carrier_interruptions, last_probe_clock
         if peer.pump is None:
             return
         carrier = peer.pump.env.datapump_carrier == 3 and bool(peer.pump.state()["data"])
@@ -96,6 +98,19 @@ def main():
         cpu = pump.cpu
         rx = pump.object + 0x2338
         config = cpu._read32(rx + 0x4b0)
+        # Original 1203c700 fits phase change across nine probe tones.
+        # RX+a94 is its probe-analysis object; 2474/2478 accumulate timing
+        # slope/count, copied by 1201f... into the PCM resampler. Read only.
+        probe = rx + 0xa94
+        probe_clock = (cpu._read32(probe + 0x2a4), cpu._read32(probe + 0x2478))
+        if probe_clock != last_probe_clock and 1 <= probe_clock[1] <= 12:
+            last_probe_clock = probe_clock
+            floating_probe = lambda offset: struct.unpack("<f", cpu._read32(probe + offset).to_bytes(4, "little"))[0]
+            probe_clock_events.append({"block": peer.block, "part": probe_clock[0],
+                "count": probe_clock[1], "stage": cpu._read32(probe + 0x2a0),
+                "frequency_offset": floating_probe(0x2470),
+                "timing_sum": floating_probe(0x2474),
+                "tone_phase_differences": [floating_probe(0x243c + 4*i) for i in range(9)]})
         # Original K56 symbol state machine (12022710 onward). Read only;
         # these diagnostics never feed a gate, decision, or waveform.
         symbol_state = (cpu._read32(rx + 0x94f4), cpu._read32(rx + 0x97d8))
@@ -261,6 +276,7 @@ def main():
         (out / "client-events.json").write_text(json.dumps(client.events, indent=2) + "\n")
         (out / "client-phase2.json").write_text(json.dumps(phase2_events, indent=2) + "\n")
         (out / "client-symbols.json").write_text(json.dumps(symbol_events, indent=2) + "\n")
+        (out / "client-probe-clock.json").write_text(json.dumps(probe_clock_events, indent=2) + "\n")
         server_log = (out / "server.log").read_text(errors="replace")
         if "outgoing (completes ATD)" not in server_log:
             raise RuntimeError("wrong engine role; see server.log")

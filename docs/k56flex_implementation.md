@@ -10,12 +10,14 @@ analogue DATA role. It is the digital-side (server) downstream payload core
 and its exact inverse, plus the V.8bis capability frame, the parameter record
 and the accepted-report logic. `AT+MS=K56` (automode enabled) selects the
 V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
-probe. The server now completes a bounded raw duplex connection against
-native HSF over PCMU: audio-derived S/S-bar, report, MP/MP', upstream B1 and
-the PCM data mapper. The client model remains incomplete. See the 21 October
-MP/data qualification below: it uses explicit 65-tap native analogue
-reconstruction; default 129-tap startup and sustained renegotiation remain
-unresolved (Draft 0.23, Table 1a and clause 11).
+probe. The server now completes raw duplex connections against native HSF
+over PCMU at the unchanged 129-tap analogue reconstruction default: negotiated
+V.8bis/V.8, audio-derived S/S-bar, report, MP/MP', upstream B1 and the PCM
+mapper. A two-minute run delivers 64 KiB exactly each way with no carrier
+interruption. The client model remains incomplete. See the 21 October L2
+window qualification below; earlier 65-tap results are diagnostic history.
+Hardware interoperability and in-data renegotiation are not qualified
+(Draft 0.23, Table 1a and clause 11).
 
 **Read first:** MICA overlay 8E is the V.32/V.32bis datapump, not K56flex,
 and the resident QAM engine once lifted here under the K56flex name is now in
@@ -1382,6 +1384,65 @@ limits. Shared V.34/V.90 regressions also guard the receiver handoff. All
 media remains byte-exact G.711 with unchanged sample accounting, no added
 gain, filtering or DSP-constant changes in the server path. Default 129-tap
 native startup still fails at Loop6. No hardware or sustained-link claim.
+
+## Phase-2 L2 window fixes default-129 startup and stability, 21 October 2026
+
+The Loop6 failure was downstream of a corrupted **Phase 2 clock estimate**,
+not incorrect P1/P2 PCM bytes. An unchanged original MICA server paired with
+the same original HSF client (9600 upstream cap, default 129-tap analogue
+reconstruction) connects. Its identification/P1/P2 bytes match ours; HSF's
+clock estimate is about -0.5 ppm and its final P1 DFE metric is about 0.0009.
+Our former estimate was +225.85 ppm and the metric about 0.85, above the
+unchanged original Loop6 threshold 0.36.
+
+Original HSF `1203c700` estimates frequency and timing slope from nine probe
+tones, collecting into the probe-analysis object at RX+a94. It accumulates
+timing slope at +2474 and window count at +2478; `1201f...` later seeds the
+PCM resampler from these values. Read-only diagnostics now retain each
+window in `client-probe-clock.json`. The first five windows are nearly clean.
+In the sixth window the old server had already stopped L2 and was sending
+Tone A: its fitted frequency jumps to -1.166 Hz and timing sum to 0.012492.
+The corresponding MICA window stays on the probe and remains near zero.
+
+Our own transmit tap confirms L1 from 9.35825 to 9.51825 s (160 ms), L2 to
+9.91825 s (400 ms), then Tone A. HSF finishes its final measurement around
+9.968 s. This is our truncated measurement stimulus, not grounds to modify
+HSF's resampler, quality policy, Loop6 threshold or analogue reconstruction.
+
+The fix changes only the explicit K56 common-startup answerer: emit 27
+20-ms table periods of L2 (540 ms) instead of 20 (400 ms). K56 Draft 0.23
+4.1 uses common V.34 Phase 2; V.34 10.1.2.4 and 11.2.1.2.6 permit L2 for up
+to 550 ms plus round-trip delay. The new interval fits that bound without
+estimating round-trip time and keeps the last HSF measurement inside L2.
+Ordinary V.34 and V.90 durations, gain, tables, scrambler taps and bearer
+sample accounting are unchanged.
+
+At the default 129 taps, the sixth fitted frequency is now about -0.000079
+Hz, timing sum -0.00000788, estimated drift -0.146 ppm, and P1 DFE metric
+0.00093. Native HSF passes Loop6 and both training directions. A completed
+40-second run delivers 8192 exact binary bytes each way. The isolated
+mainline build (without pending V.90 TX edits or K56 RX-window removal)
+then passes **120 seconds, 65536 exact serial bytes each way, 9600 up /
+52000 down, zero framing errors and zero carrier interruptions**:
+
+```
+python3 tools/k56flex_hsf_pair.py --seconds 120 --payload-bytes 65536 \
+  --require-payload --require-audio-gates --output artifacts/k56flex-new
+```
+
+No `--dac-taps` override, native peer modification, peer-control callback,
+or gate injection is used. Host writes use the ordinary PTY and native
+packed-8N1 queue, retrying partial writes. Only byte-exact PCMU crosses
+between modems. The payload comparison covers all 256 octet values.
+
+The generator regression checks L1/L2 waveform levels and emitted duration,
+and unchanged ordinary V.34/V.90 choices. It fails with the scoped duration
+change removed. All 22 focused K56 and shared V.34/V.90 regressions pass.
+Retained compact results, probe-clock windows, hashes and before/after tap
+comparison are in `reference-data/k56flex-hsf/l2-window-summary.json`.
+Earlier Loop6/default129 and late-renegotiation failures above are superseded
+for this clean local profile. Physical hardware, other line impairments and
+handling an independently requested in-data renegotiation remain unqualified.
 
 ## Mainline integration, 13 October 2026
 

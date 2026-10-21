@@ -4693,6 +4693,13 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
    The answer modem keeps 400 ms. */
 static int l2_cycles(const v34_state_t *s)
 {
+    /* K56flex Draft 0.23 4.1 uses the common V.34 probe. Original HSF
+       1203c700's final timing window extends past our former 400 ms L2
+       into Tone A, biasing its clock estimate by about 226 ppm. Keep the
+       full window on L2: 27 periods = 540 ms, within V.34 10.1.2.4 and
+       11.2.1.2.6's 550 ms + round-trip limit. Ordinary V.34/V.90 unchanged. */
+    if (s->rx.k56_phase2 && !s->tx.v90_mode && !s->tx.calling_party)
+        return 27;
     if (s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))
         return 27;
     /*endif*/
