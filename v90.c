@@ -663,6 +663,9 @@ struct v90_state_s {
     bool             v92_cpu_received;
     bool             v92_remote_ack_received;   /* CPu'/SUVu' ack, or E2u */
     bool             v92_cpd_sent;
+    /* A CPd has been designed and queued: its upstream design inputs (LU_rx,
+     * sigma) are frozen from here, not from its last bit (v92_cpd_sent). */
+    bool             v92_cpd_designed;
     bool             v92_cpd_retry;
     /* 9.6.1.1.3: sticky once the initial CPd's acknowledgement has timed
      * out -- CPd then repeats at each complete-message boundary until Ed. */
@@ -983,9 +986,16 @@ double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s)
     return 1.0;
 }
 
+/* V.92 9.6.1.1.6, Table 30: the CPd we sent defines the upstream waveform
+ * from B1u on, and the analogue modem keeps the one it received.  So the
+ * design inputs freeze when a CPd is QUEUED.  Freezing them only once its
+ * last bit was out let a measurement that arrived mid-CPd move the design
+ * (68 -> 66 points on a sigma change of 0.2), and the B1u receiver, armed
+ * from v90_build_v92_cpd_frame() at CPu, then expected a constellation the
+ * analogue modem was never told about: B1u never correlated. */
 bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx, double sigma_linear)
 {
-    if (!s || !(lu_rx > 1.0) || !(sigma_linear >= 0.0) || s->v92_cpd_sent)
+    if (!s || !(lu_rx > 1.0) || !(sigma_linear >= 0.0) || s->v92_cpd_designed)
         return false;
     s->v92_upstream_lu_rx = lu_rx;
     s->v92_upstream_sigma = sigma_linear;
@@ -995,7 +1005,7 @@ bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx, double sigma_linear)
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx)
 {
-    if (!s || !(sigma_linear > 0.0) || s->v92_cpd_sent)
+    if (!s || !(sigma_linear > 0.0) || s->v92_cpd_designed)
         return false;
     s->v92_upstream_sigma = sigma_linear;
     s->v92_upstream_lu_rx = lu_rx;
@@ -1259,6 +1269,7 @@ static bool v90_build_v92_cpd_native(v90_state_t *s)
         return false;
     s->v92_tx_pos = 0;
     s->v92_cpd_retry = false;
+    s->v92_cpd_designed = true;
     return true;
 }
 
@@ -4747,6 +4758,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_cpu_received = false;
     s->v92_remote_ack_received = false;
     s->v92_cpd_sent = false;
+    s->v92_cpd_designed = false;
     s->v92_cpd_retry = false;
     s->v92_cpd_repeat = false;
     s->v92_symbol_clock = s->v92_cpd_end = 0;

@@ -130,6 +130,24 @@ now validates B1d on Motorola and USR and recovers V.42 detection bytes on USR;
 see `docs/offline_pcm_payload_recovery.md`. PCM-upstream payload recovery from
 these recordings remains unestablished.
 
+## CPd design freezes when the CPd is queued (2026-10-21)
+
+The upstream constellation is designed from the measured TRN2u `LU_rx` and
+sigma (`v90_build_v92_cpd_frame()`).  `v90.c` used to keep accepting those
+measurements until the CPd's last bit was out (`v92_cpd_sent`), while the
+frame had already been encoded when it was queued.  The B1u receiver is armed
+from a fresh `v90_build_v92_cpd_frame()` at CPu (both `modem_engine.c` and
+`v92_startup_test`), so a measurement landing mid-CPd gave the receiver a
+different constellation from the one the analogue modem received (9.6.1.1.6,
+Table 30): B1u never correlated above 0.3.
+
+It surfaced in `v92_startup_test` (PCMA, zero DIL, reconstructed audio) after
+ff201b16 respaced the zero-DIL CPt (Ucodes 32..60): that moved sigma by 0.2
+(18.57 -> 18.78) and the design from 68 to 66 points between the queued CPd
+and CPu.  The old set was only lucky.  The inputs now freeze at the queue
+(`v92_cpd_designed`), so a repeated CPd and the receiver carry the design that
+went out.
+
 ## PCM-upstream data-pump foundation
 
 `v92_upstream_data.c` starts the post-B1u receive path with the two reversible
