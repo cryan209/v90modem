@@ -421,12 +421,16 @@ static void test_v250_parameters(void)
     expect(dte, "AT+MR?", "+MR: 0");
     expect(dte, "AT+ES?", "+ES: 3,0,2");
     expect(dte, "AT+DS?", "+DS: 3,0,1024,32");
-    expect(dte, "AT+ES=?", "+ES: (1-3),(0,2-3),(1-2,4-5)");
+    /* V.250 6.5.1 Table 20: orig_rqst 4, orig_fbk 4 and ans_fbk 6 are the
+     * Alternative protocol (MNP, V.42 Annex A), supported since mnp.c. */
+    expect(dte, "AT+ES=?", "+ES: (1-4),(0,2-4),(1-2,4-6)");
     expect(dte, "AT+DS=?", "+DS: (0-3),(0,1),(512-65535),(6-250)");
     expect(dte, "AT+ES=3,2,5", "OK");
     expect(dte, "AT+ES?", "+ES: 3,2,5");
-    expect(dte, "AT+ES=4", "ERROR");               /* alternative protocol */
-    expect(dte, "AT+ES?", "+ES: 3,2,5");           /* untouched */
+    expect(dte, "AT+ES=4", "OK");                  /* alternative protocol */
+    expect(dte, "AT+ES?", "+ES: 4,2,5");
+    expect(dte, "AT+ES=0", "ERROR");               /* direct mode: not offered */
+    expect(dte, "AT+ES?", "+ES: 4,2,5");           /* untouched */
     expect(dte, "AT+DS=3,1,4096,64", "OK");
     expect(dte, "AT+DS?", "+DS: 3,1,4096,64");
     expect(dte, "AT+DS=3,0,100", "ERROR");
