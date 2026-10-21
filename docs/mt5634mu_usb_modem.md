@@ -229,3 +229,31 @@ Evidence is retained in the same directory under `6314-a/`, `route-6314/`,
 accepts all four gateway extensions 6311–6314. The seven hardware-free tests
 still pass; no modem or gateway settings other than the documented volatile
 speaker/result settings were changed.
+
+### 6311 gateway-state check: BUSY cleared, answered call still fails carrier
+
+A subsequent read-only inspection of the MP-114 FXS at `10.69.70.221`
+(firmware 6.60A.241.010) showed 6311 registered/idle in Asterisk, no active
+PBX channels or call forwarding, and **Endpoint Status IDLE**, assigned
+number 6311, no associated calls in the gateway's port-1 SIP status page.
+The home-page physical-port indicators were inactive. This does not support
+a currently stuck off-hook call; the cause of the earlier BUSY is unproven.
+
+One fresh muted 6004-to-6311 call then reached the actual modem route.
+Gateway status showed ACTIVE / SESSION, caller 6004, destination 6311 and
+`g711Ulaw64k:20`. CDR `1792545227.1922` confirms the Dial leg ANSWERED in
+one second and stayed up for 55 seconds, with no voicemail leg. Nevertheless,
+the MT5634MU returned `NO CARRIER` after **61.229 s**, with ATI11 modulation,
+rates and protocol NA, zero frames/retrains, **termination cause 3**, and
+Last PCM S PTR `71A1`. Thus the older termination-3 failure is reproducible
+after the temporary BUSY condition clears; voicemail does not explain this
+answered-call failure. The exact training failure remains undiagnosed.
+
+No port reset, reboot, disconnect command or configuration save was issued.
+The post-call Voice Information page displays echo cancellation and silence
+suppression disabled and both gains 0 dB; its idle coder `G723High` and frame
+duration 0 are not the active call's codec (the live SIP page showed G.711).
+Gateway login was logged out after inspection. Evidence, including idle and
+active-session screenshots, AT transcript/ATI11, filtered CDR and final bridge
+counters, is retained locally in
+`reference-data/artifacts/mt5634mu-6311-state-20261021/` with a hash manifest.
