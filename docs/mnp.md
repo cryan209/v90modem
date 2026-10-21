@@ -87,13 +87,17 @@ says which protocol actually came up.
 ## Choices the text leaves open, and deviations
 
 * **N401's octet order.**  8.1.2.3 would put the high-order octet first, but
-  MNP equipment sends 64 as `40 00`.  We send low octet first, and the parser
+  MNP equipment sends 64 as `40 00` (the RasFinder's LR does, live).  We send low octet first, and the parser
   takes whichever reading lies in 1-256.
 * **Duplicate-LA retransmission is guarded.**  The receiver sends an LA for
   every frame of a gap (as A.7.3.2.2 says), so after one go-back the LAs
   already in flight each repeat N(R).  Our sender ignores a repeated N(R) that
-  arrives less than the shortest measured round trip after its last go-back.
-  Without it the 1e-4 rows stall for 6 s at a time.
+  arrives less than the shortest measured round trip after its last go-back,
+  or after the oldest unacknowledged LT was sent.  Without the first the 1e-4
+  rows stall for 6 s at a time.  The second is for an idle peer's T404 LA
+  (A.7.3.3.2 d)), which repeats N(R) by construction: the RasFinder's crossed
+  our first LT 53 ms after we sent it, against a 320 ms round trip, and
+  A.7.3.5 a) read literally resent the LT (first live call, below).
 * **Adaptive packet assembly** (the MNP class 4 facility, not in Annex A
   beyond "no more than N401 user octets"): each go-back halves the LT size,
   k clean LTs grow it by N401/4.  Bounds: never below what keeps k LTs filling
@@ -134,25 +138,76 @@ implementation or captures to be bit-exact against.
 * `data_stack_test`: the two FCS check values, the initiating LR, octet for
   octet, against Table A.2, and the default path against a plain V.14 answerer
   (V.42 detection, then 3 LRs, then the V.14 fallback, with the peer's
-  early data still delivered and ours delivered after).
+  early data still delivered and ours delivered after), and 200 octets going
+  out as one LT once the 256-octet facility is agreed.
 * `engine_pair_test` (fast tier): V.32bis caller at factory +ES against an
   MNP-only answerer (`+ES=3,0,6`); an MNP-only caller (`+ES=4,0`) against a
   factory answerer; V.34 with the answering DTE stalled for 6 s.  Each grades
   `+ER: ALT` and `CONNECT .../MNP` on both sides and the payload both ways.
 
-## Not verified
+## Live calls
 
-No MNP equipment other than this code has been on the other end.  The things
-most likely to need changing when one is:
+### RasFinder, 21 October 2026
 
-1. When the bit-oriented framing starts.  A.6.4 puts the whole three-message
-   exchange in mode 2 and A.6.4.2 starts the data phase on sending/receiving
-   the confirming LA; we switch right after it.
-2. N401 octet order in LR (above).
-3. Whether a peer minds the LA-per-out-of-sequence-frame volume, or our 3-try
-   LR budget after a failed V.42 detection (some MNP answerers may need longer
-   to start listening).
+Nine outbound calls from vmhost CT 117 (wired) to the RasFinder's MultiTech
+modems on 6311-6313, our side MNP-only (`AT+ES=4,4`, `AT&A3`, `AT+ER=1`),
+both bit streams dumped and read with `tools/mnp_frames.py`.  Recipe:
+`tools/soak/rasfinder_mnp_call.sh`.  Builds: 0bc12cfe's `mnp.c` (c1-c7) and
+the same with the changes committed with this note (c8, c9).  Captures: `/root/mnp-runs/c1`-`c9` on CT
+117 (disposable; the frame listings below are the record).
 
-The rigs that could answer this: the Courier (`&M4`, `&M5` with MNP), MICA
-(`MNP 2-5` in its banner), and the CX93001 on 6004 (`AT\N2`).  A live MNP call
-is the next step; until then treat "MNP works" as "MNP works against itself".
+* **8 of 9 calls connected**, `+ER: ALT` then `CONNECT 2400/ARQ/V22B/MNP`
+  (V.22bis, 7 calls) or `CONNECT 14400/ARQ/V34/MNP` (V.34, one -- that call
+  offered V.90 and fell back).  The banner and `login:` came down in LTs, and
+  what we typed went up and was echoed, answered (`Invalid User Name!!!`) and
+  finally answered with `You are logged off` and an LD, which took us down
+  cleanly.  Data moves both ways under MNP against real equipment.
+* **Establishment.**  The peer's response LR is ours with k = 7:
+  `02 | 01 06 01 00 00 00 00 ff | 02 01 03 | 03 01 07 | 04 02 40 00 | 08 01 03`.
+  So mode 3, k 7, the 256-octet facility and fixed-field LT/LA are all
+  agreed; N401 comes low octet first (Not-verified item 2, settled).  Its
+  first bit-oriented LA arrives about 0.2 s after our octet-oriented
+  confirming LA: the switch to mode 3 straight after that LA is right
+  (item 1, settled).  Its first LAs carry credit 0 for ~2 s, until its login
+  process attaches.
+* **256-octet LTs are delivered whole.**  A 72-octet LT (our adaptive packet
+  assembly ceiling at 2400) was acknowledged and its echo was 64 octets: that
+  looked like the peer honouring parameter 4's N401 and discarding the rest.
+  It is the login field.  It holds 64 characters and drops the rest of the
+  write.  A 72-octet LT of 40 `a`, 20 backspaces and 12 `b` comes back as
+  20 `a` and all 12 `b` (three calls), and octets 65-72 are `b`.  A cap at
+  parameter 4 was written, tested, and withdrawn on this evidence: it cost about a
+  tenth of the throughput on most `v42_stress_test` rows, and nearly three
+  quarters at 300 ms each way.
+  The peer's line editor also echoes stale buffer contents after a line with
+  backspaces; read what it echoes, not how it looks.
+* **The peer sometimes ignores an in-sequence LT.**  Three LTs in two calls
+  (c5, c8), always after its login application had just overflowed or rejected a
+  line, the peer neither acknowledged nor rejected a CRC-clean LT (our
+  transmit tap, demodulated, shows it intact): no LA for an invalid frame, no
+  credit 0.  Its next T404 LA (every 3 s) repeats N(R), our go-back resends
+  (A.7.3.5 a)), and the resend is accepted.  Costs up to 3 s; nothing to fix
+  on our side, and the T404 guard above did not suppress any of these
+  go-backs (they arrive well over a round trip after the LT).
+* **One call never established** (c3, V.22bis).  The peer sent marks (its
+  detection phase) for 3.8 s, never answered our LRs at 0, 1.6 and 3.3 s --
+  all CRC-clean on our demodulated transmit tap -- then gave up on error
+  control, sent its banner as plain V.14, and its login read our fourth LR as
+  typed text.  Its detection window is under 4 s after training, and in that
+  call it heard nothing it accepted; the other eight answered our first LR
+  within 0.45 s.  Not reproduced.
+
+Still not verified:
+
+1. Our 3-try LR budget after a failed V.42 detection.  The RasFinder runs
+   LAPM, so a factory `+ES` call never reaches MNP against it; the c3 window
+   above says a peer can stop listening within 4 s.
+2. Whether a peer minds the LA-per-out-of-sequence-frame volume: no call here
+   had an out-of-sequence LT.
+3. Any peer as the MNP initiator against our answerer (`+ES=3,0,6` or the
+   factory answerer), and MNP over V.32bis (V.32bis does not train against the
+   RasFinder at all, `rasfinder_modulation_tests_20261020.md`).
+
+The rigs that could answer these: the Courier (`&M4`, `&M5` with MNP), MICA
+(`MNP 2-5` in its banner), and the CX93001 on 6004 (`AT\N2`), none of which
+was connected on 21 October.

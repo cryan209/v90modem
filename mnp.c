@@ -831,14 +831,23 @@ static void rx_la(mnp_t *m, uint8_t nr, int credit)
         return;
     }
     /* a): an LA repeating the last N(R) asks for retransmission -- but not
-       one that left the far end before our last go-back could have reached
-       it (less than the shortest round trip seen since): the receiver sends
-       LAs for every frame of a gap, and those already in flight would each
-       start the retransmission over. */
-    if (out > 0  &&  !m->retx_active
-        &&  (!m->goback_at  ||  !m->have_rtt
-             ||  (double)(m->now - m->goback_at) >= m->min_rtt))
-        go_back(m);
+       one that left the far end before our last go-back, or the oldest
+       unacknowledged LT, could have reached it (less than the shortest round
+       trip seen since).  The receiver sends LAs for every frame of a gap, and
+       those already in flight would each start the retransmission over; and
+       an idle peer's T404 LA (A.7.3.3.2 d)) repeats N(R) by construction, so
+       one that crosses a fresh LT would resend it.  The RasFinder's did, on
+       the first live MNP call. */
+    if (out > 0  &&  !m->retx_active)
+    {
+        uint64_t sent = m->out[(uint8_t)(m->acked + 1) & 15].sent_at;
+        bool stale = m->have_rtt
+                     &&  ((m->goback_at  &&  (double)(m->now - m->goback_at) < m->min_rtt)
+                          ||  (double)(m->now - sent) < m->min_rtt);
+
+        if (!stale)
+            go_back(m);
+    }
 }
 
 /* A.7.3.2. */

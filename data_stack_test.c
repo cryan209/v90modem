@@ -857,6 +857,58 @@ static void test_mnp_lr_encoding(void)
     mnp_free(m);
 }
 
+/* LR parameter 8 bit 1 (A.6.4.1.8) agreed: our LTs carry up to 256 octets.
+ * Live against the RasFinder a 72-octet LT is delivered whole (docs/mnp.md);
+ * its login field, not MNP, is what stops at 64 characters. */
+typedef struct {
+    uint8_t src[512];
+    int len, pos;
+    int delivered;
+} n401_end_t;
+
+static int n401_get(void *user, uint8_t *buf, int max)
+{
+    n401_end_t *e = user;
+    int n = e->len - e->pos;
+
+    if (n > max)
+        n = max;
+    memcpy(buf, e->src + e->pos, (size_t) n);
+    e->pos += n;
+    return n;
+}
+
+static void n401_put(void *user, const uint8_t *buf, int len)
+{
+    (void) buf;
+    ((n401_end_t *) user)->delivered += len;
+}
+
+static void test_mnp_n401_facility(void)
+{
+    static n401_end_t a, b;
+    mnp_t *ma = mnp_init(true, 3, 9600, n401_get, n401_put, NULL, &a);
+    mnp_t *mb = mnp_init(false, 3, 9600, n401_get, n401_put, NULL, &b);
+    mnp_stats_t st;
+    int i;
+
+    for (i = 0; i < 9600 * 5 && !(mnp_is_connected(ma) && mnp_is_connected(mb)); i++) {
+        mnp_rx_bit(mb, mnp_tx_bit(ma));
+        mnp_rx_bit(ma, mnp_tx_bit(mb));
+    }
+    a.len = 200;
+    memset(a.src, 'a', 200);
+    for (i = 0; i < 9600 * 3 && b.delivered < 200; i++) {
+        mnp_rx_bit(mb, mnp_tx_bit(ma));
+        mnp_rx_bit(ma, mnp_tx_bit(mb));
+    }
+    mnp_get_stats(ma, &st);
+    CHECK(b.delivered == 200 && st.optimisation == 3 && st.n401 == 256 && st.lt_tx == 1,
+          "MNP: 256-octet facility agreed, 200 octets go in one LT (A.6.4.1.8)");
+    mnp_free(ma);
+    mnp_free(mb);
+}
+
 /* V.42 7.9: detection fails, the alternative procedure fails (a plain V.14
  * answerer never answers LR), and only then the buffered fallback.  What the
  * peer sent meanwhile is still delivered (Appendix I.3 b)), and the caller's
@@ -955,6 +1007,7 @@ int main(void)
     test_detection_fallback_forwards_early_data();
     test_mnp_fcs_check_values();
     test_mnp_lr_encoding();
+    test_mnp_n401_facility();
     test_mnp_alternative_then_v14_fallback();
     test_compression_error();
     test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");

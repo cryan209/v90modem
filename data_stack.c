@@ -817,6 +817,25 @@ static int ds_tx_load(data_stack_t *s)
     return 1;
 }
 
+/* Opt-in wire diagnostic, paired with DS_RX_BIT_DUMP: the error-control
+   transmit bit stream (V.42 or MNP), one ASCII '0'/'1' per bit.  It includes
+   credentials; use only test accounts. */
+static FILE *ds_tx_bit_dump(void)
+{
+    static FILE *f;
+    static bool tried;
+
+    if (!tried)
+    {
+        const char *path = getenv("DS_TX_BIT_DUMP");
+
+        tried = true;
+        if (path && *path)
+            f = fopen(path, "w");
+    }
+    return f;
+}
+
 static int ds_tx_get_bit_impl(data_stack_t *s)
 {
     int bit;
@@ -826,16 +845,8 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
 
     if (s->framing == DS_FRAMING_V42)
     {
-        /* Opt-in wire diagnostic, paired with DS_RX_BIT_DUMP. It includes
-           credentials; use only test accounts. One bit per ASCII byte. */
-        static FILE *dump;
-        static bool tried;
-        if (!tried)
-        {
-            const char *path = getenv("DS_TX_BIT_DUMP");
-            tried = true;
-            if (path && *path) dump = fopen(path, "w");
-        }
+        FILE *dump = ds_tx_bit_dump();
+
         /* The DTE drains in its own time: look for clearance every so often
            on the line clock (a room() call takes the queue's lock). */
         if (s->rx_room  &&  (++s->rx_room_poll & 63) == 0)
@@ -853,12 +864,15 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
     }
     if (s->framing == DS_FRAMING_MNP)
     {
+        FILE *dump = ds_tx_bit_dump();
+
         if (s->rx_room  &&  (++s->rx_room_poll & 63) == 0)
             ds_rx_flow_check(s);
         bit = s->mnp ? mnp_tx_bit(s->mnp) : 1;
         /* Falling back to V.14 from inside that call: mark, as for V.42. */
         if (s->demote_pending)
             bit = 1;
+        if (dump) fputc(bit ? '1' : '0', dump);
         return bit;
     }
     if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
