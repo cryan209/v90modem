@@ -104,6 +104,13 @@ live CX does not survive that restart.
   error 0.04 for the whole call. The CX's symbol timing drifts smoothly
   (about 0.9 samples/s) with no jump at the gap, so the signal itself was
   always decodable.
+- Calls 3-4, with the parity fix deployed: both failed like call 1. V.8
+  failed, we trained at 1200, and the CX never reported CONNECT. Replaying
+  call 4 with the original `v22bis_rx.c` trains at 1200 at the same
+  millisecond, so this handshake fault predates the hold. On those links
+  the hold rode out the drops (10-60 ms) that the CX made while it waited.
+  The parity fix is still unverified live in an MNP data call: 1 of the 4
+  calls reached CONNECT 2400.
 
 ## Other datapumps (surveyed 2026-10-21, not changed)
 
