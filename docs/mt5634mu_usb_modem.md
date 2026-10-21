@@ -213,3 +213,19 @@ the diagnosis uses modem diagnostics and PBX call metadata instead.
 Validation: bridge builds with `make mt5634mu_bridge`; the fast-tier diagnostic
 row passes all seven hardware-free tests. The live calls above establish the
 observed routing and V.34/LAPM results only, not V.90 interoperation.
+
+### Follow-up: 6314
+
+At the user's request, 6004 dialled 6314 with the same active profile and
+`ATM0` confirmed. Result: `NO CARRIER` after 54.820 s. ATI11 shows modulation,
+rates and protocol NA, zero frames/retrains, termination cause 2. Asterisk
+CDR `1792544500.1911` shows a **20-second NO ANSWER** on the 6314 Dial leg,
+followed by 30 seconds in VoiceMail; the live channel snapshot confirms
+VoiceMail. Unlike 6311's immediate BUSY, this route rings without answering.
+No modem handshake or LAPM connection was established.
+
+Evidence is retained in the same directory under `6314-a/`, `route-6314/`,
+`bridge3.log`, `cdr-6314.csv` and `pbx-6314-live.txt`. The diagnostic now
+accepts all four gateway extensions 6311–6314. The seven hardware-free tests
+still pass; no modem or gateway settings other than the documented volatile
+speaker/result settings were changed.

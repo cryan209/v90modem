@@ -138,7 +138,7 @@ def diagnose(port, number, wait, hold):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--dev', default='/tmp/mt5634mu')
-    ap.add_argument('--number', required=True, choices=('6311', '6312'))
+    ap.add_argument('--number', required=True, choices=('6311', '6312', '6313', '6314'))
     ap.add_argument('--out', required=True, type=Path, help='new output directory')
     ap.add_argument('--wait', type=float, default=80)
     ap.add_argument('--hold', type=float, default=5)
