@@ -257,3 +257,52 @@ Gateway login was logged out after inspection. Evidence, including idle and
 active-session screenshots, AT transcript/ATI11, filtered CDR and final bridge
 counters, is retained locally in
 `reference-data/artifacts/mt5634mu-6311-state-20261021/` with a hash manifest.
+
+## Fax trial, 21 October 2026
+
+Two outbound legacy **Class 2** trials from 6004 to the PBX's existing
+internal receiver 3000 reached page CONNECT but **did not complete a fax**.
+This modem reports `+FCLASS=?` as `0,1,2`; do not use the project's Class 2.0
+or 2.1 command dialect for it. Its probed `+FDCC`/`+FDIS` capabilities permit
+14400 bit/s, 1D MH, no ECM; active `+FDIS?` was `1,5,0,2,0,0,0,0`, and
+`+FBOR?` was 0 (direct order). The receiver is Asterisk's existing
+`ReceiveFAX(...,dfz)` / `res_fax_spandsp`; no receiver configuration changed.
+
+The synthetic source is a 1728 x 2292, 204 x 196 dpi monochrome page with
+text, borders and row-index marks. The vendored SpanDSP `t4_tx` encoded it
+as T.4 1D MH, with DLE stuffing and DLE/ETX termination. A local `t4_rx`
+decode of those exact DTE bytes reproduces all dimensions and **zero differing
+pixels**. This validates the input page, not its transmission through USB or
+the telephone bearer.
+
+| Trial | Modem result | PBX evidence |
+|---|---|---|
+| Default 14400 ceiling | `+FCON`, peer `+FDIS:1,5,0,2,0,0,0,0`; ultimately `+FDCS:1,4,0,2,0,0,0,0` (12000 bit/s), page CONNECT at +29.938 s; page input OK; `+FET=2` ends `+FHNG:54`, no `+FPTS:1`. | CDR `1792545933.1925`, channel `PJSIP/6004-000004ee`: ReceiveFAX answered, 25 s. No TIFF at its exact configured output path. |
+| Temporary 9600 ceiling (`+FDIS=1,3,0,2,0,0,0,0`) | `+FDCS:1,3,0,2,0,0,0,0`, page CONNECT at +17.988 s; same page input OK followed by `+FHNG:54`, no `+FPTS:1`. | CDR `1792546100.1927`, channel `PJSIP/6004-000004ef`: ReceiveFAX answered, 13 s; the cumulative G.711 RX protocol error counter increased from 1 to 2. |
+
+The transcript times above start with the local AT session, not PBX answer.
+The PBX leg ended before the DTE finished supplying its page. `+FHNG:54`
+means no response to repeated EOP, per MultiTech's
+[Fax Developer's Guide S000239 rev F](https://multitech.com/wp-content/uploads/s000239.pdf),
+2.4.5, Table 2.3 / page 26. Its 2.5.3.1 and Appendix A describe the legacy Class 2
+bit order and `+FDT` / page / `+FET=2` sequence used here. A page-input `OK`
+is not peer acceptance. These runs do not identify why the receiver ends the
+call; they do not establish hardware fax interoperability or a USB transport
+defect. No RTP/audio capture was taken.
+
+The DTE waits for CONNECT/XON and honors incoming XOFF/XON during page
+upload. Both calls used `ATM0`; the temporary fax rate was restored to the
+original `+FDIS` tuple, and cleanup confirmed `ATH`, `+FCLASS=0` and `ATM0`.
+No reset, NVRAM write, modem DSP change, transcoding, sample-accounting change
+or gateway audio-setting change was made. A broad PBX log read was rejected
+by automatic approval review because it could include unrelated calls; only
+call metadata, counters and a query restricted to the first test channel were
+used. That channel-specific message-log query returned no diagnostic lines.
+
+Retained local evidence is in
+`reference-data/artifacts/mt5634mu-fax-20261021/`: capability probe, exact AT
+transcripts and summaries, sender scripts, synthetic source/encoded page,
+vendored encoder/decoder helper sources, local raster verification, PBX
+metadata and final bridge counters, with a SHA-256 manifest. Copy the scripts
+and page to a fresh `artifacts/` directory before repeating a trial; do not
+overwrite the retained evidence. No production fax implementation was changed.
