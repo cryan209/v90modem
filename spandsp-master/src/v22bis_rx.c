@@ -849,6 +849,24 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
 }
 /*- End of function --------------------------------------------------------*/
 
+/* One sample of a held carrier drop: keep the T/2 sampling instant and the
+   carrier phase running at their trained rates, so the receiver resumes on
+   the same symbol grid when the signal returns, but feed nothing to the
+   equaliser, Gardner or carrier loops -- they would train on line noise --
+   and deliver no bits.  No sample is added to or removed from the stream. */
+static void hold_sample(v22bis_state_t *s)
+{
+    if ((s->rx.eq_put_step -= PULSESHAPER_COEFF_SETS) <= 0)
+        s->rx.eq_put_step += PULSESHAPER_COEFF_SETS*40/(3*2);
+    /*endif*/
+#if defined(SPANDSP_USE_FIXED_POINT)
+    dds_advance(&s->rx.carrier_phase, s->rx.carrier_phase_rate);
+#else
+    dds_advancef(&s->rx.carrier_phase, s->rx.carrier_phase_rate);
+#endif
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v22bis_rx(v22bis_state_t *s, const int16_t amp[], int len)
 {
     int i;
@@ -916,6 +934,25 @@ SPAN_DECLARE(int) v22bis_rx(v22bis_state_t *s, const int16_t amp[], int len)
                    call (v90modem engine_pair_test, 2026-10-05).  V.22bis
                    6.3.1.2.1 has the answer modem send USB1 until it detects
                    S1 or SB1, so only the receiver restarts here. */
+                /* A trained receiver holds instead.  In data mode a carrier
+                   drop is a fault of the line, not a new handshake: a real
+                   CX93001 at V.22bis 2400 dropped to line noise for ~30ms
+                   and came back at full level, 8-10s into every call
+                   (v90modem docs/mnp.md, 2026-10-21), and restarting both
+                   directions here lost the trained state for good.  V.250
+                   6.3.12 (S10) has the DCE stay connected while the received
+                   line signal is absent and continue the call if it returns;
+                   the user's S10 timer, not the datapump, decides when a drop
+                   is a disconnect.  The transmitter is not touched. */
+                if (s->rx.training == V22BIS_RX_TRAINING_STAGE_NORMAL_OPERATION)
+                {
+                    s->rx.signal_present = false;
+                    s->rx.carrier_held = true;
+                    v22bis_report_status_change(s, SIG_STATUS_CARRIER_DOWN);
+                    hold_sample(s);
+                    continue;
+                }
+                /*endif*/
                 if (s->rx.training == V22BIS_RX_TRAINING_STAGE_SYMBOL_ACQUISITION)
                     v22bis_rx_restart(s);
                 else
@@ -930,9 +967,15 @@ SPAN_DECLARE(int) v22bis_rx(v22bis_state_t *s, const int16_t amp[], int len)
         {
             /* Look for power exceeding the carrier on point */
             if (power < s->rx.carrier_on_power)
+            {
+                if (s->rx.carrier_held)
+                    hold_sample(s);
+                /*endif*/
                 continue;
+            }
             /*endif*/
             s->rx.signal_present = true;
+            s->rx.carrier_held = false;
             v22bis_report_status_change(s, SIG_STATUS_CARRIER_UP);
         }
         /*endif*/
@@ -1082,6 +1125,7 @@ int v22bis_rx_restart(v22bis_state_t *s)
     s->rx.training = V22BIS_RX_TRAINING_STAGE_SYMBOL_ACQUISITION;
     s->rx.training_count = 0;
     s->rx.signal_present = false;
+    s->rx.carrier_held = false;
 
     s->rx.carrier_phase_rate = (s->calling_party)  ?  DDS_PHASE_RATE(HIGH_CARRIER_FREQUENCY)  :  DDS_PHASE_RATE(LOW_CARRIER_FREQUENCY);
     s->rx.carrier_phase = 0;

@@ -118,6 +118,12 @@ struct v22bis_state_s
 
         /*! \brief >0 if a signal above the minimum is present. It may or may not be a V.22bis signal. */
         int signal_present;
+        /*! \brief True while the trained receiver is holding through a carrier
+                   drop in data mode: timing and carrier phase run on, the
+                   equaliser and tracking loops are frozen, no bits are
+                   delivered.  The DTE-side S10 timer (V.250 6.3.12) decides
+                   when a drop is a disconnect. */
+        int carrier_held;
 
         /*! \brief The current phase of the carrier (i.e. the DDS parameter). */
         uint32_t carrier_phase;

@@ -94,7 +94,7 @@ static at_profile_t profiles[3] =
         /*.pulse_dial =*/ false,
         /*.double_escape =*/ false,
         /*.adaptive_receive =*/ false,
-        /*.s_regs[100] =*/ {0, 0, '+', '\r', '\n', '\b', 1, 60, 5, 0, 0, 0, 50}
+        /*.s_regs[100] =*/ {0, 0, '+', '\r', '\n', '\b', 1, 60, 5, 0, 14, 0, 50}
 #else
         .echo = true,
         .verbose = true,
@@ -110,7 +110,8 @@ static at_profile_t profiles[3] =
         .s_regs[6] = 1,
         .s_regs[7] = 60,
         .s_regs[8] = 5,
-        .s_regs[10] = 0,
+        /* V.250 6.3.12 gives S10 no default; 14 (1.4s) is the Hayes value. */
+        .s_regs[10] = 14,
         .s_regs[12] = 50
 #endif
     }

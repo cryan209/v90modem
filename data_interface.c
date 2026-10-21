@@ -2183,6 +2183,13 @@ void di_set_connect_timeout(int seconds)
     pthread_mutex_unlock(&t31_mtx);
 }
 
+/* Read from the media thread while a datapump holds through a carrier drop,
+ * where taking t31_mtx could invert the lock order; one byte, so unlocked. */
+int di_carrier_loss_delay(void)
+{
+    return at ? at->p.s_regs[10] : 14;
+}
+
 void di_on_ring(void)
 {
     pthread_mutex_lock(&test_mtx);

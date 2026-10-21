@@ -1,0 +1,95 @@
+# Carrier loss in data mode (S10)
+
+V.250 6.3.12: S10 is "the amount of time, in tenths of a second, that the DCE
+will remain connected to the line (off-hook) after the DCE has indicated the
+absence of received line signal. If the received line signal is once again
+detected before the time specified in S10 expires, the DCE remains connected
+to the line and the call continues." Defined values are 1-254. V.250 gives no
+default and does not define 255. We follow Hayes practice: factory 14 (1.4 s,
+the value in `at_interpreter.c`'s profile, which used to say 0), and 255
+means never disconnect on carrier loss.
+
+## Why
+
+A real CX93001 dialling us at V.22bis 2400 under MNP (`docs/mnp.md`, "CX93001
+dialling in") drops its signal to line noise for about 30 ms, 8-10 s into
+every call, then comes back at full level. Two faults of ours turned that
+into a hang-up:
+
+1. `v22bis_put_bit_cb` hung up on the first `SIG_STATUS_CARRIER_DOWN` after
+   training.
+2. SpanDSP's `v22bis_rx()` answered any carrier drop after symbol
+   acquisition with `v22bis_restart()`, which restarts **both** directions.
+   Our transmitter went back to the start of the handshake, and the trained
+   equaliser, carrier and timing loops were thrown away.
+
+## V.22bis (fixed)
+
+- `v22bis_rx.c`: in `V22BIS_RX_TRAINING_STAGE_NORMAL_OPERATION`, a drop below
+  the carrier-off threshold sets `rx.carrier_held` and reports CARRIER_DOWN.
+  While the carrier is held, each sample runs `hold_sample()`: the T/2
+  sampling counter and the carrier DDS run on at their trained rates, so the
+  receiver resumes on the same symbol grid, but nothing goes to the
+  equaliser, Gardner or carrier loops and no bits are delivered. The AGC is
+  already locked after acquisition. The transmitter is not touched. No
+  sample is added to or removed from the stream. When the power comes back
+  above carrier-on, CARRIER_UP is reported and the same trained receiver
+  carries on. The V.22bis descrambler (1 + x^-14 + x^-17) is
+  self-synchronising, so a few bits are lost after the drop and error
+  control resends the frame they cut. Drops during training still restart
+  the datapump, as before.
+- `modem_engine.c`: CARRIER_DOWN after training starts an S10 countdown in
+  received samples (`v22bis_carrier_hold_tick`, read through
+  `di_carrier_loss_delay()`). CARRIER_UP before it runs out logs
+  "carrier back after N ms" and the call continues. If it runs out, the
+  engine logs "(S10), hanging up" and hangs up. If a second
+  TRAINING_SUCCEEDED arrives in data, the engine logs "retrained in data":
+  that would mean the datapump restarted instead of holding.
+- Circuit 109 (DCD) to the DTE is not dropped during the hold.
+
+Tests (`tests/fast.list`, `engine_pair_test --gap-ms`, which silences the
+caller's signal into the answerer for N ms mid-payload, one sample in for one
+sample out):
+
+| gap | grade |
+|---|---|
+| 30 ms, MNP | payload intact both ways, no retrain, caller resent LTs (5) recovered by MNP |
+| 2 s, MNP | first NO CARRIER 1.42 s after the gap began (S10 = 14) |
+
+Checked by hand as well: `ATS10=5` with a 2 s gap hangs up after 0.52 s.
+`ATS10=255` rides out a 3 s gap and the payload still arrives intact. LAPM
+rides out a 30 ms gap too.
+
+Negative control: with the datapump hold disabled and the engine still
+holding, the 30 ms loopback **still delivers the payload**. SpanDSP's full
+restart retrains against our own engine in about 1.6 s. Only the
+"retrained in data" log tells the two apart, so the test checks for it. The
+live CX does not survive that restart.
+
+## Other datapumps (surveyed 2026-10-21, not changed)
+
+Measured with `engine_pair_test --gap-ms` (V.42 LAPM, `AT+DS=0` so the
+payload is still in flight) or read from the code:
+
+- **V.21 / Bell 103 / V.23** (`v21_put_bit`): hang up on the first
+  CARRIER_DOWN in data. Same fault as V.22bis had, but there is no trained
+  state to keep, so the fix is only the engine's S10 timer. Read from code.
+- **V.32bis** (`v32bis.c` over `v17rx.c`): the engine ignores the status, but
+  `v17_rx()` calls `v17_rx_restart()` on any carrier drop, which throws away
+  the trained receiver and waits for a fresh training sequence the peer
+  never sends. Measured: a 30 ms gap into the answerer and the call never
+  delivers again, ending at V.42 N400 (T401 retries exhausted). It is a
+  hang-up on the first drop with a delay added, and S10 is not applied. A
+  fix needs the same hold in `v17rx.c` (or in `v32bis.c` around it), with
+  care for the clause 7 retrain watch, which must still see a real retrain
+  tone.
+- **V.34** (`v34rx.c`): never reports CARRIER_DOWN. Measured: a 30 ms gap
+  passes, and a 3 s gap is recovered by the engine's §11 retrain ("V.34
+  retrain complete; resuming the existing data link"). It never hangs up on
+  carrier loss, so S10 is not applied in this direction either: a dead line
+  is ended only by the retrain caps or V.42.
+- **V.90 / V.92** (same `v34rx.c` path and status callback): no CARRIER_DOWN
+  in data either. Retrain-on-loss is off by default for V.90
+  (`ME_V90_RETRAIN_ON_LOSS=0`, `docs/retrain_and_resync.md`). Not measured
+  here; the engine pair has no V.90 digital/analogue gap case yet.
+- x2, K56flex and clear channel were not surveyed.

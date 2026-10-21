@@ -1124,6 +1124,11 @@ static int v22bis_get_bit_cb(void *user_data)
 /* Set once V.22bis has actually trained, so a later carrier drop is read as a
  * lost connection rather than as part of the handshake. */
 static bool g_v22bis_trained;
+/* V.250 6.3.12 (S10): a trained V.22bis has lost the received line signal
+ * and the datapump is holding (v22bis_rx.c, carrier_held).  Counts received
+ * samples down to the disconnect; negative when no drop is in progress. */
+static long g_v22bis_hold_left = -1;
+static long g_v22bis_hold_samples;
 /* V.32bis A.2.2: the V.22bis answer modem heard the caller's S1/SB1 in Ta. */
 static bool g_v22bis_carrier_seen;
 static int  g_v22bis_carrier_flaps;
@@ -1280,6 +1285,21 @@ static bool v22bis_status_is_v8_fsk(int bit)
     return true;
 }
 
+/* S10 ran out with the received line signal still absent (V.250 6.3.12). */
+static void v22bis_carrier_hold_tick(int len)
+{
+    g_v22bis_hold_samples += len;
+    if (g_v22bis_hold_left == LONG_MAX)
+        return;
+    if ((g_v22bis_hold_left -= len) > 0)
+        return;
+    g_v22bis_hold_left = -1;
+    ME_LOG("[ME] V.22bis carrier absent for %ld ms (S10), hanging up\n",
+           g_v22bis_hold_samples / 8);
+    trace_phase("V22BIS carrier lost for S10 -> hangup");
+    me_hangup();
+}
+
 static void v22bis_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -1293,7 +1313,12 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
          * "training complete" 8 ms after V.8 and then dropped 60 ms later on
          * the CARRIER_DOWN that follows the V.8 tail.  Only
          * TRAINING_SUCCEEDED means trained. */
-        if (bit == SIG_STATUS_CARRIER_UP) {
+        if (bit == SIG_STATUS_CARRIER_UP && g_v22bis_hold_left >= 0) {
+            ME_LOG("[ME] V.22bis carrier back after %ld ms; call continues (V.250 6.3.12)\n",
+                   g_v22bis_hold_samples / 8);
+            trace_phase("V22BIS carrier back after %ld ms", g_v22bis_hold_samples / 8);
+            g_v22bis_hold_left = -1;
+        } else if (bit == SIG_STATUS_CARRIER_UP) {
             g_v22bis_carrier_seen = true;
             /* A tone at the edge of the receive band (V.32bis AA into our
                answer modem) flaps the carrier detect every few ms; log the
@@ -1306,14 +1331,31 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
             ME_LOG("[ME] Bell 212A: V.22 trained with the far end's tone (2225 Hz "
                    "answer, or Bell 103 originate) still on the line; not connecting on it\n");
         } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED) {
+            /* A held carrier drop resumes without retraining; a second
+               TRAINING_SUCCEEDED means the datapump restarted instead. */
+            if (g_v22bis_trained)
+                ME_LOG("[ME] V.22bis retrained in data (the datapump restarted)\n");
             g_v22bis_trained = true;
             /* V.22bis falls back to 1200 against a V.22 peer, so report
                what it trained at. */
             on_training_complete(ME_MOD_V22BIS,
                                  g_v22bis ? v22bis_get_current_bit_rate(g_v22bis) : 2400,
                                  "V.22bis");
-        } else if (bit == SIG_STATUS_TRAINING_FAILED
-                   || (bit == SIG_STATUS_CARRIER_DOWN && g_v22bis_trained)) {
+        } else if (bit == SIG_STATUS_CARRIER_DOWN && g_v22bis_trained) {
+            /* V.250 6.3.12: stay connected for S10 tenths of a second and
+             * continue the call if the signal returns.  The datapump holds
+             * its trained state meanwhile, so the error-control layer only
+             * sees the frames the drop cut (V.42 / Annex A retransmit them).
+             * A real CX93001 at V.22bis 2400 drops for ~30 ms 8-10 s into
+             * every call (docs/mnp.md); this used to hang up on the spot. */
+            int s10 = di_carrier_loss_delay();
+
+            g_v22bis_hold_samples = 0;
+            g_v22bis_hold_left = s10 >= 255 ? LONG_MAX : (long) s10 * 800;
+            ME_LOG("[ME] V.22bis carrier lost in data; holding for S10=%d%s\n",
+                   s10, s10 >= 255 ? " (never disconnect)" : "");
+            trace_phase("V22BIS carrier lost -> hold (S10=%d)", s10);
+        } else if (bit == SIG_STATUS_TRAINING_FAILED) {
             ME_LOG("[ME] V.22bis fallback failed (%s), hanging up\n",
                     signal_status_to_str(bit));
             trace_phase("V22BIS training failed (%s) -> hangup",
@@ -9195,6 +9237,7 @@ static void start_v22bis_training(void)
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
     g_v22bis_trained = false;
+    g_v22bis_hold_left = -1;
     g_v22bis_carrier_flaps = 0;
     g_phase_start_ms = trace_now_ms();
     /* V.22 mode: SpanDSP's V.22bis at 1200 sends no S1 and does not look
@@ -12533,6 +12576,7 @@ void me_on_sip_connected(void)
             g_mod = ME_MOD_V22BIS;
             g_state = ME_TRAINING;
             g_v22bis_trained = false;
+            g_v22bis_hold_left = -1;
             g_phase_start_ms = trace_now_ms();
             /* 2225 Hz, and V.22's USB1 at 2250 Hz: a V.22 answer modem
                opens with USB1 and moves to scrambled ones on hearing ours,
@@ -15276,6 +15320,8 @@ skip_8k_codewords:
             /* v25_ta_rx() may have moved the call to a legacy datapump. */
             if (g_v22bis)
                 v22bis_rx(g_v22bis, amp, len);
+            if (g_v22bis && g_v22bis_hold_left >= 0)
+                v22bis_carrier_hold_tick(len);
             if (g_v22bis && g_b212)
                 b212_rx_gate(amp, len);
             v25_ta_tick(len);

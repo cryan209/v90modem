@@ -64,6 +64,14 @@
  * arrive intact (--payload-printable with many --payload-reps makes it more
  * than a PTY holds).
  *
+ * --gap-ms N silences the calling side's signal into the answering side for N
+ * ms (digital silence in place of each sample, so no sample is added or
+ * lost), starting --gap-after-ms M (default 1000) after the payloads start: a
+ * carrier drop in data mode, as a real CX93001 makes (docs/mnp.md).  A short
+ * one must be ridden out (V.250 6.3.12, S10) and graded as usual;
+ * --gap-hangup-s LO HI is for a long one, and requires the first NO CARRIER
+ * between LO and HI seconds after the gap began (use with --expect-hangup).
+ *
  * ENGINE_PAIR_KEEP_LOGS=1 keeps both engines' logs after a passing call too,
  * to compare a passing configuration against a failing one.
  */
@@ -435,6 +443,9 @@ int main(int argc, char **argv)
     float fdm_level = -20.0f;
     const char *fdm_tap = NULL;
     int fdm_call_linear = 0;
+    double gap_ms = 0.0, gap_after_ms = 1000.0;
+    double gap_hangup_lo = -1.0, gap_hangup_hi = -1.0;
+    int gap_start = -1, gap_end = -1;
 
     memset(side, 0, sizeof(side));
     side[0].name = "call";
@@ -487,6 +498,13 @@ int main(int argc, char **argv)
             fdm_call_linear = 1;
         } else if (!strcmp(argv[i], "--dte-stall-seconds") && i + 1 < argc) {
             dte_stall_seconds = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--gap-ms") && i + 1 < argc) {
+            gap_ms = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--gap-after-ms") && i + 1 < argc) {
+            gap_after_ms = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--gap-hangup-s") && i + 2 < argc) {
+            gap_hangup_lo = atof(argv[++i]);
+            gap_hangup_hi = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--fax-hdlc")) {
             fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
@@ -562,6 +580,10 @@ int main(int argc, char **argv)
         }
     }
 
+    if (gap_ms > 0.0 && fdm_slot >= 0) {
+        fprintf(stderr, "--gap-ms needs a byte-exact bearer, not --fdm-slot\n");
+        return 2;
+    }
     if (fdm_call_linear && fdm_slot < 0) {
         fprintf(stderr, "--fdm-call-linear needs --fdm-slot\n");
         return 2;
@@ -635,6 +657,9 @@ int main(int argc, char **argv)
     for (int f = 0; f < frames; f++) {
         uint8_t next[2][2*FRAME];
 
+        /* --gap-ms: the answering side hears digital silence instead. */
+        if (gap_start >= 0 && f >= gap_start && f < gap_end)
+            memset(tx[0], alaw ? 0xD5 : 0xFF, FRAME);
         for (int k = 0; k < 2; k++) {
             if (exchange(side, k, tx[1 - k], next[k])) {
                 fprintf(stderr, "%s side stopped at frame %d\n", side[k].name, f);
@@ -656,6 +681,10 @@ int main(int argc, char **argv)
                 && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25) {
                 if (stall_until < 0)
                     stall_until = f + (int) (dte_stall_seconds*8000.0/FRAME);
+                if (gap_ms > 0.0 && gap_start < 0) {
+                    gap_start = f + (int) (gap_after_ms*8.0/FRAME);
+                    gap_end = gap_start + (int) (gap_ms*8.0/FRAME + 0.5);
+                }
                 /* The PTY is non-blocking and holds about 1 KB: a longer
                    payload goes in as the engine drains it, frame by frame. */
                 ssize_t n = write(s->pty_fd, s->payload + s->sent_len,
@@ -742,10 +771,28 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++)
         printf(" %s", argv[i]);
     printf("\n  %s\n", no_connect ? "fixed modes that must not meet"
-                   : expect_hangup ? (done_frame >= 0 ? "call ended without payload" : "call did NOT end")
+                   : expect_hangup ? (done_frame >= 0 ? (gap_start >= 0 ? "call ended after the gap" : "call ended without payload") : "call did NOT end")
                                    : (done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged"));
     if (expect_hangup && done_frame < 0)
         failed = 1;
+    if (gap_start >= 0)
+        printf("  gap: %.0f ms into the answering side from %.2f s%s\n", gap_ms,
+               gap_start * FRAME / 8000.0, done_frame >= 0 && done_frame < gap_start
+               ? " (call over before it began)" : "");
+    /* A short gap is only tested if the payload was still crossing it. */
+    if (gap_ms > 0.0 && !expect_hangup && (gap_start < 0 || done_frame < gap_end)) {
+        printf("  FAIL: the payload was not still in flight when the gap ended\n");
+        failed = 1;
+    }
+    if (gap_hangup_lo >= 0.0) {
+        double after = gap_start >= 0 && done_frame >= gap_start && expect_hangup
+                     ? (done_frame - gap_start) * FRAME / 8000.0 : -1.0;
+
+        printf("  first NO CARRIER %.2f s after the gap began (want %.2f-%.2f)\n",
+               after, gap_hangup_lo, gap_hangup_hi);
+        if (after < gap_hangup_lo || after > gap_hangup_hi)
+            failed = 1;
+    }
     if (g_fdm.on) {
         printf("  FDM bearer: %ld clipped wideband samples\n", g_fdm.clipped);
         for (int k = 0; k < 2; k++)

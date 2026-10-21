@@ -161,7 +161,7 @@ static const s_row_t s_rows[] = {
     { 6,  "Pause before blind dialling, s (stored only)" },
     { 7,  "Connection timeout, s (NO CARRIER; --connect-timeout)" },
     { 8,  "Comma pause, s (stored; SIP has no pause)" },
-    { 10, "Carrier loss disconnect delay, 1/10 s (stored only)" },
+    { 10, "Carrier loss disconnect delay, 1/10 s (V.22bis; 255 = never)" },
     { 12, "Escape guard time, 1/50 s (50 = 1 s; 0 = none)" },
 };
 

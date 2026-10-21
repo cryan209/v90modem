@@ -185,6 +185,10 @@ void di_load_profile(const char *path);
 
 /* S7's factory value (V.250 6.3.10, seconds from ATD/ATA to CONNECT). */
 void di_set_connect_timeout(int seconds);
+/* S10, V.250 6.3.12: how long, in tenths of a second, the DCE stays connected
+ * after the received line signal is lost (factory 14).  255 is outside V.250's
+ * 1-254 and means, as in Hayes practice, never disconnect on carrier loss. */
+int di_carrier_loss_delay(void);
 
 /*
  * Read DTE payload bytes (application → modem). Non-blocking; returns the

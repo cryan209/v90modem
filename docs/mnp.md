@@ -245,7 +245,10 @@ MNP, then V.14).  Recipe: `tools/soak/answer_ec_call.sh` on CT 117,
   "stored only", and a post-training carrier drop restarts SpanDSP's whole
   V.22bis datapump (`v22bis_rx.c`).  Tolerating such a gap needs the trained
   datapump held through it, which is datapump work across modulations, not
-  an MNP change.
+  an MNP change.  **Fixed for V.22bis 2026-10-21** (`docs/carrier_loss.md`):
+  the trained receiver holds through the drop and the engine applies S10.
+  In loopback a 30 ms gap now costs 5 LTs that MNP resends.  Not yet
+  re-verified against the CX.
 * One spurious go-back on the answerer: with no round-trip measurement yet
   (only the originator samples one from the LR exchange), the CX's
   pre-data LA repeating N(R)=0 resent our first LT once.  Harmless (the copy
@@ -260,7 +263,8 @@ Still not verified:
    had an out-of-sequence LT.
 3. MNP over V.32bis (V.32bis does not train against the RasFinder at all,
    `rasfinder_modulation_tests_20261020.md`), and an MNP answerer call that
-   lasts: every CX MNP call was cut by the S10 gap above.
+   lasts: every CX MNP call was cut by the S10 gap above (fixed in
+   loopback, live re-test pending).
 
 The rigs that could answer these: the Courier (`&M4`, `&M5` with MNP) and
 MICA (`MNP 2-5` in its banner).
