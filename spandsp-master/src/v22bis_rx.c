@@ -853,11 +853,27 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
    carrier phase running at their trained rates, so the receiver resumes on
    the same symbol grid when the signal returns, but feed nothing to the
    equaliser, Gardner or carrier loops -- they would train on line noise --
-   and deliver no bits.  No sample is added to or removed from the stream. */
+   and deliver no bits.  No sample is added to or removed from the stream.
+   Each held T/2 instant still occupies its slot in the equaliser delay line
+   (as the silence it was) and flips baud_phase, as process_half_baud()
+   would: skipping an odd number of them left the receiver deciding at the
+   eye crossing, not the centre, for the rest of the call -- a 60ms RTP loss
+   on a live CX93001 call, 2026-10-21 (docs/carrier_loss.md). */
 static void hold_sample(v22bis_state_t *s)
 {
     if ((s->rx.eq_put_step -= PULSESHAPER_COEFF_SETS) <= 0)
+    {
         s->rx.eq_put_step += PULSESHAPER_COEFF_SETS*40/(3*2);
+#if defined(SPANDSP_USE_FIXED_POINT)
+        s->rx.eq_buf[s->rx.eq_step] = (complexi16_t) {0, 0};
+#else
+        s->rx.eq_buf[s->rx.eq_step] = (complexf_t) {0.0f, 0.0f};
+#endif
+        if (++s->rx.eq_step >= V22BIS_EQUALIZER_LEN)
+            s->rx.eq_step = 0;
+        /*endif*/
+        s->rx.baud_phase ^= 1;
+    }
     /*endif*/
 #if defined(SPANDSP_USE_FIXED_POINT)
     dds_advance(&s->rx.carrier_phase, s->rx.carrier_phase_rate);

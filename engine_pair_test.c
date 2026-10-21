@@ -445,7 +445,8 @@ int main(int argc, char **argv)
     int fdm_call_linear = 0;
     double gap_ms = 0.0, gap_after_ms = 1000.0;
     double gap_hangup_lo = -1.0, gap_hangup_hi = -1.0;
-    int gap_start = -1, gap_end = -1;
+    int gap_start = -1, gap_end = -1;      /* frames, for grading */
+    long gap_s0 = -1, gap_s1 = -1;          /* samples: the silence itself */
 
     memset(side, 0, sizeof(side));
     side[0].name = "call";
@@ -658,8 +659,9 @@ int main(int argc, char **argv)
         uint8_t next[2][2*FRAME];
 
         /* --gap-ms: the answering side hears digital silence instead. */
-        if (gap_start >= 0 && f >= gap_start && f < gap_end)
-            memset(tx[0], alaw ? 0xD5 : 0xFF, FRAME);
+        for (long n = 0; gap_s0 >= 0 && n < FRAME; n++)
+            if ((long) f*FRAME + n >= gap_s0 && (long) f*FRAME + n < gap_s1)
+                tx[0][n] = alaw ? 0xD5 : 0xFF;
         for (int k = 0; k < 2; k++) {
             if (exchange(side, k, tx[1 - k], next[k])) {
                 fprintf(stderr, "%s side stopped at frame %d\n", side[k].name, f);
@@ -682,8 +684,12 @@ int main(int argc, char **argv)
                 if (stall_until < 0)
                     stall_until = f + (int) (dte_stall_seconds*8000.0/FRAME);
                 if (gap_ms > 0.0 && gap_start < 0) {
-                    gap_start = f + (int) (gap_after_ms*8.0/FRAME);
-                    gap_end = gap_start + (int) (gap_ms*8.0/FRAME + 0.5);
+                    /* Sample-accurate: a datapump hold must come out on
+                       the right T/2 parity whatever the gap's length. */
+                    gap_s0 = (long) f*FRAME + lround(gap_after_ms*8.0);
+                    gap_s1 = gap_s0 + lround(gap_ms*8.0);
+                    gap_start = (int) (gap_s0/FRAME);
+                    gap_end = (int) ((gap_s1 + FRAME - 1)/FRAME);
                 }
                 /* The PTY is non-blocking and holds about 1 KB: a longer
                    payload goes in as the engine drains it, frame by frame. */
@@ -776,8 +782,8 @@ int main(int argc, char **argv)
     if (expect_hangup && done_frame < 0)
         failed = 1;
     if (gap_start >= 0)
-        printf("  gap: %.0f ms into the answering side from %.2f s%s\n", gap_ms,
-               gap_start * FRAME / 8000.0, done_frame >= 0 && done_frame < gap_start
+        printf("  gap: %.3f ms into the answering side from %.4f s%s\n", gap_ms,
+               gap_s0 / 8000.0, done_frame >= 0 && done_frame < gap_start
                ? " (call over before it began)" : "");
     /* A short gap is only tested if the payload was still crossing it. */
     if (gap_ms > 0.0 && !expect_hangup && (gap_start < 0 || done_frame < gap_end)) {
@@ -786,7 +792,7 @@ int main(int argc, char **argv)
     }
     if (gap_hangup_lo >= 0.0) {
         double after = gap_start >= 0 && done_frame >= gap_start && expect_hangup
-                     ? (done_frame - gap_start) * FRAME / 8000.0 : -1.0;
+                     ? ((long) done_frame*FRAME - gap_s0) / 8000.0 : -1.0;
 
         printf("  first NO CARRIER %.2f s after the gap began (want %.2f-%.2f)\n",
                after, gap_hangup_lo, gap_hangup_hi);

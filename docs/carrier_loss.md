@@ -30,7 +30,9 @@ into a hang-up:
   While the carrier is held, each sample runs `hold_sample()`: the T/2
   sampling counter and the carrier DDS run on at their trained rates, so the
   receiver resumes on the same symbol grid, but nothing goes to the
-  equaliser, Gardner or carrier loops and no bits are delivered. The AGC is
+  equaliser, Gardner or carrier loops and no bits are delivered. Each held
+  T/2 instant still puts a zero into the equaliser delay line and flips
+  `baud_phase`, as `process_half_baud()` would; see "Parity" below. The AGC is
   already locked after acquisition. The transmitter is not touched. No
   sample is added to or removed from the stream. When the power comes back
   above carrier-on, CARRIER_UP is reported and the same trained receiver
@@ -48,23 +50,60 @@ into a hang-up:
 - Circuit 109 (DCD) to the DTE is not dropped during the hold.
 
 Tests (`tests/fast.list`, `engine_pair_test --gap-ms`, which silences the
-caller's signal into the answerer for N ms mid-payload, one sample in for one
-sample out):
+caller's signal into the answerer for N ms mid-payload, sample-accurate, one
+sample in for one sample out):
 
 | gap | grade |
 |---|---|
-| 30 ms, MNP | payload intact both ways, no retrain, caller resent LTs (5) recovered by MNP |
+| 40 ms, MNP | held without a retrain, payload intact both ways, caller resent LTs (5) recovered by MNP |
+| 60.75 ms, MNP | the same; this length holds an odd number of T/2 instants |
 | 2 s, MNP | first NO CARRIER 1.42 s after the gap began (S10 = 14) |
+
+Carrier detect needs about 30 ms of silence to drop. The power meter is
+exponential, and falling to the carrier-off level takes about 8 of its 4 ms
+time constants. So a 20-30 ms gap never trips the hold: the receiver runs
+through it on zeros, which leaves the equaliser taps unchanged because the
+input is zero, and error control resends what was cut. Live 20 ms RTP
+losses behave the same way.
+
+### Parity (found live, 2026-10-21)
+
+`process_half_baud()` takes T/2 samples and makes a decision only on
+alternate ones (`baud_phase`). The first version of `hold_sample()` kept
+the T/2 counter running but skipped those insertions. After a hold of an
+odd number of T/2 instants, the receiver decided at the eye crossing for
+the rest of the call: decision error 0.04 -> 0.77, constellation magnitude
+3.0 -> 1.8, and the decision-directed loops wandered off. The first
+loopback rows passed by luck, because their frame-granular gaps always held
+an even number. A sample-by-sample sweep from 60.000 to 60.875 ms fails at
+60.625-60.875 with the old hold and passes everywhere with the fixed one.
 
 Checked by hand as well: `ATS10=5` with a 2 s gap hangs up after 0.52 s.
 `ATS10=255` rides out a 3 s gap and the payload still arrives intact. LAPM
-rides out a 30 ms gap too.
+rides out a 40 ms gap too.
 
 Negative control: with the datapump hold disabled and the engine still
-holding, the 30 ms loopback **still delivers the payload**. SpanDSP's full
+holding, the 40 ms loopback **still delivers the payload**. SpanDSP's full
 restart retrains against our own engine in about 1.6 s. Only the
 "retrained in data" log tells the two apart, so the test checks for it. The
 live CX does not survive that restart.
+
+## Live, CX93001 (+ES=4,4, AT+MS=V22B) into the CT 117 server
+
+- Call 1: V.8 failed twice (the CX's CM unreadable, `modulations=none`).
+  We trained at 1200 without V.8 and the CX never reported CONNECT. Not a
+  data-mode result.
+- Call 2 (`CONNECT 2400`, CX `&V1`: PROTOCOL MNP): the CX's own analogue
+  drop (~30 ms, RMS 5) at 17.98 s was ridden out; the old code hung up
+  there. At 21.26 s, 3 lost RTP packets (seq 24329-24331) reached us as 60 ms
+  of exact digital zero. The hold engaged, and the parity bug above left our
+  receiver white for the rest of the call: 6 of 20 lines arrived, and 928
+  octets were unsent when the CX's scheduled hang-up came. Replaying the tap
+  through `v90_engine_replay --sync --echo-ref` reproduced the call to the
+  millisecond. With the parity fix the replay's receiver stays at decision
+  error 0.04 for the whole call. The CX's symbol timing drifts smoothly
+  (about 0.9 samples/s) with no jump at the gap, so the signal itself was
+  always decodable.
 
 ## Other datapumps (surveyed 2026-10-21, not changed)
 

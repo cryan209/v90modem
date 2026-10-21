@@ -659,10 +659,14 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./engine_pair_test --expect V22BIS --expect-connect 1200 --both-at "AT+MS=V22" --both-at "AT+MR=1" --both-expect "+MCR: V22|+MRR: 1200|CONNECT 1200"
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT&A3" --both-at "AT&M4" --both-expect "CONNECT 2400/ARQ/V22B/LAPM/V42BIS"
 # V.250 6.3.12 (S10) carrier loss in data, MNP at V.22bis 2400 as the CX93001
-# dials us (docs/carrier_loss.md): a 30 ms drop into the answerer is ridden
-# out without a retrain and costs the caller resent LTs, which MNP recovers;
-# a 2 s drop hangs up at S10 = 1.4 s.
-./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B" --call-at "AT+ES=4,4" --both-at "AT&A3" --both-expect "/ARQ/V22B/MNP" --payload-printable X --payload-reps 16 --gap-ms 30 --gap-after-ms 1500 --answer-log "carrier back after" --answer-nolog "retrained in data" --call-after ATI11 --call-absent "(resent 0)" --seconds 60
+# dials us (docs/carrier_loss.md): a 40 ms drop into the answerer (long
+# enough to trip carrier detect, ~30 ms) is held through without a retrain
+# and costs the caller resent LTs, which MNP recovers; a 2 s drop hangs up
+# at S10 = 1.4 s.  60.75 ms holds an odd number of T/2 instants: a hold that
+# loses baud_phase parity fails it (60.625-60.875 ms), as a 60 ms RTP loss
+# did on a live CX call; the 40 ms row passes either way.
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B" --call-at "AT+ES=4,4" --both-at "AT&A3" --both-expect "/ARQ/V22B/MNP" --payload-printable X --payload-reps 16 --gap-ms 40 --gap-after-ms 1500 --answer-log "carrier back after" --answer-nolog "retrained in data" --call-after ATI11 --call-absent "(resent 0)" --seconds 60
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B" --call-at "AT+ES=4,4" --both-at "AT&A3" --both-expect "/ARQ/V22B/MNP" --payload-printable X --payload-reps 16 --gap-ms 60.75 --gap-after-ms 1500 --answer-log "carrier back after" --answer-nolog "retrained in data" --seconds 60
 ./engine_pair_test --expect V22BIS --both-at "AT+MS=V22B" --call-at "AT+ES=4,4" --both-at "AT&A3" --answer-expect "/ARQ/V22B/MNP|NO CARRIER" --payload-printable X --payload-reps 16 --gap-ms 2000 --gap-after-ms 1500 --expect-hangup --gap-hangup-s 1.3 1.6 --answer-log "(S10), hanging up" --seconds 40
 ./engine_pair_test --expect V32BIS --expect-connect 9600 --both-env ME_MODE=v32bis --call-at "AT+MS=V32B,1,0,9600"
 ./engine_pair_test --expect V22BIS --call-at "AT+MS=V22B,1,2400" --answer-env ME_MODE=v22-1200 --expect-hangup --call-absent CONNECT --call-expect "NO CARRIER"
