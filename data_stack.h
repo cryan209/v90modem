@@ -101,6 +101,9 @@ typedef struct {
     bool suspended;                /* V.92 9.10.3 modem-on-hold */
     bool fallback_buffered;        /* unsupported peer => V.14 instead of failing */
     bool demote_pending;
+    /* Answerer's T400 counted on received bits (V.42 7.2.1.3); 0 = off. */
+    int rx_t400_bits;
+    int t400_ms;                   /* the T400 it counts, for re-arming */
     /* MNP (DS_FRAMING_MNP, or the answerer's LR watch during V.42 detection). */
     mnp_t *mnp;
     bool alternative_ok;           /* MNP after V.42 detection finds no LAPM */

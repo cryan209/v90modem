@@ -197,6 +197,60 @@ the same with the changes committed with this note (c8, c9).  Captures: `/root/m
   call it heard nothing it accepted; the other eight answered our first LR
   within 0.45 s.  Not reproduced.
 
+### CX93001 dialling in, 21 October 2026
+
+The Conexant CX93001 (`CX93001-EIS_V0.2013-V92`, USB on the dev Mac, now
+`/dev/cu.usbmodem246802461`) dials our answerer through the Grandstream
+ATA, which presents it as **6005** ("ATA L2"), not 6004.  Our server on
+vmhost CT 117 answers as 2904 at the factory `+ES` (V.42 detection, then
+MNP, then V.14).  Recipe: `tools/soak/answer_ec_call.sh` on CT 117,
+`tools/cx_hold_dial.py <tty> 2904 35 <setup>` here.  `+MS=V22B` on the CX
+(it sends no CM, so V.8 fails and we reach V.22bis through USB1).
+
+* **`AT\N2` on this CX is not MNP-only.**  It sends V.42 ODP and, if no ADP
+  comes, MNP LRs every 4.06 s.  `+ES=4,4` is MNP only (accepted;
+  `+ES=?` is `(0-4,6,7),(0-4),(0-6,8,9)`).
+* **Our answerer's T400 was being eaten by our own buffering** (fixed
+  here).  First call: the CX's ODP started 0.5 s into the data phase, we
+  declared "no error-control peer" at 0.75 s, went to V.14, and ignored the
+  ODP and all seven LRs that followed (`CONNECT 2400/V22B`, `+ER: NONE`).
+  The bits were clean: replayed into the data stack they detect ODP at
+  0.39 s.  The difference is that SpanDSP clocks T400 on transmitted bits,
+  and our transmit runs 1214 bits (506 ms) ahead of our receive -- measured
+  as the gap between the fourth received DC1 and the start of our ADP on the
+  next call.  7.2.1.3 has the answerer examine "the incoming bit stream",
+  so `data_stack.c` now counts the answerer's T400 on received bits
+  (`ds_arm_t400()`), with the transmit-clocked timer as a 10 s backstop.
+  `data_stack_test` checks both directions (ODP 0.5 s in with transmit 506
+  ms ahead: detected; marks only: fallback after exactly 750 ms of received
+  bits); both checks fail on the old code.  The originator's T400 (waiting
+  for ADP) still runs on transmitted bits.
+* **With that, `\N2` gives `CONNECT 2400/ARQ/V22B/LAPM/V42BIS`** at the
+  default T400, 20 of 20 lines each way (it took `ME_V42_T400_MS=3000` on the
+  call before the fix).
+* **MNP answerer, live: works, then the call drops.**  CX at `+ES=4,4`:
+  `+ER: ALT`, `CONNECT 2400/ARQ/V22B/MNP`, the CX's `&V1` says `PROTOCOL
+  MNP`.  Its LR: `02 | 01 06 01 00 00 00 00 ff | 02 01 03 | 03 01 08 | 04 02
+  40 00 | 08 01 02 | 09 01 05` -- k 8, N401 64, fixed-field LT/LA but not
+  the 256-octet facility, and a parameter 9 we do not know, which our
+  response LR leaves out (A.7.1.5.6); the CX accepts that and runs without
+  compression.  LTs and LAs then run cleanly both ways (5 lines each way,
+  every LA advancing).  All three MNP calls (cx4-cx6) then ended 8-10 s into
+  data, including one where we sent nothing: the CX's signal falls to line
+  noise for ~30 ms (cx5: it comes back at full level), our V.22bis receiver
+  reports carrier down, and the engine hangs up at once.  The LAPM calls
+  never had such a gap; why the CX makes one in MNP mode is not known.  The
+  fault on our side is that we ignore **S10** (V.250 carrier-loss disconnect
+  delay, factory 1.4 s; the CX itself is at S10=14): `at_help.c` lists it as
+  "stored only", and a post-training carrier drop restarts SpanDSP's whole
+  V.22bis datapump (`v22bis_rx.c`).  Tolerating such a gap needs the trained
+  datapump held through it, which is datapump work across modulations, not
+  an MNP change.
+* One spurious go-back on the answerer: with no round-trip measurement yet
+  (only the originator samples one from the LR exchange), the CX's
+  pre-data LA repeating N(R)=0 resent our first LT once.  Harmless (the copy
+  is the first repeat of the last LT, A.7.3.2.2), not changed.
+
 Still not verified:
 
 1. Our 3-try LR budget after a failed V.42 detection.  The RasFinder runs
@@ -204,10 +258,9 @@ Still not verified:
    above says a peer can stop listening within 4 s.
 2. Whether a peer minds the LA-per-out-of-sequence-frame volume: no call here
    had an out-of-sequence LT.
-3. Any peer as the MNP initiator against our answerer (`+ES=3,0,6` or the
-   factory answerer), and MNP over V.32bis (V.32bis does not train against the
-   RasFinder at all, `rasfinder_modulation_tests_20261020.md`).
+3. MNP over V.32bis (V.32bis does not train against the RasFinder at all,
+   `rasfinder_modulation_tests_20261020.md`), and an MNP answerer call that
+   lasts: every CX MNP call was cut by the S10 gap above.
 
-The rigs that could answer these: the Courier (`&M4`, `&M5` with MNP), MICA
-(`MNP 2-5` in its banner), and the CX93001 on 6004 (`AT\N2`), none of which
-was connected on 21 October.
+The rigs that could answer these: the Courier (`&M4`, `&M5` with MNP) and
+MICA (`MNP 2-5` in its banner).

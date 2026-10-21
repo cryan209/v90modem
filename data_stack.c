@@ -389,6 +389,38 @@ static int ds_v42_n400(void)
     return 20;
 }
 
+#define DS_T400_DEFAULT_MS 750           /* V.42 9.1.1 */
+#define DS_T400_TX_BACKSTOP_MS 10000
+
+/* V.42 7.2.1.3: the answerer examines "the incoming bit stream" for the ODP,
+   and falls back if it is not observed within T400 of the physical
+   connection.  SpanDSP clocks T400 on transmitted bits, and here transmit
+   runs ahead of receive by our own buffering (jitter buffer, media frames,
+   demodulator): 1214 bits, 506 ms, on a live V.22bis call from a CX93001 --
+   two thirds of a 750 ms meant for propagation.  On the first such call the
+   CX's ODP came a quarter of a second later than on the next, and we fell
+   back to V.14 with its ODP and the MNP LRs after it ignored.  The answerer therefore counts T400 on received
+   bits (ds_rx_put_bit), and the transmit-clocked timer is only a backstop for
+   a receiver that delivers nothing.  0 = the default.  The bits are counted
+   at line_bit_rate, so where receive is slower than that (V.90's upstream)
+   T400 is longer in proportion -- the safe direction.  The originator's T400
+   (waiting for ADP) is unchanged. */
+static void ds_arm_t400(data_stack_t *s, int t400_ms)
+{
+    int ms = (t400_ms > 0)  ?  t400_ms  :  DS_T400_DEFAULT_MS;
+
+    if (s->calling_party) {
+        s->rx_t400_bits = 0;
+        v42_set_t400(s->v42, t400_ms);
+        return;
+    }
+    s->t400_ms = ms;
+    s->rx_t400_bits = (int) ((int64_t) ms*s->line_bit_rate/1000);
+    if (s->rx_t400_bits < 1)
+        s->rx_t400_bits = 1;
+    v42_set_t400(s->v42, ms + DS_T400_TX_BACKSTOP_MS);
+}
+
 int ds_init_v42_ex(data_stack_t *s,
                 bool calling_party,
                 bool detect,
@@ -413,7 +445,6 @@ int ds_init_v42_ex(data_stack_t *s,
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
-    v42_set_t400(s->v42, ds_v42_t400_ms());
     if (v42_set_compression(s->v42, p0, p1, p2) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
         v42_free(s->v42);
@@ -421,6 +452,7 @@ int ds_init_v42_ex(data_stack_t *s,
         return -1;
     }
     s->line_bit_rate = line_bit_rate;
+    ds_arm_t400(s, ds_v42_t400_ms());
     v42_restart(s->v42);
     return 0;
 }
@@ -451,7 +483,6 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
-    v42_set_t400(s->v42, ds_v42_t400_ms());
     if (v42_set_v44(s->v42, parameters ? parameters : &defaults) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0)
     {
@@ -459,6 +490,7 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
         return -1;
     }
     s->line_bit_rate = line_bit_rate;
+    ds_arm_t400(s, ds_v42_t400_ms());
     v42_restart(s->v42);
     return 0;
 }
@@ -466,7 +498,7 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
 void ds_v42_restart_t400(data_stack_t *s, int t400_ms)
 {
     if (s  &&  s->v42) {
-        v42_set_t400(s->v42, t400_ms);
+        ds_arm_t400(s, t400_ms);
         v42_restart_t400(s->v42);
     }
 }
@@ -836,6 +868,18 @@ static FILE *ds_tx_bit_dump(void)
     return f;
 }
 
+static void ds_tx_bit_dump_put(FILE *f, int bit)
+{
+    static unsigned n;
+
+    if (!f)
+        return;
+    fputc(bit ? '1' : '0', f);
+    /* As the receive dump: a server stopped by a signal flushes nothing. */
+    if ((++n & 8191) == 0)
+        fflush(f);
+}
+
 static int ds_tx_get_bit_impl(data_stack_t *s)
 {
     int bit;
@@ -859,7 +903,7 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
            V.42 7.2.1.3: the answerer sends marks until detection ends. */
         if (s->demote_pending)
             bit = 1;
-        if (dump) fputc(bit ? '1' : '0', dump);
+        ds_tx_bit_dump_put(dump, bit);
         return bit;
     }
     if (s->framing == DS_FRAMING_MNP)
@@ -872,7 +916,7 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
         /* Falling back to V.14 from inside that call: mark, as for V.42. */
         if (s->demote_pending)
             bit = 1;
-        if (dump) fputc(bit ? '1' : '0', dump);
+        ds_tx_bit_dump_put(dump, bit);
         return bit;
     }
     if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
@@ -1003,6 +1047,13 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
             mnp_rx_bit(s->mnp, bit);
         if (s->v42)
             v42_rx_bit(s->v42, bit);
+        /* The answerer's T400 has run on received bits (ds_arm_t400): end it
+           now.  A no-op once detection is over. */
+        if (s->rx_t400_bits > 0  &&  --s->rx_t400_bits == 0  &&  s->v42) {
+            v42_set_t400(s->v42, 1);
+            v42_restart_t400(s->v42);
+            v42_set_t400(s->v42, s->t400_ms + DS_T400_TX_BACKSTOP_MS);
+        }
         return;
     }
 

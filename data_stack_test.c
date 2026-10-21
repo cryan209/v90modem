@@ -944,6 +944,80 @@ static void alt_event(void *ctx, ds_link_event_t e)
     if ((int) e < 16) alt_events[e]++;
 }
 
+/* V.42 7.2.1.3: the answerer's T400 is about the incoming bit stream.  Here
+ * transmit runs ahead of receive (1214 bits, 506 ms, measured live with a
+ * CX93001 caller): an ODP the far end starts 0.5 s into the data phase must
+ * still be seen, and a caller that sends only marks still falls back after
+ * 750 ms of them. */
+static ds_link_event_t t400_events[16];
+static int t400_event_count;
+
+static void t400_event(void *ctx, ds_link_event_t e)
+{
+    (void) ctx;
+    if (t400_event_count < 16)
+        t400_events[t400_event_count++] = e;
+}
+
+static int t400_none(void *ctx) { (void) ctx; return -1; }
+static void t400_sink(void *ctx, uint8_t b) { (void) ctx; (void) b; }
+
+static bool t400_saw(ds_link_event_t e)
+{
+    for (int i = 0; i < t400_event_count; i++)
+        if (t400_events[i] == e)
+            return true;
+    return false;
+}
+
+/* Bits the answerer receives: marks, then ODP from bit odp_at (or never). */
+static int t400_rx_bit(long i, long odp_at)
+{
+    /* DC1 even parity, 9 marks, DC1 odd parity, 9 marks (V.42 7.2.1.2). */
+    static const char odp[] = "0100010001" "111111111" "0100010011" "111111111";
+    long k;
+
+    if (odp_at < 0  ||  i < odp_at)
+        return 1;
+    k = (i - odp_at) % (long) (sizeof(odp) - 1);
+    return odp[k] - '0';
+}
+
+static long t400_run(long odp_at, int *fallback_at)
+{
+    static data_stack_t s;
+    long detected_at = -1;
+
+    t400_event_count = 0;
+    *fallback_at = -1;
+    ds_init_v42(&s, false, true, 2400, t400_none, NULL, t400_sink, NULL, t400_event, NULL);
+    ds_set_fallback_buffered(&s, true);
+    for (int i = 0; i < 1214; i++)
+        ds_tx_get_bit(&s);
+    for (long i = 0; i < 2400 * 3; i++) {
+        ds_tx_get_bit(&s);
+        ds_rx_put_bit(&s, t400_rx_bit(i, odp_at));
+        if (detected_at < 0  &&  t400_saw(DS_LINK_DETECTED))
+            detected_at = i;
+        if (*fallback_at < 0  &&  t400_saw(DS_LINK_FALLBACK))
+            *fallback_at = (int) i;
+    }
+    ds_release(&s);
+    return detected_at;
+}
+
+static void test_v42_answerer_t400_on_received_bits(void)
+{
+    int fallback_at;
+    long detected = t400_run(1200, &fallback_at);
+
+    CHECK(detected > 1200 && fallback_at < 0,
+          "V.42 answerer: ODP 0.5 s in is seen though transmit leads receive by 506 ms (7.2.1.3)");
+    detected = t400_run(-1, &fallback_at);
+    CHECK(detected < 0 && fallback_at >= 1790 && fallback_at <= 1810,
+          "V.42 answerer: no ODP falls back after T400 = 750 ms of received bits (9.1.1)");
+}
+
 static void test_mnp_alternative_then_v14_fallback(void)
 {
     data_stack_t caller, peer;
@@ -1008,6 +1082,7 @@ int main(void)
     test_mnp_fcs_check_values();
     test_mnp_lr_encoding();
     test_mnp_n401_facility();
+    test_v42_answerer_t400_on_received_bits();
     test_mnp_alternative_then_v14_fallback();
     test_compression_error();
     test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");
