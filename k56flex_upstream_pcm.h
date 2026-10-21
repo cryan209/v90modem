@@ -23,6 +23,8 @@ typedef struct {
     uint8_t ext;
     uint16_t report;
     int sbar_sample;
+    int mp_sample, mp_ack_sample;
+    unsigned mp_type, mp_up, mp_down, mp_mask, mp_trellis, mp_nonlinear, mp_shaping;
 } k56flex_upstream_pcm_result_t;
 
 /* Batch-only linear 8 kHz input. Caller expands G.711 without altering its
@@ -33,7 +35,8 @@ typedef struct {
  * Maximum input: 80000 samples (10 seconds). tap must be 5 or 18. */
 int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
                                k56flex_upstream_pcm_result_t *out);
-/* Streaming audio-only acquisition of the same preamble/report. baud_code
+/* Streaming audio-only acquisition of the preamble/report and following MP.
+ * MP is V.34 10.1.3.9 framing with K56's downstream rate field. baud_code
  * is V.34 Table 1's 0..5 symbol-rate index; carrier comes from INFO1a.
  * Per-call state, at most 80000 samples before acquisition; the acquired
  * FIR retains only its history/lookahead between chunks. Each event is
@@ -41,6 +44,8 @@ int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
 typedef struct k56flex_upstream_pcm_s k56flex_upstream_pcm_t;
 #define K56U_ACQUIRED 4  /* one-shot streaming S/S-bar/PP/TRN validation */
 #define K56U_SBAR 8      /* earlier, directly observed S/S-bar reversal */
+#define K56U_MP 16       /* two identical CRC/start/fill-valid MP records */
+#define K56U_MP_ACK 32   /* one CRC-valid MP' acknowledging the accepted MP */
 k56flex_upstream_pcm_t *k56flex_upstream_pcm_new(int baud_code, int high_carrier, unsigned tap);
 void k56flex_upstream_pcm_free(k56flex_upstream_pcm_t *s);
 int k56flex_upstream_pcm_rx(k56flex_upstream_pcm_t *s, const int16_t *pcm, int count,

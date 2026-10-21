@@ -149,11 +149,36 @@ static void test_gate_timeout(void)
     CHECK(k56flex_train_init(&t, &cfg) < 0, "bad rate rejected");
 }
 
+static void test_mp_limits(void)
+{
+    for (int cap = K56FLEX_RATE_MIN_BPS; cap <= K56FLEX_RATE_MAX_BPS; cap += 2000)
+    for (unsigned down = 1; down <= 15; down++) {
+        k56flex_train_t t;
+        k56flex_train_cfg_t cfg = {0};
+        cfg.rate_bps = cap;
+        CHECK(!k56flex_train_init(&t, &cfg), "MP limit init");
+        CHECK(k56flex_train_accept_mp(&t, 4, down, 0x5) == 7200,
+              "choose supported upstream rate below maximum");
+        int peer = (int)(down+15)*2000;
+        CHECK(t.cfg.rate_bps == (cap < peer ? cap : peer), "respect both downstream caps");
+        CHECK(t.cfg.param.extra == 3 && t.cfg.param.control == 5 && t.cfg.param.bit == 1,
+              "negotiated upstream MP fields");
+        k56flex_train_cfg_t before = t.cfg;
+        CHECK(k56flex_train_accept_mp(&t, 0, down, 0x7fff) < 0, "cleardown rejected");
+        CHECK(k56flex_train_accept_mp(&t, 4, down, 0x10) < 0, "no enabled upstream rejected");
+        CHECK(k56flex_train_accept_mp(&t, 15, down, 0x7fff) < 0, "reserved upstream rejected");
+        CHECK(!memcmp(&t.cfg, &before, sizeof(before)), "rejected MP cannot mutate limits");
+        t.phase = K56T_PARAM_1;
+        CHECK(k56flex_train_accept_mp(&t, 4, down, 15) < 0, "late MP cannot replace transmitted parameters");
+    }
+}
+
 int main(void)
 {
     test_composite();
     test_to_data();
     test_gate_timeout();
+    test_mp_limits();
     printf(failures ? "k56flex_train_test: %d FAILURES\n" : "k56flex_train_test: all passed\n", failures);
     return failures != 0;
 }

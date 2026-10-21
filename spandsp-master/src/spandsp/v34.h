@@ -818,6 +818,11 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int bit_rate,
                                                 int trellis_size);
 
+/* External PCM protocols may select V.34 clause 7 GPC (18/23) rather
+ * than V.90 6.5's GPA (5/23). Set before preparing B1/data; tap is 5 or 18.
+ * This affects only the local receiver, never the transmitted scrambler. */
+SPAN_DECLARE(int) v34_set_rx_data_scrambler(v34_state_t *s, int tap);
+
 /*! Report whether the V.90 upstream receiver has acquired its T/3
     timing/equalizer solution from the known B1 frame (9 kHz at 3000 baud,
     9.6 kHz at 3200 baud). */

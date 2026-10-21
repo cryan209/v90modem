@@ -4976,6 +4976,18 @@ static void l1_l2_signal_init(v34_state_t *s)
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
+    if (s->rx.k56_phase2 && !s->tx.calling_party
+        && s->tx.stage == V34_TX_STAGE_SECOND_A)
+    {
+        /* V.34 11.2.1.2.5: Tone A lasts 10 ms on the WIRE after its
+           reversal, not 10 ms at the input of the nine-symbol CC shaper.
+           L1 bypasses that shaper; switching immediately truncates A by
+           its group delay. Keep the CC output for (9-1)/2 bauds, then
+           start L1 without inserting/deleting any line samples. */
+        s->tx.k56_probe_cc_tail_samples =
+            ((V34_INFO_TX_FILTER_STEPS - 1)*40 + 3)/(2*3);
+        s->tx.current_modulator = V34_MODULATION_CC;
+    }
     /* 11.2.1.2.5 conditions the receiver to detect Tone B as L1 begins, so
        any Tone B seen earlier in the call (the 11.2.1.1.1 burst that carried
        INFO0c) is stale by here. */
@@ -10004,6 +10016,15 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
     /*endif*/
     for (sample = 0;  sample < max_len;  sample++)
     {
+        if (s->tx.k56_probe_cc_tail_samples > 0
+            && --s->tx.k56_probe_cc_tail_samples == 0)
+        {
+            s->tx.current_modulator = V34_MODULATION_L1_L2;
+            /* A transition at the first sample must still fill this call.
+               Returning zero makes v34_tx() stop and the engine pad silence,
+               violating 11.2.1.2.5's contiguous CC-to-L1 handover. */
+            return sample ? sample : tx_l1_l2(s, amp, max_len);
+        }
         if ((s->tx.baud_phase += 3) >= 40)
         {
             s->tx.baud_phase -= 40;
@@ -11623,6 +11644,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.info0_acknowledgement = false;
     s->tx.info0_retry_count = 0;
     s->tx.v90_info1a_fast_retries = 0;
+    s->tx.k56_probe_cc_tail_samples = 0;
     s->tx.v90_info1a_total_retries = 0;
     s->tx.v90_phase2_info0_recovery_loops = 0;
     s->tx.phase3_call_wait_j = false;

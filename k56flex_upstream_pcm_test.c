@@ -169,6 +169,51 @@ static void native_hsf_stream(int with_jtag)
     streaming(pcm, count, 1, with_jtag);
 }
 
+static void native_hsf_mp(void)
+{
+    int16_t pcm[39200];
+    FILE *f = fopen("reference-data/k56flex-hsf/upstream-mp-ulaw.g711", "rb");
+    CHECK(f != NULL, "native MP fixture");
+    if (!f) return;
+    int count = 0, octet;
+    while (count < 39200 && (octet = fgetc(f)) != EOF) pcm[count++] = ulaw_to_linear(octet);
+    CHECK(count == 39200 && fgetc(f) == EOF, "native MP fixture length");
+    fclose(f);
+    const int chunks[] = {1, 80, 160};
+    for (int corrupt = 0; corrupt < 2; corrupt++)
+    for (unsigned c = 0; c < sizeof(chunks)/sizeof(chunks[0]); c++) {
+        k56flex_upstream_pcm_t *rx = k56flex_upstream_pcm_new(4, 1, 18);
+        CHECK(rx != NULL, "native MP allocation");
+        if (!rx) continue;
+        int mps = 0, acks = 0, ends = 0;
+        k56flex_upstream_pcm_result_t r;
+        for (int at = 0; at < count;) {
+            int n = count-at < chunks[c] ? count-at : chunks[c];
+            int16_t input[160];
+            for (int i = 0; i < n; i++)
+                input[i] = corrupt && at+i >= 35200 ? 0 : pcm[at+i];
+            int events = k56flex_upstream_pcm_rx(rx, input, n, &r);
+            CHECK(events >= 0, "native MP chunk rejected");
+            if (events < 0) break;
+            mps += !!(events & K56U_MP);
+            acks += !!(events & K56U_MP_ACK);
+            ends += !!(events & K56U_REPORT_END);
+            if (events & K56U_MP) CHECK(!acks, "MP' before MP");
+            at += n;
+        }
+        CHECK(ends == 1 && mps == !corrupt && acks == !corrupt,
+              "native MP chunk%d corrupt%d: J'a%d MP%d MP'%d", chunks[c], corrupt, ends, mps, acks);
+        if (!corrupt) {
+            CHECK(r.mp_type == 0 && r.mp_up == 4 && r.mp_down == 11
+                  && r.mp_mask == 0x7fff && !r.mp_trellis
+                  && !r.mp_nonlinear && !r.mp_shaping, "native MP fields");
+            CHECK(r.mp_sample > 36000 && r.mp_ack_sample > r.mp_sample,
+                  "native MP/MP' sample order");
+        }
+        k56flex_upstream_pcm_free(rx);
+    }
+}
+
 static void streaming_negatives(const int16_t *s_fixture)
 {
     for (int kind = 0; kind < 3; kind++) {
@@ -203,6 +248,7 @@ int main(void)
         streaming_negatives(pcm);
         native_hsf_stream(0);
         native_hsf_stream(1);
+        native_hsf_mp();
         matrix(pcm);
         negatives(pcm, wrong);
     }

@@ -2,14 +2,15 @@
 """Bounded whole-engine K56flex call against cruft's native legacy HSF client.
 
 Direct byte-exact PCMU socket, no SIP/PBX or forced gates. The peer uses its
-normal Flex-only V.8bis -> V.8 -> K56 startup. This probe reports carrier
-observations separately from verified payload (which it does not qualify).
+normal Flex-only V.8bis -> V.8 -> K56 startup. Carrier observations alone
+are not success: --payload-bytes/--require-payload checks actual duplex DTE.
 """
 import argparse
 import errno
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import struct
@@ -51,15 +52,21 @@ def main():
                     help="fail unless native K56 reaches Phase 3 through real V.8/INFO1")
     ap.add_argument("--require-audio-gates", action="store_true",
                     help="require audio-derived S/S-bar/report gates and native Phase 4 (not CONNECT)")
+    ap.add_argument("--payload-bytes", type=int, default=0,
+                    help="check this many raw 8N1 host bytes in each direction after carrier")
+    ap.add_argument("--require-payload", action="store_true")
     args = ap.parse_args()
     if not 1 <= args.seconds <= 120:
         ap.error("--seconds must be 1..120")
     if not 9 <= args.dac_taps <= 513 or args.dac_taps % 4 != 1:
         ap.error("--dac-taps must be 4n+1 in 9..513")
+    if not 0 <= args.payload_bytes <= 32768 or (args.require_payload and not args.payload_bytes):
+        ap.error("--payload-bytes must be 0..32768, and nonzero with --require-payload")
     cruft = args.cruft.resolve()
     sys.path.insert(0, str(cruft))
     from native.hsf.k56_client import K56Client, PCMUStream
     from native.hsf.pcm import LIBRARY
+    from native.hsf.serial_bits import encode_8n1, Decoder8N1
 
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -71,11 +78,17 @@ def main():
     symbol_events = []
     last_phase2_state = None
     last_symbol_state = None
+    carrier_seen, carrier_active, carrier_interruptions = False, False, 0
 
     def observe(peer):
-        nonlocal last_phase2_state, last_symbol_state
+        nonlocal last_phase2_state, last_symbol_state, carrier_seen, carrier_active, carrier_interruptions
         if peer.pump is None:
             return
+        carrier = peer.pump.env.datapump_carrier == 3 and bool(peer.pump.state()["data"])
+        if carrier_active and not carrier:
+            carrier_interruptions += 1
+        carrier_active = carrier
+        carrier_seen |= carrier
         # Read-only original K56 diagnostics. 1203a1df branches to state
         # 0x28/1203b470 (DEMY) on a low-power rejection. Only 1203a3a4
         # changes RX+66c0 to the actual symbol path after INFO1/70 ms.
@@ -141,7 +154,13 @@ def main():
                               "power_threshold": sum(limits)})
 
     stream = PCMUStream(client, observe)
-    upstream, downstream, dte = bytearray(), bytearray(), bytearray()
+    upstream, downstream, dte, client_received = bytearray(), bytearray(), bytearray(), bytearray()
+    client_serial, serial_decoder = bytearray(), Decoder8N1()
+    expected_up = hashlib.shake_256(b"v90modem Flex upstream payload").digest(args.payload_bytes)
+    expected_down = hashlib.shake_256(b"v90modem Flex downstream payload").digest(args.payload_bytes)
+    packed_up = encode_8n1(expected_up)
+    sent_up = sent_down = 0
+    carrier_frame = None
     fd, frames, end_reason = None, 0, "duration limit"
     start_wall = time.monotonic()
     final_state = None
@@ -196,8 +215,29 @@ def main():
                             upstream.extend(tx)
                             downstream.extend(incoming)
                             tx = stream.exchange(bytes(incoming))
+                            if client.pump:
+                                # Drain the local host queue, including idle
+                                # packed marks. This never controls the peer.
+                                received = client.pump.read()
+                                client_received.extend(received)
+                                client_serial.extend(serial_decoder.feed(received))
                             frames += 1
                             drain(fd, dte)
+                            if (args.payload_bytes and client.pump
+                                    and client.pump.env.datapump_carrier == 3
+                                    and client.pump.state()["data"] and b"CONNECT" in dte):
+                                if carrier_frame is None:
+                                    carrier_frame = frames
+                                # A host-side two-second idle guard. This
+                                # schedules DTE data, never training/gates.
+                                if frames >= carrier_frame + 100:
+                                    if sent_up < len(packed_up):
+                                        sent_up += client.pump.write(packed_up[sent_up:])
+                                    if sent_down < len(expected_down):
+                                        try:
+                                            sent_down += os.write(fd, expected_down[sent_down:])
+                                        except BlockingIOError:
+                                            pass
                             if client.failure:
                                 end_reason = client.failure
                                 break
@@ -216,6 +256,8 @@ def main():
         (out / "client-tx.g711").write_bytes(upstream)
         (out / "server-tx.g711").write_bytes(downstream)
         (out / "dte.bin").write_bytes(dte)
+        (out / "client-received-packed.bin").write_bytes(client_received)
+        (out / "client-received-serial.bin").write_bytes(client_serial)
         (out / "client-events.json").write_text(json.dumps(client.events, indent=2) + "\n")
         (out / "client-phase2.json").write_text(json.dumps(phase2_events, indent=2) + "\n")
         (out / "client-symbols.json").write_text(json.dumps(symbol_events, indent=2) + "\n")
@@ -237,6 +279,15 @@ def main():
         sbar_from_audio = "K56flex upstream S/S-bar from audio" in server_log
         report_from_audio = "K56flex upstream report from audio" in server_log
         end_from_audio = "K56flex upstream 899F from audio" in server_log
+        connect = re.search(rb"\r\nCONNECT[^\r\n]*\r\n", dte)
+        server_serial = bytes(dte[connect.end():]) if connect else b""
+        payload_ok = bool(args.payload_bytes and connect and final_state and final_state["data"]
+                          and client.pump.env.datapump_carrier == 3
+                          and carrier_seen and carrier_interruptions == 0
+                          and sent_up == len(packed_up) and sent_down == len(expected_down)
+                          and server_serial == expected_up and client_serial == expected_down
+                          and serial_decoder.framing_errors == 0)
+        (out / "server-received-serial.bin").write_bytes(server_serial)
         report = {
             "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
             "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
@@ -256,11 +307,22 @@ def main():
             "server_report_from_audio": report_from_audio,
             "server_jtag_from_audio": end_from_audio,
             "final_client_state": final_state, "failure": client.failure,
+            "client_carrier": client.pump.env.datapump_carrier if client.pump else 0,
+            "client_rates": client.pump.negotiated_rates() if client.pump else None,
+            "client_carrier_interruptions": carrier_interruptions,
+            "client_received_packed_bytes": len(client_received),
+            "payload_bytes_requested": args.payload_bytes,
+            "upstream_serial_bytes": len(server_serial),
+            "downstream_serial_bytes": len(client_serial),
+            "client_framing_errors": serial_decoder.framing_errors,
+            "upstream_payload_exact": bool(args.payload_bytes and server_serial == expected_up),
+            "downstream_payload_exact": bool(args.payload_bytes and client_serial == expected_down),
             "client_tx_training_completed": any(n[0] == 1000 for n in notices),
             "client_rx_training_completed": any(n[0] == 1001 for n in notices),
             "server_dte_connect": b"CONNECT" in dte,
-            "verified_connection": False,
-            "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+            "verified_connection": payload_ok,
+            "limits": ("Checked raw duplex payload over local PCMU; no hardware qualification."
+                       if payload_ok else "No checked duplex payload qualification."),
             "inputs": {str(executable): digest(executable), str(LIBRARY): digest(LIBRARY),
                        str(Path(__file__).resolve()): digest(Path(__file__))},
         }
@@ -271,6 +333,8 @@ def main():
         if args.require_audio_gates and not (phase2_handoff and native_phase4
                                              and sbar_from_audio and report_from_audio):
             raise SystemExit("K56flex audio-gate/Phase-4 requirement failed")
+        if args.require_payload and not payload_ok:
+            raise SystemExit("K56flex checked duplex payload requirement failed")
     finally:
         client.close()
         if proc is not None and proc.poll() is None:

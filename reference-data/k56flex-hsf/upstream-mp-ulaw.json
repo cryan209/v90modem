@@ -1,0 +1,64 @@
+{
+  "source": "artifacts/k56flex-hsf-continuous-idle-20261021/client-tx.g711",
+  "source_sha256": "3691f39c9fb4085ea3f0f87c2c02d023b8067530d116208e8d51e096b932be19",
+  "first_sample": 139200,
+  "samples": 39200,
+  "sha256": "249bb15277aaef3d260049810a5a4f73c30f3f817b17298d33a2356bc4b3e406",
+  "transport": "Only PCMU between peers; original native HSF",
+  "expected": {
+    "report": "00/89b0",
+    "J_a_prime": true,
+    "MP_type": 0,
+    "upstream_rate_n": 4,
+    "downstream_rate_code": 11,
+    "mask": 32767,
+    "trellis": 0,
+    "MP_prime_records": 1
+  },
+  "native_run_report": {
+    "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+    "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+    "dac_taps": 65,
+    "audio_seconds": 35.0,
+    "end_reason": "duration limit",
+    "wall_seconds": 12.382519125007093,
+    "flex_agreed": true,
+    "v8_started": true,
+    "v8_modulations": 1,
+    "selected_modulation": "k56",
+    "phase2_handoff": true,
+    "client_phase3_seen": true,
+    "client_flex_phase3_seen": true,
+    "client_phase2_rejected": false,
+    "client_phase4_seen": true,
+    "server_sbar_from_audio": true,
+    "server_report_from_audio": true,
+    "server_jtag_from_audio": true,
+    "final_client_state": {
+      "active_modulation": "k56",
+      "tx_state": 42,
+      "tx_label": "Tx_MD",
+      "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+      "data": 1,
+      "info0_received": 1,
+      "info0_error_recovery": 0
+    },
+    "failure": null,
+    "client_carrier": 3,
+    "client_rates": {
+      "upstream": 9600,
+      "downstream": 52000
+    },
+    "client_received_packed_bytes": 83916,
+    "client_tx_training_completed": true,
+    "client_rx_training_completed": true,
+    "server_dte_connect": false,
+    "verified_connection": false,
+    "limits": "Carrier diagnostics only; no checked duplex payload qualification.",
+    "inputs": {
+      "/Users/scottcryan/v90modem/audio_sock_modem": "b380dfa95fe08788aeb31c7351d7af6565452a01813fbdeff6711d0e8cb60488",
+      "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+      "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "c3a36d2e48f4575c794fe3a6aa3f11bb692d5df99b21b77e757691596be24ac0"
+    }
+  }
+}

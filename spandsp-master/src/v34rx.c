@@ -17270,6 +17270,18 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 
 static bool v90_t3_start(v34_rx_state_t *rx);
 
+SPAN_DECLARE(int) v34_set_rx_data_scrambler(v34_state_t *s, int tap)
+{
+    if (!s || (tap != 5 && tap != 18))
+        return -1;
+    /* V.34 clause 7: zero-based shift indices for the actual upstream
+       polynomial. K56flex's caller uses GPC; ordinary V.90 retains GPA.
+       B1 template construction and DATA descrambling must use the same tap. */
+    s->rx.v90_far_tap_measured = tap - 1;
+    s->rx.scrambler_tap = tap - 1;
+    return 0;
+}
+
 SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int baud_rate,
                                                 int high_carrier,

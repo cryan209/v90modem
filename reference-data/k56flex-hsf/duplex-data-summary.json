@@ -1,0 +1,857 @@
+{
+  "purpose": "Native PCMU duplex qualification with explicit 65-tap analogue reconstruction; default129 and sustained renegotiation remain unresolved",
+  "runs": [
+    {
+      "directory": "artifacts/k56flex-hsf-duplex-payload-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 19.691551083000377,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_received_packed_bytes": 116472,
+        "payload_bytes_requested": 2048,
+        "upstream_serial_bytes": 2048,
+        "downstream_serial_bytes": 2048,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "eb1db48ed5040ad6dfa07abaff092bbf771319cf2a1789e4f821eea935e990de",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "5a67c6a592a76b728e9c67f564d0bf255be669c5806ad37f6be51bf613b61740"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "ad537b4f4ded1372041df6b55fc3261a3e3c92493c726a31e5b0f757e1281a34",
+        "client-tx.g711": "546df3ad3de422764ccae98b619f3bbb24449597557be6565cf01d88442c682e",
+        "dte.bin": "14569a95e88f3744b3972c609816df63b9fa9dc562d65a83812710650962497d",
+        "server-received-serial.bin": "c8222204b3448a4e21d1108c4fe6dfe16c6150ef098e97a5bf40227580a4f600",
+        "client-received-serial.bin": "00ffb01e5bde2a8db21fa5047228eb9c070e88a1b51dd916e760a76a7405805e"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-duplex-8k-final-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 18.67764791601803,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 116472,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "784d34e2940177aa19e0719bd452b3150992bf75db40209d561d93ba0dd32bb7",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "23a76fa6e6ddc32199d2d8235a5fb9adaa3f50812cceb514872f1dbd0c9256d9",
+        "client-tx.g711": "e1603711ce4299b0d57675bd87041b41ae1d4a54b74bb6eef17d2226731ccac0",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-duplex-32k-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 90.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 47.43421149998903,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": true,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 2,
+          "tx_label": "CallB",
+          "rx_label": "DEMY",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 1,
+        "client_received_packed_bytes": 243096,
+        "payload_bytes_requested": 32768,
+        "upstream_serial_bytes": 62783,
+        "downstream_serial_bytes": 32768,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "eb1db48ed5040ad6dfa07abaff092bbf771319cf2a1789e4f821eea935e990de",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "394ef3320597f6a35de6238c2d8b9eac133a630048f5c8b9a5ac4a2633ca91c6"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "dd2664178362bb3aad182fef861fcb8b8443076adefed5c2ba1d3f76c668622e",
+        "client-tx.g711": "4653dc3422ee4a0fd4f7db6a56ad407d85d2a91dfeb4ccc314c4ef6a30a2fee7",
+        "dte.bin": "a86c9629548f025e7e1d91802691d97ffb9c45de3304018713e356a9436ca022",
+        "server-received-serial.bin": "36e50514aa10e55d02605cb1ed95cb8fc8a929880456524500db43ebf7b1bc4f",
+        "client-received-serial.bin": "b771589a0dec69ca8069bb193e7708cf0819c18f76ed7e2511253f8485ec605d"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-head-span-control-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 21.98,
+        "end_reason": "engine closed audio socket",
+        "wall_seconds": 4.314893958042376,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": false,
+        "client_phase3_seen": false,
+        "client_flex_phase3_seen": false,
+        "client_phase2_rejected": true,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 25,
+          "tx_label": "CallWaitJ",
+          "rx_label": "DEMY",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 0,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 0,
+        "downstream_serial_bytes": 0,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": false,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "9afaa6f608a9a9d5c5136f6fdee30d27da7420b0228445b51b1c4ea568308358",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[ME] K56flex upstream audio acquisition exhausted"
+      ],
+      "sha256": {
+        "server-tx.g711": "b67932f8b6451f3da4a9bcaff2c077a85bd47e2512b1f6aea8651192229f4555",
+        "client-tx.g711": "3b711066f68be8087b190ee890e612e2d6b99e50fb02775b8c938ed0b45caf4e",
+        "dte.bin": "d78d5f9a08125721d2e204e615950e26fa9a8188112e5460fd7d227393b8e6f1",
+        "server-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "client-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 0,
+        "client-received-serial.bin": 0
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-essential-span-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 24.96846791706048,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 116472,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "eb6ba7ad495d655c1e5aa824384f0c3707d9aa8998860c36740ee03ce75d9f32",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "23a76fa6e6ddc32199d2d8235a5fb9adaa3f50812cceb514872f1dbd0c9256d9",
+        "client-tx.g711": "e1603711ce4299b0d57675bd87041b41ae1d4a54b74bb6eef17d2226731ccac0",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-essential-default129-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 13.16,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 3.768393624923192,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "CALL_ADETECT1",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 0,
+        "payload_bytes_requested": 0,
+        "upstream_serial_bytes": 0,
+        "downstream_serial_bytes": 0,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": false,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "eb6ba7ad495d655c1e5aa824384f0c3707d9aa8998860c36740ee03ce75d9f32",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [],
+      "sha256": {
+        "server-tx.g711": "29d19097af68fa0629d0a4c4177b82c2231e2897f3c1e9cdaaac7876affbccb4",
+        "client-tx.g711": "705464b419ffd8bb2e238c839c20be8dda17143869286f12fe758c5e69c4a658",
+        "dte.bin": "eedf601bb36392d53b574c1703477b2e155a5a6db8c797102e9137175fd05b57",
+        "server-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "client-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 0,
+        "client-received-serial.bin": 0
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-essential-reneg-loss-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 90.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 51.55913191603031,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": true,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 2,
+          "tx_label": "CallB",
+          "rx_label": "DEMY",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 1,
+        "client_received_packed_bytes": 243096,
+        "payload_bytes_requested": 32768,
+        "upstream_serial_bytes": 62783,
+        "downstream_serial_bytes": 32768,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "eb6ba7ad495d655c1e5aa824384f0c3707d9aa8998860c36740ee03ce75d9f32",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "dd2664178362bb3aad182fef861fcb8b8443076adefed5c2ba1d3f76c668622e",
+        "client-tx.g711": "4653dc3422ee4a0fd4f7db6a56ad407d85d2a91dfeb4ccc314c4ef6a30a2fee7",
+        "dte.bin": "a86c9629548f025e7e1d91802691d97ffb9c45de3304018713e356a9436ca022",
+        "server-received-serial.bin": "36e50514aa10e55d02605cb1ed95cb8fc8a929880456524500db43ebf7b1bc4f",
+        "client-received-serial.bin": "b771589a0dec69ca8069bb193e7708cf0819c18f76ed7e2511253f8485ec605d"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-quality-8k-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 18.114786499994807,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 116472,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "508ebea702f1d6f204911c07a876ee5850191b7a30aaba22ee80b895cc7fa965",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "a90a1c430e41ab3301aec2939d624fff91a3a90f31778be36f72fad6dda88bd4",
+        "client-tx.g711": "006f329c8efe207b835c97d34c8d2f2a151282416984a303ae8b20b086e94f6f",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-quality-loss-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 49.02,
+        "end_reason": "engine closed audio socket",
+        "wall_seconds": 23.519108457956463,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 36,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 1,
+        "client_received_packed_bytes": 175020,
+        "payload_bytes_requested": 32768,
+        "upstream_serial_bytes": 23404,
+        "downstream_serial_bytes": 32768,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/Users/scottcryan/v90modem/audio_sock_modem": "508ebea702f1d6f204911c07a876ee5850191b7a30aaba22ee80b895cc7fa965",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down",
+        "[TRACE +49020ms] K56flex upstream quality lost: 0.541 > 0.080; ending call"
+      ],
+      "sha256": {
+        "server-tx.g711": "068f43ac9d833f524f7e6ced20a8718adcb434ccd8a99641946d1fa2aaf47e08",
+        "client-tx.g711": "095e0f3b1a38d45c2f68e73855a53afb3c8f48f2b4d795c21315539e2995d902",
+        "dte.bin": "dcd39af5bdd4a6f2d51500870887f9a96adcb820fbb9f1c0b2cd2c90430b341e",
+        "server-received-serial.bin": "c3382e444daf9a671197d2c9718fdf0eca0d3db04e18fcdcc27c8ccf3fcddb63",
+        "client-received-serial.bin": "b771589a0dec69ca8069bb193e7708cf0819c18f76ed7e2511253f8485ec605d"
+      },
+      "all_octet_values": {
+        "server-received-serial.bin": 256,
+        "client-received-serial.bin": 256
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-staged-8k-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 16.46710750006605,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 116472,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "24a6cd53124c66c466b6baf287d8b0cc687890fca02022705d2ab4376c39cad3",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16800ms] K56flex upstream S/S-bar from audio at sample 46491",
+        "[TRACE +18880ms] K56flex upstream report from audio 00/89b0 at sample 63163",
+        "[TRACE +18960ms] K56flex upstream 899F from audio at sample 63726",
+        "[TRACE +22000ms] K56flex upstream MP from audio at sample 88076: 9600 up / 52000 down",
+        "[TRACE +22080ms] K56flex upstream MP' from audio at sample 88676",
+        "[TRACE +22580ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "a90a1c430e41ab3301aec2939d624fff91a3a90f31778be36f72fad6dda88bd4",
+        "client-tx.g711": "006f329c8efe207b835c97d34c8d2f2a151282416984a303ae8b20b086e94f6f",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7"
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-tail-only-rx-control-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 65,
+        "audio_seconds": 40.0,
+        "end_reason": "duration limit",
+        "wall_seconds": 16.677026666002348,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": true,
+        "server_sbar_from_audio": true,
+        "server_report_from_audio": true,
+        "server_jtag_from_audio": true,
+        "final_client_state": {
+          "active_modulation": "k56",
+          "tx_state": 42,
+          "tx_label": "Tx_MD",
+          "rx_label": "CALL_UPDATE_PARAMS_RECEIVED_IN_INFO1A",
+          "data": 1,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": null,
+        "client_carrier": 3,
+        "client_rates": {
+          "upstream": 9600,
+          "downstream": 52000
+        },
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 117768,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 8192,
+        "downstream_serial_bytes": 8192,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": true,
+        "downstream_payload_exact": true,
+        "client_tx_training_completed": true,
+        "client_rx_training_completed": true,
+        "server_dte_connect": true,
+        "verified_connection": true,
+        "limits": "Checked raw duplex payload over local PCMU; no hardware qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "a1b00174c817f560eeccb4016d10507b7503818c445fbc99c83d07bd12a9b5d7",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [
+        "[TRACE +16600ms] K56flex upstream S/S-bar from audio at sample 46528",
+        "[TRACE +18680ms] K56flex upstream report from audio 00/89b0 at sample 63196",
+        "[TRACE +18760ms] K56flex upstream 899F from audio at sample 63938",
+        "[TRACE +21800ms] K56flex upstream MP from audio at sample 88288: 9600 up / 52000 down",
+        "[TRACE +21880ms] K56flex upstream MP' from audio at sample 88888",
+        "[TRACE +22380ms] K56flex DATA: audio MP/MP' and upstream B1 acquired, 9600 up / 52000 down"
+      ],
+      "sha256": {
+        "server-tx.g711": "c3ea959ced62f4e48e81e5bd5599ea037c54fbc075d9bd1860ad9384bb8d690f",
+        "client-tx.g711": "de26640c821c58a6787d7bb8d1cf0e543f8c0136740a893ee896650a1874d6cf",
+        "dte.bin": "4fd6a8bdfed885d6b5b0a9f2129854cdc9cc82379265ae05a5004960a7ea3df7",
+        "server-received-serial.bin": "26adf8a0e678490040636a12c5a6a8dbfb7f4c997abbc5ff44c02b407b088177",
+        "client-received-serial.bin": "5c9f962c814d392e8039b9ff3f4de693b9c574fc674191fe80d61f9543950cd7"
+      }
+    },
+    {
+      "directory": "artifacts/k56flex-hsf-tail-only-default129-20261021",
+      "report": {
+        "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
+        "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
+        "dac_taps": 129,
+        "audio_seconds": 12.94,
+        "end_reason": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "wall_seconds": 2.5006498330039904,
+        "flex_agreed": true,
+        "v8_started": true,
+        "v8_modulations": 1,
+        "selected_modulation": "k56",
+        "phase2_handoff": true,
+        "client_phase3_seen": true,
+        "client_flex_phase3_seen": true,
+        "client_phase2_rejected": false,
+        "client_phase4_seen": false,
+        "server_sbar_from_audio": false,
+        "server_report_from_audio": false,
+        "server_jtag_from_audio": false,
+        "final_client_state": {
+          "active_modulation": "v34",
+          "tx_state": 24,
+          "tx_label": "TxReTrainWait75ms",
+          "rx_label": "abstract_state",
+          "data": 0,
+          "info0_received": 1,
+          "info0_error_recovery": 0
+        },
+        "failure": "K56flex training fell back to another modulation; Flex-only call rejected",
+        "client_carrier": 0,
+        "client_rates": null,
+        "client_carrier_interruptions": 0,
+        "client_received_packed_bytes": 0,
+        "payload_bytes_requested": 8192,
+        "upstream_serial_bytes": 0,
+        "downstream_serial_bytes": 0,
+        "client_framing_errors": 0,
+        "upstream_payload_exact": false,
+        "downstream_payload_exact": false,
+        "client_tx_training_completed": false,
+        "client_rx_training_completed": false,
+        "server_dte_connect": false,
+        "verified_connection": false,
+        "limits": "No checked duplex payload qualification.",
+        "inputs": {
+          "/private/tmp/k56-span-head-wxeznwrv/audio_sock_modem": "a1b00174c817f560eeccb4016d10507b7503818c445fbc99c83d07bd12a9b5d7",
+          "/Users/scottcryan/cruft/native/hsf/.work/build/libhsf_lift.so": "f0849f6cfd5e0f30c0448d177a30d853c49ac84d7eb409d5865fa743190a9a6c",
+          "/Users/scottcryan/v90modem/tools/k56flex_hsf_pair.py": "398d9c842841b4cd5c6714752f735f9128b079b440ee562f233016a2c09db1e0"
+        }
+      },
+      "traces": [],
+      "sha256": {
+        "server-tx.g711": "931d9bd66062a0112b3930084fafd14c2a61e09401ab10ef49e0a8aeaf067537",
+        "client-tx.g711": "bbba74d2f700c99e4409628e58494b43ba360fa7dae7d94f60da20d15551fca8",
+        "dte.bin": "eedf601bb36392d53b574c1703477b2e155a5a6db8c797102e9137175fd05b57",
+        "server-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "client-received-serial.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "dependency_result": "Transmit-tail alignment is required. Restoring only HEAD RX short-probe behavior still passes 8 KiB duplex at 65 taps. RX removal and V90 TX edits excluded from commit."
+}

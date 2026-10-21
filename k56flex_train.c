@@ -159,6 +159,23 @@ void k56flex_train_force_phase(k56flex_train_t *t, k56flex_train_phase_t ph)
 void k56flex_train_status(k56flex_train_t *t, unsigned bits) { t->status |= bits; }
 void k56flex_train_set_report(k56flex_train_t *t, unsigned f) { t->cfg.report_field = f; }
 
+int k56flex_train_accept_mp(k56flex_train_t *t, unsigned up, unsigned down, unsigned mask)
+{
+    if (t->phase >= K56T_PARAM_1 || !up || up > 14 || down < 1 || down > 15) return -1;
+    mask &= (1u << up) - 1;
+    if (!mask) return -1;
+    unsigned selected = up;
+    while (!(mask & (1u << (selected-1)))) --selected;
+    /* Original HSF 12023dc0 uses the K56 PCM ladder in MP bits 24:27.
+     * Preserve a stricter local downstream cap; never exceed the peer. */
+    int downstream = (int)(down + 15)*2000;
+    if (t->cfg.rate_bps > downstream) t->cfg.rate_bps = downstream;
+    t->cfg.param.extra = selected;
+    t->cfg.param.control = mask;
+    t->cfg.param.bit = 1; /* V.34 Table 20 bit 50: asymmetric rates */
+    return (int)selected*2400;
+}
+
 void k56flex_train_set_data_source(k56flex_train_t *t, k56flex_source_fn fn, void *user)
 {
     t->data_source = fn;

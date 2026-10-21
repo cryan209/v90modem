@@ -139,6 +139,7 @@ int k56flex_upstream_pcm_decode(const int16_t *pcm, int count, unsigned tap,
     memset(out, 0, sizeof(*out));
     out->trn_sample = out->report_sample = out->end_sample = -1;
     out->sbar_sample = -1;
+    out->mp_sample = out->mp_ack_sample = -1;
     if (!pcm || count <= 0 || count > 80000 || (tap != 5 && tap != 18)) return -1;
     r = p3_result_alloc(count + 100, 0);
     if (!r) return -1;
@@ -211,7 +212,89 @@ struct k56flex_upstream_pcm_s {
     k56flex_upstream_t control;
     k56flex_upstream_pcm_result_t result;
     int samples, search_at, next_symbol, s_search_at, sbar_seen, timestamp_delay;
+    unsigned mp_previous, mp_history, mp_count, mp_repeats, mp_seen, mp_ack_seen;
+    uint8_t mp_bits[188], mp_last[188], mp_accepted[188];
+    int mp_last_length;
 };
+
+static unsigned mp_field(const uint8_t *bits, int at, int count)
+{
+    unsigned value = 0;
+    for (int i = 0; i < count; i++) value |= (unsigned)bits[at+i] << i;
+    return value;
+}
+
+/* V.34 10.1.3.9, Tables 20/21 and 10.1.2.3.2: strict sync, start,
+ * reflected-8408 CRC and fill. No preamble-only or elapsed-time acceptance.
+ * K56 uses bits 24:27 as PCM rate/2000-15 (original HSF 12023dc0),
+ * rather than the ordinary V.34 downstream rate multiplier. */
+static int mp_bit(k56flex_upstream_pcm_t *s, unsigned bit)
+{
+    memmove(s->mp_bits, s->mp_bits+1, sizeof(s->mp_bits)-1);
+    s->mp_bits[187] = (uint8_t)bit;
+    if (s->mp_count < 188) ++s->mp_count;
+    for (int type = 0; type < 2; type++) {
+        int length = type ? 188 : 88, end = type ? 170 : 68;
+        const uint8_t *b = s->mp_bits + 188-length;
+        if (s->mp_count < (unsigned)length || b[18] != type) continue;
+        if (mp_field(b, 0, 17) != 0x1ffff) continue;
+        int valid = 1;
+        for (int i = 17; i <= end; i += 17) if (b[i]) valid = 0;
+        for (int i = end+17; i < length; i++) if (b[i]) valid = 0;
+        uint16_t crc = 0xffff;
+        for (int i = 17; i < end; i += 17)
+            for (int j = 1; j <= 16; j++)
+                crc = (crc >> 1) ^ (((crc ^ b[i+j]) & 1) ? 0x8408 : 0);
+        if (!valid || crc != mp_field(b, end+1, 16)) continue;
+        /* MP' need not repeat: original HSF transmits one accepted MP'
+         * then E/B1. Require a complete CRC-valid acknowledgement of the
+         * already accepted payload, not a second acknowledgement frame. */
+        if (s->mp_seen && b[33] && !s->mp_ack_seen && type == (int)s->result.mp_type) {
+            int same = 1;
+            for (int i = 18; i < end; i++)
+                if (i != 33 && b[i] != s->mp_accepted[i]) same = 0;
+            if (same) { s->mp_ack_seen = 1; return K56U_MP_ACK; }
+        }
+        if (s->mp_last_length == length && !memcmp(s->mp_last, b, length))
+            s->mp_repeats = 2;
+        else {
+            memcpy(s->mp_last, b, length);
+            s->mp_last_length = length;
+            s->mp_repeats = 1;
+        }
+        if (s->mp_repeats < 2) continue;
+        if (!s->mp_seen) {
+            s->mp_seen = 1;
+            memcpy(s->mp_accepted, b, length);
+            s->result.mp_type = type;
+            s->result.mp_up = mp_field(b, 20, 4);
+            s->result.mp_down = mp_field(b, 24, 4);
+            s->result.mp_mask = mp_field(b, 35, 15);
+            s->result.mp_trellis = mp_field(b, 29, 2);
+            s->result.mp_nonlinear = b[31];
+            s->result.mp_shaping = b[32];
+            return K56U_MP;
+        }
+    }
+    return 0;
+}
+
+static int mp_symbol(k56flex_upstream_pcm_t *s, point_t y)
+{
+    static const unsigned labels[4] = {0, 3, 1, 2};
+    if (!isfinite(y.re) || !isfinite(y.im)) return 0;
+    unsigned raw = labels[(y.re < 0) + 2*(y.im < 0)];
+    unsigned dibit = (raw - s->mp_previous) & 3;
+    s->mp_previous = raw;
+    int events = 0;
+    for (int i = 0; i < 2; i++) {
+        unsigned scrambled = (dibit >> i) & 1;
+        unsigned bit = scrambled ^ ((s->mp_history >> 17) & 1) ^ ((s->mp_history >> 22) & 1);
+        s->mp_history = (s->mp_history << 1) | scrambled;
+        events |= mp_bit(s, bit);
+    }
+    return events;
+}
 
 k56flex_upstream_pcm_t *k56flex_upstream_pcm_new(int baud_code, int high_carrier,
                                                unsigned tap)
@@ -233,6 +316,7 @@ k56flex_upstream_pcm_t *k56flex_upstream_pcm_new(int baud_code, int high_carrier
     k56flex_upstream_init(&s->control, tap);
     s->result.trn_sample = s->result.report_sample = s->result.end_sample = -1;
     s->result.sbar_sample = -1;
+    s->result.mp_sample = s->result.mp_ack_sample = -1;
     s->search_at = 2*(288+16+64);
     return s;
 }
@@ -249,7 +333,6 @@ int k56flex_upstream_pcm_rx(k56flex_upstream_pcm_t *s, const int16_t *pcm, int c
 {
     int events = 0;
     if (!s || !pcm || count < 0 || !out) return -1;
-    if (s->control.ended) { *out = s->result; return 0; }
     if (count > 80000 || count > INT_MAX - s->samples
         || (!s->result.acquired && count > 80000 - s->samples)) return -1;
     p3_result_t *r = s->observations;
@@ -312,10 +395,11 @@ int k56flex_upstream_pcm_rx(k56flex_upstream_pcm_t *s, const int16_t *pcm, int c
         s->next_symbol = at;
     }
     if (s->result.acquired) {
-        while (s->next_symbol + TAPS/2 < r->symbol_count && !s->control.ended) {
+        while (s->next_symbol + TAPS/2 < r->symbol_count) {
             int at = s->next_symbol;
             point_t y = equalize(r, at, s->weights);
-            int ev = k56flex_upstream_symbol(&s->control, (float)y.re, (float)y.im);
+            int ev = s->control.ended ? mp_symbol(s, y)
+                     : k56flex_upstream_symbol(&s->control, (float)y.re, (float)y.im);
             s->next_symbol += 2;
             if (ev < 0) continue;
             if (ev & K56U_REPORT) {
@@ -324,6 +408,8 @@ int k56flex_upstream_pcm_rx(k56flex_upstream_pcm_t *s, const int16_t *pcm, int c
                 s->result.report_sample = r->symbols[at].sample_index + s->timestamp_delay;
             }
             if (ev & K56U_REPORT_END) s->result.end_sample = r->symbols[at].sample_index + s->timestamp_delay;
+            if (ev & K56U_MP) s->result.mp_sample = r->symbols[at].sample_index + s->timestamp_delay;
+            if (ev & K56U_MP_ACK) s->result.mp_ack_sample = r->symbols[at].sample_index + s->timestamp_delay;
             events |= ev;
         }
     }

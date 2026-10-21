@@ -6,8 +6,8 @@
  * come from the DB11/DB2E/D9CB control flow and are checked stage by stage
  * against the original sample generator (k56flex_train_vectors.h).  Stretches
  * that the firmware leaves to the peer are gates driven by DM 8F31 status bits;
- * nothing on the wire tells us how a real client signals them, so they are
- * supplied by the caller (k56flex_train_status) and are Open in the spec.
+ * the caller supplies locally decoded S/S-bar, report and MP/MP' events
+ * through k56flex_train_status. The engine derives these from audio.
  */
 #ifndef K56FLEX_TRAIN_H
 #define K56FLEX_TRAIN_H
@@ -49,7 +49,7 @@ typedef struct {
     int rate_bps;                /* negotiated downstream rate */
     unsigned report_field;       /* DM 8FEF: 0 until the client's report is accepted */
     k56flex_param_t param;       /* record fields; param.rate is filled from rate_bps */
-    uint16_t training_word;      /* B31D's word (unknown); appended at gate A */
+    uint16_t training_word;      /* B31D's Jd word; appended at gate A */
     unsigned gate_timeout_pairs; /* 0 = wait forever */
 } k56flex_train_cfg_t;
 
@@ -76,6 +76,10 @@ int k56flex_train_init(k56flex_train_t *t, const k56flex_train_cfg_t *cfg);
 void k56flex_train_status(k56flex_train_t *t, unsigned bits);
 /* The client's accepted report (k56flex_report_field), needed before PRIME. */
 void k56flex_train_set_report(k56flex_train_t *t, unsigned report_field);
+/* Accepted upstream MP limits (Draft 0.23 4.11; V.34 Table 20).
+ * Downstream code is rate/2000-15; upstream code is rate/2400. Must precede
+ * parameter transmission; returns selected upstream rate or -1. */
+int k56flex_train_accept_mp(k56flex_train_t *t, unsigned up, unsigned down, unsigned mask);
 void k56flex_train_set_data_source(k56flex_train_t *t, k56flex_source_fn fn, void *user);
 /* Produce n level words; may return fewer only in K56T_DATA when the source pauses. */
 size_t k56flex_train_samples(k56flex_train_t *t, int16_t *out, size_t n);

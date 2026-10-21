@@ -4796,6 +4796,8 @@ static k56flex_v8bis_t *g_k56 = NULL;
 static k56flex_train_t *g_k56_train = NULL;
 static k56flex_startup_t *g_k56_startup = NULL;
 static k56flex_upstream_pcm_t *g_k56_upstream = NULL;
+static int g_k56_baud_code, g_k56_high_carrier, g_k56_upstream_bps;
+static bool g_k56_b1_started;
 static bool g_k56_negotiated = false;
 static k56flex_train_phase_t g_k56_last_phase = K56T_FAILED;
 
@@ -4849,6 +4851,8 @@ static void me_k56_start_locked(void)
         k56flex_v8bis_free(g_k56);
     k56flex_upstream_pcm_free(g_k56_upstream);
     g_k56_upstream = NULL;
+    g_k56_upstream_bps = 0;
+    g_k56_b1_started = false;
     g_k56_negotiated = false;
     g_k56_last_phase = K56T_FAILED;
     g_k56 = k56flex_v8bis_new(&cfg);
@@ -4857,6 +4861,43 @@ static void me_k56_start_locked(void)
            g_calling_party ? "initiating (CRe)" : "responding (listening for CRe)",
            cfg.client_model ? "client" : "server", cfg.blind ? ", blind CL" : "",
            cfg.mu_law ? "mu-law" : "A-law", cfg.v90_capable);
+}
+
+static int me_k56_source_word(void *user, uint16_t *word)
+{
+    (void)user;
+    /* Draft 0.23 4.12: continuous mapped idle marks after priming.
+     * A temporarily empty DTE must never become a silent DS0 gap. */
+    *word = 0;
+    for (int i = 0; i < 16; i++) {
+        int bit = g_state == ME_DATA ? ds_tx_get_bit(&g_data_stack) : 1;
+        *word |= (uint16_t)((bit < 0 ? 1 : bit & 1) << i);
+    }
+    return 0;
+}
+
+static int me_k56_idle_bit(void *user) { (void)user; return 1; }
+static void me_k56_phase4_bit(void *user, int bit) { (void)user; (void)bit; }
+static void me_k56_data_bit(void *user, int bit)
+{
+    (void)user;
+    if (bit >= 0 && g_state == ME_DATA && g_k56_train && g_v34
+        && v34_v90_upstream_rx_acquired(g_v34)
+        && !v34_v90_upstream_carrier_lost(g_v34)) {
+        float settled = 0;
+        float error = v34_v90_upstream_rx_error(g_v34, &settled);
+        /* Local raw-data confidence policy, as on x2: a fourfold error
+         * increase with a 0.08 floor is not an ITU DSP constant. V.34
+         * 11.6 requires reacquisition after loss; until K56 renegotiation
+         * exists, end the call rather than forwarding unframed noise. */
+        float limit = fmaxf(0.08f, 4.0f*settled);
+        if (settled > 0 && error > limit) {
+            trace_phase("K56flex upstream quality lost: %.3f > %.3f; ending call", error, limit);
+            g_state = ME_HANGUP;
+            return;
+        }
+        ds_rx_put_bit(&g_data_stack, bit);
+    }
 }
 
 static bool me_k56_probe_start_locked(void)
@@ -4876,6 +4917,7 @@ static bool me_k56_probe_start_locked(void)
     tc.gate_timeout_pairs = (unsigned)((gate ? atoi(gate) : 8000) * 2 / 3);
     g_k56_train = calloc(1, sizeof(*g_k56_train));
     if (g_k56_train && k56flex_train_init(g_k56_train, &tc) == 0) {
+        k56flex_train_set_data_source(g_k56_train, me_k56_source_word, NULL);
         g_k56_last_phase = K56T_FAILED;
         ME_LOG("[ME] K56flex probe: transmitting training stream (%s, %d bit/s), "
                "gives up %d ms after the probes if the peer does not answer\n",
@@ -4898,12 +4940,14 @@ static void me_k56_startup_progress_locked(void)
         trace_phase("K56flex startup failed (no data fallback)");
     } else {
         trace_phase("K56flex Phase 2 complete; starting PCM probes");
-        int baud_code, high_carrier;
+        int baud_code = -1, high_carrier = 0;
         if (k56flex_startup_upstream_profile(g_k56_startup, &baud_code, &high_carrier) < 0
             || !(g_k56_upstream = k56flex_upstream_pcm_new(baud_code, high_carrier, 18))) {
             ME_LOG("[ME] K56flex: cannot initialize negotiated upstream audio receiver\n");
             st = K56S_FAILED;
         }
+        g_k56_baud_code = baud_code;
+        g_k56_high_carrier = high_carrier;
     }
     k56flex_startup_free(g_k56_startup);
     g_k56_startup = NULL;
@@ -13852,8 +13896,81 @@ void me_rx_audio(const int16_t *amp, int len)
             if (events & K56U_REPORT_END) {
                 trace_phase("K56flex upstream 899F from audio at sample %d", result.end_sample);
             }
+            if (events & K56U_MP) {
+                int upstream = k56flex_train_accept_mp(g_k56_train, result.mp_up,
+                                                       result.mp_down, result.mp_mask);
+                if (upstream < 0) {
+                    trace_phase("K56flex unsupported upstream MP from audio");
+                    g_state = ME_HANGUP;
+                } else {
+                    g_k56_upstream_bps = upstream;
+                    g_v34 = v34_init(NULL, 3200, upstream, false, true,
+                                    me_k56_idle_bit, NULL, me_k56_data_bit, NULL);
+                    if (!g_v34) { g_state = ME_HANGUP; }
+                    else {
+                        /* Borrow only the local primary-channel receiver.
+                         * K56 owns every transmitted PCM codeword and MP.
+                         * Clause 7/V.34 GPC was validated in received TRN;
+                         * preserve V.90's separate GPA default elsewhere. */
+                        v34_set_v90_mode(g_v34, g_law == ME_LAW_ALAW);
+                        v34_set_put_phase4_bit(g_v34, me_k56_phase4_bit, NULL);
+                        v34_force_v90_phase4_cp_rx(g_v34);
+                        if (v34_set_rx_data_scrambler(g_v34, 18)
+                            || v34_v90_prepare_upstream_data(g_v34, g_k56_baud_code,
+                                                            g_k56_high_carrier, upstream, 0))
+                            g_state = ME_HANGUP;
+                    }
+                    /* Draft 0.23 4.11; resident 15BB/15EE -> 0FFE:
+                     * completed training and accepted MP post 1000/2000.
+                     * CRC-valid repeated audio records, never peer callbacks. */
+                    k56flex_train_status(g_k56_train, (1u << 12) | (1u << 13));
+                    trace_phase("K56flex upstream MP from audio at sample %d: %d up / %d down",
+                                result.mp_sample, upstream, g_k56_train->cfg.rate_bps);
+                }
+            }
+            if (events & K56U_MP_ACK) {
+                /* V.34 10.1.3.9: MP' is MP with acknowledgement set.
+                 * Resident 15FF/160A posts 4000 after that acceptance. */
+                k56flex_train_status(g_k56_train, K56FLEX_STATUS_PARAM_DONE);
+                trace_phase("K56flex upstream MP' from audio at sample %d", result.mp_ack_sample);
+                if (g_v34 && !g_k56_b1_started) {
+                    /* V.34 10.1.3.1: known B1 gates user bits. As at the
+                     * V.90 CP' seam, search without inventing an E event. */
+                    if (v34_v90_begin_b1_search(g_v34)) g_state = ME_HANGUP;
+                    else g_k56_b1_started = true;
+                }
+            }
+        }
+        if (g_v34 && g_k56_upstream_bps && g_state != ME_HANGUP) {
+            v34_rx(g_v34, amp, len);
+            if (v34_v90_upstream_carrier_lost(g_v34)) {
+                /* V.34 11.6: a lost upstream needs another training
+                 * exchange, not delivery of unframed noise to the DTE.
+                 * K56 renegotiation is not implemented yet: fail closed. */
+                trace_phase("K56flex upstream carrier lost; ending call");
+                g_state = ME_HANGUP;
+            }
+            if (g_state != ME_DATA && g_state != ME_HANGUP && g_k56_b1_started
+                && k56flex_train_phase(g_k56_train) == K56T_DATA
+                && v34_v90_upstream_rx_acquired(g_v34)) {
+                g_state = ME_DATA;
+                if (data_stack_start_online(g_k56_train->cfg.rate_bps, g_calling_party))
+                    g_state = ME_HANGUP;
+                else {
+                    g_report_tx_rate = g_k56_train->cfg.rate_bps;
+                    g_report_rx_rate = g_k56_upstream_bps;
+                    if (g_data_framing != DS_FRAMING_V42 && g_data_framing != DS_FRAMING_MNP
+                        && !g_data_connect_reported) {
+                        g_data_connect_reported = true;
+                        di_on_connected(g_report_tx_rate);
+                    }
+                    trace_phase("K56flex DATA: audio MP/MP' and upstream B1 acquired, %d up / %d down",
+                                g_report_rx_rate, g_report_tx_rate);
+                }
+            }
         }
         pthread_mutex_unlock(&g_state_mtx);
+        me_drain_rx_to_dte();
         return;
     }
     if (g_k56) {

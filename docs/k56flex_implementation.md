@@ -10,10 +10,12 @@ analogue DATA role. It is the digital-side (server) downstream payload core
 and its exact inverse, plus the V.8bis capability frame, the parameter record
 and the accepted-report logic. `AT+MS=K56` (automode enabled) selects the
 V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
-probe. Neither is a complete live K56flex data connection. The first two
-upstream gates now follow received S/S-bar and the accepted report; MP and
-parameter exchange remain incomplete (Draft 0.23, Table 1a and clause 11).
-See the 21 October audio-gate qualification below for the native-peer limits.
+probe. The server now completes a bounded raw duplex connection against
+native HSF over PCMU: audio-derived S/S-bar, report, MP/MP', upstream B1 and
+the PCM data mapper. The client model remains incomplete. See the 21 October
+MP/data qualification below: it uses explicit 65-tap native analogue
+reconstruction; default 129-tap startup and sustained renegotiation remain
+unresolved (Draft 0.23, Table 1a and clause 11).
 
 **Read first:** MICA overlay 8E is the V.32/V.32bis datapump, not K56flex,
 and the resident QAM engine once lifted here under the K56flex name is now in
@@ -1285,6 +1287,101 @@ known to connect against the original MICA server at 129 taps, so this is
 an unresolved interoperability limit, not grounds for changing that default.
 The first two gates are fixed; live MP/parameter, E/B1 and payload remain
 separate unfinished work. No hardware interoperability is claimed.
+
+## Native HSF MP, B1 and checked duplex data, 21 October 2026
+
+Continuation of the startup-only result above. The original receiver no
+longer stops consuming audio at J'a. It differentially decodes the following
+four-point MP using GPC, with strict V.34 10.1.3.9 Tables 20/21 sync, start,
+CRC (10.1.2.3.2) and fill checks. Two identical MP records establish the
+offer. One matching, CRC-valid MP' suffices: native HSF sends only one before
+E/B1. Requiring two acknowledgements left the server stuck in PARAM_2 while
+HSF had already completed transmit training.
+
+Resident MICA `15BB -> 0FFE` posts `1000` after training; `15EE` posts `2000`
+after MP acceptance; `15FF/160A` posts `4000` at the acknowledged exchange.
+The server now uses the actual repeated audio MP to release GATE_C and the
+first parameter wait, and the received MP' to release PARAM_2. These are
+local receiver events; no native peer state or host callback releases a gate.
+Deferring readiness until MP is conservative but works with this native peer.
+
+HSF proposes upstream N=4 (9600), downstream code 11 (52000), mask `7FFF`,
+16-state trellis, linear encoding and minimum shaping. Original `12023dc0`
+uses downstream code `rate/2000 - 15`, unlike the ordinary V.34 rate field.
+The server respects both its local PCM cap and that received limit, chooses
+an enabled upstream rate, and fills the outgoing parameter record's upstream
+rate/mask rather than the previous zero (cleardown) values. The native peer
+accepts both parameter records and reports both training directions complete.
+
+The local SpanDSP primary-channel receiver buffers audio from accepted MP,
+then searches known B1 after MP' without fabricating an E event. V.34 clause
+7 and 10.1.3.1 require GPC and independent B1 initialization here. A replay
+fitted the GPC B1 template at 100%, yet the borrowed V.90 data path still
+descrambled with GPA: its published bits were about 50% ones while the GPC
+diagnostic was 100% marks. `v34_set_rx_data_scrambler(...,18)` now selects
+GPC explicitly before capture/template construction; ordinary V.90 retains
+its GPA default. Only successful B1 acquisition and PCM DATA permit host
+CONNECT. The receive branch drains actual decoded bytes to the PTY.
+
+The earlier DATA transition also had no source attached, so the mapper
+stopped after six priming frames and the engine emitted DS0 silence. A local
+word source now supplies continuous idle marks, then the normal data-stack
+bits once online (Draft 0.23 4.12). This is not a callback between modems.
+The native peer then holds carrier and decodes mapped idle exactly.
+
+Completed 40-second native qualification `k56flex-hsf-duplex-payload-20261021`:
+PTY CONNECT 52000, native carrier 3/data=1, actual 9600 up / 52000 down,
+2048 deterministic binary serial bytes delivered exactly in **each**
+direction, zero client framing errors. The tool now supports
+`--payload-bytes N --require-payload`, compares the actual PTY/native host
+outputs, drains packed idle marks, and rejects carrier interruptions; startup
+or carrier observations alone never satisfy payload verification.
+
+The final 40-second repeat `k56flex-hsf-duplex-8k-final-20261021` passes with
+8192 exact serial bytes each way, zero framing errors and zero carrier
+interruptions, using the loss-gated receiver. Reproduce with:
+
+```
+python3 tools/k56flex_hsf_pair.py --seconds 40 --dac-taps 65 \
+  --payload-bytes 8192 --require-payload --require-audio-gates \
+  --output artifacts/k56flex-hsf-duplex-new
+```
+
+Dependency control: rebuilding vendored SpanDSP from committed HEAD plus
+only the receive-tap API fails before the native symbol handoff
+(`k56flex-hsf-head-span-control-20261021`). Adding the K56 CC-tail alignment
+restores 8192 exact bytes each way. A one-variable control restores HEAD's
+short-probe RX behavior while retaining the tail fix and still passes
+(`k56flex-hsf-tail-only-rx-control-20261021`). The commit therefore keeps
+that receive behavior; its proposed removal and the V.90 nominal-power/fill/
+INFO1d changes are not dependencies and remain separate. At the unchanged
+129-tap default, the smaller build still fails Loop6 at 12.94 s
+(`k56flex-hsf-tail-only-default129-20261021`). The
+K56 tail also now handles its first-sample block boundary without returning
+zero samples: the new waveform regression fails with that fix removed and
+passes for requested chunks of 1, 7, 80 and 160 samples.
+
+The 90-second, 32768-byte trial is a **failure**, not sustained qualification.
+All 32768 downstream bytes are exact, but native HSF initiates renegotiation
+around 56.5 seconds and loses carrier; the first upstream mismatch is byte
+30602. The server does not yet implement K56 in-data renegotiation. Its
+receiver now fails closed on upstream carrier loss instead of continuing to
+deliver unframed noise. No native quality threshold or decision is overridden.
+The receiver's slow carrier-loss flag alone did not stop this failure. A
+local raw-data confidence check (four times settled decision error, floor
+0.08, the same policy used for x2) now also ends the call. A completed retry
+closes at 49.02 s after native renegotiation, with 14 corrupt trailing bytes
+instead of continuing to emit noise for the rest of the 90-second trial.
+`k56flex-hsf-quality-8k-20261021` still passes 8192 exact bytes each way with
+that guard and zero carrier interruptions. Neither result solves renegotiation.
+
+The new retained `upstream-mp-ulaw.*` fixture includes original Ja/J'a,
+repeated MP and the single MP'. Tests cover 1/80/160-sample chunks, one-shot
+events and fields, removal of the MP waveform, and negotiated rate/mask
+limits. Shared V.34/V.90 regressions also guard the receiver handoff. All
+media remains byte-exact G.711 with unchanged sample accounting, no added
+gain, filtering or DSP-constant changes in the server path. Default 129-tap
+native startup still fails at Loop6. No hardware or sustained-link claim.
 
 ## Mainline integration, 13 October 2026
 

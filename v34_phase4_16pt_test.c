@@ -288,6 +288,33 @@ static void check_spec_encoder(v34_state_t *s)
     }
 }
 
+static void check_k56_cc_tail_sample_boundary(void)
+{
+    /* V.34 11.2.1.2.5: ending the CC tail exactly at a block boundary
+       must not create a short transmit block that the engine pads as silence. */
+    const int chunks[] = {1, 7, 80, 160};
+    int16_t expected[160], actual[160];
+    for (unsigned i = 0; i < sizeof(chunks)/sizeof(chunks[0]); i++) {
+        v34_state_t *s = v34_init(NULL, 3200, 9600, false, true,
+                                  NULL, NULL, NULL, NULL);
+        assert(s);
+        v34_set_k56_phase2(s, true);
+        s->tx.stage = V34_TX_STAGE_SECOND_A;
+        l1_l2_signal_init(s);
+        s->tx.k56_probe_cc_tail_samples = 1;
+        assert(tx_cc_modulation(s, actual, chunks[i]) == chunks[i]);
+        assert(s->tx.current_modulator == V34_MODULATION_L1_L2);
+        v34_free(s);
+        s = v34_init(NULL, 3200, 9600, false, true, NULL, NULL, NULL, NULL);
+        assert(s);
+        l1_l2_signal_init(s);
+        assert(tx_l1_l2(s, expected, chunks[i]) == chunks[i]);
+        assert(!memcmp(actual, expected, chunks[i]*sizeof(actual[0])));
+        v34_free(s);
+    }
+    puts("PASS: K56 CC-to-L1 boundary fills every requested line sample");
+}
+
 static void check_k56_info1a_mode_flags(void)
 {
     /* V.34 Table 16 framing/CRC remains common; K56flex Draft 0.23 4.1
@@ -336,6 +363,7 @@ int main(void)
 
     assert(s);
     check_k56_info1a_mode_flags();
+    check_k56_cc_tail_sample_boundary();
     /* Table 18's exact 16-point request was overridden as "nearly tied".
        Exercise the production classifier and the selected MP generator. */
     int distance;
