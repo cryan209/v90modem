@@ -6307,10 +6307,10 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         /*endif*/
         /* Carrier-level reference feeding the Tone A gate: instant attack,
            slow decay (~4096-sample time constant, so roughly -17 dB/s with no
-           signal).  Deliberately not windowed against s->sample_time -- the
-           V.90 Phase 2 flow reconditions this receiver repeatedly, resetting
-           that clock, so a 2 s window never completed and the reference stayed
-           at 0.  A minimum tracker is wrong here too: Phase 2 contains genuine
+           signal).  Deliberately not windowed against s->sample_time -- a
+           2 s window never completed and the reference stayed at 0 (that
+           clock did not advance at all until v34_rx() counted the samples
+           its demodulators consume).  A minimum tracker is wrong here too: Phase 2 contains genuine
            silent gaps, so a minimum collapses to ~0 and the gate degenerates
            to always-open. */
         if (power > s->info_rx_carrier_ref)
@@ -16676,6 +16676,22 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
         s->rx.sample_time += lenx;
     }
     while (lenx > 0  &&  leny < len);
+    /* Every demodulator except SILENCE returns 0 having consumed the whole
+       block (the SpanDSP convention), so the add above never advanced the
+       clock: rx.sample_time stayed at 0 for the whole call.  Phase 2 then
+       timestamped each Tone A reversal with only its offset in the block
+       (tone_ab_hop_time), and v90_tone_a_reversal_recovery_due(), which
+       measures from it on the TX clock, read the V.90 9.2.1.2.4 deadline
+       (900 ms + RTD after the second reversal) as long expired.  So SECOND_B
+       reversed Tone B after 2 bauds on every call instead of waiting for the
+       analogue modem's Tone A reversal (9.2.1.1.6), and sent L1/L2 into the
+       peer's own L2.  A Conexant CX93001 then had no probe to measure, sent
+       INFO1a for V.34 at 2400 baud with projected N=1, and V.90 was never
+       selected.  Count the rest of the block; which samples go to which
+       demodulator, and this function's return value, are unchanged. */
+    if (lenx == 0  &&  leny < len)
+        s->rx.sample_time += len - leny;
+    /*endif*/
 
     if (s->rx.received_event == V34_EVENT_TRAINING_FAILED
         && !s->rx.training_failed_reported)

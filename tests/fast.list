@@ -821,6 +821,9 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAM
 # The RasFinder's MT5634SMI does not reset its scrambler before V.90 B1 (10.1.3.1/V.34), so no B1 template fits;
 # the upstream trains on the 4-point CP'/E instead and must decode B1 as scrambled ones (docs/v90_rasfinder_phase4.md).
 sh -c 'ME_V90_UPSTREAM_MAX_BPS=9600 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v90-b1/live-rx.g711 ulaw --fast --dial 2>&1 | grep -q "upstream DATA bits: t=0.1s tap=4 ones=100%"'
+# V.90 9.2.1.1.6: our Tone B reversal waits for the CX93001's Tone A reversal.  With the RX clock frozen at 0 the
+# 9.2.1.2.4 deadline read as expired and we reversed after 2 bauds, into the peer's L2 (docs/v90_hardware_interop.md).
+sh -c 'ME_MODE=v90 ME_V34_SPAN_FLOW_LOG=1 ./v90_engine_replay reference-data/artifacts/cx93001-v90-phase2/live-rx.g711 ulaw --fast --sync --sip-answer > "$TMPDIR/p2.log" 2>&1; grep -q "Tone A reversal transaction completed at SECOND_B" "$TMPDIR/p2.log" && ! grep -q "recovery deadline reached at SECOND_B" "$TMPDIR/p2.log"'
 
 @group
 # V.34 7/10.1.3.3/10.1.3.9 and 11.4: retain standard MP decoding while

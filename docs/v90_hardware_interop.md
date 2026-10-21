@@ -101,6 +101,71 @@ has six corrupted downstream bytes. This is not an interoperability pass.
 See `apple_usb_modem_sm56.md`, “Foreign USB hardware peer”, and retained
 `reference-data/artifacts/apple-cx-direct-20261018/` for diagnostics and grading.
 
+### Conexant CX93001 declines V.90: our Phase 2 sequencing, 21 October 2026
+
+The CX93001 (`AT\N2`, `AT+MS=V90,1,300,33600,300,56000`) dials our
+answerer as **6314 (AudioCodes port 4)**. The answerer runs on vmhost CT 117
+(`tools/soak/answer_ec_call.sh ... v90`, `tools/cx_hold_dial.py`). It had
+declined V.90 at INFO1a since 23 July. It sent a V.34 INFO1a (Table 11),
+which describes our transmit direction as 2400 baud with projected N=1.
+That is the reading of a probe it could not measure. A poor downstream
+measurement rules out PCM.
+
+**Cause: ours.** On the taps, the CX sends L1 at 7.20-7.36 s and L2 until
+7.84 s. We reversed Tone B at 7.62 s and started our L1 at 7.64 s, while
+it was still sending L2. §9.2.1.1.6 lets the digital modem reverse only
+after "detecting Tone A and the subsequent Tone A phase reversal". Under
+§9.2.2.1.6 the CX sends that Tone A, reverses it and goes silent to wait
+for our reversal, but our reversal had already passed (Tone A 7.84 s,
+reversal 7.89 s). Our L1/L2 had arrived before it was listening.
+
+Why we reversed early: `v34_rx()` advances `rx.sample_time` by each
+demodulator's return value. Every demodulator except SILENCE returns 0,
+the SpanDSP convention for "consumed the block", so the receive clock
+stayed at 0 for the whole call. `tone_ab_hop_time` held only the in-block
+offset of the second Tone A reversal. `v90_tone_a_reversal_recovery_due()`
+compares it with the transmit clock, so the §9.2.1.2.4 deadline (900 ms +
+RTD) read as expired when `SECOND_B` started. The replay logs "recovery
+deadline reached at SECOND_B after 2 bauds" (tx_time 9440, rx_time 0,
+hop 140). This came in on 23 July (6b30ac32), when the deadline replaced a
+fixed 333 ms stage timer that happened to cover the CX's 300 ms. That is
+the July regression window: the CX had accepted V.90 on 19 July.
+
+The fix counts the rest of the block in `v34_rx()`. Which samples go to
+which demodulator, and the return value, are unchanged. In replay,
+`SECOND_B` now waits 193 bauds for the CX's real reversal (fast-tier
+fixture `reference-data/artifacts/cx93001-v90-phase2`). On the wire, the
+CX's Tone A reversal now comes first, then our reversal, then our L1/L2.
+Our L1/L2 itself was always conformant: 25 equal tones, the four
+§10.1.3.5 omissions, and L1 6 dB above L2.
+
+**Live, after the fix: the CX selects V.90 on 8 of 11 calls** (0 of 2
+earlier today, and none since July):
+
+| Declared max power (INFO0d 33:37) | Calls | V.90 (UINFO) | Declined (first INFO1a, our direction) |
+|---|---|---|---|
+| default −6 dBm0 | 5 | 3 (95) | 2 (2400 baud N=5; 2400 baud N=0) |
+| −7 / −9 / −12 / −13 dBm0 | 1 each | 4 (91 / 85 / 79 / 75) | — |
+| −11 dBm0 | 1 | — | 1 (2800 baud N=7) |
+
+So the maximum-power declaration is not the switch. The CX honours it
+(UINFO falls as the ceiling falls, §8.2.3.2), and the declines are
+scattered. Every decline has a poor first-probe reading. Two of the three
+ran Phase 2 with the same stage timing as accepted calls. The third went
+through INFO0 recovery. Our RTP transmit timing during L1/L2 is clean on
+every call (largest gap 21.7 ms). The retrain Phase 2 of one declined call
+read our probe as 3200 baud N=13, but still chose V.34.
+
+**Next layer.** On the −13 dBm0 call we reached V.90 DATA at 46666/31200.
+Our T/3 upstream B1 then gave up ("the upstream has no carrier"). The CX
+never reported CONNECT and retrained at 67 s.
+
+Also noted, not changed: the round-trip delay estimate is only measured on
+the V.92 short Phase 2 path. Every V.90/V.34 Phase 2 deadline uses RTD = 0.
+INFO0d bits 29:32 declare −13 dBm0 while the tap shows Phase 2 at about
+−10 dBm0 (L2 −10.2, Tone B −9.9). `v90_info0d_nominal_power_code()` is meant
+to declare the actual level. Why it does not is not yet investigated.
+
 ## Eicon, 8 October 2026: clean LAN results and native V.34 corrections
 
 Using our analogue caller against Eicon endpoints 7910 (PCMU) and 7900
