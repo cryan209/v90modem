@@ -183,6 +183,34 @@ through the answer tone. "modulations=none" is the summary of a CM that
 never arrived, not an unreadable one. The two V.8 attempts cost 11.9 s
 before USB1, and the CX waits that long.
 
+### Re-check preparation, 2026-10-22 (fresh live calls pending)
+
+Reviewed main `6783ae58` against the four retained S1 fixtures and the
+`/root/s1-live1`..`4` logs on vmhost CT 117. Rebuilt and ran
+`v22bis_s1_test`: all four receive taps train at 2400, and all 15
+dispersive-channel delays (0..14 samples) train both ends at 2400. The
+V.22bis sources match main; unrelated local V.34 working-tree changes
+were present, so this focused check is not a clean-main full-suite result.
+Logs and fixture hashes: `artifacts/cx93001-s1-recheck-20261022/`.
+
+The retained successful calls report training at 13760, 13801, 13760 and
+13761 ms, respectively, consistent with the S1 response path in
+6.3.1.1.2 b), rather than the 1200-bit/s commit in 6.3.1.2.2 b).
+The attached `/dev/cu.usbmodem246802461` answers ATI3 with
+`CX93001-EIS_V0.2013-V92`. CT 117 is reachable and the test SIP ports are
+idle, but its checkout is older (`7663df9a`); it cannot be treated as a
+current-main build. The root filesystem has only about 296 MiB free;
+an isolated build can use its `/tmp` tmpfs with the vendored libraries.
+
+No fresh call was placed: automatic approval review blocked copying the
+main source patch to vmhost pending explicit source-transfer approval.
+The planned comparison remains two fresh `AT\\N2`, `AT+MS=V22B` calls
+using `answer_ec_call.sh` on wired CT 117 and `cx_hold_dial.py` on the CX,
+with both raw G.711 taps, negotiated-rate reports, numbered payloads and
+RTP accounting retained. This preparation does not add a live success or
+re-verify the MNP carrier hold. No DSP change is supported by these results;
+the existing S1 comments cite 2.5.2.2/Table 1 and 6.3.1.1.2 b).
+
 ## Other datapumps (surveyed 2026-10-21, not changed)
 
 Measured with `engine_pair_test --gap-ms` (V.42 LAPM, `AT+DS=0` so the
