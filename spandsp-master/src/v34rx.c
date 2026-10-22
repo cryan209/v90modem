@@ -17349,6 +17349,24 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
         return 0;
     total = s->rx.phase3_ja_capture_hyp_len[hypothesis];
     len = v34_ja_window_bits(total);
+    if (len > max_bits)
+        len = max_bits;
+    /* Packed ring; callers still get one byte per bit, oldest first. */
+    for (i = 0;  i < len;  i++)
+        bits[i] = (uint8_t) v34_ja_window_get(s->rx.phase3_ja_capture_hyp[hypothesis], total, i);
+    return len;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Total Ja bits EVER captured for this hypothesis, not the ring's retained
+   window.  The engine's re-search throttle needs a monotonic quantity: keying
+   it on the copy-out length instead stops the search dead once the ring fills,
+   because that length stops growing while bits keep arriving. */
+SPAN_DECLARE(int) v34_v90_phase3_ja_total_bits(v34_state_t *s, int hypothesis)
+{
+    if (!s || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
+        return 0;
+    return s->rx.phase3_ja_capture_hyp_len[hypothesis];
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -17394,24 +17412,6 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits_from(v34_state_t *s,
     if (first_abs)
         *first_abs = from;
     return n;
-    if (len > max_bits)
-        len = max_bits;
-    /* Packed ring; callers still get one byte per bit, oldest first. */
-    for (i = 0;  i < len;  i++)
-        bits[i] = (uint8_t) v34_ja_window_get(s->rx.phase3_ja_capture_hyp[hypothesis], total, i);
-    return len;
-}
-/*- End of function --------------------------------------------------------*/
-
-/* Total Ja bits EVER captured for this hypothesis, not the ring's retained
-   window.  The engine's re-search throttle needs a monotonic quantity: keying
-   it on the copy-out length instead stops the search dead once the ring fills,
-   because that length stops growing while bits keep arriving. */
-SPAN_DECLARE(int) v34_v90_phase3_ja_total_bits(v34_state_t *s, int hypothesis)
-{
-    if (!s || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
-        return 0;
-    return s->rx.phase3_ja_capture_hyp_len[hypothesis];
 }
 /*- End of function --------------------------------------------------------*/
 

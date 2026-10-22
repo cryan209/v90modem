@@ -15002,10 +15002,10 @@ skip_8k_codewords:
                         g_v90_dil_capture_search = 0;
                         g_v90_dil_hyp_last_bits = 0;
                         g_v90_dil_hyp_cursor = -1;
+                        v90_ja_template_reset();
                         ME_LOG("[ME] V.90: peer retrain detected; following it back to Phase 2 "
                                "(accepted=%d)\n", accepted ? 1 : 0);
                         trace_phase("V90 peer retrain detected, following (accepted=%d)",
-                        v90_ja_template_reset();
                                     accepted ? 1 : 0);
                         /* PEER_RETRAIN is an application-owned event, unlike
                          * the ordinary V.34 TX/RX handshake events.  A rejected
@@ -16649,6 +16649,14 @@ static void prepare_v90_phase3_locked(void)
             v90_set_downstream_rate_limits(g_v90, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX]);
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+            if (g_v90 && g_v90_phase2_restarts == 0) {
+                /* Experiment: the initial attempt's pre-Sd wait (§9.3.1.3,
+                 * 0..500 ms; the default is 0). */
+                int initial_delay = parse_env_int("ME_V90_SD_DELAY_MS", -1);
+
+                if (initial_delay >= 0)
+                    v90_set_sd_delay_ms(g_v90, initial_delay);
+            }
             if (g_v90 && g_v90_phase2_restarts > 0) {
                 int retrain_delay;
 

@@ -427,3 +427,17 @@ The gate is now 0.03; an unconverged filter reads 0.05 or more, which
 this stage (Ja recognised on 5/5 but the CX sent no S after Jd), so the effect is
 unmeasured. S arrival is not explained by our TX stalls (checked against
 rtp-tx.csv gaps after Sd on 15 calls).
+
+**Why the CX sometimes never sends S after Jd (23 October, measured).** The CX
+goes silent 0.60 s after our Sd starts and resumes *exactly* 4.10 s later on every
+one of 16 calls (rx tap, `lag.py`): then it sends S if it has decoded Jd, or its
+Tone A retrain if not. That instant does not move with TRN1d length (8004T and
+20004T alike), RTP jitter (no correlation with >25 ms TX gaps, no seq/ts
+discontinuities), or the pre-Sd wait. The CX's own `AT&V1` after a failed call shows
+Rx LEVEL 215 / Line QUALITY 255 / EQM 0 (never measured) and Highest Rx State 62, and
+on the one success level 10, quality 64, state 67, EQM 00E5: on failures it never
+completes receive-side training on TRN1d/Jd, so the channel it hears is the
+suspect, not our Jd timing. A 500 ms pre-Sd wait (`ME_V90_SD_DELAY_MS`, new,
+default unchanged) completed Phase 3 on 3/6 calls against 2/6 for 0 ms -- no
+evidence either way. Success over the day ran 2/5, 3/5, 0/8, 1/6, 1/10 on the same
+build: the rig itself drifts.
