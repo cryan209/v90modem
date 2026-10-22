@@ -318,3 +318,56 @@ verified and then discarded by the menu's existing implementation.
 `tools/eicon_zmodem_test.py` repeats the checks with exclusive binary-safe
 PTY ownership by sz/rz, preserving the ZMODEM headers after textual prompts.
 Run it inside the LAN modem build; it uses the isolated 5078/14600 ports.
+
+## Phase 2 transmit contracts, 22 October 2026
+
+The transmitter corrections address three independent wire defects:
+
+- **INFO0d nominal power (V.90 Table 7, bits 29:32).** The declaration was
+  fixed at -13 dBm0 even when the selected Phase 2 level was -10 dBm0.
+  It now follows the existing transmit gain calibration, rounded and bounded
+  to Table 7's -6..-21 dBm0 range. This changes signalling, not waveform gain.
+- **INFO0d final fill (Table 7, bits 58:61).** The stage initializer could
+  reset the differential point before the last fill bit was emitted. Save
+  that baud's point before changing stage; contiguous recovery repeats retain
+  its differential history. No sample or baud is added.
+- **INFO1d repetition (8.2.3.1 and Table 9).** The generic INFO1c path added
+  eight bits and rounded to a byte, making each digital message 120 bits
+  instead of 109. Digital INFO1d now sends four contiguous 109-bit messages,
+  preceded by one arbitrary-phase point for the group. V.92 Table 17 uses
+  the same message length. Ordinary V.34 framing is unchanged.
+
+`v34_phase4_16pt_test` checks the production generators' differential output:
+CRC, final fill, exact frame boundaries and recovery repeats, in both PCM
+laws. Power checks select -6, -10, -14 and -21 dBm0 and independently measure
+Tone B and L2 after G.711 encode/decode; each is within 0.25 dB of the
+declaration. These checks fail against the pre-change transmitter: stale
+power, final fill and INFO1d length each have an independent failing check.
+
+The review also found undefined signed left shifts in the Q7 precoder
+projection (V.34 9.6.2/Table 11). Multiplication by 128 retains the same
+scale for negative constellation coordinates. The complete generator test
+passes UBSan after that correction; its directly included transmitter is
+instrumented, while the linked SpanDSP archive is not.
+
+Build verification exposed a separate stale-object trap: `make clean`
+deleted all dependency files but omitted some test objects, including
+`v34_hdx_test.o`. The old half-duplex test produced 102 failures; compiling
+the same source afresh restored the nonlinear-primary case with zero payload
+errors. Clean now removes all root and tools object files before the
+existing explicit cleanup. Validation used a clean application build and a
+clean vendored SpanDSP build.
+
+Final validation: `make -j6` builds the application and tests; the runner
+with `-j 6 tests/fast.list tests/slow.list` completes **615 passed, 0 failed**
+in 223 seconds after integrating the newer upstream receiver corrections.
+Logs: `test-logs/dsp-review-integrated/`. The equivalent cleanup fix already
+present upstream is retained. The two multiline SIP
+tests require localhost socket permission, which the initial sandboxed run
+lacked. The K56flex RX rollback and V.FC/USB bridge work already pending in
+this working tree are separate from these transmitter corrections.
+
+These are transmitter conformance results, not hardware qualification or
+evidence that any particular peer's training failure is fixed. A new live
+comparison must check our transmitted tap and complete checked payload
+traffic before claiming an interoperability improvement.

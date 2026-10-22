@@ -987,6 +987,23 @@ static int v90_info0d_max_power_code(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int v90_info0d_nominal_power_code(const v34_tx_state_t *s)
+{
+    /* Table 7/V.90 bits 29:32 declare the actual Phase 2 nominal level.
+       Invert v34_tx_power()'s gain calibration rather than retaining the
+       historical -13 dBm0 declaration after the engine selects -10 dBm0.
+       This changes signalling metadata, not any waveform gain. */
+    float reference_gain = (1.0f/V34_NOMINAL_SYMBOL_RMS)*32768.0f/TX_PULSESHAPER_GAIN;
+#if defined(SPANDSP_USE_FIXED_POINT)
+    reference_gain *= 16.0f*(32767.0f/30672.52f);
+#endif
+    int code = s->gain > 0
+             ? (int) lroundf(-6.0f - DBM0_MAX_SINE_POWER
+                            - 20.0f*log10f(s->gain/reference_gain))
+             : 15;
+    return code < 0 ? 0 : code > 15 ? 15 : code;
+}
+
 static int info0_sequence_tx(v34_tx_state_t *s)
 {
     uint8_t *t;
@@ -1043,11 +1060,8 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
         /* 29:32    Digital modem nominal transmit power for Phase 2.
                     Represented in -1 dBm0 steps: 0 = -6 dBm0, 15 = -21 dBm0.
-                    V.90 Table 7 requires the transmitted value, not the level
-                    requested from the linear modulator.  The byte-exact G.711
-                    output measures -13 dBm0 for L2 and the INFO carrier, so
-                    advertise that wire level rather than the old -10 dBm0. */
-        bitstream_put(&bs, &t, 7, 4);
+                    V.90 Table 7 requires the transmitted nominal value. */
+        bitstream_put(&bs, &t, v90_info0d_nominal_power_code(s), 4);
         /* 33:37    Maximum digital modem transmit power.
                     Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
                     -6 dBm0 -> code = (6 - 0.5) / 0.5 = 11.
@@ -1099,8 +1113,9 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, 0, 8);
         bitstream_flush(&bs, &t);
         V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW,
-                 "  PCM law: %s, nominal power: -13 dBm0, max power: %.1f dBm0\n",
+                 "  PCM law: %s, nominal power: %d dBm0, max power: %.1f dBm0\n",
                  s->v90_pcm_law ? "A-law" : "u-law",
+                 -6 - v90_info0d_nominal_power_code(s),
                  -0.5*(double) (v90_info0d_max_power_code() + 1));
         return 62;
     }
@@ -2845,8 +2860,10 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
         /* Table 11/V.34 step 2/7, 9.6.2/V.34 item 4 - Compute the channel output signal y(n), and the precoded signal x(n) */
         y.re = u.re + s->c.re;
         y.im = u.im + s->c.im;
-        s->x[V34_XOFF + s->step_2d].re = (y.re << 7) - s->p.re;
-        s->x[V34_XOFF + s->step_2d].im = (y.im << 7) - s->p.im;
+        /* Signed constellation coordinates can be negative. Multiplication
+           preserves the Q7 scaling without an undefined signed left shift. */
+        s->x[V34_XOFF + s->step_2d].re = y.re*128 - s->p.re;
+        s->x[V34_XOFF + s->step_2d].im = y.im*128 - s->p.im;
 
         subsets[s->step_2d & 1] = get_binary_subset_label(&y);
         qam_mod(s);
@@ -3048,8 +3065,16 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
         V90_INFO0_RETRY_HARD_CAP = 16
     };
     int bit;
+    complex_sig_t digital_point;
 
     bit = get_data_bit(&s->tx);
+    /* Table 7/V.90 bits 58:61 are all fill ones. Preserve this baud's
+       differential point before a completion handler reinitializes lastbit
+       for Tone B or a repeated INFO0d; otherwise the final fill bit can
+       become zero. No extra baud or line sample is introduced. */
+    digital_point = s->tx.lastbit;
+    if (bit > 0)
+        digital_point.re = -digital_point.re;
     if (s->tx.txptr >= s->tx.txbits)
     {
         if (s->tx.v90_mode
@@ -3085,10 +3110,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                     if (s->tx.v92_short_armed  &&  v92_short_phase2_agreed(s))
                         v92_short_begin(s, "digital");
                     /*endif*/
-                    if (bit)
-                        s->tx.lastbit.re = -s->tx.lastbit.re;
-                    /*endif*/
-                    return s->tx.lastbit;
+                    return digital_point;
                 }
                 /*endif*/
                 if (!s->tx.info0_acknowledgement)
@@ -3242,6 +3264,14 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
         /*endif*/
     }
     /*endif*/
+    if (s->tx.v90_mode && !s->tx.calling_party)
+    {
+        /* Contiguous INFO0d repeats retain differential history; a new
+           stage keeps the state its initializer selected for the next baud. */
+        if (s->tx.current_getbaud == get_info0_baud)
+            s->tx.lastbit = digital_point;
+        return digital_point;
+    }
     if (bit)
         s->tx.lastbit.re = -s->tx.lastbit.re;
     /*endif*/
@@ -6629,7 +6659,8 @@ static void info1_baud_init(v34_state_t *s)
                          ? "V.92 Table 17" : "V.90 Table 9");
         prepare_info1c(s);
         s->tx.txbits = info1c_sequence_tx(&s->tx, &s->tx.info1c);
-        s->tx.txbits += 8;
+        if (!s->tx.v90_mode)
+            s->tx.txbits += 8;
     }
     else
     {
@@ -6645,8 +6676,12 @@ static void info1_baud_init(v34_state_t *s)
         s->tx.txbits = info1a_sequence_tx(&s->tx, &s->tx.info1a);
     }
     /*endif*/
-    /* Round up to a whole number of bytes */
-    s->tx.txbits = (s->tx.txbits + 7) & ~7;
+    /* Table 9/V.90 defines exactly 109 transmitted bits. Section 8.2.3.1
+       permits contiguous repetitions, not the eleven byte-padding zeros
+       the generic INFO1c buffer used to emit between them. Buffer storage
+       may be byte-aligned; this digital INFO1d wire length must not be. */
+    if (!(s->tx.v90_mode && !s->tx.calling_party))
+        s->tx.txbits = (s->tx.txbits + 7) & ~7;
     s->tx.txptr = 0;
     if (s->tx.v90_mode)
     {
@@ -9327,7 +9362,7 @@ static complex_sig_t get_data_baud(v34_state_t *s)
 
     /* Return one 2D symbol from the current mapping frame.
        tx_mapping_frame_buf holds the precoded signal x(n) in Q9.7, as written by
-       v34_get_mapping_frame() ("(y.re << 7) - p.re"). It has to be scaled back by
+       v34_get_mapping_frame() ("y.re*128 - p.re"). It has to be scaled back by
        128 before it reaches the modulator - the plain cast that used to be here
        handed the modulator symbols 128x too large. v34_get_mapping_frame() keeps
        its Q9.7 output contract, since v34_get_mapping_frame_state() callers and

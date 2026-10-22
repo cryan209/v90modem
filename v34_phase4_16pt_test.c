@@ -2,7 +2,7 @@
  * its own Phase 4 TRN, MP, MP' and E (10.1.3.2, 10.1.3.8, 10.1.3.9).  Includes
  * the production v34tx.c and calls the real static generators.  Generator
  * level only: our receiver has no 16-point Phase 4 path, so there is no
- * waveform loopback for it.
+ * waveform loopback for it. Also checks Phase 2 transmitter wire contracts.
  */
 #include "spandsp-master/src/v34tx.c"
 
@@ -288,6 +288,153 @@ static void check_spec_encoder(v34_state_t *s)
     }
 }
 
+static void check_v90_nominal_power_declaration(void)
+{
+    /* Table 7/V.90: the nominal-power declaration must follow the selected
+       transmit level, rather than a stale calibration from an older build. */
+    const int power[] = {-6, -10, -14, -21};
+    for (int law = 0; law < 2; law++)
+    for (unsigned i = 0; i < sizeof(power)/sizeof(power[0]); i++)
+    {
+        v34_state_t *s = v34_init(NULL, 3200, 31200, false, true,
+                                  NULL, NULL, NULL, NULL);
+        assert(s);
+        v34_set_v90_mode(s, law);
+        v34_tx_power(s, (float) power[i]);
+        assert(info0_sequence_tx(&s->tx) == 62);
+        unsigned code = 0;
+        for (int k = 0; k < 4; k++)
+            code |= ((s->tx.txbuf[(29+k)/8] >> ((29+k)%8)) & 1) << k;
+        assert(-6 - (int) code == power[i]);
+        /* Check our own bearer output too: inverting the gain setter alone
+           cannot establish Table 7's actual nominal transmit level. Tone B
+           and L2 have nominal power (8.2.2/8.2.4 and 10.1.2.4/V.34).
+           Exclude filter startup and the L1-to-L2 transition. */
+        int16_t waveform[3200];
+        initial_ab_not_ab_baud_init(s);
+        assert(tx_cc_modulation(s, waveform, 1600) == 1600);
+        for (int signal = 0; signal < 2; signal++)
+        {
+            if (signal)
+            {
+                l1_l2_signal_init(s);
+                assert(tx_l1_l2(s, waveform, 3200) == 3200);
+            }
+            double energy = 0;
+            int start = signal ? 1600 : 800;
+            for (int k = start; k < start + 800; k++)
+            {
+                int sample = law ? alaw_to_linear(linear_to_alaw(waveform[k]))
+                                 : ulaw_to_linear(linear_to_ulaw(waveform[k]));
+                energy += (double) sample*sample;
+            }
+            double measured = DBM0_MAX_POWER + 10*log10(energy/800/(32768.0*32768.0));
+            assert(fabs(measured - (-6 - (int) code)) < 0.25);
+        }
+        v34_free(s);
+    }
+    puts("PASS: Table 7/V.90 nominal power follows selected TX power in both laws");
+}
+
+static unsigned info_wire_crc(const int *bits, int count)
+{
+    unsigned crc = 0xFFFF;
+    for (int i = 0; i < count; i++)
+        crc = ((crc ^ bits[i]) & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
+    return crc;
+}
+
+static int differential_bit(complex_sig_t previous, complex_sig_t point)
+{
+    return (double) previous.re*point.re + (double) previous.im*point.im < 0;
+}
+
+static void check_v90_info0_recovery_boundaries(void)
+{
+    /* 9.2.1.2.1: a repeated INFO0d is still a complete DPSK frame, whether
+       it repeats again or completes the acknowledgement transaction. */
+    for (int law = 0; law < 2; law++)
+    for (int acknowledged = 0; acknowledged < 2; acknowledged++)
+    {
+        v34_state_t *s = v34_init(NULL, 3200, 31200, false, true,
+                                  NULL, NULL, NULL, NULL);
+        assert(s);
+        v34_set_v90_mode(s, law);
+        s->tx.info0_acknowledgement = true;
+        s->rx.info0_acknowledgement = acknowledged;
+        info0_baud_init(s);
+        s->tx.stage = V34_TX_STAGE_INFO0_RETRY;
+        complex_sig_t previous = s->tx.lastbit;
+        for (int frame = 0; frame < (acknowledged ? 1 : 2); frame++)
+        {
+            int bits[62];
+            for (int i = 0; i < 62; i++)
+            {
+                complex_sig_t point = get_info0_baud(s);
+                bits[i] = differential_bit(previous, point);
+                previous = point;
+            }
+            assert(info_wire_crc(bits + 12, 46) == 0);
+            assert(bits[28] == 1);
+            for (int i = 58; i < 62; i++) assert(bits[i] == 1);
+        }
+        assert((s->tx.current_getbaud == get_info0_baud) == !acknowledged);
+        v34_free(s);
+    }
+    puts("PASS: INFO0d recovery preserves fill bits and differential history across repeats");
+}
+
+static void check_v90_info_wire_boundaries(void)
+{
+    for (int law = 0; law < 2; law++)
+    for (int v92 = 0; v92 < 2; v92++)
+    {
+        v34_state_t *s = v34_init(NULL, 3200, 31200, false, true,
+                                  NULL, NULL, NULL, NULL);
+        assert(s);
+        v34_set_v90_mode(s, law);
+        /* V.92 9.3/Table 17 retains INFO1d's 109-bit framing. */
+        s->tx.v92_info0_capable = v92 != 0;
+        s->rx.info0_raw_26_27 = v92 ? 1 : 0;
+        s->tx.v92_pcm_upstream_capable = v92 != 0;
+        s->rx.info0_received = true;
+        info0_baud_init(s);
+        complex_sig_t previous = s->tx.lastbit;
+        int bits[4*109];
+        for (int i = 0; i < 62; i++)
+        {
+            complex_sig_t point = get_info0_baud(s);
+            bits[i] = differential_bit(previous, point);
+            previous = point;
+        }
+        assert(info_wire_crc(bits + 12, 46) == 0);
+        for (int i = 58; i < 62; i++) assert(bits[i] == 1);
+
+        info1_baud_init(s);
+        /* V.90 8.2.3.1: one arbitrary point precedes the whole group. */
+        previous = get_info1_baud(s);
+        int count = 0;
+        while (s->tx.current_getbaud == get_info1_baud && count < 4*109)
+        {
+            complex_sig_t point = get_info1_baud(s);
+            bits[count++] = differential_bit(previous, point);
+            previous = point;
+        }
+        assert(count == 4*109 && s->tx.current_getbaud != get_info1_baud);
+        const int sync[] = {1,1,1,1,0,1,1,1,0,0,1,0};
+        for (int frame = 0; frame < 4; frame++)
+        {
+            const int *f = bits + frame*109;
+            assert(memcmp(f, sync, sizeof(sync)) == 0);
+            assert(info_wire_crc(f + 12, 93) == 0);
+            for (int i = 105; i < 109; i++) assert(f[i] == 1);
+            assert(memcmp(f, bits, 109*sizeof(*f)) == 0);
+        }
+        v34_free(s);
+    }
+    puts("PASS: V.90/V.92 INFO0d final fill and contiguous 109-bit INFO1d groups in both laws");
+}
+
 static void check_k56_probe_window(void)
 {
     /* V.34 10.1.2.4/11.2.1.2.6: the K56 common-startup probe must
@@ -389,6 +536,9 @@ int main(void)
     check_k56_info1a_mode_flags();
     check_k56_cc_tail_sample_boundary();
     check_k56_probe_window();
+    check_v90_nominal_power_declaration();
+    check_v90_info_wire_boundaries();
+    check_v90_info0_recovery_boundaries();
     /* Table 18's exact 16-point request was overridden as "nearly tied".
        Exercise the production classifier and the selected MP generator. */
     int distance;
