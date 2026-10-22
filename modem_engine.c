@@ -6677,20 +6677,22 @@ static bool v34_reneg_timed_out_locked(void)
  * implementation): 31200 at 3200 baud (9.75 bits/symbol) needs 35.0 dB,
  * and each 0.75 bit/symbol less needs 2.0 dB less.  Calibrated on
  * replays with the real echo reference: the SmartLink rig reads 36.9-37.3
- * dB and the RasFinder 35.4-36.4 dB, both carrying 31200; a Conexant
+ * dB and the RasFinder's 4-point training reads 35.4-36.4 dB; a Conexant
  * CX93001 reads 28.4-28.5 dB and never decoded 31200, while 24000 (which
- * would need 29.0) decoded on one call of two.  0 = no measurement. */
+ * would need 29.0) decoded on one call of two. This estimates channel
+ * capacity; it does not validate B1 acquisition or sustained DATA decoding.
+ * 0 = no supported measured rate. */
 static int me_v90_upstream_rate_for_snr(float snr, int baud)
 {
     float bits;
     int n;
 
-    if (!(snr > 0.0f) || baud <= 0)
+    if (!isfinite(snr) || !(snr > 0.0f) || baud <= 0)
         return 0;
     bits = 9.75f + (snr - 35.0f)*0.75f/2.0f;
     n = (int) floorf(bits*baud/2400.0f);
     if (n < 2)
-        n = 2;
+        return 0;
     if (n > 14)
         n = 14;
     return n*2400;
@@ -6700,6 +6702,7 @@ static int me_v90_upstream_rate_for_snr(float snr, int baud)
 static bool g_v90_up_snr_started = false;
 static bool g_v90_up_snr_done = false;
 static uint64_t g_v90_up_snr_start = 0;
+static int g_v90_upstream_prepared_bps = 0;
 
 static void v90_reset_upstream_data_arming(void)
 {
@@ -6708,6 +6711,7 @@ static void v90_reset_upstream_data_arming(void)
     g_v90_upstream_e_run = 0;
     g_v90_up_snr_started = false;
     g_v90_up_snr_done = false;
+    g_v90_upstream_prepared_bps = 0;
 }
 
 /* Measure the analogue modem's upstream before MP offers it a rate.
@@ -6720,26 +6724,30 @@ static void v90_reset_upstream_data_arming(void)
  * and CP, all 4-point (§8.5.2, our Jd bit 47 = 0), during the 500 ms of
  * our TRN2d.  Capture it on the T/3 branch from CPt acceptance, train the
  * T/3 equalizer on the newest 600 symbols, and read its decision error. */
-static void v90_upstream_measure_locked(void)
+/* False means this attempt was restarted: the RX caller must stop using its
+ * old Phase-4 state. No measurement is not permission to offer the ceiling. */
+static bool v90_upstream_measure_locked(void)
 {
     float snr;
 
     if (g_v90_up_snr_done || !g_v34 || !g_v90 || g_v92_active)
-        return;
+        return true;
     if (v90_get_tx_phase(g_v90) != V90_TX_TRN2D)
-        return;
+        return true;
     if (!g_v90_up_snr_started) {
         if (v34_v90_upstream_capture_early(g_v34) != 0) {
-            g_v90_up_snr_done = true;
-            return;
+            ME_LOG("[ME] V.90 upstream measurement unavailable; no MP rate offered\n");
+            if (!restart_v90_phase2_locked("upstream measurement unavailable before MP"))
+                g_state = ME_HANGUP;
+            return false;
         }
         g_v90_up_snr_started = true;
-        g_v90_up_snr_start = g_g711_rx_octets;
-        return;
+        g_v90_up_snr_start = g_v34_rx_samples;
+        return true;
     }
     /* 300 ms: 960 symbols at 3200 baud, room for 600 and the filter edges. */
-    if (g_g711_rx_octets - g_v90_up_snr_start < 2400)
-        return;
+    if (g_v34_rx_samples - g_v90_up_snr_start < 2400)
+        return true;
     g_v90_up_snr_done = true;
     snr = v34_v90_upstream_4point_snr(g_v34, 600);
     {
@@ -6747,14 +6755,60 @@ static void v90_upstream_measure_locked(void)
         int baud = v90_selected_upstream_baud_locked() == 3 ? 3000 : 3200;
         int cap = me_v90_upstream_rate_for_snr(snr, baud);
 
-        ME_LOG("[ME] V.90 upstream 4-point SNR %.1f dB before MP: carries "
-               "about %d bps; MP offered %d bps\n", snr, cap, offer);
-        if (cap > 0 && offer > 0 && cap < offer && !getenv("ME_V90_UPSTREAM_NO_SNR_CAP")) {
+        /* V.90 9.4.2.4 / Table 16: MP's maximum and capability mask govern
+         * the peer's selected upstream. Invalid/missing channel evidence or
+         * an empty common set must not silently preserve the initial ceiling. */
+        if (cap <= 0 || offer <= 0
+            || (g_lim[LIM_MIN_RX] > 0 && cap < g_lim[LIM_MIN_RX])) {
+            ME_LOG("[ME] V.90 upstream measurement %.1f dB yields no supported "
+                   "common rate; no MP rate offered\n", snr);
+            if (!restart_v90_phase2_locked("no measured common upstream rate before MP"))
+                g_state = ME_HANGUP;
+            return false;
+        }
+        ME_LOG("[ME] V.90 upstream 4-point SNR %.1f dB before MP: measured "
+               "limit %d bps, common capability ceiling %d bps\n", snr, cap, offer);
+        if (cap < offer && !getenv("ME_V90_UPSTREAM_NO_SNR_CAP")) {
             v90_set_upstream_rate_limit(g_v90, cap);
             ME_LOG("[ME] V.90 upstream: MP now offers %d bps (§9.4.2.4, MP bits 24:27)\n",
                    v90_mp_upstream_max_bps(g_v90));
         }
+        if (v90_mp_upstream_max_bps(g_v90) <= 0) {
+            ME_LOG("[ME] V.90 upstream measured limit leaves no common rate; no MP rate offered\n");
+            if (!restart_v90_phase2_locked("empty measured upstream rate intersection"))
+                g_state = ME_HANGUP;
+            return false;
+        }
+        /* A data CP may arrive during TRN2d, before this measurement. If
+         * it prepared B1 at the capability ceiling, update that receiver to
+         * the final measured MP rate before MP/E/B1 can be transmitted
+         * (9.4.2.4-.5). Preserve the captured ring and all sample counts. */
+        if (g_v34_upstream_data_armed
+            && g_v90_upstream_prepared_bps != v90_mp_upstream_max_bps(g_v90)) {
+            int rate = v90_mp_upstream_max_bps(g_v90);
+
+            if (g_v34_upstream_data_started) {
+                if (!restart_v90_phase2_locked("upstream B1 started before measured MP rate settled"))
+                    g_state = ME_HANGUP;
+                return false;
+            }
+            if (v34_v90_prepare_upstream_data(g_v34,
+                    v90_selected_upstream_baud_locked(),
+                    v34_get_rx_high_carrier(g_v34), rate, 0) != 0) {
+                if (!restart_v90_phase2_locked("measured MP rate cannot prepare upstream RX"))
+                    g_state = ME_HANGUP;
+                return false;
+            }
+            g_v90_upstream_prepared_bps = rate;
+            ME_LOG("[ME] V.90 upstream RX updated to measured MP rate: %d bps\n", rate);
+        }
+        ME_LOG("[ME] V.90 upstream MP offer selected: %d bps from CP capabilities "
+               "and rate limits, %s (§9.4.2.4)\n",
+               v90_mp_upstream_max_bps(g_v90),
+               getenv("ME_V90_UPSTREAM_NO_SNR_CAP")
+                   ? "SNR cap disabled (diagnostic)" : "bounded by channel measurement");
     }
+    return true;
 }
 
 /* V.90 §6.2 requires the digital modem to support both 3000 and 3200 baud;
@@ -6886,31 +6940,34 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
         && !frame->silence_request
         && !g_v34_upstream_data_armed && g_v34) {
         int baud = v90_selected_upstream_baud_locked();
-        int rate = v34_get_current_bit_rate(g_v34);
+        int ceiling = me_v90_upstream_cap(v34_get_current_bit_rate(g_v34));
+        int rate = v90_mp_upstream_max_bps(g_v90);
         int max_rate = v90_upstream_baud_max_bps(baud);
-
-        int mp_rate = v90_mp_upstream_max_bps(g_v90);
-
-        if (rate > max_rate)
-            rate = max_rate;
-        rate = me_v90_upstream_cap(rate);
         /* §9.4.2.4: the analogue modem transmits at the highest rate enabled
          * in both modems, no higher than MP's bits 24:27 -- and our MP's
          * mask is the intersection with the CP's bits 36:48.  A peer that
          * caps its own upstream in CP therefore transmits below the rate
          * V.34 trained at; preparing for the trained rate left this receiver
          * at 31200 against a 24000 transmitter (Apple rig, v90-pr4-2). */
-        if (mp_rate > 0 && mp_rate < rate) {
-            ME_LOG("[ME] V.90 upstream: CP/MP mask limits the upstream "
-                   "%d -> %d bps (§9.4.2.4)\n", rate, mp_rate);
-            rate = mp_rate;
+        if (rate <= 0 || rate > max_rate || rate > ceiling
+            || (g_lim[LIM_MIN_RX] > 0 && rate < g_lim[LIM_MIN_RX])
+            || (g_lim[LIM_MAX_RX] > 0 && rate > g_lim[LIM_MAX_RX])) {
+            ME_LOG("[ME] V.90 upstream: no valid CP/MP negotiated receive rate "
+                   "(%d bps, receiver ceiling %d); refusing default-rate B1 preparation\n",
+                   rate, ceiling);
+            /* This can run inside v34_rx(); defer cleanup to the engine. */
+            g_hangup_cause = "Modem (no negotiated V.90 upstream rate)";
+            g_state = ME_HANGUP;
+            return false;
         }
+        ME_LOG("[ME] V.90 upstream RX rate negotiated from CP/MP: %d bps (§9.4.2.4)\n", rate);
         /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
          * peer's own decode of our Type-0 MP confirms 16-state upstream. */
         if (v34_v90_prepare_upstream_data(g_v34, baud,
                                            v34_get_rx_high_carrier(g_v34),
                                            rate, 0) == 0) {
             g_v34_upstream_data_armed = true;
+            g_v90_upstream_prepared_bps = rate;
             g_v90_upstream_e_run = 0;
             ME_LOG("[ME] V.90 upstream RX data prepared (%d baud, %d bps, trellis 16); watching for E\n",
                    baud == 3 ? 3000 : 3200, rate);
@@ -14656,8 +14713,11 @@ skip_8k_codewords:
                     }
                     ME_CB_PROF(1, v34_rx(g_v34, filtered, len));
                     me_rx_accounting_check();
-                    if (g_mod == ME_MOD_V90 && g_state == ME_TRAINING)
-                        v90_upstream_measure_locked();
+                    if (g_mod == ME_MOD_V90 && g_state == ME_TRAINING
+                        && !v90_upstream_measure_locked()) {
+                        pthread_mutex_unlock(&g_state_mtx);
+                        return;
+                    }
                     /* The T/3 interpolator is exact-rational 6/5 and begins
                      * counting input samples at the arm, so which of its five
                      * phases a call runs on is fixed by the bearer index it
@@ -16022,6 +16082,26 @@ static void prepare_v90_analogue_phase3_locked(void)
                cfg.upstream_max_n, cfg.upstream_max_n*2400);
     else
         cfg.upstream_max_n = 0;
+    /* V.250 6.4.1 / V.90 9.4.2.4: analogue upstream is our TX direction.
+     * Advertise the DTE-enabled rates in CP/CPt, so both ends select the
+     * same rate; checking the limits only after CONNECT is too late. */
+    cfg.upstream_min_n = g_lim[LIM_MIN_TX] > 0
+                        ? (g_lim[LIM_MIN_TX] + 2399)/2400 : 0;
+    if (cfg.upstream_min_n == 1)
+        cfg.upstream_min_n = 2;
+    if (g_lim[LIM_MAX_TX] > 0) {
+        int max_n = g_lim[LIM_MAX_TX]/2400;
+
+        if (max_n < 2) {
+            ME_LOG("[ME] V.90 analogue: no upstream rate within AT+MS transmit limits\n");
+            g_state = ME_HANGUP;
+            return;
+        }
+        if (max_n > 14)
+            max_n = 14;
+        if (cfg.upstream_max_n == 0 || max_n < cfg.upstream_max_n)
+            cfg.upstream_max_n = max_n;
+    }
     cfg.v34 = g_v34;                    /* borrow the modulator Phase 2 configured */
     if (g_v90a_dil_valid)
         cfg.dil = g_v90a_dil;
@@ -16783,6 +16863,17 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
 
+            /* 8.6.3 / 9.4.2.4: never put the initial capability ceiling on
+             * the wire as a startup MP if RX has not measured the channel.
+             * A receive stall can otherwise let TX reach MP first. Existing
+             * data-mode 9.6 negotiations retain the measured/learnt ceiling. */
+            if (phase_before == V90_TX_MP && !g_v92_active
+                && !g_v90_up_snr_done && !v90_rate_renegotiation_active(g_v90)) {
+                ME_LOG("[ME] V.90 startup MP blocked: channel measurement not completed\n");
+                if (!restart_v90_phase2_locked("no channel measurement at startup MP boundary"))
+                    g_state = ME_HANGUP;
+                return false;
+            }
             if (g_qc_aligned && codewords + pos >= g_tx_chunk_ptr
                 && codewords + pos < g_tx_chunk_ptr + g_tx_chunk_len) {
                 uint64_t idx = g_tx_chunk_base

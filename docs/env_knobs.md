@@ -110,7 +110,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_TRN1D_SYMBOLS` | v90.c |  | sdh | 24796T (3.1 s) of Jd wait. |
 | `ME_V90_TRN2D_SYMBOLS` | v90.c |  | sdh |  |
 | `ME_V90_UPSTREAM_MAX_BPS` | modem_engine.c |  | tsd | for the whole call. |
-| `ME_V90_UPSTREAM_NO_SNR_CAP` | modem_engine.c |  | d | Do not cap MP's upstream offer from the Phase 4 4-point SNR (docs/v90_hardware_interop.md). |
+| `ME_V90_UPSTREAM_NO_SNR_CAP` | modem_engine.c |  | d | Diagnostic: bypass the Phase 4 SNR ceiling, but still require a valid measurement and common enabled rates before startup MP. |
 | `ME_V90_UPSTREAM_STEP` | modem_engine.c |  | d | A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0 |
 | `ME_V91_CONTROL_CHANNEL` | modem_engine.c |  | sd | 6.4: optional; on by default, it gives slip detection and in-band |
 | `ME_V91_SPECIFY_DIL` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
@@ -176,7 +176,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_PHASE_SWEEP` | v34rx.c |  | h | diagnostic mode: holds one upstream frame-phase candidate for grading |
 | `ME_V90_SLIP_ROT_SWEEP` | v34rx.c |  | d | diagnostic: static-rotation sweep in the upstream slip search |
 | `ME_V90_SMARTLINK_DUMMY_CPT` | modem_engine.c | 0 | - | interop: the only way to enable v90_repair_smartlink_dummy_cpt() (tested in vpcm_loopback_test) |
-| `ME_V90_UPSTREAM_T2` | v34rx.c |  | - | pending experiment: the V.90 upstream through the ordinary V.34 receiver has never been compared |
+| `ME_V90_UPSTREAM_T2` | v34rx.c |  | - | Pending experiment: ordinary V.34 upstream receiver. No pre-MP channel measurement is implemented for this path, so native V.90 startup now refuses an unmeasured MP offer. |
 | `ME_V92_MH_GRANT` | modem_engine.c | 1 | h | test hook: V.92 9.10 modem-on-hold grant/deny |
 | `ME_V92_MH_INITIATE` | modem_engine.c |  | h | test hook: provokes V.92 9.10 modem-on-hold against a real peer |
 | `ME_V92_MH_T1` | modem_engine.c | 0x3 | dh | test hook: V.92 9.10 modem-on-hold T1 code |

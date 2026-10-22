@@ -45,6 +45,7 @@ struct v90_analogue_phase3_s {
     bool                   startup_data_reached;
     bool                   upstream_data_started;
     int                    upstream_rate_n;
+    int                    upstream_min_n;
     int                    upstream_max_n;
     int                    round_trip_delay_samples;
     bool                   zero_length_dil;
@@ -70,6 +71,12 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     v90_analogue_rx_config_t rxc;
 
     if (cfg == NULL  ||  cfg->baud_rate_code < 0  ||  cfg->baud_rate_code > 5)
+        return NULL;
+    if (cfg->upstream_min_n < 0 || cfg->upstream_min_n > 14
+        || cfg->upstream_min_n == 1
+        || cfg->upstream_max_n < 0 || cfg->upstream_max_n > 14
+        || cfg->upstream_max_n == 1
+        || (cfg->upstream_max_n > 0 && cfg->upstream_min_n > cfg->upstream_max_n))
         return NULL;
     if (cfg->shaping_redundancy < 0  ||  cfg->shaping_redundancy > 3)
         return NULL;
@@ -104,6 +111,7 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     s->shaping_redundancy = cfg->shaping_redundancy;
     s->shaping_lookahead = cfg->shaping_lookahead;
     s->digital_max_tx_dbm0 = cfg->digital_max_tx_dbm0;
+    s->upstream_min_n = cfg->upstream_min_n;
     s->upstream_max_n = cfg->upstream_max_n;
     s->round_trip_delay_samples = cfg->round_trip_delay_samples > 0
                                 ? cfg->round_trip_delay_samples : 0;
@@ -320,6 +328,14 @@ static void start_phase4(v90_analogue_phase3_t *s)
 
         s->cpt.upstream_rate_mask &= below;
         s->cp.upstream_rate_mask &= below;
+    }
+    /* V.250 6.4.1 / V.90 9.4.2.4: the enabled set must also exclude rates
+     * below the DTE's transmit minimum, not reject them after CONNECT. */
+    if (s->upstream_min_n > 2 && s->upstream_min_n <= 14) {
+        uint16_t below = (uint16_t)((1U << (s->upstream_min_n - 2)) - 1U);
+
+        s->cpt.upstream_rate_mask &= (uint16_t)~below;
+        s->cp.upstream_rate_mask &= (uint16_t)~below;
     }
     memset(&p4c, 0, sizeof(p4c));
     p4c.law = s->law;

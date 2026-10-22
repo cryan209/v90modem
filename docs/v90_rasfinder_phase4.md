@@ -1485,3 +1485,50 @@ tested binary, dependency/application/focused-test build logs, generated
 build patch, per-call PTY bytes, both G.711 taps, both RTP CSVs, interactions,
 call runner, independent analysis and TX-frame checker, results and hashes.
 These recordings are retained hardware evidence, not added regression fixtures.
+
+### Negotiated-rate contract checks, 22 October 2026
+
+The negotiation corrections described in `v90_upstream_data_path.md` were
+built on the same isolated vmhost checkout, then exercised in six further
+completed calls, 15:08–15:13 NZDT. These check negotiation constraints; their
+small alternating set is not an acquisition-yield A/B.
+
+The tested source is `cac07c32` plus `source.patch` (SHA-256
+`9594e2206a8517cb55c3a757b0a05d828368a7d8b745a88a60e6006af07d0c2d`).
+That patch matches the local changes to `modem_engine.c`,
+`v90_analogue_phase3.c` and `v90_analogue_phase3.h` byte for byte.
+Tested binary SHA-256:
+`6d1c40956a3f04c2a944e318e6d56213bc14cfd18f76f82b7b073274eb0b0b68`.
+The generated build-file differences and vendored libraries are those of
+the earlier isolated build; application objects were cleaned for the changed
+configuration header and rebuilt with clang.
+
+The call duration, accounts, ports, PCMU bearer, echo driver and 90-second
+cooldown are unchanged. Each line alternates the default `AT+MS=V90,1` and
+`AT+MS=V90,1,28000,56000,4800,24000`. The latter supplies a 24000 RX ceiling
+and also explicitly requires 28000–56000 TX; a V.34 fallback below that TX
+minimum is consequently rejected, rather than counted as a connection.
+
+| Call | Rate contract and outcome |
+| --- | --- |
+| r1 / 6311 | Configured limits. No V.90 DATA/LAPM. V.34 fallback reaches 16800 and is rejected by the DTE bounds. |
+| r1 / 6312 | Default. 35.8 dB estimate, MP offer and RX preparation 31200; V.90 DATA 46666/31200 at +26.014 s. No LAPM/login. |
+| r1 / 6313 | Configured limits. No V.90 DATA/LAPM. V.34 fallback reaches 24000 and is rejected by the 28000 TX minimum. |
+| r2 / 6311 | Default. 35.8 dB estimate, MP offer and RX preparation 31200; V.90 DATA 42666/31200 at +25.467 s. No LAPM/login. |
+| r2 / 6312 | Configured limits. 35.9 dB estimate would permit 31200, but the common ceiling is 24000. MP offers 24000, RX prepares 24000, V.90 DATA 50666/24000 at +25.300 s. No LAPM/login; parity/discontinuity recovery follows. A later offer falls to 21600 after receiver feedback. |
+| r2 / 6313 | Default. First estimate 16.4 dB selects 7200 without completing startup. A later estimate of 29.0 dB selects 21600; MP and RX agree, V.90 DATA 40000/21600 at +46.950 s. No LAPM/login; further recovery/fallback follows. |
+
+All six complete without driver errors. None reports DTE CONNECT or provides
+an application echo. The live rate logs demonstrate measurement/constraint
+selection, including 21600 without a fixed lower default; they do not prove
+that the current SNR curve predicts a rate our data receiver can sustain.
+The earlier 31200 call was already a measured, negotiated selection, not
+evidence of the missing-measurement fallback. The actual fail-open cases
+are now covered by the new no-MP regression rows.
+
+Evidence is retained locally under
+`reference-data/artifacts/rf-negotiation-20261022/`: the exact source patch,
+tested binary, build log, manifest, runner, six sets of taps/PTys/RTP CSVs,
+analyses, test-list snapshots, the 620-row passing regression timings,
+validation metadata and checksums. The build remains in the isolated CT 117
+temporary checkout for follow-up; no long-lived modem service was changed.

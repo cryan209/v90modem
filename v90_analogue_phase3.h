@@ -58,8 +58,9 @@ typedef struct {
      */
     int       shaping_redundancy;
     int       shaping_lookahead;
-    /* Diagnostic ceiling for the V.34 upstream N (N*2400 bit/s).  Zero trusts
-     * MP; 2..14 permits probing peers which immediately request §9.6. */
+    /* Local V.34 upstream bounds, N*2400 bit/s. Zero leaves that bound
+     * unrestricted; CP/CPt advertise the resulting enabled rate set. */
+    int       upstream_min_n;
     int       upstream_max_n;
     /*
      * A V.34 context to borrow as the modulator.  Phase 2 has already

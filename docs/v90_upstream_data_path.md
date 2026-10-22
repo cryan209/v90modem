@@ -2885,3 +2885,61 @@ can be absent without any test noticing.**
 Not yet seen live against a peer: the slip/relabel paths re-arm and drop to
 the old unconstrained decoder, so the worst case on the rig is the previous
 behaviour, but no rig call has yet shown a "V0 phase lost" or "moved" line.
+
+## 22 October 2026: an initial ceiling is not a negotiated rate
+
+The six `cac07c32` RasFinder calls did **not** establish that startup used an
+unmeasured 31200 fallback. On r1/6311 the pre-MP measurement was 35.6 dB;
+the existing link-budget model chose 31200, the CP/MP enabled sets allowed
+it, and the peer used it. That estimate did not guarantee successful B1 or
+DATA decoding. The description of that particular rate as a fallback default
+was incorrect. The failures are recorded in `v90_rasfinder_phase4.md`.
+
+The review nevertheless found three negotiation defects:
+
+1. A missing/unavailable measurement left the initial capability ceiling in
+   place. Startup now restarts without an MP offer if measurement is missing,
+   non-finite, yields no supported rate, or has no overlap with the configured
+   receive bounds. The transmit MP boundary also checks that measurement has
+   completed, so an RX stall cannot silently approve the initial ceiling.
+   The measurement interval counts samples delivered to V.34, not only raw
+   G.711 octets; the latter never advanced on the linear receive interface.
+2. A data CP can arrive during TRN2d, before the measurement finishes, and
+   prepare B1 at the provisional ceiling. A lower measured MP rate now
+   updates that prepared receiver while retaining its captured sample history.
+   RX preparation uses the exact common CP/MP rate, rejects an empty or
+   out-of-bounds selection, and never substitutes the initial V.34 rate.
+   A late rate change after B1 has started restarts the attempt instead.
+3. The analogue role's CP/CPt advertised its whole upstream ladder even when
+   `AT+MS` restricted TX. It rejected the resulting out-of-bounds connection
+   only afterwards. CP and CPt now filter both the TX minimum and maximum
+   before advertising them; the digital role and analogue transmitter choose
+   the same highest remaining common rate.
+
+V.90 8.6.3/Table 16 defines MP's maximum and enabled-rate mask; 9.4.2.4
+selects the highest rate enabled by both modems and no higher than MP's
+maximum. Section 9.4.2.5 puts B1 at that rate. V.250 6.4.1 supplies the DTE
+bounds. The Phase-2 initialization rate remains a capability ceiling, not a
+fallback DATA rate. No replacement fixed 21600/24000 default is introduced,
+and the empirical SNR-to-rate curve is unchanged. Thus a measured channel
+can still negotiate 31200; an optimistic estimate or broken B1 acquisition
+remains a separate problem requiring evidence.
+
+Five engine-pair regressions cover a peer advertising only 24000 (checking
+MP mask `0x0100`, the digital RX selection, and actual payload in both PCM
+laws), unavailable measurement (no MP/CONNECT in either law), and disjoint
+peer/DTE rate sets (no MP/CONNECT). The T/2 diagnostic deliberately has no
+pre-MP measurement and now fails that negotiation instead of retaining the
+maximum. The explicit `ME_V90_UPSTREAM_NO_SNR_CAP` experiment still bypasses
+the numeric SNR ceiling, with a diagnostic log, but no longer bypasses the
+requirement for a measurement or a common rate set.
+
+Validation: a clean application rebuild after the config-header change,
+then the complete fast/slow runner: **620 passed, 0 failed**, 204 seconds,
+`test-logs/v90-rate-final/`. The five new rows include real payload checks,
+not only rate logs. Linux/RasFinder verification of the same three-file
+source patch selects 24000 with an explicit receive ceiling and 21600 from
+an uncapped 29.0 dB estimate; higher estimates still select 31200. None of
+those six calls establishes LAPM, so this does not qualify sustained hardware
+data reception. Details and retained provenance are in
+`v90_rasfinder_phase4.md`, "Negotiated-rate contract checks".
