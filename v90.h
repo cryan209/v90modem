@@ -278,6 +278,10 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
  * normal operation should decode the descriptor received in Ja. */
 bool v90_dil_load_smartlink_adi_qc(v90_dil_desc_t *out);
 bool v90_dil_load_smartlink_adi(v90_dil_desc_t *out);
+/* The CX93001's fixed Ja descriptor, and the raw frame bits (bit 0 first) it
+ * was parsed from. */
+bool v90_dil_load_cx93001(v90_dil_desc_t *out);
+const uint8_t *v90_dil_cx93001_ja_bits(int *bit_len_out);
 
 /*
  * G.711 codeword <-> (Ucode, sign) helpers (Table 1/V.90 mapping).

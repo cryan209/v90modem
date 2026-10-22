@@ -638,6 +638,8 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
 
 /*! Copy one Phase 3 Ja hypothesis before descrambling, as unpacked bits. */
 SPAN_DECLARE(int) v34_v90_phase3_ja_total_bits(v34_state_t *s, int hypothesis);
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits_from(v34_state_t *s, int hypothesis, int from,
+                                                   uint8_t bits[], int max_bits, int *first_abs);
 
 SPAN_DECLARE(int) v34_v90_copy_phase3_ja_raw_bits(v34_state_t *s,
                                                    int hypothesis,

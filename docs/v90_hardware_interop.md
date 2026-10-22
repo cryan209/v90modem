@@ -371,3 +371,36 @@ These are transmitter conformance results, not hardware qualification or
 evidence that any particular peer's training failure is fixed. A new live
 comparison must check our transmitted tap and complete checked payload
 traffic before claiming an interoperability improvement.
+
+## CX93001 Ja recognised by template (23 October 2026)
+
+**Symptom.** Six of six CX93001 V.90 calls on CT 117 selected V.90, then the CX
+retrained 3.4 s after Phase 3 began and finally declined at INFO1a; the same
+build had reached data mode on 21-22 October. A build of 191312a0 behaved the
+same, so the line, not a code change, had moved.
+
+**Cause.** V.90 9.3.2.4: the analogue modem sends TRN then Ja and retrains if no
+Sd-to-Sd-bar transition arrives within 1500 ms of the start of Ja. The CX's
+TRN lasts ~2 s and its Ja descriptor is the same in every call (N=119 LSP=124
+LTP=126, identical across `cxfull-2` and `cxsettle-2`). On the failing calls the
+Phase 3 equaliser had been conditioned on a late PP start (`onset 92 ago`, PP
+residual 0.62 against 0.26, TRN lock 63% against 98%), so the Ja bits carried
+too many errors for any frame's CRC to pass -- yet the frame IS captured: on
+hypothesis 8 it agrees with the known frame at 77% over 1800 bits (noise: 50%).
+We waited for a CRC-valid descriptor, the CX got no Sd, and it retrained. The
+500 ms bound of 9.3.1.3 never started because that clock keys on a heuristic
+Ja candidate, and the CX has no TRN-to-Ja gap to offer one.
+
+**Fix.** `v90_ja_template_scan()` compares each hypothesis' newest Ja bits with
+a 384-bit stretch of the CX's frame body; 70% agreement is 8 sigma from
+chance, and 9.3.1.3 makes Sd follow the receipt of Ja, not a valid CRC. On a
+match the engine answers with the CX's own descriptor (`v90_dil_load_cx93001`).
+`ME_V90_JA_TEMPLATE=0` disables it. `v34_v90_copy_phase3_ja_bits_from()` copies
+only the bits that arrived since the last look.
+
+**Result.** Offline, the failing tap now recognises Ja at 281/384 (fixture
+`reference-data/artifacts/cx93001-ja-crc-fails-20261023`, in `fast.list`).
+Live, 3 of 4 calls recognised Ja and sent Sd/TRN1d/Jd; one completed Phase 3 and
+reached Ri and Phase 4 CP before the CX retrained (the known MP-recognition
+gap), and one lost the CX's S after Jd. Arming Phase 3 tracking after the TRN
+refinement was tried and changed the Ja agreement by 0.8 points; not kept.

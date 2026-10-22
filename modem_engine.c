@@ -3272,6 +3272,7 @@ static uint8_t        g_v90_dil_capture[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
 static int            g_v90_dil_capture_bits = 0;
 static int            g_v90_dil_capture_search = 0;
 static int            g_v90_dil_hyp_last_bits = 0;
+static void          v90_ja_template_reset(void);
 /* Next hypothesis of a sweep in progress, or -1 when idle.  One sweep graded
    all 24 hypotheses inside a single media callback (16-90 ms, growing with
    the captured Ja bits), which holds up our RTP; it is now spread over
@@ -5924,6 +5925,7 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_hyp_last_bits = 0;
     g_v90_dil_hyp_cursor = -1;
     g_v90_dil_hyp_dumped = false;
+    v90_ja_template_reset();
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
     g_v90_wait_ja_tone_a_logged = false;
@@ -8605,6 +8607,117 @@ static bool v90_dil_try_repeated_frames(const uint8_t *bits, int total_bits)
     return false;
 }
 
+/* Ja recognition by template, for a peer whose Ja descriptor is known.
+ *
+ * The CX93001 sends one fixed descriptor in every Ja (v90_dil_cx93001_ja_bits).
+ * Its Ja runs 1500 ms at most (§9.3.2.4: no Sd-to-Sd-bar transition within
+ * that and it retrains), and a frame is only usable when it arrives with a
+ * valid CRC.  Whether it does is a lottery on this line: the equaliser is
+ * conditioned on PP and the first 256T of TRN, and a late PP start
+ * (CT 117, 2026-10-23: "onset 92 ago", residual 0.62 against 0.26) leaves it
+ * poor enough that the descriptor never validates inside the 1.5 s, although
+ * the frame IS in the captured bits -- on the winning hypothesis they agree
+ * with the known frame at 77% over 1800 bits, against 50% for noise.  The CX
+ * then retrains having never seen an Sd (6/6 calls that day).
+ *
+ * Agreement of at least 70% over a 384-bit stretch of the frame body is 8
+ * sigma from chance, so that stretch finding itself in the capture is Ja
+ * received (§9.3.1.3: Sd follows the RECEIPT of Ja, not a CRC-valid
+ * descriptor), and the descriptor to answer with is the one the template
+ * carries.  ME_V90_JA_TEMPLATE=0 turns it off.
+ *
+ * Only bits that arrived since the last look are compared, and each position
+ * stops at the first mismatch past the budget, so a frame's worth of noise
+ * costs ~230 compares a position. */
+#define V90_JA_TPL_FROM          18
+#define V90_JA_TPL_LEN           384
+#define V90_JA_TPL_MAX_MISMATCH  115
+#define V90_JA_TPL_NEW_MIN       16
+#define V90_JA_TPL_HYPS          24
+
+static int g_v90_ja_tpl_scanned[V90_JA_TPL_HYPS];
+
+static void v90_ja_template_reset(void)
+{
+    memset(g_v90_ja_tpl_scanned, 0, sizeof(g_v90_ja_tpl_scanned));
+}
+
+static bool v90_ja_template_scan(void)
+{
+    static uint8_t tpl[V90_JA_TPL_LEN];
+    static bool    tpl_ready = false;
+    static int     enabled = -1;
+    uint8_t        bits[2048 + V90_JA_TPL_LEN];
+    v90_dil_desc_t desc;
+
+    if (enabled < 0) {
+        const char *e = getenv("ME_V90_JA_TEMPLATE");
+
+        enabled = !(e && atoi(e) == 0);
+    }
+    if (!enabled || !g_v34 || g_v90_dil_parse_logged)
+        return false;
+    if (!tpl_ready) {
+        int tbits;
+        const uint8_t *packed = v90_dil_cx93001_ja_bits(&tbits);
+
+        for (int k = 0; k < V90_JA_TPL_LEN; k++) {
+            int pos = V90_JA_TPL_FROM + k;
+
+            tpl[k] = (uint8_t)((packed[pos / 8] >> (pos % 8)) & 1);
+        }
+        tpl_ready = true;
+    }
+
+    for (int h = 0; h < V90_JA_TPL_HYPS; h++) {
+        int total = v34_v90_phase3_ja_total_bits(g_v34, h);
+        int first_abs;
+        int n;
+
+        if (total < g_v90_ja_tpl_scanned[h])
+            g_v90_ja_tpl_scanned[h] = 0;        /* the ring was wiped */
+        if (total - g_v90_ja_tpl_scanned[h] < V90_JA_TPL_NEW_MIN
+            || total < V90_JA_TPL_LEN)
+            continue;
+        /* A window may start up to V90_JA_TPL_LEN-1 bits before the first
+         * unscanned position and still end on the newest bit. */
+        n = v34_v90_copy_phase3_ja_bits_from(g_v34, h,
+                g_v90_ja_tpl_scanned[h], bits, (int)sizeof(bits), &first_abs);
+        if (n < V90_JA_TPL_LEN)
+            continue;
+        for (int i = 0; i + V90_JA_TPL_LEN <= n; i++) {
+            int mismatches = 0;
+
+            for (int k = 0; k < V90_JA_TPL_LEN; k++) {
+                if (bits[i + k] != tpl[k] && ++mismatches > V90_JA_TPL_MAX_MISMATCH)
+                    break;
+            }
+            if (mismatches > V90_JA_TPL_MAX_MISMATCH)
+                continue;
+            if (!v90_dil_load_cx93001(&desc))
+                return false;
+            g_v90_pending_dil = desc;
+            g_v90_pending_dil_valid = true;
+            if (g_v90)
+                v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+            ME_LOG("[ME] V.90: Ja recognised by template (CX93001 frame, hypothesis %d, "
+                   "%d/%d bits agree at capture bit %d); answering with its descriptor "
+                   "(N=%u LSP=%u LTP=%u)\n",
+                   h, V90_JA_TPL_LEN - mismatches, V90_JA_TPL_LEN,
+                   first_abs + i - V90_JA_TPL_FROM,
+                   (unsigned)desc.n, (unsigned)desc.lsp, (unsigned)desc.ltp);
+            trace_phase("V90 Ja recognised by template (hyp %d, %d/%d)", h,
+                        V90_JA_TPL_LEN - mismatches, V90_JA_TPL_LEN);
+            g_v90_dil_parse_logged = true;
+            v90_note_ja_confirmed_by_descriptor();
+            return true;
+        }
+        /* Windows that start in the last LEN-1 bits are not complete yet. */
+        g_v90_ja_tpl_scanned[h] = first_abs + n - (V90_JA_TPL_LEN - 1);
+    }
+    return false;
+}
+
 static bool v90_dil_capture_try_v34_hypotheses(void)
 {
     uint8_t unpacked[V90_DIL_CAPTURE_MAX_BITS];
@@ -8684,6 +8797,8 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
         ME_LOG("[ME] V.90 Ja capture: first bits at t=%.3fs (%d bits)\n",
                (double)g_rx_audio_samples / 8000.0, first_bits);
     }
+    if (v90_ja_template_scan())
+        return true;
     if (first_bits < 206)
         return false;
     /* This is called every RX audio frame (~20ms), but the 24-hypothesis x
@@ -14890,6 +15005,7 @@ skip_8k_codewords:
                         ME_LOG("[ME] V.90: peer retrain detected; following it back to Phase 2 "
                                "(accepted=%d)\n", accepted ? 1 : 0);
                         trace_phase("V90 peer retrain detected, following (accepted=%d)",
+                        v90_ja_template_reset();
                                     accepted ? 1 : 0);
                         /* PEER_RETRAIN is an application-owned event, unlike
                          * the ordinary V.34 TX/RX handshake events.  A rejected

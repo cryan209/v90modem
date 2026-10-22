@@ -17341,6 +17341,51 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
         return 0;
     total = s->rx.phase3_ja_capture_hyp_len[hypothesis];
     len = v34_ja_window_bits(total);
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The newest Ja bits of one hypothesis from absolute index `from` on (clipped
+   to what the ring still retains), one byte per bit, oldest first.  Returns
+   the count and sets *first_abs to the absolute index of bits[0].  The
+   template scan only ever needs the bits that arrived since it last looked, so
+   copying the whole 16384-bit window for each of 24 hypotheses every frame
+   would be the expensive way to ask. */
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits_from(v34_state_t *s,
+                                                   int hypothesis,
+                                                   int from,
+                                                   uint8_t bits[],
+                                                   int max_bits,
+                                                   int *first_abs)
+{
+    int total;
+    int win;
+    int base;
+    int i;
+    int n;
+
+    if (first_abs)
+        *first_abs = 0;
+    if (!s || !bits || max_bits <= 0
+        || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
+        return 0;
+    total = s->rx.phase3_ja_capture_hyp_len[hypothesis];
+    win = v34_ja_window_bits(total);
+    base = total - win;
+    if (from < base)
+        from = base;
+    if (from >= total)
+        return 0;
+    n = total - from;
+    if (n > max_bits)
+    {
+        from = total - max_bits;
+        n = max_bits;
+    }
+    for (i = 0;  i < n;  i++)
+        bits[i] = (uint8_t) v34_ja_window_get(s->rx.phase3_ja_capture_hyp[hypothesis], total, from - base + i);
+    if (first_abs)
+        *first_abs = from;
+    return n;
     if (len > max_bits)
         len = max_bits;
     /* Packed ring; callers still get one byte per bit, oldest first. */
