@@ -417,3 +417,13 @@ upstream=12000 downstream=46666" -- then failed at T/3 4-point training
 (decision error 0.0134) and B1 acquisition (fit 56-63%). The 4-point SNR before
 MP read 19.4 dB that day against 28.5 on 22 October, so the offer fell to
 12000 bps. The other 3 calls never got an S (the CX retrained during Jd).
+
+**T/3 4-point training gate (23 October, not yet live-validated).** The CX's
+4-point CP'/E signal measured 19.4 dB on the one call that reached data mode;
+`v90_t3_blind_acquire()` trained it to a decision error of 0.0134 and rejected it
+against a fixed 0.01 (-20 dB) -- below the line's own noise floor (error ~ 1/SNR).
+The gate is now 0.03; an unconverged filter reads 0.05 or more, which
+`v90_t3_blind_locate()` already rejects. The following 8-call run never reached
+this stage (Ja recognised on 5/5 but the CX sent no S after Jd), so the effect is
+unmeasured. S arrival is not explained by our TX stalls (checked against
+rtp-tx.csv gaps after Sd on 15 calls).

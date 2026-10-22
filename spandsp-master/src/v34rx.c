@@ -13572,7 +13572,15 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     end = qend - 3*4;
     base = (end - 3*TRAIN > oldest)  ?  end - 3*TRAIN  :  oldest;
     err = v90_t3_train_4point(s, base, end, w, &phase);
-    if (err > 0.01f)
+    /* The training error cannot go below the line's own noise: mean squared
+     * decision error is about 1/SNR, so 0.01 (-20 dB) is unreachable on a
+     * line that carries less than 20 dB.  CT 117, 2026-10-23: the CX's
+     * 4-point signal measured 19.4 dB, trained cleanly to 0.0134 (the first
+     * pass found it at 0.0128), and was thrown away here -- the call then
+     * went to a B1 template fit that cannot work either (56-63%).  A filter
+     * that has not converged reads 0.05 and up, which locate() already
+     * rejects; 0.03 (-15 dB) keeps the gap to that. */
+    if (err > 0.03f)
     {
         V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 T/3 4-point training failed: decision error "
