@@ -274,7 +274,24 @@ static int v90_jd_s_wait_symbols(void)
      * samples; 500 ms is comfortably above that and still spec-legal, since
      * the allowance only ever makes us more patient than the minimum. */
     int rtd_allowance = 4000;
+    const char *value = getenv("ME_V90_JD_RTD_ALLOWANCE");
 
+    /* The 4000 above (0.5 s) was too tight against a peer that uses the whole
+     * of 9.3.2.7: the CX93001 starts its S 5000 ms after the silence that
+     * follows Ja, measured from ITS detection of our Sd, and we then need the
+     * S's 128T and the line watch's confirmation as well.  CT 117, 2026-10-23:
+     * the S was found on the line a few frames after this budget (24796
+     * symbols) expired, and Phase 3 was torn down on 2 of 4 calls that had
+     * otherwise got through TRN1d.  One second of extra patience costs
+     * nothing when the S never comes -- the peer retrains on its own clock. */
+    rtd_allowance = 12000;
+    if (value && *value) {
+        char *end;
+        long parsed = strtol(value, &end, 10);
+
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 80000)
+            rtd_allowance = (int) parsed;
+    }
     return 5100*8 - v90_trn1d_len() + rtd_allowance;
 }
 

@@ -404,3 +404,16 @@ Live, 3 of 4 calls recognised Ja and sent Sd/TRN1d/Jd; one completed Phase 3 and
 reached Ri and Phase 4 CP before the CX retrained (the known MP-recognition
 gap), and one lost the CX's S after Jd. Arming Phase 3 tracking after the TRN
 refinement was tried and changed the Ja agreement by 0.8 points; not kept.
+
+**Jd S-wait widened (same day).** With Ja recognised, the CX's S after Jd arrived
+21324-32364 Jd symbols in (2 of 5 calls) -- it uses 9.3.2.7's whole 5000 ms,
+counted from its own detection of Sd, and we then need the S's 128T and the line
+watch. The resync budget (5100 ms - TRN1d + 4000 symbols = 24796) had expired
+on calls where the S was found a few frames later. `v90_jd_s_wait_symbols()` now
+allows 12000 symbols of round trip and detection (`ME_V90_JD_RTD_ALLOWANCE`).
+Live (CT 117, 5 calls): 2 reached CPt/TRN2d/MP, and one completed the whole
+startup -- CX recognised MP (data-mode CP drn=15), MP' and E exchanged, "DATA
+upstream=12000 downstream=46666" -- then failed at T/3 4-point training
+(decision error 0.0134) and B1 acquisition (fit 56-63%). The 4-point SNR before
+MP read 19.4 dB that day against 28.5 on 22 October, so the offer fell to
+12000 bps. The other 3 calls never got an S (the CX retrained during Jd).
