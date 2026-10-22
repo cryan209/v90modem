@@ -1393,3 +1393,95 @@ login at 48000/21600 on 6313 and holds about 61 s without a logged resync;
 6312 reaches 45333/21600 but decodes white and follows a peer retrain, while
 6311 reaches login only through V.34 fallback. No improvement in V.90
 success rate is demonstrated by this small historical comparison.
+
+## 2026-10-22: cac07c32 on vmhost, default-rate V.90 offers
+
+**No usable V.90 connection in six completed calls.** One call enters
+V.90 DATA at 46666 downstream / 31200 upstream but never establishes LAPM
+or delivers the login banner. Two other calls reach login only after
+V.34 fallback; one carries all ten checked echoes, the other loses decoding
+after the first. These are current-revision hardware results, not an A/B or
+evidence that the Phase 2 transmitter corrections improved or regressed
+acquisition.
+
+### Build and method
+
+Calls ran on wired vmhost CT 117, 22 October 2026, 14:41–14:45 NZDT.
+The isolated source-only checkout is `/tmp/rf-cac07c32-20261022`, at
+`cac07c32fbb3400367473733f50e2940f6205d2a`; existing checkouts and services
+were left alone. The container's root disk had only about 296 MB free,
+so the build and captures use its memory-backed `/tmp`. They have been
+copied to retained local storage below.
+
+The build uses vendored SpanDSP and pjproject, clang, and the normal
+selective `v34rx.c` optimization. Fresh-checkout prerequisites were handled
+before compiling the application: configure the vendored libraries, supply
+Automake's missing `INSTALL` document, generate the V.22bis CC filter
+headers before the optimized V.34 RX target, and retain the configured
+Linux host stamp so a retry does not delete those headers. Automake
+regenerated two tracked `Makefile.in` files; their patch is retained.
+`git diff --exit-code -- '*.c' '*.h'` passes: there are no DSP source edits.
+The focused `v34_phase4_16pt_test` passes on this Linux build before calls.
+
+Tested application SHA-256:
+`5b70c853b1e9ef3599f5ad133cb8f2440eb2c39415ee227c40c917a9f66c648e`.
+
+Two rounds each run three parallel calls, one per 6311/6312/6313, with
+accounts 2901/2902/2903, SIP ports 5090/5092/5094 and RTP ports
+15000/15100/15200. Each lasts 90 seconds after ATD; the rounds are separated
+by 90 seconds without calls. PCMU is forced, `AT+MS=V90,1` selects the offer,
+LAPM XID compatibility is automatic, and **upstream rates use defaults**:
+the earlier 21600 diagnostic ceiling is not set. No live SpanDSP flow log
+is enabled. All six owned server processes terminate cleanly, return code 0.
+
+After CONNECT and a readable `login:`, the exclusive PTY driver sends up
+to ten distinct 16-byte ASCII tokens and checks each against newly received
+bytes. Backspaces erase each token before the next one. No CR or credentials
+are submitted. This grades short application round trips, not raw BER,
+uncompressed throughput or a bulk transfer. LAPM may conceal corrected
+physical errors; it cannot make an absent echo pass this check.
+
+### Completed calls
+
+| Call | Result |
+| --- | --- |
+| r1 / 6311 | V.90 DATA at +24.952 s, 46666/31200. No DTE CONNECT, LAPM or login. Upstream discontinuity recovery and peer retrains follow. |
+| r1 / 6312 | V.34 fallback; initial 31200 B1 rejected, then `CONNECT 24000/ARQ/V34/LAPM/V42BIS`. Login and 10/10 exact 16-byte echoes (160 bytes), from dial +40.5 to +75.3 s. No logged decoding loss before our termination. |
+| r1 / 6313 | No DTE CONNECT/login. Retrains; a V.34 DATA entry at 28800 is rejected by the B1 SNR gate. |
+| r2 / 6311 | No DTE CONNECT/login. A V.34 DATA entry at 31200 is rejected by the B1 SNR gate; further training fails/retrains. |
+| r2 / 6312 | V.34 fallback, `CONNECT 24000/ARQ/V34/LAPM/V42BIS`, login. First 16-byte echo passes at dial +40.2 s; next two fail. Receiver stops decoding, attempts §11.6 recovery then §11.5 retrain; a later 19200 DATA entry also loses decoding. |
+| r2 / 6313 | No DTE CONNECT/login. V.90 training times out and falls back to V.22bis without connecting before termination. |
+
+### Our transmit tap and bearer limits
+
+An independent 1200-Hz DBPSK demodulator checks the first 20 seconds of
+each **our-TX** tap, then applies the V.90 Table 7/9 CRC, fill and field
+layouts. All six contain a CRC-valid INFO0d declaring -10 dBm0, PCMU and
+final fill `1111`. Recovered contiguous INFO1d frames have valid CRC/fill
+and **109-bit spacing**, as required by 8.2.3.1. Some groups cross the
+20-second analysis boundary or have a frame not recovered; this is not
+a claim to have decoded every transmitted repeat. Large gaps between
+separate recovered groups are retained in the JSON, not mislabelled as
+padding. The expected corrected wire contracts are present in real output.
+
+Across 21,818 received and 26,601 transmitted RTP packets, every recorded
+payload type is 0 (PCMU), with no sequence or checked timestamp
+discontinuities. Maximum local packet spacing is 30.75 ms RX and 54.21 ms
+TX. These local traces do not prove byte-exact transport at the far end or
+rule out downstream loss/playout changes. Callback pacing remains a live
+concern: r1/6311 spends 32.7 ms in an RX callback during B1 acquisition.
+
+On that V.90 DATA call the pre-MP estimate is 35.6 dB, so the default
+offer remains 31200. The T/3 B1 template's best fit is only 22.6%; the
+fallback acquisition publishes data, but LAPM never establishes and V0
+parity/discontinuity recovery follows. This identifies upstream acquisition
+and recovery as unfinished work; it does not establish that rate policy,
+bearer pacing or the RasFinder caused the failure. The old October 20 batch
+used an upstream cap and a different source snapshot, so it is not a control.
+
+Retained local evidence:
+`reference-data/artifacts/rf-cac07c32-20261022/` contains the manifest,
+tested binary, dependency/application/focused-test build logs, generated
+build patch, per-call PTY bytes, both G.711 taps, both RTP CSVs, interactions,
+call runner, independent analysis and TX-frame checker, results and hashes.
+These recordings are retained hardware evidence, not added regression fixtures.
