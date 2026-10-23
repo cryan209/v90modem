@@ -1532,3 +1532,39 @@ tested binary, build log, manifest, runner, six sets of taps/PTys/RTP CSVs,
 analyses, test-list snapshots, the 620-row passing regression timings,
 validation metadata and checksums. The build remains in the isolated CT 117
 temporary checkout for follow-up; no long-lived modem service was changed.
+
+## 2026-10-23: current receiver checked against wired RasFinder
+
+With the CX93001 disconnected, two sequential bounded calls ran from wired
+vmhost CT117 (`/root/mnp-live`) to 6313 and 6311. Each held 90 seconds with
+PCMU, `AT+MS=V90,1`, default rate limits and automatic LAPM XID compatibility.
+The binary SHA256 was
+`dfdf7c5b96988012e6f341534ae488e5c7e2ccdc03a15aecb795d1f7208fbbbe`
+(latest committed receiver fixes through 6ec4bba9 plus the existing workspace
+changes). Neither call produced DTE CONNECT, login or a checked payload echo.
+No credentials or carriage return were sent to the login application.
+
+6313 accepted CPt at +22.263 s, data CP at +25.925 s, and acknowledged CP/E
+at +28.724 s. Local DATA followed at +28.743 s, 46666/16800, but B1 template
+fits were only 18.8–26.4%; the peer retrained at +29.590 s. A second startup
+stalled on repeated CPt, then retrained and later fell back to V.34. The
+independent CP decoder confirms CRC-valid CPt/CP frames in RX seconds 21–27.
+Checking our own TX first: the spec decoder at sample 178106 with mask
+87,81,69,44 recovers all 11,322 TRN2d training bits as ones and 1,324/1,324
+CRC-valid MP frames (V.90 §8.6.5 and Table 16). This verifies those transmitted
+bits and CRCs; it does not establish correct downstream timing.
+
+6311 entered local DATA at +26.604 s, 33333/31200. Its four-point training
+was clean (decision error 0.00025, 36 dB), but B1 template fits were only
+17.6–21.9%. The blind fallback committed with fit=0, then ended B1 after one
+frame with error 1460.507 and published undecodable data. Discontinuity
+recovery/carrier loss followed, then peer retrain at +37.231 s. This leaves
+B1 acquisition/fallback validation open; it does not prove an invalid peer B1.
+Acquisition callbacks also exceed the 20 ms packet interval: 6313 includes
+62.6 ms, and 6311 has multiple 21–38 ms callbacks. Their causal contribution
+to either failure is unproven.
+
+Local evidence: `reference-data/artifacts/rf-current-20261023/`, with paired
+G.711 taps, complete server logs, exclusive PTY interactions, final metadata,
+independent check reports and checksums. No post-divergence replay is used as
+hardware evidence. Sustained bidirectional hardware payload remains unverified.
