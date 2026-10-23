@@ -223,6 +223,15 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
 #define V34_V90_T3_ACQ_RETRY_GAP            4800
+/*! A window that held no B1 at all (in-sample fit under 0.95) says nothing
+    about the samples after it, so the next look need not wait half a second
+    for a fresh 4800: it covers only the new wire, 125 ms of it, and costs a
+    few hundred coarse positions instead of a rescan of the whole ring.  The
+    count keeps the same 28800-sample reach as six full windows.  A B1 that
+    arrives 0.7 s after the E anchor (the Apple rig's loop delay) used to wait
+    for the second full window, 1.05 s after the anchor. */
+#define V34_V90_T3_ACQ_FAST_GAP             1200
+#define V34_V90_T3_ACQ_FAST_MAX             24
 /*! T/3 samples (20 ms at 9600 Hz, one RTP packet) between two passes of the
     B1 template search, and the most data symbols one call of the emitter may
     produce.  pjmedia sends our next packet only when the receive callback
@@ -1610,6 +1619,25 @@ typedef struct
         tried on this call. */
     bool v90_t3_blind_tried;
     int64_t v90_t3_acq_retry_at;
+    /*! Window of the current fast retry (-1 when none): see
+        V34_V90_T3_ACQ_FAST_GAP.  fast_start..fast_end replaces the
+        anchor-derived window until a retry of the ordinary kind. */
+    int64_t v90_t3_fast_start;
+    int64_t v90_t3_fast_end;
+    int v90_t3_fast_retries;
+    /*! Early looks after E (-1 when none): the end of the next 125 ms
+        window and where it starts.  B1 follows E directly on a conventional
+        peer, so waiting the classic 4800 samples past the anchor before the
+        first look costs 0.5 s of V.42 7.2.1.2's T400 for nothing.  These
+        windows run no 4-point (blind) acquisition and are not counted
+        against any retry budget; the classic window still runs, unchanged,
+        when they have reached it. */
+    int64_t v90_t3_prelude_next;
+    int64_t v90_t3_prelude_start;
+    /*! The search now under way is a prelude or fast window: skip the
+        least-squares fits when nothing in it resembles B1. */
+    bool v90_t3_srch_cheap;
+    bool v90_t3_srch_prelude;
     /*! The B1 template search, one template per media packet rather than all
         of them in one callback (see v90_t3_try_acquire()): whether a search
         is under way, the next template to try and the raw count it waits

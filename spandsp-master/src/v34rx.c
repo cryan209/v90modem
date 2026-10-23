@@ -13142,7 +13142,8 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
                                  complexf_t best_coeff[V34_V90_T3_FSE_TAPS],
                                  int64_t *best_first_out,
                                  bool *best_conjugate_out,
-                                 float *coarse_out)
+                                 float *coarse_out,
+                                 float min_coarse)
 {
     enum { KEEP = 8 };
     float score[KEEP] = {0};
@@ -13180,6 +13181,16 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
             }
         }
     }
+    /* A fast retry window that holds nothing resembling B1 (random alignment
+       scores 5-8 %, a real B1 83-100 %) is not worth eight least-squares
+       fits: with a look every 125 ms the fits would otherwise run on every
+       packet for seconds. */
+    if (score[0] < min_coarse)
+    {
+        *coarse_out = score[0];
+        return 0.0f;
+    }
+    /*endif*/
     /* Refine: the coarse pass only looked at every third sample. */
     for (int k = 0;  k < KEEP;  k++)
     {
@@ -13234,11 +13245,39 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
    When the windows run out there is no upstream at all for the rest of the
    call, so say so rather than falling silent: V.90 9.5.1.1 is the only
    recovery with the reach to fix it, and a retrain ends in a fresh B1. */
-static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why)
+static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why,
+                                        int64_t window_start, int64_t window_end)
 {
-    if (++s->v90_t3_acq_retries <= V34_V90_T3_ACQ_MAX_RETRIES)
+    if (window_end >= 0  &&  s->v90_t3_srch_prelude)
+    {
+        /* An early look found no B1: the next 125 ms, no budget spent. */
+        s->v90_t3_prelude_start = window_end - 6;
+        s->v90_t3_prelude_next = window_end + V34_V90_T3_ACQ_FAST_GAP;
+        s->v90_t3_acquisition_attempted = false;
+    }
+    else if (window_end >= 0  &&  s->v90_t3_fast_retries < V34_V90_T3_ACQ_FAST_MAX
+        &&  !V34_DIAG_GETENV("ME_V90_T3_NO_FAST"))
+    {
+        /* Nothing in [window_start, window_end] looked like B1: look at the
+           next 125 ms of wire, overlapping by one coarse step so a B1 that
+           straddles the boundary is still scanned whole. */
+        s->v90_t3_fast_retries++;
+        s->v90_t3_fast_start = window_end - 6;
+        s->v90_t3_fast_end = window_end + V34_V90_T3_ACQ_FAST_GAP;
+        s->v90_t3_acquisition_attempted = false;
+    }
+    else if (++s->v90_t3_acq_retries <= V34_V90_T3_ACQ_MAX_RETRIES)
     {
         s->v90_t3_acquisition_attempted = false;
+        s->v90_t3_prelude_next = -1;
+        if (s->v90_t3_fast_end >= 0)
+        {
+            /* Resume the ordinary full-history windows from where the fast
+               ones got to, so the next one still contains the B1 the
+               out-of-sample check has just refused. */
+            s->v90_t3_e_anchor = s->v90_t3_fast_end - 4800;
+            s->v90_t3_fast_end = -1;
+        }
         s->v90_t3_e_anchor += V34_V90_T3_ACQ_RETRY_GAP;
         s->v90_t3_acq_retry_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_RETRY_GAP;
     }
@@ -13765,6 +13804,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     enum { SEARCH_BACK = 120000 };
     int64_t search_start;
     int64_t search_end;
+    bool prelude;
     complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
     float best_match = 0.0f;
     float best_coarse = 0.0f;
@@ -13800,6 +13840,32 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         search_start = V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2;
     /*endif*/
     search_end = s->v90_t3_e_anchor + V90_T3_SEARCH_FORWARD;
+    prelude = false;
+    if (s->v90_t3_fast_end >= 0)
+    {
+        if (s->v90_t3_fast_start > search_start)
+            search_start = s->v90_t3_fast_start;
+        /*endif*/
+        search_end = s->v90_t3_fast_end;
+    }
+    else if (s->v90_t3_prelude_next >= 0)
+    {
+        if (s->v90_t3_prelude_next >= search_end)
+        {
+            /* The early windows have reached the classic one. */
+            s->v90_t3_prelude_next = -1;
+        }
+        else
+        {
+            if (s->v90_t3_prelude_start > search_start)
+                search_start = s->v90_t3_prelude_start;
+            /*endif*/
+            search_end = s->v90_t3_prelude_next;
+            prelude = true;
+        }
+        /*endif*/
+    }
+    /*endif*/
     if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
         || s->v90_t3_raw_count < s->v90_t3_acq_retry_at
         || s->v90_t3_b1_symbols <= 0
@@ -13836,8 +13902,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_srch_blind_back = -1;
     s->v90_t3_srch_mp_cma_measured = false;
     v90_t3_cma_abandon(s);
+    s->v90_t3_srch_prelude = prelude;
+    s->v90_t3_srch_cheap = prelude  ||  s->v90_t3_fast_end >= 0;
     s->v90_t3_srch_blind_stage =
-        (!s->v90_t3_blind_tried  &&  !s->x2_mode
+        (!prelude  &&  !s->v90_t3_blind_tried  &&  !s->x2_mode
          &&  !V34_DIAG_GETENV("ME_V90_T3_NO_BLIND"))  ?  0  :  2;
     s->v90_t3_srch_step_at = s->v90_t3_raw_count;
     s->v90_t3_srch_start = search_start;
@@ -13971,7 +14039,8 @@ search:
                     continue;
                 /*endif*/
                 match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
-                                            &first, &conjugate, &coarse);
+                                            &first, &conjugate, &coarse,
+                                            s->v90_t3_srch_cheap  ?  0.25f  :  0.0f);
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 T/3 B1 template tap=%d trellis=%d expanded=%d: "
                          "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
@@ -18403,6 +18472,13 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_acq_best_conjugate = 0;
     rx->v90_t3_acq_best_first = 0;
     rx->v90_t3_acq_retry_at = 0;
+    rx->v90_t3_fast_start = 0;
+    rx->v90_t3_fast_end = -1;
+    rx->v90_t3_fast_retries = 0;
+    rx->v90_t3_prelude_next = -1;
+    rx->v90_t3_prelude_start = 0;
+    rx->v90_t3_srch_cheap = false;
+    rx->v90_t3_srch_prelude = false;
     rx->v90_t3_e_anchor = -1;
     rx->v90_t3_in_b1 = false;
     rx->v90_t3_b1_frame_err = 0.0f;
@@ -18533,6 +18609,16 @@ static int begin_rx_data(v34_state_t *s, bool report_e)
             s->rx.v90_t3_e_anchor = s->rx.v90_t3_raw_count;
         }
         /*endif*/
+    }
+    /*endif*/
+    s->rx.v90_t3_prelude_next = -1;
+    s->rx.v90_t3_fast_end = -1;
+    s->rx.v90_t3_fast_retries = 0;
+    if (report_e  &&  s->rx.v90_t3_prepared  &&  s->rx.v90_t3_e_anchor >= 0
+        &&  !V34_DIAG_GETENV("ME_V90_T3_NO_PRELUDE"))
+    {
+        s->rx.v90_t3_prelude_next = s->rx.v90_t3_e_anchor + V34_V90_T3_ACQ_FAST_GAP;
+        s->rx.v90_t3_prelude_start = 0;
     }
     /*endif*/
     if (v34_rx_t2_data_path(&s->rx) && v34_build_expected_b1(&s->rx))

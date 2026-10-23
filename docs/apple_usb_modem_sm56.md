@@ -2315,8 +2315,9 @@ hang-up started renegotiation 2, offering 24000.
 - The server's T/3 FSE span on this loop.  It is the reason 31200 (and
   marginally 26400) decodes poorly; a longer FSE or precoding (MP Type 1) is
   the real fix.
-- The server's 1.1 s upstream acquisition latency.  Until it falls below T400
-  the analogue side needs `ME_V42_T400_MS`; the default stays at V.42's 750 ms.
+- The server's 1.1 s upstream acquisition latency: **mostly the rig, see
+  "Where the 1.1 s goes" below.**  The analogue side still needs
+  `ME_V42_T400_MS` on this rig; the default stays at V.42's 750 ms.
 - `--rx-replay` segfaults at V.14 fallback without `--pty-link`; pass one.
 - Startup's Phase 4 is still a coin flip on some attempts (v90-rr-2).
 
@@ -4021,3 +4022,35 @@ clocking will fix the peer's V.34 selection. Retained measurement scripts,
 phase fits, alternating trial logs/raw taps/events, executable provenance,
 cleanup readbacks and test evidence:
 `reference-data/artifacts/apple-cx-clocking-20261018/`.
+
+### Where the 1.1 s goes (2026-10-24)
+
+v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run
+"detected" +32.962, template fit puts B1 at raw 8077 = +33.68, first bit
++34.037.  Data entry was +32.904.
+
+- **Loop delay of this rig is ~0.7 s, not the server.**  Cross-correlating the
+  server's transmit tap with its receive tap (tap-level echo, -53 dB) peaks at
+  538 ms on every window tried (12, 20, 40 s); the Apple modem's own echo
+  delay (94-174 ms) is on top.  The analogue side starts B1 ~50 ms after *its*
+  data entry, yet B1 reaches the server 0.78 s after our own B1d.  ODP out,
+  ADP back therefore cannot fit V.42's 750 ms T400 (9.1.1) here whatever the
+  server does; it leaves ~50 ms.
+- **The E-run is not a clock.**  The 20-ones detector fires 0.7 s *before* B1
+  on this call (CP preamble run, not E) and 3.1 s after data entry on another
+  (v90-lat-1).  It is only an anchor for the B1 search.
+- **What the server did waste:** the first look waited 4800 samples (0.5 s)
+  past the anchor, and a miss waited another 4800 with a full-ring rescan.
+  Now: 125 ms "prelude" windows from the anchor (no blind 4-point commit),
+  and after a classic-window miss 125 ms "fast" windows over the new wire
+  only, skipping the least-squares fits below 25 % coarse score.  Same reach
+  (28800 samples), same validation, no sample accounting change.
+  `ME_V90_T3_NO_PRELUDE=1` / `ME_V90_T3_NO_FAST=1` restore the old schedule.
+- When B1 is already in the ring at CP' acceptance (the CP'-triggered search),
+  the first bit came 58-60 ms after data entry (ab-old-8, ab-new-9): nothing
+  left to cut there.
+- **Not demonstrated live.**  Of 9 A/B calls only 3 reached data and none
+  exercised the E-anchored path (two used the CP' search, one delivered no
+  bit), so the prelude/fast windows have no live A/B; the rig yielded
+  Phase-3/Ja failures.  Offline replay of v90-rr-4 diverges from the live
+  call (different transmit), so it cannot score this either.
