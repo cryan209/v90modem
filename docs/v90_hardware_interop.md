@@ -726,3 +726,37 @@ cancellation both limit the experiment. Do not enable blind acquisition on
 the strength of its acquired flag. The replay's optional ASCII bit output
 allows independent CRC checking; `V90_REPLAY_QUIET` suppresses forced-mode
 FLOW logging without changing the receiver.
+
+### Nonzero B1 trellis-state probe (23 October 2026)
+
+The same 45-second capture was tested with temporary offline builds, leaving
+production sources and binaries unchanged. Sweeping 9600..31200 in 2400-bit/s
+steps at 3000 and 3200 baud finds the strongest raw-template fit only at the
+negotiated 3200/21600 (58.4%; other supported combinations at most 30.3%).
+That does not support changing the negotiated rate to rescue acquisition.
+
+Sweeping initial encoder states 0..15 instead finds **97.7%** at state 4,
+GPA/16-state trellis, against 58.4% for the default zero state. The raw
+standalone probe still rejects its out-of-sample lattice distance (0.736).
+With the whole engine and recorded TX echo reference, state 4 fits **99.9%**,
+passes the existing validation after a repeated window (distance 0.227),
+and acquires B1. This is evidence that the zero-state template misses this
+captured B1; it does not establish why the peer differs from the reset in
+V.34 10.1.3.1. The plain V.34 receiver already searches nonzero states for
+a different captured peer; the V.90 T/3 path currently does not.
+
+The acquired engine emits clean all-ones windows at 0.1 and 0.3 seconds,
+then deteriorates by 0.5 seconds. Its decoded bits have **zero valid HDLC
+frames**, 680 bad complete frames and 752 aborted segments. Two independent
+negative controls do not recover frames: freezing echo-delay tracking gives
+0/1016/987 (valid/bad/aborted), and disabling V0 phase acquisition gives
+0/684/747 with the same early deterioration. Neither control is a proposed
+production change. Constant ones alone remain insufficient payload proof;
+replay cannot validate the peer's reaction to divergent transmission.
+
+Temporary sources, sweep logs, compressed decoded bits and checksums are
+retained under `reference-data/artifacts/cx-b1-state-20261023/`. The next
+acquisition change should search states with bounded work, preserve the
+complete-frame and out-of-sample gates, and then be graded on live framed
+payload rather than its acquisition flag. No fixed state-4 exception is
+justified, and sustained data reception remains unresolved.
