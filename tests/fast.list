@@ -857,3 +857,6 @@ sh -c 'F=reference-data/artifacts/cx93001-ja-crc-fails-20261023/live-rx.g711; ME
 
 # V.90 9.4.1.4/.6: a batch CP must not qualify E on an unvalidated live tap.
 sh -c 'ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 ./v90_engine_replay reference-data/artifacts/cx93001-unqualified-e-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/cxe.log" 2>&1 && grep -q "CP_VALID source=batch kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && grep -q "CP_VALID source=spandsp kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && ! grep -q "upstream E detected\|V90 enter DATA" "$TMPDIR/cxe.log"'
+
+# Byte-exact relay and RTCP diagnostic negative controls.
+python3 tools/test_rtp_path_check.py

@@ -104,9 +104,10 @@ See `apple_usb_modem_sm56.md`, “Foreign USB hardware peer”, and retained
 ### Conexant CX93001 declines V.90: our Phase 2 sequencing, 21 October 2026
 
 The CX93001 (`AT\N2`, `AT+MS=V90,1,300,33600,300,56000`) dials our
-answerer as **2904**, through Grandstream ATA line 2 (SIP caller **6005**).
-The CX is attached to the dev Mac as `/dev/cu.usbmodem246802461`;
-**6314 (AudioCodes port 4) is a different route**, not the dial-in recipe.
+answerer at **2904**, originating as **6314 (AudioCodes port 4)** in the
+21–23 October V.90 captures. The CX is attached to the dev Mac as
+`/dev/cu.usbmodem246802461`. The older MNP calls used Grandstream line
+6005; the current SIP caller identity is verified in each server log.
 The answerer runs on vmhost CT 117
 (`tools/soak/answer_ec_call.sh ... v90`, `tools/cx_hold_dial.py`). It had
 declined V.90 at INFO1a since 23 July. It sent a V.34 INFO1a (Table 11),
@@ -514,3 +515,83 @@ summaries and SHA-256 manifest: `reference-data/artifacts/cx-work-20261023/`.
 The completed baseline and both candidate fallback calls each delivered
 all 20 numbered lines exactly once, in order, in both directions; these
 are V.34 payload results. The false-E V.90 call delivered none.
+
+## RTP path checked at both PBX legs (23 October 2026)
+
+The earlier route correction to Grandstream/6005 was itself wrong: it used
+an older MNP note. `cxfull-2`, `cxsettle-2` and all the new V.90 server logs
+identify the current caller as **6314, AudioCodes 1.4**. The CX dials **2904**.
+The MP-114 registers at **10.69.70.221**; the PBX is **192.168.88.122** and
+CT 117 is **192.168.88.230**. The host also has a direct wired VLAN-70
+address, **10.69.70.16**. No network/gateway/PBX configuration changed.
+
+Two further calls used the same candidate binary and 8000T TRN2d setting.
+Call 1 failed at MP and fell back to V.34/LAPM. Call 2 reached two V.90
+Phase-4 attempts; the first retrained ~2 s after TRN2d, the second kept
+sending unacknowledged CP while we stayed in MP/MP prime, then retrained.
+It never connected. Neither call qualifies V.90 payload.
+
+**Engine to wire, call 1.** Host Ethernet capture contains 4711 TX packets,
+753760 payload codewords, byte-identical to the complete TX tap, with no
+sequence/timestamp gaps. The reverse 4709-packet wire stream matches the
+RX tap over 752000 aligned codewords with zero mismatches, at a constant
+1760-sample tap offset. That offset includes jitter-buffer/startup delay;
+it is not a physical propagation-delay measurement. Host TX's largest
+packet interval was 54.36 ms; RX's was 28.41 ms.
+
+**Both PBX legs, call 2.** All 2599 downstream packets, 415840 codewords,
+pass from CT 117 through the PBX toward the gateway in identical order,
+with identical SSRC/sequence/timestamp and payload. The gateway-egress
+payload is also byte-identical to our entire engine TX tap. All 2597
+upstream packets, 415520 codewords, are identical across the reverse PBX
+bridge. There are no captured sequence/timestamp gaps. This clears
+transcoding, byte replacement and packet omission at the captured PBX
+relay; it does not prove delivery to the gateway or its D/A playout.
+
+**Gateway RTCP reports a downstream concern.** Its cumulative-loss counter
+is 0 near the first packet, 2 at +4.79 s, 4 at +10.31 s, 5 at +25.77 s,
+6 at +33.11 s, and 7 at +37.69 s (relative to the first RTP packet in the
+PBX capture), remaining 7 through +48.37 s. The two senders' other reception
+reports show no loss. This puts the reported loss beyond the captured PBX
+egress. RTCP alone cannot distinguish network loss from gateway receiver
+behavior, locate each missing packet, or prove it caused MP rejection.
+The PBX-egress largest TX gap was 46.02 ms; the second MP interval includes
+that gap. Captures reported zero kernel drops.
+
+Reproduce the packet-identity, payload and RTCP checks with:
+
+```sh
+python3 tools/rtp_path_check.py \
+  reference-data/artifacts/cx-wire-20261023/call2/pbx.pcap \
+  --source 192.168.88.230 --relay 192.168.88.122 --peer 10.69.70.221 \
+  --tx-tap reference-data/artifacts/cx-wire-20261023/call2/live-tx.g711
+```
+
+The diagnostic requires a relay that preserves RTP identity. It reports
+changed bytes, missing/added packets and reordered/duplicate identities;
+an empty capture is never a positive transparency result. Its fast-tier
+negative controls include a changed mu-law negative-zero codeword, loss,
+reordering, duplication, sequence wrap, a changed timestamp, RTP extension
+and padding, capture truncation, compound RTCP and signed cumulative loss.
+They use the RFC 3550 6.4.1/.2 reception-block layout, cross-checked against
+the vendored `pjmedia/rtcp.h`.
+
+**Direct wired isolation was blocked before training.** The identical
+binary runs on vmhost with CT 117's existing loader/libraries, bound to
+10.69.70.16, and can directly INVITE the gateway without registering or
+changing infrastructure. Both CX auto-answer and explicit first-RING ATA
+attempts fail to complete SIP answer setup. The second capture proves why:
+the gateway sends final `200 OK` and BYE to **192.168.88.122:5060**, despite
+Via/rport and Contact naming **10.69.70.16:5098**. The PBX answers BYE with
+`481 Call/Transaction Does Not Exist`. The direct caller sees only ringing
+and one-way early RTP. These calls cannot compare V.90 audio or packet-loss
+performance. Both ended on-hook, CX S0 restored to 0, all test servers and
+capture processes stopped.
+
+Raw pcaps, matched taps, transcripts, reproduction scripts, JSON reports
+and hash manifest: `reference-data/artifacts/cx-wire-20261023/`. This is
+retained local evidence, not an added hardware qualification. The remaining
+software timing concern is measurable Ja-search work: call 1 logged three
+21–22 ms RX callbacks, of which 14.7–16.1 ms was the DIL/Ja search. Reducing
+that work without changing which template windows match is a concrete next
+step; it does not by itself resolve or explain the RTCP loss reports.

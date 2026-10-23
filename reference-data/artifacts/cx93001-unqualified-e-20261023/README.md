@@ -1,7 +1,8 @@
 # CX93001 false E, 23 October 2026
 
 First 24 s of wired CT 117 call `/root/cx-work-20261023-trn8k1`,
-CX93001 calling 2904 through Grandstream line 6005. Both files are raw,
+CX93001 calling 2904 from AudioCodes port 6314 (verified in the server log).
+Both files are raw,
 byte-exact 8000 Hz mu-law codewords, cropped at the same 192000-sample
 boundary. No resampling or transcoding. Server: main 2bb6bb2b plus the
 pre-existing working-tree deferred line-echo fit and V.34 changes;
