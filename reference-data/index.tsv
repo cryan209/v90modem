@@ -412,3 +412,4 @@ reference-data/artifacts/cx93001-connect-without-b1-20261023	4	722108	tests/fast
 reference-data/artifacts/cx-connect-gate-20261023	16	1499907	docs/v90_hardware_interop.md; actual PTY before/after, positive deferred-connect payload checks and full-suite summaries; local evidence
 reference-data/artifacts/cx-b1-state-20261023	57	1261991	docs/v90_hardware_interop.md; offline B1 state/rate sweeps, rejected state-refinement candidate and prepared-parameter regression controls; local evidence, no hardware qualification
 reference-data/artifacts/cx-tracking-20261023	28	5852512	docs/v90_hardware_interop.md; isolated receiver tracking controls, decoded bits, symbol taps and TX divergence boundaries; local diagnostic evidence
+reference-data/artifacts/cx-rig-ready-20261023	4	110310	docs/v90_hardware_interop.md; wired Linux build and actual-PTY regression ready for live test, physical CX93001 disconnected; local evidence

@@ -815,3 +815,31 @@ a fixed recording, not evidence of how the hardware would respond to the
 candidate. Retained sources, logs, symbol and bit dumps, TX taps and
 checksums: `reference-data/artifacts/cx-tracking-20261023/`. A new live
 exchange is still needed to qualify any acquisition change.
+
+### Wired rig prepared; CX93001 disconnected (23 October 2026)
+
+CT117's idle `/root/mnp-live` build now includes the CONNECT gate and
+rejected-window parameter fix. Its existing private-header/line-EC worktree
+matches this Mac's pre-existing worktree; the two updated source hashes
+were verified after transfer. Original sources and executable were saved
+under `/root/cx-current-20261023-56624aea/`. The new executable and saved
+`sip.current` have SHA-256
+`da34f7b5c83dc8d61affe21b702133c478a088f70297510e1ad7ccaf5b84c0e5`.
+The paired 45-second actual-PTY regression passes on Linux with zero
+CONNECT results, B1 give-up and CONNECT-deferral evidence. No live server
+is left running. Build and replay logs are retained under
+`reference-data/artifacts/cx-rig-ready-20261023/`.
+
+A new physical call could not start: `/dev/cu.usbmodem246802461` is absent
+and pyserial's port inventory has no CX93001. The unrelated FTDI serial
+port was not opened. Reconnecting the CX93001 is required for that test;
+this preparation is not hardware qualification.
+
+`tools/cx_hold_dial.py` also now cleans up failed and interrupted dial
+attempts, rather than exiting before ATH and AT&V1. Guarded escape is
+followed by a command terminator (a failed dial may already be in command
+mode), hangup and the last-call report; serial and log handles are closed.
+The quick-tier helper test exercises NO CARRIER, BUSY, NO DIALTONE,
+timeout, interruption and normal CONNECT without touching hardware.
+Payload grading is still required separately; a successful dial exit code
+does not qualify sustained data.
