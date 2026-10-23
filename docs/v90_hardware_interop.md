@@ -789,3 +789,29 @@ focused replay rows, including the newly added negative row, also pass:
 `test-logs/cx-rejected-hypothesis{,-focused,-sockets}/`. The regression's
 previous-receiver negative control exits 1 with `rejected B1 changed
 prepared trellis or measured scrambler`.
+
+### Tracking controls on the acquired capture (23 October 2026)
+
+Isolated builds based on `5f8b263e`, with the captured state-4 template
+override only, reproduce the early deterioration. Disabling each loop
+separately still gives zero valid HDLC frames: default 680 bad/752 aborted,
+no equalizer DD adaptation 778/814, no timing recovery 971/1011, no carrier
+tracking 37/52. The smaller last counts do not indicate success; that arm
+publishes fewer bits. No diagnostic override is shipped.
+
+For the default run, mean squared lattice distance over consecutive
+320-symbol windows is 0.051, 0.046, 0.132, 0.220, 0.680. With equalizer
+adaptation disabled it is 0.054, 0.049, 0.138, 0.225, 0.676: adaptation is
+not the cause of this early loss. Local timing-offset sweeps at 1600 and
+3200 data symbols do not recover a clean lattice (best 0.600 and 0.618).
+Later default-run windows return to small lattice distances but still
+decode unstructured bits; a clean lattice alone is not frame recovery.
+
+Generated TX taps pin the replay's limits: production and the state-4 probe
+are byte-identical until sample 310240 (**38.78 seconds**), well after the
+early deterioration. Both first differ from the recorded live TX at sample
+42720 (**5.34 seconds**). Thus these are controlled receiver comparisons on
+a fixed recording, not evidence of how the hardware would respond to the
+candidate. Retained sources, logs, symbol and bit dumps, TX taps and
+checksums: `reference-data/artifacts/cx-tracking-20261023/`. A new live
+exchange is still needed to qualify any acquisition change.
