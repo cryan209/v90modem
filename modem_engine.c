@@ -356,6 +356,7 @@ static bool g_ec_alt_only = false;
    them (V.90/V.92).  0 = report the CONNECT rate. */
 static int g_report_tx_rate = 0;
 static int g_report_rx_rate = 0;
+static bool me_connect_carrier_ready(void);
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 static bool me_quick_connect_enabled(void);
@@ -854,9 +855,12 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         g_data_framing = DS_FRAMING_V14;
         /* x2 host: CONNECT waits for DATA (accepted MP/E and upstream B1),
            which reports it now that the framing is V.14. */
-        if (!g_data_connect_reported && !(g_mod == ME_MOD_X2 && g_state != ME_DATA)) {
+        if (!g_data_connect_reported && me_connect_carrier_ready()
+            && !(g_mod == ME_MOD_X2 && g_state != ME_DATA)) {
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
+        } else if (!g_data_connect_reported && !me_connect_carrier_ready()) {
+            ME_LOG("[ME] V.90 CONNECT deferred: upstream B1 not acquired\n");
         }
         break;
     case DS_LINK_CONNECTED:
@@ -870,7 +874,8 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
                    st.k, st.n401, st.optimisation);
         } else
             ME_LOG("[ME] V.42 LAPM connected\n");
-        if (!g_data_connect_reported && !g_data_link_failed) {
+        if (!g_data_connect_reported && !g_data_link_failed
+            && me_connect_carrier_ready()) {
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
         }
@@ -9132,6 +9137,29 @@ static void me_rx_bit_dump(int bit)
         fputc(bit >= 0 ? '0' + (bit & 1) : 'x', f);
 }
 
+/* V.90 9.4.1.6: downstream B1d completion and an error-control verdict do
+ * not turn on receive circuit 109. The digital receiver must acquire B1.
+ * Keep the stack running while that happens, but gate the DTE result. */
+static bool me_connect_carrier_ready(void)
+{
+    if (g_mod != ME_MOD_V90 || !g_v90 || me_v90_analogue_role() || g_v92_active)
+        return true;
+    return g_state == ME_DATA && g_v34
+        && v34_v90_upstream_rx_acquired(g_v34)
+        && !v34_v90_upstream_carrier_lost(g_v34);
+}
+
+static void me_v90_report_deferred_connect(void)
+{
+    if (g_mod == ME_MOD_V90 && g_v90 && !me_v90_analogue_role()
+        && !g_v92_active && g_state == ME_DATA
+        && !g_data_connect_reported && !g_data_link_failed
+        && ds_link_is_ready(&g_data_stack) && me_connect_carrier_ready()) {
+        g_data_connect_reported = true;
+        di_on_connected(g_data_connect_rate);
+    }
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -9193,7 +9221,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         g_report_tx_rate = downstream_rate;
                         g_report_rx_rate = rate;
                         if (g_data_framing != DS_FRAMING_V42
-                            && !g_data_connect_reported) {
+                            && !g_data_connect_reported && me_connect_carrier_ready()) {
                             g_data_connect_reported = true;
                             di_on_connected(downstream_rate);
                         }
@@ -14846,6 +14874,7 @@ skip_8k_codewords:
                             ME_LOG("[ME] V.90 %s\n", lec_msg);
                     }
                     ME_CB_PROF(1, v34_rx(g_v34, filtered, len));
+                    me_v90_report_deferred_connect();
                     me_rx_accounting_check();
                     if (g_mod == ME_MOD_V90 && g_state == ME_TRAINING
                         && !v90_upstream_measure_locked()) {
@@ -16936,9 +16965,11 @@ static void enter_v90_data_locked(void)
     if (g_data_connect_reported) {
         /* A retrain, not a new connection: the DTE was told CONNECT once and
            §11.5 never takes it back -- it only clamps 104 for the duration. */
-    } else if (g_data_framing != DS_FRAMING_V42) {
+    } else if (g_data_framing != DS_FRAMING_V42 && me_connect_carrier_ready()) {
         g_data_connect_reported = true;
         di_on_connected(downstream_rate);
+    } else if (g_data_framing != DS_FRAMING_V42) {
+        ME_LOG("[ME] V.90 CONNECT deferred: upstream B1 not acquired\n");
     } else {
         ME_LOG("[ME] V.90 carrier ready; waiting for V.42 LAPM\n");
     }

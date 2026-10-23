@@ -408,3 +408,5 @@ reference-data/artifacts/cx93001-unqualified-e-20261023	4	385595	tests/fast.list
 reference-data/artifacts/cx-work-20261023	45	8909658	docs/v90_hardware_interop.md; wired baseline/candidate call taps, false-E independent decode and regression/test logs; local evidence, no V.90 payload qualification
 reference-data/artifacts/cx-wire-20261023	66	20191564	docs/v90_hardware_interop.md; matched wire/PBX pcaps, G.711 taps, receiver-reported loss and direct SIP routing failure; local evidence, no V.90 qualification
 reference-data/artifacts/cx-ja-cost-20261023	89	21608991	docs/v90_hardware_interop.md; Ja matcher profiling, exact replay TX equivalence and alternated live taps; local evidence, no V.90 qualification
+reference-data/artifacts/cx93001-connect-without-b1-20261023	4	722108	tests/fast.list, docs/v90_hardware_interop.md; paired 45 s CX93001 prefix proving false DTE CONNECT after missing B1; tracked regression
+reference-data/artifacts/cx-connect-gate-20261023	16	1499907	docs/v90_hardware_interop.md; actual PTY before/after, positive deferred-connect payload checks and full-suite summaries; local evidence

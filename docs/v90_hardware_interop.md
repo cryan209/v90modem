@@ -671,3 +671,45 @@ Both retain the pre-existing deferred echo-fit/V.34 working-tree changes;
 the comparison changes only this matcher. All live test processes stopped.
 Evidence, profile sources/logs, replay equivalence, matched taps and manifest:
 `reference-data/artifacts/cx-ja-cost-20261023/`.
+
+## DTE CONNECT gated on upstream B1 (23 October 2026)
+
+`cx-ja-B1` exposes an actual DTE defect, not only an optimistic engine
+log: after seven failed B1 windows, the data stack's optional +ES fallback
+reports `DS_LINK_FALLBACK` and the DTE receives **CONNECT 50666**, despite
+no upstream carrier. The fallback callback previously checked only
+whether a CONNECT had already been reported. V.90 9.4.1.6 requires B1
+reception before turning on circuit 109; optional error control does not
+relax that requirement.
+
+Native V.90 CONNECT paths now require acquired, non-lost upstream carrier
+and completed downstream startup. The data stack remains running so that
+acquisition can deliver ODP/LAPM/MNP normally. If framing/link readiness
+arrives first, the RX callback reports the deferred CONNECT when upstream
+acquisition succeeds. This changes the DTE result, not the sample stream,
+mapper or error-control negotiation. The analogue role, V.92's existing
+PCM-upstream lock gate and established-call retrain reporting are retained.
+
+A paired 45-second prefix is tracked as
+`reference-data/artifacts/cx93001-connect-without-b1-20261023/`.
+`tools/replay_dte_check.py` reads the real PTY under default V1/Q0 settings;
+it does not mistake an engine DATA announcement for a CONNECT. Unmodified
+replay emits one `CONNECT 50666`; the corrected replay emits none, with
+B1-give-up, +ES fallback and CONNECT-deferral log evidence all present.
+Both mu-law and A-law V.14 engine-pair rows now require the initial
+CONNECT-deferral log and still deliver checked payload in both directions,
+so a deferred connection is not simply suppressed forever.
+
+Validation: all 42 focused V.90/V.92 engine-pair rows pass. The full
+fast/slow run passes 623 rows; the only two initial failures are sandbox
+localhost socket denials, and both pass with socket access (**625 rows
+passing across the runs**). Logs: `test-logs/cx-connect-gate/` and
+`test-logs/cx-connect-gate-sockets/`. Before/after PTY replay logs and probe
+evidence are retained in `reference-data/artifacts/cx-connect-gate-20261023/`.
+No new live acquisition success is claimed.
+
+The same capture's standalone upstream probe can set the acquisition flag
+via the E/4-point route where CP-prime search fails, but that probe has no
+live echo cancellation and no decoded-FCS assertion. It is evidence for
+investigating the CP-prime/blind policy, not permission to enable a weaker
+acquisition path or claim working payload. That remains open.
