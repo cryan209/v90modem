@@ -34,6 +34,10 @@
 #include <math.h>
 
 #include "spandsp.h"
+#include "spandsp/private/bitstream.h"
+#include "spandsp/private/power_meter.h"
+#include "spandsp/private/logging.h"
+#include "spandsp/private/v34.h"
 
 #define BLOCK           160
 /* How far back the receiver's own B1 search reaches, plus margin. */
@@ -336,8 +340,17 @@ int main(int argc, char *argv[])
         }
         if (cp_prime)
             printf("replay: CP' B1 search started without an E event\n");
+        int prepared_trellis = rx->rx.v90_t3_trellis_size;
+        int measured_tap = rx->rx.v90_far_tap_measured;
         if (feed(rx, t, sample_count) != 0)
             return 1;
+        if (!v34_v90_upstream_rx_acquired(rx)
+            && (rx->rx.v90_t3_trellis_size != prepared_trellis
+                || rx->rx.v90_far_tap_measured != measured_tap))
+        {
+            fprintf(stderr, "replay: rejected B1 changed prepared trellis or measured scrambler\n");
+            return 1;
+        }
         printf("replay: acquired=%d\n", v34_v90_upstream_rx_acquired(rx));
         printf("replay: %" PRId64 " bits published\n", bit_log_len);
         if (dump_bits() != 0) return 1;

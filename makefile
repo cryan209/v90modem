@@ -970,7 +970,7 @@ v34_phase2_decode_test.o: v34_phase2_decode_test.c v34_phase2_decode.h
 v34_mp_test.o: v34_mp_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_data_test.o: v34_data_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_gardner_test.o: v34_gardner_test.c $(SPANDSP_DIR)/v34_gardner.h
-v90_upstream_replay.o: v90_upstream_replay.c $(SPANDSP_DIR)/spandsp/v34.h
+v90_upstream_replay.o: v90_upstream_replay.c $(SPANDSP_DIR)/spandsp/v34.h $(SPANDSP_DIR)/spandsp/private/v34.h
 v90_engine_replay.o: v90_engine_replay.c modem_engine.h
 v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_fdm_test.o: v34_fdm_test.c fdm_bank.h $(SPANDSP_DIR)/spandsp/v34.h

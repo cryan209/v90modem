@@ -14009,8 +14009,6 @@ search:
     {
         if (want_blind)
         {
-            s->v90_far_tap_measured = mp_tap;
-            s->v90_t3_trellis_size = mp_trellis;
             /* Stage 0 measured this very template's constellation power and
                the template builds since skipped it, so v90_t3_cma_* still
                hold that measurement: rebuilding only the 128 B1 symbols is
@@ -14033,10 +14031,6 @@ search:
             b1_template_skip_cma = best_match < 0.95f;
             (void) v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
             b1_template_skip_cma = false;
-            s->v90_far_tap_measured = best_tap;
-            if (best_trellis >= 0)
-                s->v90_t3_trellis_size = best_trellis;
-            /*endif*/
         }
         /*endif*/
         s->v90_t3_srch_built = true;
@@ -14268,6 +14262,12 @@ search:
         /*endif*/
     }
 commit:
+    /* V.34 10.1.3.1: only a validated B1 selects the receive hypothesis.
+       A failed window's strongest noise fit must not replace the prepared
+       trellis or the measured scrambler used by subsequent attempts. */
+    s->v90_far_tap_measured = best_tap;
+    if (best_trellis >= 0)
+        s->v90_t3_trellis_size = best_trellis;
     if (s->x2_mode && best_trellis >= 0)
     {
         const uint8_t (*table)[16];

@@ -760,3 +760,32 @@ acquisition change should search states with bounded work, preserve the
 complete-frame and out-of-sample gates, and then be graded on live framed
 payload rather than its acquisition flag. No fixed state-4 exception is
 justified, and sustained data reception remains unresolved.
+
+### Rejected B1 windows preserve prepared parameters (23 October 2026)
+
+A bounded state-refinement candidate exposed a separate state-management
+bug: loading a window's best template wrote its trellis and scrambler into
+the durable receiver settings **before** held-out validation. A rejected
+noise window could therefore replace the prepared 16-state code with the
+64-state code for later searches. Those assignments now occur only at the
+validated acquisition commit point (V.34 10.1.3.1); fitting and validation
+thresholds are unchanged. The standalone replay checks that an unacquired
+run preserves both prepared parameters. Against the paired 45-second CX
+fixture that assertion fails with the previous receiver and passes with
+the corrected receiver; the negative capture is now a quick-tier row.
+
+The general state-refinement candidate is **not shipped**. It finds state 4
+at 99.9% without a special-case override, but the actual-PTY regression
+then reports CONNECT followed by garbage. Acquisition alone is therefore
+insufficient to accept this candidate. Its source, decoded bits and PTY
+log are retained as `candidate-*` in the same local evidence directory.
+The original no-CONNECT regression remains required. This is a controlled
+negative result, not successful hardware or sustained-data qualification.
+
+Validation: clean rebuild; full existing suite 623 passing, with only two
+sandbox socket-bind failures; both socket rows pass with access. The ten
+focused replay rows, including the newly added negative row, also pass:
+**626 distinct test rows passing across the runs**. Logs are under
+`test-logs/cx-rejected-hypothesis{,-focused,-sockets}/`. The regression's
+previous-receiver negative control exits 1 with `rejected B1 changed
+prepared trellis or measured scrambler`.
