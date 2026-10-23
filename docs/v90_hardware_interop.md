@@ -713,3 +713,16 @@ via the E/4-point route where CP-prime search fails, but that probe has no
 live echo cancellation and no decoded-FCS assertion. It is evidence for
 investigating the CP-prime/blind policy, not permission to enable a weaker
 acquisition path or claim working payload. That remains open.
+
+The forced-E probe was subsequently checked at its decoded-bit output:
+`V90_REPLAY_QUIET=1 V90_REPLAY_BITS_OUT=/tmp/cx-e-probe.bits
+./v90_upstream_replay
+reference-data/artifacts/cx93001-connect-without-b1-20261023/live-rx.g711
+ulaw 3200 21600 20.8 2.95`. It publishes 526,716 bits and sets acquired,
+but `tools/hdlc_bit_check.py` finds **zero valid complete frames**, 1,008 bad
+complete frames and 1,051 aborted segments. This is a negative diagnostic,
+not a validated alternative to the CP′ search: forced E and absent echo
+cancellation both limit the experiment. Do not enable blind acquisition on
+the strength of its acquired flag. The replay's optional ASCII bit output
+allows independent CRC checking; `V90_REPLAY_QUIET` suppresses forced-mode
+FLOW logging without changing the receiver.

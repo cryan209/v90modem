@@ -56,6 +56,20 @@ static uint8_t *bit_log;
 static int64_t bit_log_len;
 static int64_t bit_log_cap;
 
+/* ASCII output for tools/hdlc_bit_check.py.  A receiver lock alone is not
+   evidence of usable V.42 frames. */
+static int dump_bits(void)
+{
+    const char *path = getenv("V90_REPLAY_BITS_OUT");
+    if (!path) return 0;
+    FILE *out = fopen(path, "w");
+    if (!out) { perror(path); return -1; }
+    for (int64_t i = 0; i < bit_log_len; i++)
+        if (fputc('0' + bit_log[i], out) == EOF)
+        { fclose(out); return -1; }
+    return fclose(out);
+}
+
 static void replay_put_bit(void *user_data, int bit)
 {
     (void) user_data;
@@ -305,7 +319,8 @@ int main(int argc, char *argv[])
             || history > INT_MAX/8000.0)
             return 2;
 
-        rx = make_rx(alaw, baud_code, 0, bps, 1);
+        rx = make_rx(alaw, baud_code, 0, bps,
+                     getenv("V90_REPLAY_QUIET") == NULL);
         printf("replay: feeding %.2f s of history before the handover\n",
                history);
         if (feed(rx, t - (int) (history*8000.0), t) != 0)
@@ -324,6 +339,8 @@ int main(int argc, char *argv[])
         if (feed(rx, t, sample_count) != 0)
             return 1;
         printf("replay: acquired=%d\n", v34_v90_upstream_rx_acquired(rx));
+        printf("replay: %" PRId64 " bits published\n", bit_log_len);
+        if (dump_bits() != 0) return 1;
         if (first_bit_sample >= 0)
             printf("replay: first data bit published within %.1f ms of handover (block end)\n",
                    (first_bit_sample-t)/8.0);
@@ -391,6 +408,7 @@ int main(int argc, char *argv[])
     printf("replay: finished, %" PRId64 " bits published, "
            "%d intact U%%07d pattern lines\n",
            bits_out, replay_count_pattern_lines());
+    if (dump_bits() != 0) return 1;
     v34_free(rx);
     free(samples);
     return 0;
