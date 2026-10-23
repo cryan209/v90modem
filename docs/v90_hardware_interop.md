@@ -595,3 +595,79 @@ software timing concern is measurable Ja-search work: call 1 logged three
 21–22 ms RX callbacks, of which 14.7–16.1 ms was the DIL/Ja search. Reducing
 that work without changing which template windows match is a concrete next
 step; it does not by itself resolve or explain the RTCP loss reports.
+
+## Ja template comparison cost reduced without changing matches (23 October 2026)
+
+The byte-per-bit template loop dominated an instrumented replay of the
+21–22 ms live callbacks noted above. Replace eight scalar comparisons
+with an unaligned-safe `memcpy`/XOR/popcount over eight 0/1 bytes. The
+capture API and template both produce only 0/1, so each differing bit
+contributes exactly one set bit. Byte order is immaterial. Rejected windows
+may stop up to seven comparisons later, but accepted mismatch counts and
+which first window is accepted are unchanged. The 384-bit window,
+115-error budget, hypothesis order, scan cursor and V.90 9.3.1.3 timing
+policy are unchanged; no signal constants or sample accounting change.
+
+Instrumented offline replay of `cx-wire-20261023/call1`, 213 template calls
+and 530 surrounding DIL/Ja search calls on each arm:
+
+| Host | Template total before / after | Whole search total before / after |
+|---|---|---|
+| Mac ARM64 | 177.552 / 9.809 ms (18.1x) | 209.529 / 39.882 ms |
+| Wired Linux x86-64 | 215.813 / 17.898 ms (12.1x) | 252.811 / 54.796 ms |
+
+On Linux the largest template invocation was 2.600 / 0.221 ms; the largest
+whole-search invocation was 3.283 / 1.301 ms. These are one controlled
+replay per host/arm, not a live real-time guarantee. Temporary scope timers
+were identical on both arms, accumulated counts/total/max without per-call
+printing, and are absent from the delivered binary. The Linux candidate
+was rebuilt after profiling and its SHA-256 matches the uninstrumented
+candidate saved before profiling.
+
+Three independent engine replay inputs (noisy Ja, false-E regression,
+second wire-captured call) retain the same hypothesis, score, capture-bit
+position and sample-clock recognition time. Their complete generated TX
+taps are byte-identical over **94880 + 192000 + 415840 = 702720** codewords.
+This checks implementation equivalence on fixed inputs; it does not claim
+hardware behavior after a divergent transmission.
+
+`v90_ja_match_test` exercises every error count at all eight alignments,
+including the 115/116 boundary and non-word-aligned lengths. The Linux
+ASan/UBSan build passes. Mac ASan stalled in shadow-memory initialization
+before main, so no Mac ASan result is claimed. Full fast/slow validation:
+**622 passed**, with only the two localhost socket rows denied by the
+sandbox; both pass on their required-access rerun (**624 rows passing
+across the runs**). Logs: `test-logs/cx-ja-cost/` and
+`test-logs/cx-ja-cost-sockets/`.
+
+Four live calls were alternated **A1/B1/A2/B2**, baseline/candidate, same
+8000T TRN2d, `AT\N2`, `ATS7=60`, V.90 +MS bounds and a 15-second payload
+hold after CONNECT. All calls recognized Ja. Neither arm had a
+Ja-attributed RX callback over 20 ms in this batch, so it cannot establish
+a live stall-rate or acquisition pass-rate improvement. None qualified
+sustained V.90 data:
+
+- A1: V.90 MP retrains, then V.34/LAPM at 4800.
+- B1: valid batch CP prime, V.90 50666/21600 DATA announcement, but upstream
+  B1 never acquires; the CX never CONNECTs. Its CP-prime search explicitly
+  disables the four-point/blind fallback. The best template fits 61% and
+  repeated searches make 21–56 ms callbacks. Independent raw demodulation
+  confirms CP ends near RX-file 20.59 s; later symbols cease being 4-point.
+  This is an acquisition lead, not proof that enabling blind fallback will
+  recover data. Our own DTE later prints `CONNECT 50666/V90` after the
+  error-control timeout falls back to V.14, despite the missing upstream
+  lock. That is a separate CONNECT-gating defect to fix.
+- A2: a streaming CP validates; E is accepted at +30900 ms, just 60 ms
+  before the peer-retrain event. No V.90 link. This still needs a check
+  against the raw retrain tone before treating the E as real.
+- B2: V.90 retrains, then V.34/MNP at 21600; the short payload hold is not
+  a sustained-link qualification.
+
+Baseline Linux binary SHA-256:
+`19218ec1bc18939758864a4902fa61a478b4d08e73d023bb41229d0275dac65c`;
+candidate:
+`ac4346df6274a4a2825518c9338f92d60a576e3def4457a2426687931d7396e4`.
+Both retain the pre-existing deferred echo-fit/V.34 working-tree changes;
+the comparison changes only this matcher. All live test processes stopped.
+Evidence, profile sources/logs, replay equivalence, matched taps and manifest:
+`reference-data/artifacts/cx-ja-cost-20261023/`.

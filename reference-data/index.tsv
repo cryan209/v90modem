@@ -407,3 +407,4 @@ reference-data/artifacts/cx93001-ja-crc-fails-20261023	2	112000	tests/fast.list,
 reference-data/artifacts/cx93001-unqualified-e-20261023	4	385595	tests/fast.list, docs/v90_hardware_interop.md; paired first 24 s of CX93001 CP misread as E by an unqualified streaming decoder; tracked negative regression
 reference-data/artifacts/cx-work-20261023	45	8909658	docs/v90_hardware_interop.md; wired baseline/candidate call taps, false-E independent decode and regression/test logs; local evidence, no V.90 payload qualification
 reference-data/artifacts/cx-wire-20261023	66	20191564	docs/v90_hardware_interop.md; matched wire/PBX pcaps, G.711 taps, receiver-reported loss and direct SIP routing failure; local evidence, no V.90 qualification
+reference-data/artifacts/cx-ja-cost-20261023	89	21608991	docs/v90_hardware_interop.md; Ja matcher profiling, exact replay TX equivalence and alternated live taps; local evidence, no V.90 qualification

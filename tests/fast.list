@@ -860,3 +860,4 @@ sh -c 'ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 ./v90_engine_replay reference-data/
 
 # Byte-exact relay and RTCP diagnostic negative controls.
 python3 tools/test_rtp_path_check.py
+./v90_ja_match_test

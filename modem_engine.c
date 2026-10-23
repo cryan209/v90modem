@@ -58,6 +58,7 @@
 #include "v92_qc.h"
 #include "v92_short_phase1_decode.h"
 #include "v25_automode.h"
+#include "v90_ja_match.h"
 
 #include <spandsp.h>
 
@@ -8645,9 +8646,12 @@ static bool v90_dil_try_repeated_frames(const uint8_t *bits, int total_bits)
  * descriptor), and the descriptor to answer with is the one the template
  * carries.  ME_V90_JA_TEMPLATE=0 turns it off.
  *
- * Only bits that arrived since the last look are compared, and each position
- * stops at the first mismatch past the budget, so a frame's worth of noise
- * costs ~230 compares a position. */
+ * Only bits that arrived since the last look are compared. Eight byte-per-bit
+ * entries are compared at once with the same Hamming budget. This scan
+ * dominated replay profiling of DIL/Ja work that took 14–16 ms inside
+ * 21–22 ms live callbacks (2026-10-23), delaying RTP. This changes neither
+ * the match threshold nor the first matching window.
+ */
 #define V90_JA_TPL_FROM          18
 #define V90_JA_TPL_LEN           384
 #define V90_JA_TPL_MAX_MISMATCH  115
@@ -8705,12 +8709,8 @@ static bool v90_ja_template_scan(void)
         if (n < V90_JA_TPL_LEN)
             continue;
         for (int i = 0; i + V90_JA_TPL_LEN <= n; i++) {
-            int mismatches = 0;
-
-            for (int k = 0; k < V90_JA_TPL_LEN; k++) {
-                if (bits[i + k] != tpl[k] && ++mismatches > V90_JA_TPL_MAX_MISMATCH)
-                    break;
-            }
+            int mismatches = v90_ja_mismatches(bits + i, tpl, V90_JA_TPL_LEN,
+                                               V90_JA_TPL_MAX_MISMATCH);
             if (mismatches > V90_JA_TPL_MAX_MISMATCH)
                 continue;
             if (!v90_dil_load_cx93001(&desc))

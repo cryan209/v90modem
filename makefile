@@ -200,6 +200,8 @@ TEST_TARGETS += vfc_mapper_test vfc_signature_test vfc_frame_test vfc_frame_code
 V250_CTL_TEST_OBJS = v250_ctl_test.o v250_ctl.o
 NEAR_ECHO_TEST_OBJS = near_echo_test.o near_echo.o
 V34_LINE_EC_TEST_OBJS = v34_line_ec_test.o v34_line_ec.o
+V90_JA_MATCH_TEST_OBJS = v90_ja_match_test.o
+TEST_TARGETS += v90_ja_match_test
 V90_ANALOGUE_PR4_TEST_OBJS = v90_analogue_pr4_test.o v90_analogue_pr4.o
 LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
 # The two DTE console arrangements (classic combined, control + data).
@@ -510,6 +512,9 @@ near_echo_test: $(NEAR_ECHO_TEST_OBJS)
 
 v34_line_ec_test: $(V34_LINE_EC_TEST_OBJS)
 	$(CC) $(V34_LINE_EC_TEST_OBJS) -o $@ -lm
+
+v90_ja_match_test: $(V90_JA_MATCH_TEST_OBJS)
+	$(CC) $(V90_JA_MATCH_TEST_OBJS) -o $@
 
 v90_analogue_pr4_test: $(V90_ANALOGUE_PR4_TEST_OBJS)
 	$(CC) $(V90_ANALOGUE_PR4_TEST_OBJS) -o $@ -lm
