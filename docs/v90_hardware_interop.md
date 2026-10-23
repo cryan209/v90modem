@@ -104,7 +104,10 @@ See `apple_usb_modem_sm56.md`, “Foreign USB hardware peer”, and retained
 ### Conexant CX93001 declines V.90: our Phase 2 sequencing, 21 October 2026
 
 The CX93001 (`AT\N2`, `AT+MS=V90,1,300,33600,300,56000`) dials our
-answerer as **6314 (AudioCodes port 4)**. The answerer runs on vmhost CT 117
+answerer as **2904**, through Grandstream ATA line 2 (SIP caller **6005**).
+The CX is attached to the dev Mac as `/dev/cu.usbmodem246802461`;
+**6314 (AudioCodes port 4) is a different route**, not the dial-in recipe.
+The answerer runs on vmhost CT 117
 (`tools/soak/answer_ec_call.sh ... v90`, `tools/cx_hold_dial.py`). It had
 declined V.90 at INFO1a since 23 July. It sent a V.34 INFO1a (Table 11),
 which describes our transmit direction as 2400 baud with projected N=1.
@@ -441,3 +444,73 @@ suspect, not our Jd timing. A 500 ms pre-Sd wait (`ME_V90_SD_DELAY_MS`, new,
 default unchanged) completed Phase 3 on 3/6 calls against 2/6 for 0 ms -- no
 evidence either way. Success over the day ran 2/5, 3/5, 0/8, 1/6, 1/10 on the same
 build: the rig itself drifts.
+
+## False E from an unqualified streaming decoder (23 October 2026)
+
+A new wired CX93001 call reproduced the previously noted false-E path.
+With `ME_V90_TRN2D_SYMBOLS=8000` (7998 transmitted symbols after frame
+alignment), `cx-work-20261023-trn8k1` accepted CP from the batch decoder,
+then reported upstream E at TRACE +21143 ms and entered DATA. Its streaming
+framer had accepted **zero** frames (`cp_valid=0`). Independent DQPSK/GPA
+recovery of the RX tap finds CRC-valid **unacknowledged CP** continuously
+from RX-file 20.740313 s through 23.868750 s: no E/B1 transition occurred
+there. B1 searches on that continuing CP scored 17–20% and stalled media
+callbacks for 21–48 ms. These were searches for a B1 the peer had not sent.
+
+The engine now qualifies its streaming E watch only after that same stream
+has delivered an accepted CRC-valid CPt/CP. Rejecting a frame and changing
+its hypothesis revokes that qualification and clears the ones counter;
+new calls/retrains reset both. A batch CP still prepares the upstream rate,
+but cannot validate another demodulator's bits. V.90 9.4.1.4 explicitly
+allows E instead of a decoded CP prime, so the qualified E alternative is
+retained. Sections 9.4.1.6 and 9.4.2.4–.5 require actual E before B1.
+
+When the batch decoder recovers CP prime and the streaming path remains
+unqualified, the existing independently validated B1 search is now also
+available on a G.711 frontend. It reports no E and releases no bits before
+its full B1/out-of-sample checks pass. This preserves A-law engine-pair
+payload delivery when the live CP hypothesis loses lock; requiring a live
+CRC without that recovery regressed two existing A-law rows.
+
+Regression: paired first-24-second taps in
+`reference-data/artifacts/cx93001-unqualified-e-20261023/`, now in
+`tests/fast.list`. Pre-change synchronous echo-reference replay falsely
+reports E at +22100 ms. Corrected replay accepts batch CP, then streaming
+CP, with no E/DATA in the prefix. This is a negative handover regression;
+it cannot qualify subsequent peer behavior after our first divergent TX.
+
+**Our own TX checked first.** On the preceding default-TRN2d baseline,
+independent spec decoding recovers all 11322 TRN2d bits as ones and validates
+336/336 MP CRCs. On the failing 8000T call, the independent waveform
+generator reproduces **all 7998 magnitudes and all 7998 signs exactly**
+from the peer's CPt (Ucodes 97/85/42/41, Sr=1, ld=1, a1=1, other
+coefficients zero). That clears the generated sequence, not the waveform
+the CX ultimately hears through its analogue path.
+
+**Live candidate limits.** Two candidate calls used the same 8000T setting.
+The first retrained 2 s after TRN2d, before data CP; the second recovered
+repeated CRC-valid CP on the streaming path, remained in MP/MP prime with
+no false E/DATA, and followed the peer's retrain at +29204 ms. Both fell
+back to V.34/LAPM. Neither establishes sustained V.90 payload or a startup
+pass-rate improvement. The unresolved gate is still the CX recognizing our
+MP and returning CP prime/E. Do not change the default TRN2d duration on
+this evidence.
+
+Baseline executable SHA-256:
+`c45298f20df66df783a7e8c3bd2bd200d14d4a5c8195aa857d38e6b6bf5dd627`;
+candidate:
+`19218ec1bc18939758864a4902fa61a478b4d08e73d023bb41229d0275dac65c`.
+Both use CT 117 `/root/mnp-live`, with the pre-existing deferred line-echo
+fit and V.34 working-tree changes. The candidate changes only the engine's
+E qualification and CP-prime recovery from that baseline.
+
+Validation: full fast/slow run **620 passed**, with only the two localhost
+SIP tests denied socket access by the sandbox; both pass when rerun with
+localhost access (**622 tests passing across the runs**). Logs:
+`test-logs/cx-e-qualified/` and `test-logs/cx-e-qualified-sockets/`.
+
+Retained full call evidence, independent decode output, source diff, test
+summaries and SHA-256 manifest: `reference-data/artifacts/cx-work-20261023/`.
+The completed baseline and both candidate fallback calls each delivered
+all 20 numbered lines exactly once, in order, in both directions; these
+are V.34 payload results. The false-E V.90 call delivered none.

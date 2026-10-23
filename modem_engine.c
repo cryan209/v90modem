@@ -5952,6 +5952,9 @@ static void v90_dil_capture_reset(void)
 static bool g_v34_upstream_data_armed = false;
 static bool g_v34_upstream_data_started = false;
 static int g_v90_upstream_e_run = 0;
+/* E must come from a CRC-qualified streaming decoder, not merely from a
+ * receiver whose parameters were supplied by the independent batch path. */
+static bool g_v90_upstream_stream_valid = false;
 
 /* How many §9.6 rate renegotiations one call may run.  Each costs the best
  * part of a second of downstream (384T of Rd, 24T of R̄d, TRN2d, the MP
@@ -6711,6 +6714,7 @@ static void v90_reset_upstream_data_arming(void)
     g_v34_upstream_data_armed = false;
     g_v34_upstream_data_started = false;
     g_v90_upstream_e_run = 0;
+    g_v90_upstream_stream_valid = false;
     g_v90_up_snr_started = false;
     g_v90_up_snr_done = false;
     g_v90_upstream_prepared_bps = 0;
@@ -6916,6 +6920,14 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                 diag->frame.v90_compatibility ? "CP" : "CPt",
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
     if (accepted) {
+        /* V.90 9.4.1.4 permits E in place of a decoded CP', but 9.4.1.6
+         * still requires actual E. A batch CP validates its own demodulator,
+         * not this live bit tap. On CX trn8k1 (2026-10-23), the tap had zero
+         * valid frames and falsely read E while the wire kept sending CP.
+         * A valid CPt/CP on THIS tap qualifies its E watch; decoding CP'
+         * is not required. */
+        if (source && strcmp(source, "spandsp") == 0)
+            g_v90_upstream_stream_valid = true;
         v90_dump_accepted_cp(frame);
         v90_cp_live_mark_accepted_locked(diag);
         /* §9.6.1.2.3's CP' is what releases Ed, and whether it was decoded
@@ -6983,9 +6995,12 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
      * waiting indefinitely for the CP demodulator's 20-bit E run. On the
      * direct Apple pair that run arrived 102 seconds late, long after both
      * V.42 detection timers expired. This path does not report an E event. */
-    /* This recovery is for a linear waveform frontend. Byte-exact DS0
-     * peers retain their existing E handover and optional blind fallback. */
-    if (accepted && g_state == ME_TRAINING && g_g711_rx_octets == 0
+    /* A batch CP' can also rescue a DS0 call whose streaming hypothesis
+     * failed CRC. It cannot qualify that stream's E, but it can start the
+     * independently validated B1 search. Keep the ordinary E/blind path
+     * when the streaming decoder is qualified. */
+    if (accepted && g_state == ME_TRAINING
+        && (g_g711_rx_octets == 0 || !g_v90_upstream_stream_valid)
         && frame->v90_compatibility && frame->acknowledge
         && !frame->silence_request && !g_v92_active && g_v34
         && g_v34_upstream_data_armed && !g_v34_upstream_data_started
@@ -7011,10 +7026,11 @@ static void v90_live_cp_bit(void *user_data, int bit)
     uint32_t sync_before;
 
     (void)user_data;
-    /* After CP' is accepted, the next thing on this channel is the peer's E
-     * (20 consecutive ones) followed by B1 and data.  CP preambles are only
-     * 17 ones + 0, so a run of 20 is unambiguous. */
-    if (g_v34_upstream_data_armed && !g_v34_upstream_data_started && g_v34) {
+    /* V.90 9.4.1.6: receive E (20 consecutive ones), then B1. CP preambles
+     * are only 17 ones + 0, but an incorrect demodulator can produce any
+     * run length; qualify this tap with its own CRC-valid CP first. */
+    if (g_v34_upstream_data_armed && g_v90_upstream_stream_valid
+        && !g_v34_upstream_data_started && g_v34) {
         if (bit)
             g_v90_upstream_e_run++;
         else
@@ -7075,8 +7091,11 @@ static void v90_live_cp_bit(void *user_data, int bit)
     if (g_v90 && g_v90_reneg_cp_rx_marked
         && g_v90_cp_rx.sync_candidates != sync_before)
         v90_rate_renegotiation_note_answer(g_v90);
-    if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before)
+    if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before) {
+        g_v90_upstream_stream_valid = false;
+        g_v90_upstream_e_run = 0;
         v34_reject_v90_phase4_hypothesis(g_v34);
+    }
 }
 
 static void *v90_cp_live_worker(void *user_data)
