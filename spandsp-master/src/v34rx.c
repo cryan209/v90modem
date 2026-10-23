@@ -12836,21 +12836,26 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            the recovery, and the engine drives it; this only has to say when.
            Judge on the slow estimate, so a burst does not trigger a
            renegotiation that costs the best part of a second. */
-        if (s->v90_t3_err_base_n >= V34_V90_T3_ERR_BASE_SYMBOLS
-            &&
-            s->v90_t3_sym_err_ema >= V34_V90_T3_LOST_ERR)
+        /* V.90 9.5.1.1/9.6: loss before the baseline finishes learning
+           still needs recovery. B1 already validated this receiver; an
+           early collapse can prevent the good-symbol baseline completing
+           indefinitely. Keep the same slow-error threshold and duration. */
+        /* Latch a completed loss until clear_carrier_lost() acknowledges
+           recovery; a brief return to the grid does not prove frame sync. */
+        if (s->v90_t3_sym_err_ema >= V34_V90_T3_LOST_ERR)
         {
-            if (++s->v90_t3_lost_run == V34_V90_T3_LOST_SYMBOLS)
+            if (s->v90_t3_lost_run < V34_V90_T3_LOST_SYMBOLS
+                && ++s->v90_t3_lost_run == V34_V90_T3_LOST_SYMBOLS)
             {
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream carrier lost: %.3f from the "
-                         "constellation for %d symbols (settled at %.3f)\n",
+                         "constellation for %d symbols (baseline ready=%d)\n",
                          s->v90_t3_sym_err_ema, s->v90_t3_lost_run,
-                         s->v90_t3_err_base);
+                         s->v90_t3_err_base_n >= V34_V90_T3_ERR_BASE_SYMBOLS);
             }
             /*endif*/
         }
-        else
+        else if (s->v90_t3_lost_run < V34_V90_T3_LOST_SYMBOLS)
         {
             s->v90_t3_lost_run = 0;
         }

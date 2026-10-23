@@ -357,6 +357,7 @@ static bool g_ec_alt_only = false;
 static int g_report_tx_rate = 0;
 static int g_report_rx_rate = 0;
 static bool me_connect_carrier_ready(void);
+static const char *me_connect_carrier_wait_reason(void);
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 static bool me_quick_connect_enabled(void);
@@ -860,7 +861,7 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
         } else if (!g_data_connect_reported && !me_connect_carrier_ready()) {
-            ME_LOG("[ME] V.90 CONNECT deferred: upstream B1 not acquired\n");
+            ME_LOG("[ME] V.90 CONNECT deferred: %s\n", me_connect_carrier_wait_reason());
         }
         break;
     case DS_LINK_CONNECTED:
@@ -9145,8 +9146,16 @@ static bool me_connect_carrier_ready(void)
     if (g_mod != ME_MOD_V90 || !g_v90 || me_v90_analogue_role() || g_v92_active)
         return true;
     return g_state == ME_DATA && g_v34
+        && !v90_rate_renegotiation_active(g_v90)
+        && !v90_rate_renegotiation_pending(g_v90)
         && v34_v90_upstream_rx_acquired(g_v34)
         && !v34_v90_upstream_carrier_lost(g_v34);
+}
+
+static const char *me_connect_carrier_wait_reason(void)
+{
+    return g_v34 && v34_v90_upstream_rx_acquired(g_v34)
+        ? "upstream carrier lost or recovering" : "upstream B1 not acquired";
 }
 
 static void me_v90_report_deferred_connect(void)
@@ -16969,7 +16978,7 @@ static void enter_v90_data_locked(void)
         g_data_connect_reported = true;
         di_on_connected(downstream_rate);
     } else if (g_data_framing != DS_FRAMING_V42) {
-        ME_LOG("[ME] V.90 CONNECT deferred: upstream B1 not acquired\n");
+        ME_LOG("[ME] V.90 CONNECT deferred: %s\n", me_connect_carrier_wait_reason());
     } else {
         ME_LOG("[ME] V.90 carrier ready; waiting for V.42 LAPM\n");
     }
@@ -17196,13 +17205,13 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                        "§9.6/§11.6 training-and-B1 resynchronization\n");
                 trace_phase("V90 upstream discontinuity resync");
                 v90_upstream_step_down_locked();
-                (void) v90_request_rate_renegotiation(g_v90);
+                if (v90_request_rate_renegotiation(g_v90))
+                    v34_v90_upstream_clear_carrier_lost(g_v34);
             } else {
                 ME_LOG("[ME] V.90 upstream discontinuity; §9.6 per-call cap "
                        "reached\n");
             }
             v34_v90_upstream_clear_resync_required(g_v34);
-            v34_v90_upstream_clear_carrier_lost(g_v34);
         }
 
         /* Has the upstream lost carrier?  §9.6 allows a rate renegotiation
@@ -17221,10 +17230,11 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
                        "rate renegotiation to re-acquire\n");
                 v90_upstream_step_down_locked();
-                (void) v90_request_rate_renegotiation(g_v90);
-                /* Clear it: at the cap, the condition would otherwise be
-                 * re-raised on every block for the rest of the call. */
-                v34_v90_upstream_clear_carrier_lost(g_v34);
+                bool requested = v90_request_rate_renegotiation(g_v90);
+                /* Only acknowledge a scheduled recovery. CONNECT remains
+                 * gated while its pending/active exchange awaits new B1. */
+                if (requested)
+                    v34_v90_upstream_clear_carrier_lost(g_v34);
             } else if (retrain_on_loss_due(me_v90_max_loss_retrains())) {
                 /* §9.5.1.1.  The renegotiation above is the cheaper of the
                  * two recoveries and is preferred where the peer implements
@@ -17252,9 +17262,10 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                     "upstream carrier lost in data mode; retraining "
                     "per 9.5.1.1");
                 return false;
-            } else {
-                v34_v90_upstream_clear_carrier_lost(g_v34);
             }
+            /* If policy/dwell/caps prevent recovery, keep the loss visible.
+             * Acknowledging it here would let CONNECT report the stale B1
+             * as usable carrier without any new training (9.5.1.1/9.6). */
         }
 
         /* §9.6: "Rate renegotiation shall be initiated by the digital modem's

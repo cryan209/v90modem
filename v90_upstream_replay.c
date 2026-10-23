@@ -352,6 +352,13 @@ int main(int argc, char *argv[])
             return 1;
         }
         printf("replay: acquired=%d\n", v34_v90_upstream_rx_acquired(rx));
+        printf("replay: carrier_lost=%d\n", v34_v90_upstream_carrier_lost(rx));
+        if (v34_v90_upstream_carrier_lost(rx))
+        {
+            v34_v90_upstream_clear_carrier_lost(rx);
+            if (v34_v90_upstream_carrier_lost(rx)) return 1;
+            printf("replay: carrier loss acknowledged\n");
+        }
         printf("replay: %" PRId64 " bits published\n", bit_log_len);
         if (dump_bits() != 0) return 1;
         if (first_bit_sample >= 0)

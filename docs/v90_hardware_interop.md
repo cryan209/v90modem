@@ -843,3 +843,52 @@ The quick-tier helper test exercises NO CARRIER, BUSY, NO DIALTONE,
 timeout, interruption and normal CONNECT without touching hardware.
 Payload grading is still required separately; a successful dial exit code
 does not qualify sustained data.
+
+### Early carrier loss remains visible until recovery (23 October 2026)
+
+The receiver's loss timer previously required the good-symbol baseline to
+finish learning. A clean acquired B1 followed by an early collapse could
+prevent that baseline completing, so loss was never reported. A controlled
+fault test using the retained Apple acquisition prefix followed by seeded
+G.711 noise reproduces this: noise beginning at 0.8 seconds leaves acquired
+set but carrier_lost clear after four seconds; starting the same noise at
+2 seconds does report loss. These are synthetic test stimuli, not modified
+hardware evidence or an interop qualification.
+
+The loss timer now operates after acquisition even before baseline learning
+finishes, with its existing error threshold and 3200-symbol duration.
+Completed loss saturates until the public recovery acknowledgement clears
+it; a brief return to the lattice does not prove frame synchronization.
+The diagnostic reports whether the baseline is ready instead of printing
+its unfinished sum as a settled mean. `tools/test_v90_early_loss.py` checks
+clean input, early and late sustained noise, loss followed by clean samples,
+a short burst, and clearing through the public API. Reinstating the old
+baseline prerequisite fails the early-loss case; removing only the latch
+fails the loss-then-clean case.
+
+The engine also used to acknowledge loss even when policy/dwell/caps
+prevented starting recovery. That acknowledgement is removed: only actual
+recovery clears it. Initial CONNECT additionally waits while rate
+renegotiation is pending or active. Deferral logs distinguish missing B1
+from lost/recovering carrier.
+
+The captured state-4 diagnostic (still an isolated, unshipped override)
+exercises this through the real PTY: before the engine fix it reports one
+CONNECT and garbage; with persistent loss and the engine gate it reports
+**zero CONNECTs**, with the lost/recovering deferral reason. This addresses
+the false-CONNECT symptom of that experiment, not its inability to recover
+payload. The production zero-state receiver retains the existing captured
+no-CONNECT regression. Sources, negative-control logs and PTY results are
+retained under `reference-data/artifacts/cx-early-loss-20261023/`. The CX93001
+remains disconnected; no new live hardware success is claimed.
+
+Final validation: **628 test rows passing across runs**: the complete suite
+reports 626 passing and only two sandbox socket-bind failures, and both
+socket rows pass with access. Final logs are
+`test-logs/v90-early-loss-final3/` and
+`test-logs/v90-early-loss-final3-sockets/`. The five new controlled cases and
+the captured no-CONNECT PTY regression also pass on the idle wired Linux
+rig. Its final binary SHA-256 is
+`7994490b6d3038dd4fbfa78dc236e311de63ed1d1aa357be51849c6553bae282`;
+pre-update binary and Linux logs are saved under
+`/root/cx-early-loss-20261023-3ede2ce0/`.
