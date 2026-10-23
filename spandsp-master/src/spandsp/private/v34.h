@@ -1515,6 +1515,15 @@ typedef struct
     float v90_t3_acq_best_rel;
     float v90_t3_acq_best_dist;
     float v90_t3_acq_best_match;
+    int v90_t3_acq_best_initial_state;
+    int v90_t3_acq_best_tap;
+    int v90_t3_acq_best_trellis;
+    bool v90_t3_acq_best_expanded;
+    complexf_t v90_t3_acq_best_b1[V34_V90_T3_B1_MAX_SYMBOLS];
+    int v90_t3_acq_best_b1_symbols;
+    double v90_t3_acq_best_cma_p2, v90_t3_acq_best_cma_p4;
+    int64_t v90_t3_acq_best_cma_n;
+    float v90_t3_acq_best_cma_r2;
     int v90_t3_acq_best_conjugate;
     int64_t v90_t3_acq_best_first;
     bool v90_t3_acq_best_valid;
@@ -1644,6 +1653,8 @@ typedef struct
     bool v90_t3_srch_conjugate;
     int v90_t3_srch_tap;
     int v90_t3_srch_trellis;
+    int v90_t3_srch_initial_state;
+    int64_t v90_t3_srch_state_anchor;
     bool v90_t3_srch_expanded;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
     FILE *v90_t3_sym_dump;

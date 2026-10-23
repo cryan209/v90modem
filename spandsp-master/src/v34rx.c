@@ -13772,6 +13772,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     bool best_conjugate = false;
     int best_tap = 0;
     int best_trellis = -1;
+    int best_initial_state = 0;
     bool best_expanded = s->parms.expanded_shaping;
     bool blind = false;
     bool want_blind;
@@ -13847,6 +13848,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_srch_conjugate = false;
     s->v90_t3_srch_tap = 0;
     s->v90_t3_srch_trellis = -1;
+    s->v90_t3_srch_initial_state = 0;
+    s->v90_t3_srch_state_anchor = 0;
     s->v90_t3_srch_expanded = s->parms.expanded_shaping;
 
 search:
@@ -13989,6 +13992,64 @@ search:
             }
         }
     }
+    /* V.34 10.1.3.1 specifies state zero before B1. Some captured signals
+       match another state (also handled by v34_rx_b1_search()). Only
+       after all reset-state templates fail, refine the strongest candidate
+       with the negotiated code and scrambler. Search one state per packet
+       over a bounded +/-16-symbol neighbourhood, not the whole history.
+       Complete-frame fit and the existing held-out DATA check still gate
+       acquisition; this is not the unvalidated four-point fallback. */
+    if (s->v90_mode && !s->x2_mode && s->v90_t3_srch_match < 0.95f
+        && s->v90_t3_srch_coarse >= 0.40f)
+    {
+        const uint8_t (*table)[16];
+        int states;
+        int steps = candidate_count*3;
+        if (!trellis_parameters(mp_trellis, &table, &states)
+            && s->v90_t3_srch_step < steps + states - 1)
+        {
+            int initial = s->v90_t3_srch_step - steps + 1;
+            complexf_t coeff[V34_V90_T3_FSE_TAPS];
+            int64_t first = 0;
+            bool conjugate = false;
+            float coarse = 0.0f;
+            float match;
+            int64_t lo, hi;
+
+            if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
+                return;
+            if (initial == 1)
+                s->v90_t3_srch_state_anchor = s->v90_t3_srch_first;
+            lo = s->v90_t3_srch_state_anchor - 3*16;
+            hi = s->v90_t3_srch_state_anchor + 3*16;
+            /* acquire_pass's coarse scan is in matched-filter coordinates. */
+            lo += V34_V90_T3_RRC_TAPS/2;
+            hi += V34_V90_T3_RRC_TAPS/2;
+            if (lo < search_start) lo = search_start;
+            if (hi > search_end) hi = search_end;
+            s->v90_t3_srch_step++;
+            s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+            b1_template_skip_cma = true;
+            bool built = v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, initial);
+            b1_template_skip_cma = false;
+            if (!built) return;
+            match = v90_t3_acquire_pass(s, lo, hi, coeff, &first, &conjugate, &coarse);
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 T/3 B1 state refinement: state=%d tap=%d trellis=%d fit=%.1f%%\n",
+                     initial, mp_tap, mp_trellis, 100.0f*match);
+            if (match > s->v90_t3_srch_match)
+            {
+                s->v90_t3_srch_match = match;
+                s->v90_t3_srch_first = first;
+                s->v90_t3_srch_conjugate = conjugate;
+                s->v90_t3_srch_tap = mp_tap;
+                s->v90_t3_srch_trellis = mp_trellis;
+                s->v90_t3_srch_initial_state = initial;
+                memcpy(s->v90_t3_srch_coeff, coeff, sizeof(coeff));
+            }
+            return;
+        }
+    }
     /* What follows gets packets of its own too: loading the template the
        decoder will use (a build), then the 4-point training, the
        out-of-sample check and the commit. */
@@ -14001,6 +14062,7 @@ search:
     best_conjugate = s->v90_t3_srch_conjugate;
     best_tap = s->v90_t3_srch_tap;
     best_trellis = s->v90_t3_srch_trellis;
+    best_initial_state = s->v90_t3_srch_initial_state;
     best_expanded = s->v90_t3_srch_expanded;
     memcpy(best_coeff, s->v90_t3_srch_coeff, sizeof(best_coeff));
     /* No template fits a peer that does not reset its scrambler before B1
@@ -14034,7 +14096,8 @@ search:
                callback of every retry window live (rf-mini-20261016 opt-5,
                after the 4-point training failed). */
             b1_template_skip_cma = best_match < 0.95f;
-            (void) v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
+            (void) v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis,
+                                                   s->v90_t3_srch_initial_state);
             b1_template_skip_cma = false;
         }
         /*endif*/
@@ -14202,6 +14265,10 @@ search:
                instead. */
             bool same_again = passable
                               &&  s->v90_t3_acq_best_valid
+                              &&  best_initial_state == s->v90_t3_acq_best_initial_state
+                              &&  best_tap == s->v90_t3_acq_best_tap
+                              &&  best_trellis == s->v90_t3_acq_best_trellis
+                              &&  best_expanded == s->v90_t3_acq_best_expanded
                               &&  llabs((long long) (best_first - s->v90_t3_acq_best_first)) <= 3
                               &&  fabs(rel - s->v90_t3_acq_best_rel)
                                       <= 0.1*s->v90_t3_acq_best_rel;
@@ -14219,6 +14286,16 @@ search:
                 s->v90_t3_acq_best_rel = (float) rel;
                 s->v90_t3_acq_best_dist = (float) mean_dist;
                 s->v90_t3_acq_best_match = best_match;
+                s->v90_t3_acq_best_initial_state = best_initial_state;
+                s->v90_t3_acq_best_tap = best_tap;
+                s->v90_t3_acq_best_trellis = best_trellis;
+                s->v90_t3_acq_best_expanded = best_expanded;
+                memcpy(s->v90_t3_acq_best_b1, s->v90_t3_b1, sizeof(s->v90_t3_b1));
+                s->v90_t3_acq_best_b1_symbols = s->v90_t3_b1_symbols;
+                s->v90_t3_acq_best_cma_p2 = s->v90_t3_cma_p2;
+                s->v90_t3_acq_best_cma_p4 = s->v90_t3_cma_p4;
+                s->v90_t3_acq_best_cma_n = s->v90_t3_cma_n;
+                s->v90_t3_acq_best_cma_r2 = s->v90_t3_cma_r2;
                 s->v90_t3_acq_best_conjugate = best_conjugate;
                 s->v90_t3_acq_best_first = best_first;
                 s->v90_t3_acq_best_valid = true;
@@ -14230,6 +14307,22 @@ search:
                 memcpy(best_coeff, s->v90_t3_acq_best_coeff,
                        sizeof(best_coeff));
                 best_match = s->v90_t3_acq_best_match;
+                best_initial_state = s->v90_t3_acq_best_initial_state;
+                best_tap = s->v90_t3_acq_best_tap;
+                best_trellis = s->v90_t3_acq_best_trellis;
+                best_expanded = s->v90_t3_acq_best_expanded;
+                /* Restore the winning template with its filter and state,
+                   not the most recently attempted state's B1. Snapshotting
+                   its mapper moments avoids rebuilding 32000 symbols here. */
+                memcpy(s->v90_t3_b1, s->v90_t3_acq_best_b1, sizeof(s->v90_t3_b1));
+                s->v90_t3_b1_symbols = s->v90_t3_acq_best_b1_symbols;
+                s->v90_t3_cma_p2 = s->v90_t3_acq_best_cma_p2;
+                s->v90_t3_cma_p4 = s->v90_t3_acq_best_cma_p4;
+                s->v90_t3_cma_n = s->v90_t3_acq_best_cma_n;
+                s->v90_t3_cma_r2 = s->v90_t3_acq_best_cma_r2;
+                if (s->x2_mode)
+                    v34_set_working_parameters(&s->parms, s->baud_rate,
+                                               s->bit_rate, best_expanded);
                 best_conjugate = s->v90_t3_acq_best_conjugate;
                 best_first = s->v90_t3_acq_best_first;
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -14320,6 +14413,13 @@ commit:
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
     s->v90_t3_b1_start = best_first;
+    if (!blind && best_initial_state != 0)
+    {
+        int prior = (s->viterbi.ptr - 1) & 0xF;
+        for (int state = 0; state < s->viterbi.state_count; state++)
+            s->viterbi.vit[prior].cumulative_path_metric[state] =
+                state == best_initial_state ? 0U : 0x3FFFFFFFU;
+    }
     if (blind)
     {
         /* Nothing says which state the far end's trellis encoder is in

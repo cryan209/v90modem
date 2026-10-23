@@ -247,3 +247,5 @@ tools/eicon/__pycache__/
 
 # tools/run_tests.py output
 test-logs/
+
+/v90_b1_state_test

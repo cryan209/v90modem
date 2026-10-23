@@ -774,7 +774,7 @@ run preserves both prepared parameters. Against the paired 45-second CX
 fixture that assertion fails with the previous receiver and passes with
 the corrected receiver; the negative capture is now a quick-tier row.
 
-The general state-refinement candidate is **not shipped**. It finds state 4
+The first general state-refinement candidate was **not shipped**. It found state 4
 at 99.9% without a special-case override, but the actual-PTY regression
 then reports CONNECT followed by garbage. Acquisition alone is therefore
 insufficient to accept this candidate. Its source, decoded bits and PTY
@@ -892,3 +892,57 @@ rig. Its final binary SHA-256 is
 `7994490b6d3038dd4fbfa78dc236e311de63ed1d1aa357be51849c6553bae282`;
 pre-update binary and Linux logs are saved under
 `/root/cx-early-loss-20261023-3ede2ce0/`.
+
+### General B1 initial-state refinement with exact payload (23 October 2026)
+
+The receiver now tries alternate initial trellis states after the ordinary
+reset-state templates fail. It refines the strongest existing candidate
+only when coarse correlation is at least 40%, using the negotiated code
+and measured scrambler in a bounded +/-16-symbol neighbourhood. Each state
+gets a separate receive callback. State zero remains the ordinary path;
+the complete-frame 95% fit and held-out DATA validation are unchanged
+(V.90 8.5.1 / V.34 10.1.3.1). No fixed state-4 exception or weaker blind
+acquisition is enabled. A template match does not establish why the
+captured peer differs from the specified reset-state B1.
+
+The winning initial state seeds the Viterbi metrics. Best-window snapshots
+now retain the matching template, code, scrambler, shaping and mapper
+moments with the filter, so settling on an earlier window cannot load the
+latest attempted state's template instead. This also avoids running a
+32000-symbol mapper rebuild in that restoration callback.
+
+`v90_b1_state_test` generates four-point lead-in, B1 and known PRBS payload
+through the actual transmitter, G.711 quantization and the T/3 receiver.
+All 16 initial values of the 16-state code pass, along with representative
+32/64-state cases, 3000 baud, and 21600 bit/s. Across 22 positive cases,
+**1,683,635 known payload bits decode with zero errors**. Training-only and
+noise-only cases reject acquisition. The previous receiver fails the
+nonzero-state cases. These are synthetic receiver tests, not hardware
+interop or error-control qualification.
+
+The captured CX93001 regression now acquires B1 at 99.9%, then reports
+carrier loss and emits **zero CONNECTs** with the lost/recovering reason.
+Its quick-tier row and fixture README reflect that new acquisition result;
+the original raw files are unchanged. This supersedes the first candidate's
+false-CONNECT result after the early-loss/acknowledgement fixes, but the
+captured DATA still does not establish sustained payload.
+
+Final validation: **629 test rows pass across runs** (627 in the complete
+suite; two sandbox socket-bind failures pass with access). The full suite
+includes x2 and V.92 paths and follows a clean rebuild after private-header
+changes. Logs: `test-logs/v90-b1-states{,-sockets}/`. All 24 new cases, early
+loss checks and the captured actual-PTY check also pass on wired Linux.
+In isolated callback profiling, the maximum state-refinement callback is
+0.665 ms on this Mac and 5.858 ms on wired Linux, below the 20 ms packet
+interval in these measurements; this does not claim a live pass-rate gain.
+The receiver and new payload-test objects also pass all 24 cases with Linux
+AddressSanitizer/UBSan and leak detection; the remaining vendored objects
+in that diagnostic link are not instrumented.
+
+Evidence and temporary profiling sources are retained under
+`reference-data/artifacts/cx-b1-states-20261023/`. The Linux binary SHA-256 is
+`dfdf7c5b96988012e6f341534ae488e5c7e2ccdc03a15aecb795d1f7208fbbbe`;
+pre-update sources/binary and logs remain in
+`/root/cx-b1-states-20261023-2c572237/`. The CX93001 is still disconnected,
+so a new physical exchange and sustained bidirectional payload remain
+required before hardware qualification.

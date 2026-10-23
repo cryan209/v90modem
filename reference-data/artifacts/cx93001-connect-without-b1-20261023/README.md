@@ -1,4 +1,4 @@
-# CONNECT without upstream B1, CX93001, 23 October 2026
+# CX93001 false-CONNECT regression, 23 October 2026
 
 First 45 seconds of `cx-ja-B1`, the optimized Ja arm retained under
 `reference-data/artifacts/cx-ja-cost-20261023/B1`. Both raw mu-law files
@@ -10,12 +10,14 @@ ME_MODE=v90, ME_V90_TRN2D_SYMBOLS=8000, factory +ES, CX AT\N2,
 ATS7=60, AT+MS=V90,1,300,33600,300,56000. Tested live binary SHA-256:
 ac4346df6274a4a2825518c9338f92d60a576e3def4457a2426687931d7396e4.
 
-CP prime is CRC-valid and starts an independent B1 search. Every search
+CP prime is CRC-valid and starts an independent B1 search. Originally every search
 fails (best template fit 61%); after seven windows the receiver reports
 that the upstream has no carrier. Error-control detection later falls
 back to buffered V.14. The old engine nevertheless emits CONNECT 50666
-on its PTY. Corrected engine output must contain no CONNECT, with both
-B1-give-up and error-control-fallback evidence present.
+on its PTY. The general initial-state search now acquires B1 with a 99.9%
+fit to a state-4 template. The subsequent received stream loses usable
+carrier; corrected output must still contain no CONNECT, now with B1
+acquisition, carrier-loss and lost/recovering deferral evidence present.
 
 V.90 9.4.1.6 requires B1 reception before circuit 109 is turned on.
 V.250 +ES fallback relaxes error control, not the physical connection.
@@ -26,8 +28,9 @@ rows assert initial deferral and subsequent successful delivery.
 Read the PTY with tools/replay_dte_check.py, not the engine DATA log:
 
     ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 python3 tools/replay_dte_check.py \
-      --expect unconnected --require-log 'B1 giving up' \
-      --require-log 'no error-control peer' --require-log 'CONNECT deferred' \
+      --expect unconnected --require-log 'B1 acquired' \
+      --require-log 'upstream carrier lost' \
+      --require-log 'CONNECT deferred: upstream carrier lost or recovering' \
       -- ./v90_engine_replay <this-dir>/live-rx.g711 ulaw \
       --fast --sync --echo-ref --sip-answer
 

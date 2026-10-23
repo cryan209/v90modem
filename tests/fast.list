@@ -863,7 +863,8 @@ python3 tools/test_rtp_path_check.py
 ./v90_ja_match_test
 
 # V.90 9.4.1.6: optional error-control fallback cannot replace upstream B1.
-ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 python3 tools/replay_dte_check.py --expect unconnected --require-log "B1 giving up" --require-log "no error-control peer" --require-log "CONNECT deferred" -- ./v90_engine_replay reference-data/artifacts/cx93001-connect-without-b1-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer
+ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 python3 tools/replay_dte_check.py --expect unconnected --require-log "B1 acquired" --require-log "upstream carrier lost" --require-log "CONNECT deferred: upstream carrier lost or recovering" -- ./v90_engine_replay reference-data/artifacts/cx93001-connect-without-b1-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer
+./v90_b1_state_test
 # Sustained upstream loss is actionable before baseline learning completes.
 python3 tools/test_v90_early_loss.py
 # Failed physical-rig dials must hang up and retain the last-call report.
