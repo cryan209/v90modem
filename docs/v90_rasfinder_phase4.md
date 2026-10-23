@@ -1568,3 +1568,32 @@ Local evidence: `reference-data/artifacts/rf-current-20261023/`, with paired
 G.711 taps, complete server logs, exclusive PTY interactions, final metadata,
 independent check reports and checksums. No post-divergence replay is used as
 hardware evidence. Sustained bidirectional hardware payload remains unverified.
+
+## v34tx.c at -O2: the "optnone still fails" bug was a union alias (2026-10-24)
+
+`v56_loopback_test --ad 5 --edd 3 --bits 16000 --law ulaw` timed out when
+v34tx.c was built at `-O2` even with `#pragma clang optimize off` over the whole
+file.  `-fsanitize=undefined` on the `-O0` build found it at once: "load of
+value 6, which is not a valid value for type 'bool'" at every `s->tx.infoh.trn16`
+read (`-ftrivial-auto-var-init`, `-ffp-contract`, FORTIFY, lifetime markers and
+strict aliasing were all ruled out first).  `tx.infoh` is a union with
+`tx.info1a`/`tx.info1c`, so in **duplex** `trn16` is a byte of the INFO1
+pre-emphasis word (6 here), not a field.  `get_trn_baud` used it to pick the
+Phase 3 TRN constellation and the J pattern; which way a nonzero non-1 `bool`
+branches is codegen-dependent, hence "optnone differs from -O0".
+
+Fix (`phase3_tx_16point()`): duplex Phase 3 TRN is always four points
+(V.34 11.3.1.1.6, 11.3.1.2.3) and its J is the four-point pattern (10.1.3.3,
+Table 18); only half-duplex takes the size from INFOh bit 30 (10.2.3.4,
+12.3.1.2).  The Phase 4 log line now uses `phase4_tx_16point()`.
+
+Checked: `v56_loopback_test` passes at `-O0`, at `-O2` with the whole file
+optnone, and at plain `-O2`; clean under UBSan; `make test-fast` 623/623.
+v90_engine_replay `--dial --sync` with `ME_RX_BIT_DUMP` on 24 RasFinder taps
+(`rf-tower-v34*`, `-v90lec-*`, `-fb-1..4`, `-1..7`; the `artifacts/rf-mini-*`
+`lec*`/`opt*` taps are not on this machine): bits (12 taps that dump them),
+`v34_tx.raw`, `v34_rx.raw` and logs are identical between `-O0`, v34tx.c at
+`-O2`, and v34tx.c at `-O2` all-optnone.  Logs differ only in "slow media
+callback" wall-clock lines, which differ between two `-O0` runs too.  So
+v34tx.c is now bit-exact at `-O2` on these taps; the shipped flags are
+unchanged (the 3-of-24 whole-library `-O2` diffs are other files).

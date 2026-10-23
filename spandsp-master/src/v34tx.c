@@ -7454,6 +7454,19 @@ static void pp_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Phase 3 TRN constellation size.  In duplex operation TRN "consists of four
+   constellation points" (V.34 11.3.1.1.6, 11.3.1.2.3); only half-duplex
+   chooses it, by bit 30 of the INFOh received from the recipient
+   (10.2.3.4, Table 22, 12.3.1.2).  tx.infoh shares storage with tx.info1a
+   and tx.info1c, so in duplex trn16 is not a field at all: it aliased a byte
+   of the INFO1 pre-emphasis word, and a build that read it as nonzero
+   (any other optimisation level) sent 16-point TRN and the wrong J. */
+static bool phase3_tx_16point(const v34_state_t *s)
+{
+    return !s->tx.duplex  &&  s->tx.infoh.trn16;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_trn_baud(v34_state_t *s)
 {
     /* J pattern per V.34 §10.1.3.3, Table 18.
@@ -7508,7 +7521,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
     trn_q = 0;
     trn_sym = 0;
     /* V.34 §10.1.3.3 Table 18: J pattern depends on TRN constellation size. */
-    j_pat_idx = s->tx.infoh.trn16 ? 1 : 0;
+    j_pat_idx = phase3_tx_16point(s) ? 1 : 0;
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_TRN:
@@ -7521,7 +7534,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
              then rotate by I_n*90°, where I_n = 2*I2_n + I1_n. */
         trn_i = scramble(&s->tx, 1);
         trn_i = (scramble(&s->tx, 1) << 1) | trn_i;
-        if (s->tx.infoh.trn16)
+        if (phase3_tx_16point(s))
         {
             trn_q = scramble(&s->tx, 1);
             trn_q = (scramble(&s->tx, 1) << 1) | trn_q;
@@ -7673,7 +7686,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             /*endif*/
         }
         /*endif*/
-        if (s->tx.infoh.trn16)
+        if (phase3_tx_16point(s))
         {
             /* V.34 10.2.3 requires the selected transmit power for
                half-duplex Phase 3. Table 22 bit 30 changes the TRN
@@ -7940,7 +7953,7 @@ static void trn_baud_init(v34_state_t *s)
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - trn_baud_init()\n");
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3 TRN mode: %s-point (infoh.trn16=%d)\n",
-             s->tx.infoh.trn16 ? "16" : "4", s->tx.infoh.trn16);
+             phase3_tx_16point(s) ? "16" : "4", phase3_tx_16point(s));
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_TRN;
     s->tx.current_getbaud = get_trn_baud;
@@ -8130,7 +8143,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             s->tx.tone_duration = 0;
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: S-bar complete, starting TRN (>=512T, mode=%s-point)\n",
-                     s->tx.infoh.trn16 ? "16" : "4");
+                     phase4_tx_16point(s) ? "16" : "4");
         }
         /*endif*/
         {
