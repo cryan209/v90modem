@@ -1678,3 +1678,18 @@ now excluded for the 40 ms stall: concealed RX frames, RTP gaps, probe length
 (sweep 16-26 blocks), Tone A hold length (4 vs 8), INFO1c contents.  What is left
 is the unseen part of the card's INFO1c reception (its DSP does not log it) and
 the exact arrival time of our INFO1c at the card.
+
+**Smallest reliable buffer, 7900 V.34, Tone A hold in place (12 interleaved calls).**
+
+| ME_JB_MS | pass |
+|---|---|
+| 80 | 2/4 |
+| 100 | 4/4 |
+| 120 | 4/4 |
+
+Together with the earlier runs (60: 6/6 after the fix, 5/5 and 6/6 in two blocks;
+40: roughly 40-60 %; 200: no failure in ~40 calls) there is no clean threshold:
+80 ms is worse than 60 ms here, so the stall is a probabilistic race rather than a
+step in the buffer size.  Four or five passes in a row is not enough to call 100 ms
+safe (a 50 % failure rate would still do it one time in 16); the default stays at
+200 ms.  Evidence: `/root/jbs`, `/root/jbfix`, `/root/jbab` on CT 117.
