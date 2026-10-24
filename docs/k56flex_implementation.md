@@ -1530,3 +1530,23 @@ test.  7900 V.34 at ME_JB_MS=60: 4/6 before, 6/6 after (alternated, same day);
 at 40 ms still 0/6, so a second, unexplained dependence on loop delay remains
 (there INFO1c now follows the real Tone A and the peer still never answers).
 Regression at the 200 ms default: 7900 V.90 10/10 and V.34 10/10 with the fix.
+
+**What the 40 ms failures look like on the wire (7900, with the Tone A hold in
+place).**  No concealed RX frames (no isolated all-0xD5 20 ms blocks in any
+tap), our Tone B reversals sit 36-46 ms after the peer's in passing and failing
+calls alike, so neither starvation nor the 40 +/- 1 ms rule separates them.
+The peer's own timeline does:
+
+| | peer silence (listening to our L1/L2) | then |
+|---|---|---|
+| pass (JB 60, 200) | starts ~6.5 s, lasts 620-800 ms | Tone A, INFO1c, INFO1a |
+| fail (JB 40, and 60 before the fix) | starts ~7.55 s, 440-460 ms, AFTER our L1/L2 ended | Tone A steady, no INFO1a |
+
+In the failing calls the received probe energy continues 0.7 s longer (the peer
+appears to send L1/L2 a second time, or our L1/L2 returns as an echo; the two
+cannot be told apart in the tap because L1/L2 is the same signal on both ends),
+and the peer's 50 ms Tone A + reversal comes only after our L2.  So the peer
+runs its probe step twice and is not listening when our L1/L2 arrives.  Why it
+repeats is not established: next try would be a pcap-level look at when the
+peer's 11.2.1.2.5/11.2.1.2.6 steps complete against our Tone B, or sending
+Tone B later (11.2.1.1.5 allows L2 up to 500 ms) at JB 40.
