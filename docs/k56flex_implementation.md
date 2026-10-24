@@ -1469,3 +1469,15 @@ unavailable), where the 8 October batch got 56000/31200.  The peer's
 configuration has presumably changed.  We have no analogue K56flex DATA role
 (`k56flex_client.c` is a receive model), so nothing past V.8bis can be
 attempted yet.
+
+### 7910 answers with PPP (2026-10-24)
+
+`tools/eicon_ppp_direct.py` dials 7910 and runs `pppd` straight from CONNECT
+(the peer assigns the addresses).  V.34 24000, LCP/IPCP up, peer 10.254.104.1,
+**30/30 pings, 0 % loss**, RTT min/avg/max 422/557/1688 ms (the spread is
+the interesting part: modem + 200 ms RTP jitter buffer + V.42).  CT 117 needed
+`/dev/ppp`: host `/etc/pve/lxc/117.conf` gained `lxc.cgroup2.devices.allow:
+c 108:0 rwm` and a bind mount for `/dev/ppp`, the host node was made 0666
+(unprivileged root cannot open a 0600 root device), and `ppp` was installed
+in the container (backup: `/root/117.conf.bak-20261024` on the host).
+Evidence: `/root/ppp2` on CT 117.
