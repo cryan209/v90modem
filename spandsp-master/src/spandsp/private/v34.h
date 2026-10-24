@@ -2184,6 +2184,11 @@ typedef struct
     float tone_a_sub_pow;
     float tone_a_bin_frac;
     int tone_a_bin_frac_valid;
+    /*! Consecutive 40 ms blocks in which the 2400 Hz bin held at least 0.15
+        of the block: how long Tone A has been present, not just whether the
+        last block had it.  The answer modem's 50 ms Tone A + reversal
+        (11.2.1.2.6) touches at most three blocks. */
+    int tone_a_run;
     int phase3_s_guard_samples;
     int phase3_s_hits;
     int phase3_s_event_count;

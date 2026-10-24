@@ -5034,6 +5034,7 @@ static void l1_l2_signal_init(v34_state_t *s)
        earlier in the call -- the 11.2.1.2.6 Tone A that armed this very stage
        -- is stale by here and must not satisfy the post-L2 wait. */
     s->rx.tone_a_bin_frac_valid = 0;
+    s->rx.tone_a_run = 0;
     if (s->tx.duplex  &&  !s->tx.calling_party  &&  !s->tx.v90_mode)
         s->tx.phase2_probe_sent = true;
     /*endif*/
@@ -5516,9 +5517,17 @@ static int post_l2_tone_a_wait_bauds(v34_state_t *s)
    echo and ordinary line noise are broadband and are not. */
 static bool post_l2_tone_a_seen(v34_state_t *s)
 {
+    /* Held for four blocks (160 ms), not seen in one: the answer modem sends
+       a 50 ms Tone A + reversal (11.2.1.2.6) and then silence before it
+       listens to our L1/L2, and on a short loop that burst lands inside this
+       wait.  Taking it for the Tone A that invites INFO1c sent INFO1c into the
+       peer's silence, after which both ends waited forever (7900, jitter
+       buffer 40-80 ms: 1/5 and 0/2 against 6/6 at 200 ms).  The real Tone A is
+       held until INFO1c arrives (11.2.1.2.8). */
     return s->rx.signal_present
         &&  s->rx.tone_a_bin_frac_valid
-        &&  s->rx.tone_a_bin_frac >= 0.15f;
+        &&  s->rx.tone_a_bin_frac >= 0.15f
+        &&  (V34_DIAG_GETENV("V34_TONEA_RUN1") || s->rx.tone_a_run >= 4);
 }
 /*- End of function --------------------------------------------------------*/
 

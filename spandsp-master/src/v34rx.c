@@ -6279,10 +6279,16 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                 {
                     s->tone_a_bin_frac = s->tone_a_sub_pow/(s->guard_block_energy*40.0f);
                     s->tone_a_bin_frac_valid = 1;
+                    if (s->tone_a_bin_frac >= 0.15f)
+                        s->tone_a_run++;
+                    else
+                        s->tone_a_run = 0;
+                    /*endif*/
                 }
                 else
                 {
                     s->tone_a_bin_frac_valid = 0;
+                    s->tone_a_run = 0;
                 }
                 /*endif*/
                 s->guard_block_energy = 0.0f;

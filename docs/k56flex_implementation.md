@@ -1517,3 +1517,16 @@ Phase 2 exchange depends on the loop delay.  Open lead: INFO1c timing against
 the peer's reversal when the loop is 100-160 ms shorter.  Do not lower the
 default until that is understood; PPP over 7910 shows what is at stake
 (RTT 557 -> 291 ms).
+
+**Fix: Tone A must be held, not glimpsed (V.34 11.2.1.1.7, 11.2.1.2.6).**  The
+stall above was the call modem taking the answer modem's 50 ms Tone A +
+reversal (11.2.1.2.6, followed by silence while it listens for our L1/L2) for
+the Tone A that invites INFO1c: on a short loop that burst lands inside our
+post-L2 wait, INFO1c went into the peer's silence, and both ends waited.
+`post_l2_tone_a_seen()` now needs the 2400 Hz bin to hold >= 0.15 for four
+consecutive 40 ms blocks (`rx.tone_a_run`); the real Tone A is held until
+INFO1c arrives (11.2.1.2.8).  `V34_TONEA_RUN1=1` restores the single-block
+test.  7900 V.34 at ME_JB_MS=60: 4/6 before, 6/6 after (alternated, same day);
+at 40 ms still 0/6, so a second, unexplained dependence on loop delay remains
+(there INFO1c now follows the real Tone A and the peer still never answers).
+Regression at the 200 ms default: 7900 V.90 10/10 and V.34 10/10 with the fix.
