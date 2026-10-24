@@ -1693,3 +1693,11 @@ Together with the earlier runs (60: 6/6 after the fix, 5/5 and 6/6 in two blocks
 step in the buffer size.  Four or five passes in a row is not enough to call 100 ms
 safe (a 50 % failure rate would still do it one time in 16); the default stays at
 200 ms.  Evidence: `/root/jbs`, `/root/jbfix`, `/root/jbab` on CT 117.
+
+**100 ms, longer (7900, interleaved V.34 / V.90, 6 each, same build).**  V.90 6/6,
+V.34 4/6; with the earlier 4/4 that is V.34 8/10 at 100 ms, so 100 ms is not a safe
+default for V.34 either (200 ms: no failure in ~40 calls).  V.90 has passed at every
+size tried (40 ms 5/5, 100 ms 6/6): the stall is in V.34 Phase 2, not in the V.90
+path.  A buffer chosen per mode is not possible, because the mode is only known
+after V.8, and the buffer is fixed when the call starts (changing it mid-call would
+change the sample accounting).  Default stays at 200 ms.
