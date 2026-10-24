@@ -12,11 +12,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pty as ptymod
 import re
 import select
 import subprocess
 import termios
+import threading
 import time
+import tty
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -99,15 +102,42 @@ def main():
             m = re.search(rb'CONNECT (\d+)', rx)
             result['connect_rate'] = int(m.group(1)) if m else None
             result['lcp_seen'] = False
-            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            # The card may send its first LCP frames the moment CONNECT appears,
+            # before pppd exists.  Relay the modem PTY through a second PTY from
+            # here on (starting with whatever followed CONNECT), so nothing the
+            # card sends is dropped while pppd starts.
+            master, slave = ptymod.openpty()
+            tty.setraw(slave)
+            tail = bytes(rx).split(b'CONNECT', 1)[-1]
+            tail = tail.split(b'\n', 1)[-1] if b'\n' in tail else b''
+            if tail:
+                os.write(master, tail)
+            stop = threading.Event()
+
+            def relay():
+                while not stop.is_set():
+                    r, _, _ = select.select([fd, master], [], [], .2)
+                    try:
+                        if fd in r:
+                            data = os.read(fd, 65536)
+                            if data:
+                                os.write(master, data)
+                        if master in r:
+                            data = os.read(master, 65536)
+                            if data:
+                                os.write(fd, data)
+                    except (BlockingIOError, OSError):
+                        continue
+
+            relayer = threading.Thread(target=relay, daemon=True)
+            relayer.start()
             with (d / 'pppd.log').open('wb') as out:
                 child = subprocess.Popen(
                     ['/usr/sbin/pppd', 'notty', 'nodetach', 'local', 'noauth', 'nodefaultroute',
                      'noproxyarp', 'noipv6', 'noccp', 'novj', 'nopersist', 'logfd', '2',
                      'ipcp-accept-local', 'ipcp-accept-remote', 'lcp-echo-interval', '10',
                      'lcp-echo-failure', '6', 'debug', '0.0.0.0:'],
-                    stdin=fd, stdout=fd, stderr=out)
+                    stdin=slave, stdout=slave, stderr=out)
                 deadline = time.monotonic() + 60
                 peer_ip = None
                 while time.monotonic() < deadline:
@@ -134,6 +164,10 @@ def main():
         result['error'] = str(exc)
         print('ERROR', exc, flush=True)
     finally:
+        try:
+            stop.set()
+        except NameError:
+            pass
         for p in (child, proc):
             if p is not None:
                 p.terminate()

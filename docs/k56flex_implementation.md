@@ -1749,3 +1749,16 @@ a Phase 3 stall at 40 ms: INFO1a decoded, 55 s in `FIRST_S`, fell back to V.22bi
 at 1200).  The LCP timeouts may be a race between the card's first LCP frames and the
 harness starting `pppd` after reading CONNECT (the frames sent in between are read
 and dropped by the harness); not yet separated from a modem-side loss.
+
+**PPP over 7910 with the harness relaying the PTY (so the card's first LCP frames are not
+dropped before `pppd` starts), `/root/pq`.**  Link up and pinging 7 of 8: 40 ms 4/4,
+round trip 262-271 / 277-291 / 293-314 ms; 200 ms 3/4, 409-451 / 431-455 / 452-472 ms.
+The LCP timeouts seen before were therefore the harness race: none in 8 calls now.
+The one failure (200 ms) is a Phase 3 stall, three times in a row in one call:
+INFO1a decoded, our receiver in `PHASE3_TRAINING`, our transmitter silent as 11.3.1.1.1
+asks ("initially silent", waiting for S and the S-to-S-bar transition), while the card sent
+one steady 4092-RMS signal for ~14 s (not S, S-bar, PP, TRN, J), then retrained; each
+retry (the existing 11.5.1.2 response) ended the same way until the 60 s timeout, no
+CONNECT.  Same shape as the 40 ms stall seen earlier (55 s in `FIRST_S`, V.22bis
+fallback).  Not a buffer effect (it occurs at 200 ms too, 2 of ~30 PPP calls); not yet
+explained, the next candidate for the 7910 V.34 path.
