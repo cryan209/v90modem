@@ -1648,3 +1648,22 @@ client that listens first would time it out.
 legs, `eicon_soak_test.py --test probe`).**  download 372,736 B 0 errors;
 upload and duplex also `ok` (duplex 305,152 B out / 333,824 B in, 0 errors, longest
 receive gap 0.32-0.38 s); evidence on CT 117 in `/root/soak1`.
+
+**What the existing negotiated path does against the real card (7910, 2026-10-24).**
+`ME_K56FLEX=probe ME_K56FLEX_LISTEN=1 K56FLEX_DETECT_BLOCKS=2 ME_K56FLEX_ROLE=client`
+completes V.8bis (ack=1, card MS as above), then logs `negotiated K56flex: V.8
+caller (MS sender), no fallback` and `post-ACK V8/Phase2 startup`, skips a real V.8
+exchange (`[K56S] V.8 complete; enter digital Phase 2 (A/INFO0)`) and transmits
+INFO0a/Tone A as the *digital* side; the card never answers and the call ends
+without CONNECT after 47 s.  Two role decisions are wrong for this lab case
+(v90modem is the K56flex client, the card the server):
+- the V.8 roles: the card answers V.8 itself as soon as V.8bis ends (ANSam at
+  +0.9 s after the V.8bis ACK, then JM with V.34 and below, no PCM bit), exactly
+  as in the ordinary-V.8 run; there is no V.8 for us to skip;
+- Phase 2: the client is the *calling* side (INFO0c, Tone B), not the digital
+  A/INFO0 prelude the server path sends.
+Without `ME_K56FLEX=probe` the same call continues through ordinary V.8 and
+connects at V.34 with PPP.  The unfinished work is therefore the client path from
+V.8 onwards (calling Phase 2 with the K56flex INFO bits, then PCM receive), which
+the uncommitted `k56_phase2` work in `v34rx.c` appears to be heading for; it is
+left alone here.
