@@ -1835,3 +1835,8 @@ Dead band (`820c854f`): 18 calls, 0 FAIL, 1.11 Phase 3 attempts per call.
 Old (raw offset): 17 calls, 2 FAIL (6 attempts each, 124 s), 2.76 attempts per
 call. Rates reached 19200-24000 in both arms. The 7900 default-buffer
 regression with the change is still to be run.
+
+Regression with the INFO1c dead band (`820c854f`) against 7900 at the default
+200 ms buffer, alaw: V.34 5/5 and V.90 5/5 calls complete with all 10 echo
+lines exact, no INFO1c-retrain responses fired. (An earlier ulaw run of the
+same script dialled 7910, which has no echo menu; it is not a 7900 result.)
