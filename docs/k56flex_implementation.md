@@ -1879,6 +1879,6 @@ alone); not pursued without a second occurrence. Evidence: CT 117
 
 7910 hunt9 (30 PPP calls, ME_JB_MS=200, dead band): 30/30 connected at
 19200-24000 bps; 4 calls (9, 12, 16, 21) took ~43 s, the rest 36-37 s (the
-longer ones match the earlier one-retrain Phase 3 stall; logs not checked). The hunt8
+longer ones each had exactly one peer retrain tone: the Phase 3 stall). The hunt8
 V.8 no-JM did not recur. Dead-band calls since the change: 16 + 24 + 30 = 70,
 69 connected.
