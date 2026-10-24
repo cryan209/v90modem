@@ -27,6 +27,8 @@ def main():
     ap.add_argument('--law', choices=('ulaw', 'alaw'), default='ulaw')
     ap.add_argument('--mode', choices=('v90', 'v34'), default='v34')
     ap.add_argument('--ms', help='full AT+MS command, overrides --mode')
+    ap.add_argument('--role', choices=('analogue', 'digital'), default='analogue',
+                    help='V.90 role; a real analogue modem on the far end needs digital')
     ap.add_argument('--pings', type=int, default=30)
     ap.add_argument('--local-port', type=int, default=5078)
     ap.add_argument('--rtp-port', type=int, default=14600)
@@ -37,7 +39,10 @@ def main():
     pty = '/tmp/eicon-ppp-' + d.name
     env = os.environ.copy()
     env.pop('ME_V34_SPAN_FLOW_LOG', None)
-    env.update(ME_MODE=args.mode, ME_V90_ROLE='analogue', VPCM_ME_VERBOSE='1',
+    env.pop('ME_V90_ROLE', None)
+    if args.role == 'analogue':
+        env['ME_V90_ROLE'] = 'analogue'
+    env.update(ME_MODE=args.mode, VPCM_ME_VERBOSE='1',
                VPCM_G711_TAP_DIR=str(d.resolve()), ME_DUMP_DIR=str(d.resolve()))
     env['SIP_FORCE_PCMA' if args.law == 'alaw' else 'SIP_FORCE_PCMU'] = '1'
     result = dict(extension=ext, mode=args.mode, ok=False)
