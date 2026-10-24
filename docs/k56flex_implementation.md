@@ -1866,3 +1866,13 @@ later the card sends its retrain tone, we restart Phase 2 (11.5), and the second
 pass completes. So it is the known Phase 3 stall, not an INFO offer problem, and
 the recovery already works (about 6 s lost, 2 of 16 calls). Not pursued further
 without a capture of the stalled pass.
+
+7910 hunt8 (24 PPP calls, ME_JB_MS=200, dead band): 23/24 connected (19200-24000
+bps, 36-45 s; calls 15-17 took 43-45 s with one card retrain each). Call 19
+failed with no CONNECT: the card's ANSam arrived at 4.0 s exactly as in the
+neighbouring good call, our CM went out, and no JM ever came (V.8 timeout at
+15 s, card kept sending a steady non-2100 Hz signal). Our TX RMS sequence is the
+same as call 18 up to the point where 18 received JM, so this looks like a
+card-side V.8 miss, 1 in 58 calls over hunt6-8 (not 1 in the dead-band arm
+alone); not pursued without a second occurrence. Evidence: CT 117
+/root/hunt8/19 (taps, io.bin).
