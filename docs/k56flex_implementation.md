@@ -1882,3 +1882,13 @@ alone); not pursued without a second occurrence. Evidence: CT 117
 longer ones each had exactly one peer retrain tone: the Phase 3 stall). The hunt8
 V.8 no-JM did not recur. Dead-band calls since the change: 16 + 24 + 30 = 70,
 69 connected.
+
+Timing of the stalled pass (hunt9 call 9, stage trace): Phase 2 and INFO1 are
+identical to the retried pass. Stalled pass: PHASE3_WAIT_S at +13.9 s with our
+tx stuck in FIRST_S; no far-end S by the card's retrain tone at about +16.6 s
+(2.7 s, inside our own 3.5 s early-retrain limit, so ours never fires; the card
+always times out first). Retried pass: PHASE3_WAIT_S at +20.3 s, tx
+FIRST_S -> FIRST_NOT_S at +22.0 s (1.7 s), far-end S detected at about +23.4 s.
+So in the stalled pass the card never started its S (or started it outside the
+band our detector watches); the difference between passes is on the card side
+of Phase 3, and the cheapest recovery is the one already working.
