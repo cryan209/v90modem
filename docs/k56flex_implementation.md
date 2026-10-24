@@ -1481,3 +1481,17 @@ c 108:0 rwm` and a bind mount for `/dev/ppp`, the host node was made 0666
 (unprivileged root cannot open a 0600 root device), and `ppp` was installed
 in the container (backup: `/root/117.conf.bak-20261024` on the host).
 Evidence: `/root/ppp2` on CT 117.
+
+PPP ping RTT vs the receive jitter buffer (`ME_JB_MS`, one 30-ping call each,
+7910, V.34 24000, 0 % loss in all three):
+
+| ME_JB_MS | min / avg / max (mdev) ms |
+|---|---|
+| 200 (default) | 422 / 557 / 1688 (319) |
+| 40 | 268 / 291 / 334 (15) |
+| 20 | 250 / 312 / 1330 (189) |
+
+40 ms halves the latency and removes the tail; 20 ms brings the tail back, so
+it is at the edge on this path.  Single calls, so a trend, not a setting: the
+200 ms default stays because other rigs (Apple/ATA, AudioCodes) were tuned
+with it.
