@@ -8,6 +8,13 @@
 #define RATE 8000
 #define BLOCK 160                     /* 20 ms Goertzel block */
 #define DETECT_BLOCKS 6               /* 120 ms of a clean dual tone */
+static int detect_blocks(void)
+{
+    /* K56FLEX_DETECT_BLOCKS: shorter acceptance for a tone a gateway clips. */
+    const char *e = getenv("K56FLEX_DETECT_BLOCKS");
+    int n = e ? atoi(e) : 0;
+    return n > 0 && n <= DETECT_BLOCKS ? n : DETECT_BLOCKS;
+}
 #define TONE_AMP 1800.0               /* per tone, linear peak */
 #define DEFAULT_LISTEN_MS 3000u
 #define DELAY_TX_MS 500u              /* AB9C / A8FC: "waits 500 ticks" */
@@ -207,8 +214,8 @@ static void detect_block(k56flex_v8bis_t *s)
     frac1 = s->sumsq > 0 ? 2.0 * p[0] / (n * s->sumsq) : 0;
     frac2 = s->sumsq > 0 ? 2.0 * p[1] / (n * s->sumsq) : 0;
     if (s->sumsq / n > 60.0 * 60.0 && frac1 > 0.15 && frac2 > 0.15 && frac1 + frac2 > 0.6) {
-        if (++s->hits == DETECT_BLOCKS) {
-            s->detect_t = s->t - (uint64_t)DETECT_BLOCKS * BLOCK;
+        if (++s->hits == detect_blocks()) {
+            s->detect_t = s->t - (uint64_t)detect_blocks() * BLOCK;
             if (s->cfg.role == K56FLEX_V8BIS_RESPOND && s->state == K56V8B_IDLE_WAIT) {
                 state_enter(s, K56V8B_DELAY_TX);
                 s->state_t = s->detect_t;     /* the wait runs from the tone onset */

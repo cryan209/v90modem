@@ -1616,3 +1616,30 @@ Gateway/answerer facts found on the way: 7900/7910 are Diva controllers 2/1
 (`/etc/bri-test/config.json`), the MultiTech BRI is controller 3, reached as
 SIP 2910 by `diva-sip-gateway` (A-law only, new today); a call to 2910 is
 cleared by the far end after 4 s (ISDN cause 0x90, no called number sent).
+
+### First K56flex V.8bis exchange with real hardware (2026-10-24)
+
+**7910 is a K56flex server that starts V.8bis itself.**  Every call to it
+carries a 40 ms burst of 1375+2002 Hz at ~2.3 s (the CRe pair, then digital
+silence): the gateway on that path clips the CRe, so our 120 ms detector never
+fires.  Sending our own CRe (the default for a calling client) gets no reply.
+Listening instead, with a 40 ms acceptance, completes the exchange:
+
+    ME_K56FLEX_LISTEN=1 K56FLEX_DETECT_BLOCKS=2 ME_K56FLEX_ROLE=client
+    AT+MS=K56,1   (tools/eicon_ppp_direct.py --law ulaw --mode v90 --ms AT+MS=K56,1)
+
+3/3 calls: `K56flex V.8bis complete: ok at 6.1 s, ack=1`; default acceptance
+(120 ms) 0/2 ("no CRe heard").  The card's MS, identical every time:
+
+    12 c1 80 80 80 09 b5 02 00 94 01 83 43 55 e1
+
+NS block: length 9, country b5 (USA), provider length 2, code 0094, licensee
+0183, capability octet **0x43** (bit 6 = server, version bits 1 and 2 -- the
+same shape as Patton's 0x42; `server_acceptable()` takes it).  After V.8bis the
+call falls to ordinary V.8, whose JM offers V.34 and below, and we connect at
+V.34 (21600 here, PPP 30/30): there is still no analogue K56flex data role to
+take the call further (Phase 2/Phase 4 as a client, PCM receive).  That is the
+next piece of work; the signalling it must answer is now observable on the card
+with `mlog` (see above).  `ME_K56FLEX_LISTEN` and `K56FLEX_DETECT_BLOCKS` are
+experiments, not defaults: our own server listens 3 s for CRe, so a calling
+client that listens first would time it out.

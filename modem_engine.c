@@ -4890,6 +4890,10 @@ static void me_k56_start_locked(void)
     k56flex_v8bis_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.role = g_calling_party ? K56FLEX_V8BIS_INITIATE : K56FLEX_V8BIS_RESPOND;
+    /* ME_K56FLEX_LISTEN=1: a calling modem that waits for the answerer's CRe
+       instead of sending its own (experiment: a K56flex RAS may initiate). */
+    if (g_calling_party && getenv("ME_K56FLEX_LISTEN") && *getenv("ME_K56FLEX_LISTEN") != '0')
+        cfg.role = K56FLEX_V8BIS_RESPOND;
     cfg.mu_law = g_law == ME_LAW_ULAW;
     cfg.v90_capable = g_advertise_v90;
     {
@@ -4908,7 +4912,7 @@ static void me_k56_start_locked(void)
     g_k56 = k56flex_v8bis_new(&cfg);
     g_state = ME_V8;
     ME_LOG("[ME] K56flex V.8bis: %s as %s%s, %s advertised, v90=%d\n",
-           g_calling_party ? "initiating (CRe)" : "responding (listening for CRe)",
+           cfg.role == K56FLEX_V8BIS_INITIATE ? "initiating (CRe)" : "responding (listening for CRe)",
            cfg.client_model ? "client" : "server", cfg.blind ? ", blind CL" : "",
            cfg.mu_law ? "mu-law" : "A-law", cfg.v90_capable);
 }
