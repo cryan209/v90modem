@@ -17363,6 +17363,12 @@ SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_rx_tone_a_run(v34_state_t *s)
+{
+    return (s)  ?  s->rx.tone_a_run  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s)
 {
     if (s  &&  s->rx.received_event == V34_EVENT_PEER_RETRAIN)

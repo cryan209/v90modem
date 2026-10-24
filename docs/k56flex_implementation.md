@@ -1716,3 +1716,20 @@ the failing one, and 0037 (Tone A, waiting for INFO1c) at 4302-4312 ms in all th
 before the INFO1c window looks the same to the card, in step timing, and everything
 we can see of our own INFO1c (contents, start relative to Tone A) is the same too.
 The remaining difference is in how the card receives our INFO1c itself.
+
+### Fix: answer the answer modem's retrain while waiting for INFO1a (V.34 11.2.2.1.6, 11.5.1.2)
+
+When the Diva card does not accept our INFO1c it leaves its 648 ms INFO1c wait, falls
+back and restarts (11.5.2.1: silence, then Tone A).  We kept waiting for INFO1a until
+the 60 s training timeout.  `modem_engine.c` now treats "still in the INFO1a wait
+1.8 s after our INFO1c started, and the peer is holding Tone A (`rx.tone_a_run` >= 3
+blocks, exported as `v34_get_rx_tone_a_run`)" as the peer's retrain and restarts
+Phase 2 per 11.5.1.2 (`ME_V34_NO_INFO1C_RETRAIN=1` disables it).  V.34 caller only.
+
+7900 V.34, ME_JB_MS=40, six pairs alternated, same build: **with 6/6** (the response
+fired in 3 of the 6), **without 2/6**.  Default buffer (200 ms): V.34 3/3 and V.90 3/3
+(10 exact lines each), never fired; fast tests 623/623.  This does not explain why the
+card refuses our INFO1c about half the time at 40 ms; it makes the call recover from
+it in one extra Phase 2 pass instead of timing out.  A short buffer (and the lower
+PPP latency that goes with it, 291 ms against 557 ms) is therefore usable for V.34 in
+these runs; the default is still 200 ms, because only 7900 has been tried.

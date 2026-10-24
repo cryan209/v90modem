@@ -3330,6 +3330,9 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
 /* When the plain-V.34 receiver entered V34_RX_STAGE_PHASE3_WAIT_S, for
  * ME_V34_PHASE3_S_TIMEOUT_MS. */
 static uint64_t g_v34_phase3_wait_s_ms;
+static uint64_t g_v34_info1c_wait_ms;
+/* v34rx.c: consecutive 40 ms blocks in which the 2400 Hz bin held Tone A. */
+extern int v34_get_rx_tone_a_run(v34_state_t *s);
 /* Start of our J in a V.90->V.34 fallback, for ME_V90_FALLBACK_S_TIMEOUT_MS. */
 static uint64_t g_v90_fallback_j_ms;
 static bool g_advertise_v90 = true;
@@ -15240,6 +15243,39 @@ skip_8k_codewords:
                         }
                     } else {
                         g_v90_fallback_j_ms = 0;
+                    }
+                    /* V.34 11.2.2.1.6: no INFO1a within 700 ms plus a round trip
+                     * of the end of our INFO1c.  If the answer modem has meanwhile
+                     * given up on the INFO1c it was listening for and started a
+                     * retrain (11.5.2.1: silence, then Tone A), 11.5.1.2 has the
+                     * call modem answer it: silence, Tone B, and back to 11.2.1.1.
+                     * Nothing did, so a card that missed our INFO1c (Diva/7900 at a
+                     * short jitter buffer: roughly one call in two) held Tone A
+                     * while we waited for the 60 s training timeout.  Timed from the
+                     * start of our INFO1c (about 0.2 s long) with room for 600 ms of
+                     * round trip, and only when the peer is holding Tone A now. */
+                    if (g_mod == ME_MOD_V34  &&  g_calling_party
+                        &&  rx_stage == V34_RX_STAGE_INFO1A
+                        &&  tx_stage == V34_TX_STAGE_INFO1
+                        &&  !parse_env_int("ME_V34_NO_INFO1C_RETRAIN", 0)) {
+                        uint64_t now = trace_now_ms();
+
+                        if (g_v34_info1c_wait_ms == 0) {
+                            g_v34_info1c_wait_ms = now;
+                        } else if (now - g_v34_info1c_wait_ms > 1800
+                                   &&  v34_get_rx_tone_a_run(g_v34) >= 3) {
+                            g_v34_info1c_wait_ms = 0;
+                            ME_LOG("[ME] V.34: no INFO1a %d ms after INFO1c and the "
+                                   "peer holds Tone A: answering its retrain "
+                                   "(11.2.2.1.6, 11.5.1.2)\n", 1800);
+                            v34_clear_peer_retrain_event(g_v34);
+                            (void) restart_v34_phase2_locked(
+                                "Tone A after INFO1c: peer retrain (11.5.1.2)");
+                            pthread_mutex_unlock(&g_state_mtx);
+                            return;
+                        }
+                    } else {
+                        g_v34_info1c_wait_ms = 0;
                     }
                     if (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S) {
                         int limit = parse_env_int("ME_V34_PHASE3_S_TIMEOUT_MS", 0);
