@@ -1876,3 +1876,9 @@ same as call 18 up to the point where 18 received JM, so this looks like a
 card-side V.8 miss, 1 in 58 calls over hunt6-8 (not 1 in the dead-band arm
 alone); not pursued without a second occurrence. Evidence: CT 117
 /root/hunt8/19 (taps, io.bin).
+
+7910 hunt9 (30 PPP calls, ME_JB_MS=200, dead band): 30/30 connected at
+19200-24000 bps; 5 calls (9, 12, 16, 21 and the 42.8 s class) took ~43 s, the
+rest 36-37 s (the longer ones are the one-retrain Phase 3 stall). The hunt8
+V.8 no-JM did not recur. Dead-band calls since the change: 16 + 24 + 30 = 70,
+69 connected.
