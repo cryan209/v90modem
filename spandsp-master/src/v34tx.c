@@ -1388,7 +1388,28 @@ static int v34_probe_frequency_offset(const v34_state_t *s)
                / s->rx.l1_l2_1050_phase_step_count)
               / (2.0f*3.14159265f*0.020f);
     offset_code = (int) lroundf(offset_hz/0.02f);
-    return (offset_code >= -511 && offset_code <= 511) ? offset_code : -512;
+    if (offset_code < -511  ||  offset_code > 511)
+        return -512;
+    return offset_code;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The INFO1c (call modem) frequency offset: the probe measurement with a dead
+   band.  10.1.2.3.5 asks for 0.25 Hz accuracy, so anything inside +/-0.24 Hz is
+   a measurement of zero.  On a packet bearer the real offset IS zero, and the
+   codes we measured there (+/-1, 2: 0.02-0.04 Hz) are quantisation noise --
+   which the 7910 K56flex card reads as something else: of its first Phase 3
+   attempts, every one with a nonzero offset in INFO1c got a wideband PCM-style
+   signal our V.34 receiver cannot lock to, every one with 0 got V.34 (17
+   calls, forced 0 against measured, interleaved).  INFO1a keeps the raw value:
+   it is checked bit for bit and nothing showed a problem there. */
+static int v34_info1c_frequency_offset(const v34_state_t *s)
+{
+    int code = v34_probe_frequency_offset(s);
+
+    if (!getenv("V34_INFO1C_FO_NO_DEADBAND")  &&  code >= -12  &&  code <= 12)
+        return 0;
+    return code;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1521,7 +1542,9 @@ static void prepare_info1c(v34_state_t *s)
         s->rx.local_info1c_high_carrier[i] =
             s->tx.info1c.rate_data[i].use_high_carrier;
     }
-    s->tx.info1c.freq_offset = v34_probe_frequency_offset(s);
+    s->tx.info1c.freq_offset = v34_info1c_frequency_offset(s);
+    if (getenv("V34_INFO1C_FO"))
+        s->tx.info1c.freq_offset = atoi(getenv("V34_INFO1C_FO"));
     /* One line per INFO1c/INFO1d: the per-symbol-rate maxima the far end
        chooses its symbol rates from (10.1.2.3.4), as N (rate = 2400*N). */
     fprintf(stderr, "[V34] INFO1%s sent: max N by baud 2400=%d 2743=%d 2800=%d 3000=%d 3200=%d 3429=%d\n",

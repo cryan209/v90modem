@@ -1804,3 +1804,27 @@ was a time-of-day effect in a non-interleaved run); what changes is that no call
 V.22bis and the typical connect is ~9 s shorter.  The price is a longer worst case (up to
 two minutes of retraining instead of a V.22bis connection at 60 s).  The harness now waits
 150 s for CONNECT and records the I/O schedule (`io.bin`) so a stall can be replayed.
+
+### Root cause of the 7910 Phase 3 failures: the frequency offset in INFO1c (V.34 10.1.2.3.5)
+
+In the stalled calls the card's signal after its INFO1a is wideband (about 30 % of the energy
+above 3400 Hz, flat to Nyquist, constant RMS 4092 = random mu-law codewords); in healthy
+calls it is a band-limited V.34 Phase 3 signal (8 % above 3400 Hz).  So the K56flex card
+chooses between a V.34 and a PCM-style Phase 3, and our V.34 receiver cannot lock to the
+latter (`Phase 3 PP acquire` never converges).  It chooses from our INFO1c.  The only field
+of ours that varied between attempts was the 10-bit frequency offset: we sent the measured
+1050 Hz probe offset in 0.02 Hz units, i.e. 1, -1, 2 (quantisation noise: the real offset on a
+packet bearer is exactly zero), and after a retrain stale -282/-290 (-5.8 Hz).  Interleaved,
+17 calls (`/root/hunt5-done`): every first attempt with a nonzero offset failed (5 of 5), every
+one with 0 succeeded; forcing 0 (`V34_INFO1C_FO=0`) needed 1.12 attempts per call against 1.89
+for the measured value.
+
+Fix: `v34_probe_frequency_offset()` reports 0 for anything within +/-0.24 Hz (10.1.2.3.5 asks
+for 0.25 Hz accuracy; `V34_INFO1C_FO_NO_DEADBAND=1` restores the raw value, `V34_INFO1C_FO=n`
+forces a value).  Interleaved A/B on 7910, 8 calls per arm so far (`/root/hunt6`, 40 ms
+buffer): dead band 8/8 up, 1.12 attempts per call, one call needed a second attempt; old
+behaviour 7/8 up (one failed outright after six attempts), 2.50 attempts per call, five
+calls needed more than one.  This is the likely cause of the "half of Phase 3 attempts fail"
+seen all day, and of the earlier "INFO1c not accepted at short buffers" on 7900, whose
+INFO1c carried the same 1/2 codes (that failure was fixed by answering the retrain and was
+not re-tested with the dead band).
