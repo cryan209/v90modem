@@ -1643,3 +1643,8 @@ next piece of work; the signalling it must answer is now observable on the card
 with `mlog` (see above).  `ME_K56FLEX_LISTEN` and `K56FLEX_DETECT_BLOCKS` are
 experiments, not defaults: our own server listens 3 s for CRe, so a calling
 client that listens first would time it out.
+
+**Bulk regression with today's V.34 changes (7900 V.90, default 200 ms buffer, 60 s
+legs, `eicon_soak_test.py --test probe`).**  download 372,736 B 0 errors;
+upload and duplex also `ok` (duplex 305,152 B out / 333,824 B in, 0 errors, longest
+receive gap 0.32-0.38 s); evidence on CT 117 in `/root/soak1`.
