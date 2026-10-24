@@ -1495,3 +1495,25 @@ PPP ping RTT vs the receive jitter buffer (`ME_JB_MS`, one 30-ping call each,
 it is at the edge on this path.  Single calls, so a trend, not a setting: the
 200 ms default stays because other rigs (Apple/ATA, AudioCodes) were tuned
 with it.
+
+### The jitter-buffer trade-off on 7900 (2026-10-24)
+
+Latency is not free: lowering `ME_JB_MS` breaks V.34 startup.  7900 (A-law),
+echo lines graded, from CT 117, calls alternated 200/60 in the last block:
+
+| ME_JB_MS | V.90 | V.34 |
+|---|---|---|
+| 200 (default) | 15/15 (earlier batches) | 6/6 alternated + 10/10 + 3/3 control |
+| 80 | - | 0/2 |
+| 60 | - | 4/6 alternated (fails 2 and 5) |
+| 40 | 5/5 | 1/5 |
+
+The failure is always the same: Phase 2 completes our INFO1c, then the peer
+never sends a decodable INFO1a (it holds a steady 2400+1800 Hz) while we sit
+silent until the 60 s timeout.  Network arrival jitter never exceeded 23 ms,
+our transmit stream had no gaps (rtp-tx.csv), and the receive tap carries no
+concealed frames, so a starved buffer is not the cause; something in the
+Phase 2 exchange depends on the loop delay.  Open lead: INFO1c timing against
+the peer's reversal when the loop is 100-160 ms shorter.  Do not lower the
+default until that is understood; PPP over 7910 shows what is at stake
+(RTT 557 -> 291 ms).
