@@ -1738,3 +1738,14 @@ these runs; the default is still 200 ms, because only 7900 has been tried.
 40 ms 6/6, 60 ms 6/6, 100 ms 6/6: 18/18 with every buffer, the response firing in 5 of
 them (so about one call in four needs it).  Before it: 40 ms about 40-60 %, 60 ms 4/6,
 100 ms 8/10.  Default stays at 200 ms until another peer is tried.
+
+**PPP over 7910 at 40 vs 200 ms (12 alternated calls, build with the retrain response,
+`/root/pp`).**  Link up and pinging: 40 ms 4/6, 200 ms 4/6.  Round trip, min/avg/max:
+40 ms 265-289 / 277-336 / 296-1292 ms (steady in three of four); 200 ms 411-432 /
+435-701 / 453-2535 ms.  So the short buffer halves the latency without costing
+reliability here.  Failures (3 of 12 were `pppd` LCP timeouts with the V.42 LAPM link up
+on both sides and our ConfReq unanswered, at both buffer sizes: not the buffer; one was
+a Phase 3 stall at 40 ms: INFO1a decoded, 55 s in `FIRST_S`, fell back to V.22bis
+at 1200).  The LCP timeouts may be a race between the card's first LCP frames and the
+harness starting `pppd` after reading CONNECT (the frames sent in between are read
+and dropped by the harness); not yet separated from a modem-side loss.
