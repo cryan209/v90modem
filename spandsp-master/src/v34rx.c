@@ -7398,16 +7398,18 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             perform_l1_l2_analysis(s);
             s->dft_ptr = 0;
             V34_RX_LOG(s->logging, SPAN_LOG_DEBUG, "L1/L2 analysis x %d\n", s->l1_l2_duration);
-            if (++s->l1_l2_duration > (V34_DIAG_GETENV("V34_L1L2_BLOCKS")
-                                       ?  atoi(V34_DIAG_GETENV("V34_L1L2_BLOCKS"))  :  20))
+            if (++s->l1_l2_duration >= (V34_DIAG_GETENV("V34_L1L2_BLOCKS")
+                                        ?  atoi(V34_DIAG_GETENV("V34_L1L2_BLOCKS")) + 1
+                                        :  (s->k56_phase2 ? 8 : 21)))
             {
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->phase2_l2_count++;
                 s->current_demodulator = V34_MODULATION_TONES;
-                if (s->calling_party  &&  s->v90_mode
-                    &&  s->received_event == V34_EVENT_INFO1_OK)
+                if ((s->calling_party  &&  s->v90_mode
+                     &&  s->received_event == V34_EVENT_INFO1_OK)
+                    || (s->k56_phase2 && s->info1c_received))
                 {
-                    /* INFO1d already arrived inside the window; keep it. */
+                    /* Actual INFO1 already arrived inside the window. */
                 }
                 else
                 {
