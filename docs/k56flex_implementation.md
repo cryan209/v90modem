@@ -1849,5 +1849,7 @@ exists for.
 
 7910 PPP over V.34 with the INFO1c dead band, 16 calls alternating
 ME_JB_MS=40 / 200 (hunt7): 16/16 connected and passed pings (21600-24000 bps),
-8/8 at each buffer, 33-43 s to CONNECT, no Phase 3 retrains needed. Before the
+8/8 at each buffer, 33-43 s to CONNECT. Server logs: 14 calls needed no
+retrain; calls 8 and 16 (both 200 ms, the 42.8 s ones) each had one peer
+retrain tone and recovered; no early-retrain or INFO1c-retrain responses. Before the
 change the same call mix needed up to 6 attempts and failed 2 of 17.
