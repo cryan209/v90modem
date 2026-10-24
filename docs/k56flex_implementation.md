@@ -1733,3 +1733,8 @@ card refuses our INFO1c about half the time at 40 ms; it makes the call recover 
 it in one extra Phase 2 pass instead of timing out.  A short buffer (and the lower
 PPP latency that goes with it, 291 ms against 557 ms) is therefore usable for V.34 in
 these runs; the default is still 200 ms, because only 7900 has been tried.
+
+**Confirmation with the retrain response (7900 V.34, 18 interleaved calls, `/root/mx`).**
+40 ms 6/6, 60 ms 6/6, 100 ms 6/6: 18/18 with every buffer, the response firing in 5 of
+them (so about one call in four needs it).  Before it: 40 ms about 40-60 %, 60 ms 4/6,
+100 ms 8/10.  Default stays at 200 ms until another peer is tried.
