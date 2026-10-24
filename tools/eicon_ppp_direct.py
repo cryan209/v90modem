@@ -29,6 +29,7 @@ def main():
     ap.add_argument('--ms', help='full AT+MS command, overrides --mode')
     ap.add_argument('--role', choices=('analogue', 'digital'), default='analogue',
                     help='V.90 role; a real analogue modem on the far end needs digital')
+    ap.add_argument('--ext', help='number to dial (default 7900/7910 by law); the MultiTech BRI is 2910, A-law')
     ap.add_argument('--pings', type=int, default=30)
     ap.add_argument('--local-port', type=int, default=5078)
     ap.add_argument('--rtp-port', type=int, default=14600)
@@ -36,6 +37,8 @@ def main():
     d = args.output
     d.mkdir(parents=True, exist_ok=False)
     ext, account = ('7900', '2905') if args.law == 'alaw' else ('7910', '2900')
+    if args.ext:
+        ext = args.ext
     pty = '/tmp/eicon-ppp-' + d.name
     env = os.environ.copy()
     env.pop('ME_V34_SPAN_FLOW_LOG', None)
