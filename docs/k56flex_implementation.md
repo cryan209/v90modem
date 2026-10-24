@@ -1828,3 +1828,10 @@ calls needed more than one.  This is the likely cause of the "half of Phase 3 at
 seen all day, and of the earlier "INFO1c not accepted at short buffers" on 7900, whose
 INFO1c carried the same 1/2 codes (that failure was fixed by answering the retrain and was
 not re-tested with the dead band).
+
+### 7910 INFO1c dead band: final hunt6 numbers (35 interleaved calls)
+
+Dead band (`820c854f`): 18 calls, 0 FAIL, 1.11 Phase 3 attempts per call.
+Old (raw offset): 17 calls, 2 FAIL (6 attempts each, 124 s), 2.76 attempts per
+call. Rates reached 19200-24000 in both arms. The 7900 default-buffer
+regression with the change is still to be run.
