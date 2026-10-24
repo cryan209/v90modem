@@ -1550,3 +1550,22 @@ runs its probe step twice and is not listening when our L1/L2 arrives.  Why it
 repeats is not established: next try would be a pcap-level look at when the
 peer's 11.2.1.2.5/11.2.1.2.6 steps complete against our Tone B, or sending
 Tone B later (11.2.1.1.5 allows L2 up to 500 ms) at JB 40.
+
+**The Tone B timing matters at a short loop (diagnostic `V34_L1L2_BLOCKS`).**
+The call modem stops receiving the answer modem's probe after
+`l1_l2_duration > 20` 20 ms blocks (8 of L1, so 260 ms of L2; the spec allows
+L2 up to 500 ms, 11.2.1.1.5) and then raises Tone B.  7900 V.34 at
+ME_JB_MS=40, with the Tone A hold in place, alternated calls:
+
+| blocks | calls passing |
+|---|---|
+| 14 | 2/3 |
+| 20 (default) | 0/6 |
+| 30 | 3/3 |
+
+So the failure is a timing coincidence between our Tone B and the peer's
+probe/echo bookkeeping at this loop delay, not a shortage of anything on our
+side: both a shorter and a longer analysis get through, the default does not.
+The default is unchanged (200 ms buffer, 20 blocks); `V34_L1L2_BLOCKS=n`
+overrides it for experiments.  Not enough peers here to pick a new value that
+is safe for all of them.
