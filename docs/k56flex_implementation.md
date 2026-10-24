@@ -1853,3 +1853,8 @@ ME_JB_MS=40 / 200 (hunt7): 16/16 connected and passed pings (21600-24000 bps),
 retrain; calls 8 and 16 (both 200 ms, the 42.8 s ones) each had one peer
 retrain tone and recovered; no early-retrain or INFO1c-retrain responses. Before the
 change the same call mix needed up to 6 attempts and failed 2 of 17.
+
+Longer 7900 run with the dead band (alaw, default 200 ms buffer, 40 echo lines
+per call): 7 V.34 and 7 V.90 calls, all 14 complete with 40/40 echoes exact; no
+INFO1c-retrain responses fired. With the earlier 5+5 (10 lines) and 4+4 (40 ms)
+batches that is 16 V.34 and 16 V.90 calls on 7900 with no failure.
