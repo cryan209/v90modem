@@ -6667,6 +6667,18 @@ static void info1_baud_init(v34_state_t *s)
                      s->tx.v92_info1d_mode
                          ? "V.92 Table 17" : "V.90 Table 9");
         prepare_info1c(s);
+        if (getenv("V34_INFO1C_DBG"))
+        {
+            fprintf(stderr, "[INFO1C] pr=%d apr=%d md=%d fo=%d",
+                    s->tx.info1c.power_reduction, s->tx.info1c.additional_power_reduction,
+                    s->tx.info1c.md, s->tx.info1c.freq_offset);
+            for (int b = 0;  b < 6;  b++)
+                fprintf(stderr, " | %d:hc%d pe%d n%d", b,
+                        s->tx.info1c.rate_data[b].use_high_carrier ? 1 : 0,
+                        s->tx.info1c.rate_data[b].pre_emphasis,
+                        s->tx.info1c.rate_data[b].max_bit_rate);
+            fprintf(stderr, "\n");
+        }
         s->tx.txbits = info1c_sequence_tx(&s->tx, &s->tx.info1c);
         if (!s->tx.v90_mode)
             s->tx.txbits += 8;

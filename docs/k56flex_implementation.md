@@ -1667,3 +1667,14 @@ connects at V.34 with PPP.  The unfinished work is therefore the client path fro
 V.8 onwards (calling Phase 2 with the K56flex INFO bits, then PCM receive), which
 the uncommitted `k56_phase2` work in `v34rx.c` appears to be heading for; it is
 left alone here.
+
+**INFO1c contents do not separate pass from fail either (`V34_INFO1C_DBG=1`, 7900
+V.34, ME_JB_MS=40, eight calls).**  Passing calls 3, 5, 6; failing 1, 2, 4, 7, 8.
+Every INFO1c carries power_reduction 0, additional 0, md 0 and the same per-baud
+maxima (9/11/0/12/13/0, 3200 baud: low carrier, pre-emphasis 0, N 13); the only
+fields that vary are freq_offset (1 or 2: passes 1,1,2; fails 1,2,2,1,2) and the
+2400/2743 high-carrier flags, which are not used at 3200 baud.  Cheap hypotheses
+now excluded for the 40 ms stall: concealed RX frames, RTP gaps, probe length
+(sweep 16-26 blocks), Tone A hold length (4 vs 8), INFO1c contents.  What is left
+is the unseen part of the card's INFO1c reception (its DSP does not log it) and
+the exact arrival time of our INFO1c at the card.
