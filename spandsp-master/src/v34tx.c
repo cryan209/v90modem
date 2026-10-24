@@ -5527,7 +5527,7 @@ static bool post_l2_tone_a_seen(v34_state_t *s)
     return s->rx.signal_present
         &&  s->rx.tone_a_bin_frac_valid
         &&  s->rx.tone_a_bin_frac >= 0.15f
-        &&  (V34_DIAG_GETENV("V34_TONEA_RUN1") || s->rx.tone_a_run >= 4);
+        &&  (V34_DIAG_GETENV("V34_TONEA_RUN1") || s->rx.tone_a_run >= (V34_DIAG_GETENV("V34_TONEA_RUN") ? atoi(V34_DIAG_GETENV("V34_TONEA_RUN")) : 4));
 }
 /*- End of function --------------------------------------------------------*/
 

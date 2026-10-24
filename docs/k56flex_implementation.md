@@ -1591,3 +1591,28 @@ block count does.  What we can see (the peer repeating its probe step) is
 only the symptom; the peer's own view (`mlog`/`mantool` and the
 `bri-test-answerer` journal on eicon420, which this session could not log in
 to) is what is missing to say why.
+
+### The card's own view of Phase 2 (eicon420, 2026-10-24)
+
+eicon420 (login as the plain user; `sudo` is passwordless) runs the Diva card.
+`sudo /usr/lib/divas/mlog -c 2 -o -b` traces controller 2 (7900), but it
+needs a live stdin, else it spins on "unknown command" and writes tens of MB
+per second: `(sleep 600 | sudo timeout 600 mlog -c 2 -o -b > /tmp/mlog2.txt)`.
+The log has the DSP's `TRAINPROGRESS xxxx` steps and `Supervisor ...` decisions
+with 1 ms stamps, and the Q.931 SETUP/DISC for each call.
+
+For the answer modem's Phase 2 the interesting step is 0037 (Tone A sent, waiting
+for INFO1c).  Every call, passing or failing, leaves 0037 exactly 648 ms
+later: passing calls go to 003a (INFO1c accepted, then 003c/003e/0040...), failing
+calls go to 0038 and 200 ms later `Supervisor retrain fallback 1 2c` (restart of
+the probe exchange), which is the second probe step seen in the tap.  So at 40 ms
+our INFO1c is not accepted inside that window.  The tap cannot say whether it
+arrived late, early, or damaged; the DSP does not log the INFO1c bits.
+
+Tone A hold in `post_l2_tone_a_seen()` at ME_JB_MS=40 (`V34_TONEA_RUN`, blocks of
+40 ms): 4 blocks 3/4, 8 blocks 2/4 (so INFO1c 160 ms or 320 ms after Tone A makes
+no difference), against 0/6 earlier with 4.  The knob stays a diagnostic.
+Gateway/answerer facts found on the way: 7900/7910 are Diva controllers 2/1
+(`/etc/bri-test/config.json`), the MultiTech BRI is controller 3, reached as
+SIP 2910 by `diva-sip-gateway` (A-law only, new today); a call to 2910 is
+cleared by the far end after 4 s (ISDN cause 0x90, no called number sent).
