@@ -1858,3 +1858,11 @@ Longer 7900 run with the dead band (alaw, default 200 ms buffer, 40 echo lines
 per call): 7 V.34 and 7 V.90 calls, all 14 complete with 40/40 echoes exact; no
 INFO1c-retrain responses fired. With the earlier 5+5 (10 lines) and 4+4 (40 ms)
 batches that is 16 V.34 and 16 V.90 calls on 7900 with no failure.
+
+What the 7910 retrain on hunt7 call 8 is: the first pass is a normal Phase 2
+(INFO1c/INFO1a identical to the clean calls), then Phase 3 reaches
+PHASE3_WAIT_S with our FIRST_S going out and no far-end S arriving; about 5 s
+later the card sends its retrain tone, we restart Phase 2 (11.5), and the second
+pass completes. So it is the known Phase 3 stall, not an INFO offer problem, and
+the recovery already works (about 6 s lost, 2 of 16 calls). Not pursued further
+without a capture of the stalled pass.
