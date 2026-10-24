@@ -3331,6 +3331,8 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
  * ME_V34_PHASE3_S_TIMEOUT_MS. */
 static uint64_t g_v34_phase3_wait_s_ms;
 static uint64_t g_v34_info1c_wait_ms;
+static uint64_t g_v34_phase3_train_ms;
+static int g_v34_startup_restarts;   /* Phase 2 restarts during this call's start-up */
 /* v34rx.c: consecutive 40 ms blocks in which the 2400 Hz bin held Tone A. */
 extern int v34_get_rx_tone_a_run(v34_state_t *s);
 /* Start of our J in a V.90->V.34 fallback, for ME_V90_FALLBACK_S_TIMEOUT_MS. */
@@ -7966,6 +7968,8 @@ static bool restart_v34_phase2_locked(const char *reason)
        g_retrain_from_data.  In either case sending INFO0 here leaves the peer
        waiting for the tone required by §11.5.1.2/§11.5.2.2. */
     v34_start_retrain(g_v34);
+    if (g_state == ME_TRAINING  &&  !g_retrain_from_data)
+        g_v34_startup_restarts++;
     ME_LOG("[ME] V.34: %s; restarting Phase 2 (%d baud / %d bps)\n",
            reason ? reason : "restart requested", baud, bps);
     trace_phase("V34 restart Phase2: %d/%d", baud, bps);
@@ -10520,6 +10524,7 @@ static void me_v90_prepare_info0a_preroll(void)
 
 static void start_v34_training(void)
 {
+    g_v34_startup_restarts = 0;
     /* Must be called with g_state_mtx held */
     /* The V.90 call site sets g_mod before calling in, and this function
      * overwrites it a line below (the caller puts it back).  Read it first:
@@ -14495,7 +14500,21 @@ skip_8k_codewords:
             me_hangup();
             return;
         }
-        if (state == ME_TRAINING && elapsed > me_training_timeout_ms()) {
+        /* A V.34 call modem that is retraining (about half of its Phase 3 attempts
+         * against the 7910 card need one, ~8-17 s each) used up the 60 s in three or
+         * four attempts and fell back to V.22bis (2 calls in 36, and 1 in 4 of the
+         * first four of the next run).  V.34 sets no limit on retrains; once one has
+         * happened allow 120 s in all.  ME_V34_RETRAIN_TRAINING_MS=0 restores 60 s. */
+        uint64_t training_limit = me_training_timeout_ms();
+
+        if (g_mod == ME_MOD_V34  &&  g_calling_party  &&  g_v34_startup_restarts > 0) {
+            const char *rv = getenv("ME_V34_RETRAIN_TRAINING_MS");
+            uint64_t extended = (rv  &&  *rv)  ?  (uint64_t) strtoull(rv, NULL, 10)  :  120000;
+
+            if (extended > training_limit)
+                training_limit = extended;
+        }
+        if (state == ME_TRAINING && elapsed > training_limit) {
             ME_LOG("[ME] Training timed out after %llu ms (mod=%s)\n",
                     (unsigned long long)elapsed, me_mod_to_str(g_mod));
             trace_phase("TRAINING timeout after %llums mod=%s",
@@ -15276,6 +15295,37 @@ skip_8k_codewords:
                         }
                     } else {
                         g_v34_info1c_wait_ms = 0;
+                    }
+                    /* V.34 11.3.2.1.1/11.5.1.1: the call modem may retrain when the
+                     * answer modem's J has not arrived within 2800 ms plus two round
+                     * trips of the end of INFO1c.  A call whose receiver is still
+                     * looking for the far end's PP/TRN (PHASE3_TRAINING; a working
+                     * call leaves it in ~0.3 s) sat there until the PEER gave up
+                     * after ~15 s, and three such attempts in a row used the 60 s
+                     * training limit and fell back to V.22bis (about 1 call in 12
+                     * against the 7910 card: roughly half of its Phase 3 attempts
+                     * fail whatever its INFO1a says).  Retrain at 3500 ms instead,
+                     * which is 2800 ms plus the round trip of the lab path.
+                     * ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 restores the wait. */
+                    if (g_mod == ME_MOD_V34  &&  g_calling_party
+                        &&  rx_stage == V34_RX_STAGE_PHASE3_TRAINING) {
+                        int limit = parse_env_int("ME_V34_PHASE3_TRAIN_TIMEOUT_MS", 3500);
+
+                        if (g_v34_phase3_train_ms == 0) {
+                            g_v34_phase3_train_ms = trace_now_ms();
+                        } else if (limit > 0
+                                   &&  trace_now_ms() - g_v34_phase3_train_ms
+                                           > (uint64_t) limit) {
+                            g_v34_phase3_train_ms = 0;
+                            ME_LOG("[ME] V.34: no far-end PP/TRN lock %d ms into Phase 3; "
+                                   "retraining (11.3.2.1.1, 11.5.1.1)\n", limit);
+                            (void) restart_v34_phase2_locked(
+                                "Phase 3: no far-end PP/TRN lock (11.3.2.1.1)");
+                            pthread_mutex_unlock(&g_state_mtx);
+                            return;
+                        }
+                    } else {
+                        g_v34_phase3_train_ms = 0;
                     }
                     if (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S) {
                         int limit = parse_env_int("ME_V34_PHASE3_S_TIMEOUT_MS", 0);

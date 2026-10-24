@@ -1780,3 +1780,27 @@ the one attempt that connected after a retrain in call 2 was a 0/2+0 one, but ca
 0/2+0 attempts failed as well.  Next step if this matters: dump the first 600 symbols
 after the card's INFO1a (`--p3-symbol-export`) on the replay tap and look at what the
 card sends.
+
+### Fix: retrain after 3.5 s without a Phase 3 lock, and allow retrains 120 s (V.34 11.3.2.1.1, 11.5.1.1)
+
+About half of the 7910 card's Phase 3 attempts get no PP/TRN lock in our receiver, whatever
+its INFO1a says (44 attempts: 21 fail for each of the INFO1a pre-emphasis/power-reduction
+combinations alike).  A working attempt leaves `PHASE3_TRAINING` in 280-301 ms
+(24 of 24).  We waited for the peer to give up (~15 s) and then answered its retrain, so three
+or four attempts used the 60 s training limit and the call fell to V.22bis.
+
+`modem_engine.c`: a plain-V.34 caller still in `PHASE3_TRAINING` after 3500 ms
+(`ME_V34_PHASE3_TRAIN_TIMEOUT_MS`, 0 = off) retrains, and once a call has restarted Phase 2
+the training limit is 120 s (`ME_V34_RETRAIN_TRAINING_MS`, 0 = 60 s).  Interleaved A/B on
+7910 (PPP over V.34, 40 ms buffer, 40 calls alternated, `/root/hunt4`):
+
+| | calls up | median / mean / max seconds to connect | attempts per success |
+|---|---|---|---|
+| with both changes | 20/20 | 42.7 / 52.8 / 113 (three calls over 90 s) | 2.10 |
+| old behaviour | 18/20 (2 fell to V.22bis) | 51.6 / 48.6 / 70 (successes only) | 2.05 |
+
+Per attempt the success rate is the same (the earlier worry that the early retrain lowered it
+was a time-of-day effect in a non-interleaved run); what changes is that no call falls to
+V.22bis and the typical connect is ~9 s shorter.  The price is a longer worst case (up to
+two minutes of retraining instead of a V.22bis connection at 60 s).  The harness now waits
+150 s for CONNECT and records the I/O schedule (`io.bin`) so a stall can be replayed.

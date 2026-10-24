@@ -49,7 +49,8 @@ def main():
     if args.role == 'analogue':
         env['ME_V90_ROLE'] = 'analogue'
     env.update(ME_MODE=args.mode, VPCM_ME_VERBOSE='1',
-               VPCM_G711_TAP_DIR=str(d.resolve()), ME_DUMP_DIR=str(d.resolve()))
+               VPCM_G711_TAP_DIR=str(d.resolve()), ME_DUMP_DIR=str(d.resolve()),
+               ME_IO_SCHEDULE=str((d / 'io.bin').resolve()))
     env['SIP_FORCE_PCMA' if args.law == 'alaw' else 'SIP_FORCE_PCMU'] = '1'
     result = dict(extension=ext, mode=args.mode, ok=False)
     proc = child = None
@@ -97,7 +98,7 @@ def main():
                     raise RuntimeError('AT rejected: ' + cmd)
                 del rx[:]
             os.write(fd, ('ATD' + ext + '\r').encode())
-            if not read_until(b'CONNECT', 90):
+            if not read_until(b'CONNECT', 150):
                 raise RuntimeError('no CONNECT')
             m = re.search(rb'CONNECT (\d+)', rx)
             result['connect_rate'] = int(m.group(1)) if m else None
