@@ -1892,3 +1892,8 @@ FIRST_S -> FIRST_NOT_S at +22.0 s (1.7 s), far-end S detected at about +23.4 s.
 So in the stalled pass the card never started its S (or started it outside the
 band our detector watches); the difference between passes is on the card side
 of Phase 3, and the cheapest recovery is the one already working.
+
+7900 at ME_JB_MS=40 with 40 echo lines per call (alaw, dead band): 6 V.34 and
+6 V.90 calls, 12/12 complete with 40/40 echoes exact. The INFO1c-retrain
+response fired on 3 of the 6 V.34 calls (never on V.90) and each still
+completed. 7900 total with the dead band: 22 V.34 + 22 V.90 calls, no failure.
