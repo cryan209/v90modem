@@ -1840,3 +1840,9 @@ Regression with the INFO1c dead band (`820c854f`) against 7900 at the default
 200 ms buffer, alaw: V.34 5/5 and V.90 5/5 calls complete with all 10 echo
 lines exact, no INFO1c-retrain responses fired. (An earlier ulaw run of the
 same script dialled 7910, which has no echo menu; it is not a 7900 result.)
+
+Short-buffer check (ME_JB_MS=40, 7900, alaw, dead band in place): V.34 4/4 and
+V.90 4/4 complete with all 10 echo lines exact. The INFO1c-retrain response
+(11.5.1.2) fired once on every V.34 call and never on V.90, and each of those
+calls still completed, so the dead band does not remove the case the response
+exists for.
