@@ -7,6 +7,7 @@ Use the isolated 5078/14600 SIP/RTP ports; no other probe may use them at once.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import select
 import subprocess
@@ -100,6 +101,12 @@ def call(directory, mode, law, lines, startup_seconds, echo_timeout=20):
             os.write(fd, ('ATD'+ext+'\r').encode())
             result['menu'] = read_until(b'Select: ', startup_seconds)
             if not result['menu']:
+                # 7910 has answered as a PPP server since ~24 Oct 2026: a
+                # CONNECT followed by LCP Configure-Requests is a working
+                # link, just not the echo menu.
+                result['ppp_lcp'] = b'\x7e\xff\x7d\x23\xc0\x21' in rx
+                m = re.search(rb'CONNECT (\d+)', rx)
+                result['connect_rate'] = int(m.group(1)) if m else None
                 return result
             event('menu')
             result['stage'] = 'echo_selection'
