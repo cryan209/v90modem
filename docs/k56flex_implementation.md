@@ -1897,3 +1897,18 @@ of Phase 3, and the cheapest recovery is the one already working.
 6 V.90 calls, 12/12 complete with 40/40 echoes exact. The INFO1c-retrain
 response fired on 3 of the 6 V.34 calls (never on V.90) and each still
 completed. 7900 total with the dead band: 22 V.34 + 22 V.90 calls, no failure.
+
+Correction and replay of the stalled pass (hunt9 call 9, `v90_engine_replay
+--dial --sync --schedule io.bin --echo-ref` on the call's own taps): the replay
+reproduces the live stall to the millisecond (same stages, card retrain tone at
++16.63 s). It shows the earlier "the card never started its S" reading was
+wrong. Spectra of the taps: the card transmits a continuous wideband Phase 3
+signal (RMS ~3270) through the whole stalled window, just as in the retried
+pass. OUR transmit is exactly silent for that whole window, by design: the V.34
+caller (`get_v34_call_phase3_wait_baud`, 11.3.1.x) stays silent until the
+answerer's lead ends in J, then sends S. In the retried pass our S starts 1.5 s
+after INFO1 (card lead ended, J seen); in the stalled pass the card's lead ran
+>2.7 s with no J on our side and the card gave up first. So the open question is
+whether the card's J is missing or our receiver fails to detect it in that pass.
+Next step: p3_demod/vpcm_decode --p3 on the stalled window of
+/root/hunt9/9/live-rx.g711 (taps copied to /tmp/h8/c9 on the Mac, not retained).
