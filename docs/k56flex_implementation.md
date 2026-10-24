@@ -1846,3 +1846,8 @@ V.90 4/4 complete with all 10 echo lines exact. The INFO1c-retrain response
 (11.5.1.2) fired once on every V.34 call and never on V.90, and each of those
 calls still completed, so the dead band does not remove the case the response
 exists for.
+
+7910 PPP over V.34 with the INFO1c dead band, 16 calls alternating
+ME_JB_MS=40 / 200 (hunt7): 16/16 connected and passed pings (21600-24000 bps),
+8/8 at each buffer, 33-43 s to CONNECT, no Phase 3 retrains needed. Before the
+change the same call mix needed up to 6 attempts and failed 2 of 17.
