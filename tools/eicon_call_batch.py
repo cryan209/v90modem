@@ -90,7 +90,7 @@ def call(directory, mode, law, lines, startup_seconds, echo_timeout=20):
             attrs[2] |= termios.CLOCAL | termios.CREAD
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             time.sleep(3)
-            for command in ('ATE0', 'AT+MS=' + MODE_CARRIERS[mode] + ',0'):
+            for command in ('ATE0', os.environ.get('EICON_MS') or 'AT+MS=' + MODE_CARRIERS[mode] + ',0'):
                 result['stage'] = 'configure'
                 os.write(fd, command.encode()+b'\r')
                 if not read_until(b'OK', 3):

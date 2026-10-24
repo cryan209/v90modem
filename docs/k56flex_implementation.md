@@ -1453,3 +1453,19 @@ server law bit (Draft 0.23 clause 4.1; recovered WIN95AC client predicates
 are cited in the implementation). All five fast-list K56flex regressions
 pass after rebuilding with vendored SpanDSP. These are offline checks,
 not qualification of a complete live K56flex connection.
+
+## First probe of Eicon 7910 (2026-10-24)
+
+Dialled 7910 (PCMU) from CT 117 with `AT+MS=K56,1` (`EICON_MS` overrides the
+harness's `AT+MS` string), default and `ME_K56FLEX_ROLE=client`.  Our CRe goes
+out at 0.5 s; no CRd (1529/2225 Hz) comes back in the 3.4 s window, V.8 then
+completes as V.34 with LAPM, and no menu is reached.  The receive tap shows the
+Eicon sending a 40 ms burst of 1375+2002 Hz (the CRe pair, at equal level) at
+2.3 s, followed by 0.5 s of digital zeros, in a plain `AT+MS=V90` call too.
+Whether that is a CRe truncated on the way (gateway tone handling) or the
+Eicon's own start is not established; it is too short for our 120 ms detector.
+Plain V.90 to 7910 also no longer works today: its JM offers V.34 only (PCM
+unavailable), where the 8 October batch got 56000/31200.  The peer's
+configuration has presumably changed.  We have no analogue K56flex DATA role
+(`k56flex_client.c` is a receive model), so nothing past V.8bis can be
+attempted yet.
