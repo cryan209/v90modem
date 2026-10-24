@@ -1569,3 +1569,25 @@ side: both a shorter and a longer analysis get through, the default does not.
 The default is unchanged (200 ms buffer, 20 blocks); `V34_L1L2_BLOCKS=n`
 overrides it for experiments.  Not enough peers here to pick a new value that
 is safe for all of them.
+
+**The probe-length sweep says "random", not "length" (same day, later).**  7900
+V.34, ME_JB_MS=40, `V34_L1L2_BLOCKS` sweep, two calls each:
+
+| blocks | round 1 | round 2 |
+|---|---|---|
+| 16 | pass | fail |
+| 18 | fail | fail |
+| 20 (default) | pass | pass |
+| 22 | fail | fail |
+| 24 | pass | pass |
+| 26 | pass | pass |
+
+The default passed here although it was 0/6 an hour earlier, and 16 flipped
+between rounds.  Over everything at 40 ms the failure rate is roughly 40-60 %
+and does not follow n; at 60 ms it is 0-30 % and at 200 ms none seen in ~40
+calls.  So the stall is a race against something random whose window shrinks
+with the loop delay, and the previous section's table overstates what the
+block count does.  What we can see (the peer repeating its probe step) is
+only the symptom; the peer's own view (`mlog`/`mantool` and the
+`bri-test-answerer` journal on eicon420, which this session could not log in
+to) is what is missing to say why.
