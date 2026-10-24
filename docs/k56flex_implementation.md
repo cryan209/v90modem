@@ -1701,3 +1701,8 @@ size tried (40 ms 5/5, 100 ms 6/6): the stall is in V.34 Phase 2, not in the V.9
 path.  A buffer chosen per mode is not possible, because the mode is only known
 after V.8, and the buffer is fixed when the call starts (changing it mid-call would
 change the sample accounting).  Default stays at 200 ms.
+
+**Long default-buffer batch (7900/7910, 32 calls, 8 rounds, build with every change of
+2026-10-24, `/root/e79-long` on CT 117).**  7900: 16/16 (8 V.90 + 8 V.34, 10 exact echo
+lines each).  7910: 0/16 at the echo menu (V.34 and V.90 alike), because it answers
+with PPP and offers no PCM.
