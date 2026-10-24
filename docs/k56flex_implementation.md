@@ -1912,3 +1912,12 @@ after INFO1 (card lead ended, J seen); in the stalled pass the card's lead ran
 whether the card's J is missing or our receiver fails to detect it in that pass.
 Next step: p3_demod/vpcm_decode --p3 on the stalled window of
 /root/hunt9/9/live-rx.g711 (taps copied to /tmp/h8/c9 on the Mac, not retained).
+
+`vpcm_decode --p3` on the stalled window (13.3-16.7 s of call 9's rx tap) and on
+the retried window (19.8-23.2 s) is inconclusive: both give SNR near 0 dB and
+hundreds of spurious J/TRN "segments" under every baud/carrier hypothesis, and
+the stalled window's best hypothesis (3200 baud high, 1920 Hz) is not the
+negotiated card-to-us carrier (3200 low, 1828.6 Hz). The lightweight scan cannot
+settle whether a J is on the wire. A decision needs the real receiver at the
+negotiated carrier on those windows (v34 receiver with the negotiated Phase 3
+parameters), not this scan.
