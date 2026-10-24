@@ -1706,3 +1706,13 @@ change the sample accounting).  Default stays at 200 ms.
 2026-10-24, `/root/e79-long` on CT 117).**  7900: 16/16 (8 V.90 + 8 V.34, 10 exact echo
 lines each).  7910: 0/16 at the echo menu (V.34 and V.90 alike), because it answers
 with PPP and offers no PCM.
+
+**Card-side step times are identical up to Tone A (40 ms buffer, mlog of three calls).**
+From `Q.931 SETUP` the card reaches 0001/0003/0004/0009/0020/002a/0030 at
+0/3/5/3719-3728/3757-3767/3886-3896/4061-4071 ms in the two passing calls and in
+the failing one, and 0037 (Tone A, waiting for INFO1c) at 4302-4312 ms in all three
+(within 10 ms).  Only after 0037 do they differ: 003a at +648 ms for the passes,
+0038 at +648 ms and a retrain fallback 200 ms later for the failure.  So everything
+before the INFO1c window looks the same to the card, in step timing, and everything
+we can see of our own INFO1c (contents, start relative to Tone A) is the same too.
+The remaining difference is in how the card receives our INFO1c itself.
