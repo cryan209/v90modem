@@ -1762,3 +1762,21 @@ retry (the existing 11.5.1.2 response) ended the same way until the 60 s timeout
 CONNECT.  Same shape as the 40 ms stall seen earlier (55 s in `FIRST_S`, V.22bis
 fallback).  Not a buffer effect (it occurs at 200 ms too, 2 of ~30 PPP calls); not yet
 explained, the next candidate for the 7910 V.34 path.
+
+**The 7910 Phase 3 stall, captured and replayed (`/root/hunt/3`, PPP call at 40 ms, I/O
+schedule recorded).**  `v90_engine_replay --sync --schedule io.bin` on its receive tap
+reproduces it stage for stage (INFO1a decoded, `PHASE3_TRAINING` for 15 s, retrain,
+three cycles, V.22bis fallback).  With `ME_V34_SPAN_FLOW_LOG=1` (replay only, never a
+live call) the receiver's `Phase 3 PP acquire` lines show no lock at all: the phase
+estimate wanders (4..46), scores 170-330, magnitude 0.5-1.9, hold counts jumping 1..43.
+What it is not: lost or reordered RTP (none in the stalled call), concealed frames, or
+a clock offset (the card's Tone A is exactly 2400.000 Hz in the received samples, as it
+must be in a packet stream).  What it is: either the card's Phase 3 signal after its
+INFO1a is not the S, S-bar, PP we are looking for (11.3.1.2.1 gives them after 70 ms of
+silence), or our PP acquisition cannot find it.  The card's INFO1a differs from attempt
+to attempt in the same call (pre-emphasis index 9, 0, 8, 0; power reduction 7+5, 2+0,
+7+0, 2+0) although the line has not changed, so its measurement of our probe is noisy;
+the one attempt that connected after a retrain in call 2 was a 0/2+0 one, but call 3's
+0/2+0 attempts failed as well.  Next step if this matters: dump the first 600 symbols
+after the card's INFO1a (`--p3-symbol-export`) on the replay tap and look at what the
+card sends.
