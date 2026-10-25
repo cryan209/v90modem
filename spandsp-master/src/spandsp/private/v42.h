@@ -152,6 +152,11 @@ typedef struct
     uint64_t rtt_min;
     uint64_t rtt_max;
     int outstanding_max;
+    /* Error recovery (V.42 8.4.6/8.4.7, 8.1.3) */
+    int bad_fcs;                /*!< frames dropped for a bad FCS */
+    int rej_rx;
+    int rej_tx;
+    int t401;                   /*!< T401 expiries */
 } v42_stats_t;
 
 /*! V.42 support negotiation parameters */

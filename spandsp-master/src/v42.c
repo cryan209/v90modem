@@ -802,7 +802,8 @@ static void stats_report(v42_state_t *ss)
     fprintf(stderr,
             "[V42STAT] %s rate=%d k=%d/%d n401=%d/%d | tx I=%d (%d retx) %.0f oct/s rx I=%d %.0f oct/s RR=%d"
             " | line: I %.0f%% ctrl %.0f%% idle-window %.0f%% idle-busy %.0f%% idle-nodata %.0f%% idle-other %.0f%%"
-            " | ack rtt ms n=%d avg %.0f min %.0f max %.0f outstanding<=%d\n",
+            " | ack rtt ms n=%d avg %.0f min %.0f max %.0f outstanding<=%d"
+            " | err badfcs=%d rej rx=%d tx=%d t401=%d\n",
             ss->calling_party  ?  "caller"  :  "answerer",
             ss->tx_bit_rate,
             ss->lapm.tx_window_size_k, ss->lapm.rx_window_size_k,
@@ -816,7 +817,8 @@ static void stats_report(v42_state_t *ss)
             (st->rtt_n)  ?  stats_ms(ss, st->rtt_sum/st->rtt_n)  :  0.0,
             (st->rtt_n)  ?  stats_ms(ss, st->rtt_min)  :  0.0,
             stats_ms(ss, st->rtt_max),
-            st->outstanding_max);
+            st->outstanding_max,
+            st->bad_fcs, st->rej_rx, st->rej_tx, st->t401);
     st->last_report = st->tx_bits;
     st->bits_iframe = 0;
     st->bits_ctrl = 0;
@@ -830,6 +832,10 @@ static void stats_report(v42_state_t *ss)
     st->iframes_rx = 0;
     st->octets_rx = 0;
     st->rr_tx = 0;
+    st->bad_fcs = 0;
+    st->rej_rx = 0;
+    st->rej_tx = 0;
+    st->t401 = 0;
     st->rtt_n = 0;
     st->rtt_sum = 0;
     st->rtt_min = 0;
@@ -883,6 +889,7 @@ static void t401_expired(v42_state_t *ss)
     lapm_state_t *s;
 
     span_log(&ss->logging, SPAN_LOG_FLOW, "T.401 expired\n");
+    ss->stats.t401++;
     s = &ss->lapm;
     if ((s->configuring && s->retry_count >= ss->config.n400)
         || s->retry_count > ss->config.n400)
@@ -1182,6 +1189,7 @@ static void receive_information_frame(v42_state_t *ss, const uint8_t *frame, int
         if (!s->rejected)
         {
             tx_supervisory_frame(s, s->rsp_addr, LAPM_S_REJ, (frame[2] & 0x1));
+            ss->stats.rej_tx++;
             s->rejected = true;
         }
         return;
@@ -1226,6 +1234,7 @@ static void rx_supervisory_cmd_frame(v42_state_t *ss, const uint8_t *frame, int 
             tx_supervisory_frame(s, s->rsp_addr, (s->local_busy)  ?  LAPM_S_RNR  :  LAPM_S_RR, 1);
         break;
     case LAPM_S_REJ:
+        ss->stats.rej_rx++;
         s->far_busy = false;
         ack_info(ss, frame[2] >> 1);
         if (s->retry_count == 0)
@@ -1275,6 +1284,7 @@ static void rx_supervisory_rsp_frame(v42_state_t *ss, const uint8_t *frame, int 
             t401_start(ss);
         break;
     case LAPM_S_REJ:
+        ss->stats.rej_rx++;
         s->far_busy = false;
         ack_info(ss, frame[2] >> 1);
         if (s->retry_count == 0  ||  (frame[2] & 0x1))
@@ -1655,6 +1665,7 @@ SPAN_DECLARE(void) lapm_receive(void *user_data, const uint8_t *frame, int len, 
     }
     if (!ok)
     {
+        ss->stats.bad_fcs++;
         lapm_frame_log(ss, "rx-BAD-FCS", frame, len);
         return;
     }
@@ -2292,6 +2303,8 @@ SPAN_DECLARE(bool) v42_set_local_busy_status(v42_state_t *s, bool busy)
            sequence error (here, a frame discarded while busy) has not been
            reported.  Without it the peer stayed in its peer-busy condition
            until it next polled, ~T401 per busy spell. */
+        if (l->busy_discarded  &&  !l->rejected)
+            s->stats.rej_tx++;
         tx_supervisory_frame(l, l->rsp_addr, (l->busy_discarded  &&  !l->rejected)  ?  LAPM_S_REJ  :  LAPM_S_RR, 0);
         if (l->busy_discarded)
             l->rejected = true;
