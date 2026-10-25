@@ -1995,3 +1995,27 @@ an echo and does not resend, so it recorded a failure. One card-initiated
 retrain in ~100 minutes of V.90 data; our side recovered. Not a modem defect as
 far as these logs show; the harness could resend after a retrain if the 7900
 echo menu were to be used for longer runs.
+
+## K56flex client path: where it stands (2026-10-25, started at the user's request)
+
+Re-checked against the live card with `ME_K56FLEX_LISTEN=1 ME_K56FLEX_ROLE=client
+AT+MS=K56,1` (shell exports, not inlined): the 40 ms CRe burst is on the wire at
+2.3 s and V.8bis completes with `K56FLEX_DETECT_BLOCKS` 1 and 2, 4/4 (the card's
+MS licensee octet is 0x81 or 0x83, otherwise identical:
+`12 c1 80 80 80 09 b5 02 00 94 01 8x 43 55 e1`). The first attempt of the day
+missed the burst (default 3 s window, 0/1) and a further attempt without the knob
+would too, so any change here must keep the 2-block acceptance explicit.
+
+What is missing, in order, for an analogue K56flex data role against 7910:
+1. After V.8bis the card still answers ordinary V.8 (JM V.34 and below, no PCM
+   bit), so the K56flex indication must travel in Phase 2 (INFO0/INFO1 bits) or in
+   a K56-specific Phase 2/3 we do not decode; the card's INFO0a/INFO1a under
+   `AT+MS=K56` have not been compared with a plain V.34 call (the standalone
+   `vpcm_decode --phase12` does not decode the INFO bits from these taps).
+2. A calling-side Phase 2 that carries the K56flex bits (k56_phase2 exists only
+   for the answering/server role: `v34tx.c` l2_cycles/l1_l2_signal_init).
+3. A PCM downstream receiver for the client (the receive model in
+   `k56flex_client.c`/`k56flex_rxfe.c` runs only on our own server's output).
+Step 1 is the cheapest: log both INFO0a/INFO1a frames from the card under K56 and
+under plain V.34 and diff the reserved bits. Nothing in the tree was changed for
+this section.
