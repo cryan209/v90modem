@@ -2036,3 +2036,16 @@ differs with the V.8bis K56flex exchange: the card signals nothing K56flex-speci
 in V.34 Phase 2 as a result of our offer. If it will do K56flex at all it needs
 something we have not sent (a different CL/MS content, a K56 CM, or the
 analogue-side start signal); the INFO frames give no lead.
+
+Tone timeline of a K56 call to 7910 (hunt-style `k56c/k1`, tap time): card sends the
+40 ms CRe-pair burst at 2.3 s, ANSam (2100 Hz) from 4.1 s to about 6.9 s, then FSK
+alternating 1650/1850 Hz (V.21 channel 2: its JM) 7.4-8.3 s, silence, then V.34
+Phase 2 tones from 11.2 s. Our side: V.8bis FSK 4.0-5.4 s, V.8 CM-style FSK 6.4-8.0 s,
+Phase 2 from 11.5 s. Nothing in the card's signalling after V.8bis differs from a
+plain V.8 answer; with JM carrying no PCM bit and INFO0a/INFO1a carrying no K56
+marker, the card never offers us a K56flex PCM startup after our V.8bis. Whether it
+would for a client that sends something other than our MS/CL (the Rockwell client's
+exact sequence is in `cruft/patton-re/K56-client-comparison.md`) is the open
+question; this needs a known-good Rockwell/K56flex client capture against the same
+card, which we do not have. The client path is therefore blocked on evidence, not
+only on code.
