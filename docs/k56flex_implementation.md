@@ -1936,3 +1936,12 @@ those retrained; the low calls ran at 21600), forced-high 17 calls / 0 FAIL /
 stall rate difference (2/17 vs 1/17) is not significant; the clear effect is
 rate: forcing high removes the 21600 low-carrier calls. Env knob only, default
 unchanged.
+
+hunt10 final (40 calls, interleaved): base 20 calls / 0 FAIL / 2 retrains /
+24000 on 11 (21600 on the 9 that negotiated low); `V34_INFO1C_FORCE_HIGH=1`
+20 calls / 0 FAIL / 2 retrains / 24000 on all 20. So the carrier choice does not
+cause the Phase 3 stall (2 vs 2); what it costs is rate: the low carrier
+costs 2400 bps on this rig. 7900 with the knob set: 6 V.34 + 6 V.90 (10 echo
+lines), 12/12. Left as an env knob, not the default: the probe's low choice is a
+real measurement and nothing here shows it is wrong on a real line, only that
+the 7910/7900 rig reaches 24000 at the high carrier.
