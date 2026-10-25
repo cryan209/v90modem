@@ -6531,6 +6531,27 @@ static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s)
         s->tx.phase3_call_wait_j = false;
         s->tx.current_getbaud = get_s_not_s_baud;
     }
+    else if (getenv("V34_CALL_P3_S_AFTER_MS"))
+    {
+        /* Experiment (default off): the 7910 card sometimes gives up on a
+           call modem that stays silent through its whole lead (retrain tone
+           ~2.7 s in), without our receiver ever reporting its J.  Start S
+           after this many ms instead of waiting for J indefinitely. */
+        int limit = atoi(getenv("V34_CALL_P3_S_AFTER_MS"))
+                  * baud_rate_parameters[s->tx.baud_rate].baud_rate/1000;
+
+        if (++s->tx.tone_duration >= limit)
+        {
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.34 caller: no far-end J after %d bauds; starting local Phase 3 S/S-bar anyway\n",
+                     s->tx.tone_duration);
+            s->tx.phase3_call_wait_j = false;
+            s->tx.tone_duration = 0;
+            s->tx.current_getbaud = get_s_not_s_baud;
+        }
+        /*endif*/
+    }
+    /*endif*/
     return zero;
 }
 /*- End of function --------------------------------------------------------*/

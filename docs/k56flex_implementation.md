@@ -1945,3 +1945,16 @@ costs 2400 bps on this rig. 7900 with the knob set: 6 V.34 + 6 V.90 (10 echo
 lines), 12/12. Left as an env knob, not the default: the probe's low choice is a
 real measurement and nothing here shows it is wrong on a real line, only that
 the 7910/7900 rig reaches 24000 at the high carrier.
+
+hunt11, `V34_CALL_P3_S_AFTER_MS=1800` (caller starts S after 1.8 s of silence
+instead of waiting for J; off by default; V.34 11.3.1.1 has the call modem
+silent until J, so this is an experiment only). 40 calls interleaved: base 20 /
+0 FAIL / 3 retrains; timer 20 / 0 FAIL / 1 retrain (call 24, so the timer does
+not prevent it). Our TX tap shows the effect is small: the post-INFO1 silence is
+2.36-2.40 s on base calls and 2.17 s on timer calls, i.e. the J normally ends
+the wait only ~0.2 s after the timer. (V34_TX_LOG lines do not reach server.log
+on these runs, so "the timer fired" had to be read from the tx tap.) 3 vs 1
+retrains is not significant. The stalled pass's silence is >3 s, far past the
+normal 2.4 s, so the lead is late or its J is missed, which the timer at 1.8 s
+should have bypassed; call 24 retrained anyway, so in that call the card was not
+waiting for our S. Conclusion: not a TX-timing fix; left as an env knob.
