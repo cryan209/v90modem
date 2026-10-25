@@ -154,7 +154,11 @@ int legacy_pcm_decode_x2(const int16_t *samples, size_t count,
     return 0;
 }
 
-int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
+/* One receiver model with the server's law `server_alaw`; `alaw` is the line's.
+ * They differ on a transcoded path: the 7910 sends A-law K56flex that reaches
+ * our PCMU leg A->mu converted (docs/k56flex_implementation.md, 2026-10-25),
+ * and the A-law levels survive that within a codeword. Returns 1 if P1 locked. */
+static int decode_flex_law(const int16_t *samples, size_t count, int alaw, int server_alaw,
                            legacy_pcm_event_fn event, void *user)
 {
     k56flex_client_cfg_t cfg;
@@ -163,9 +167,9 @@ int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
     size_t processed = 0;
     k56flex_train_phase_t previous = K56T_SIL0;
     char detail[512];
-    if (!samples || !event || count > INT_MAX) return -1;
+    const char *server_law = server_alaw ? "alaw" : "ulaw";
     memset(&cfg, 0, sizeof(cfg));
-    cfg.law = alaw ? K56FLEX_LAW_A : K56FLEX_LAW_MU;
+    cfg.law = server_alaw ? K56FLEX_LAW_A : K56FLEX_LAW_MU;
     /* No recovered upstream report waveform: these are receiver-model
      * assumptions, NOT peer-negotiated fields. Do not export user bits. */
     cfg.report_word = 0x8880;
@@ -181,8 +185,9 @@ int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
         if (!locked && client->fe_started) {
             locked = 1;
             snprintf(detail, sizeof(detail),
-                     "source=k56flex_rxfe timestamp=detection p1_anchor_sample=%u law=%s gain=%.6g receiver_model=1 report_assumed=8880 report_ext_assumed=00",
-                     k56flex_rxfe_locked_at(client->fe), alaw ? "alaw" : "ulaw",
+                     "source=k56flex_rxfe timestamp=detection p1_anchor_sample=%u law=%s server_law=%s polarity=%s gain=%.6g receiver_model=1 report_assumed=8880 report_ext_assumed=00",
+                     k56flex_rxfe_locked_at(client->fe), alaw ? "alaw" : "ulaw", server_law,
+                     k56flex_rxfe_gain(client->fe) < 0 ? "inverted" : "normal",
                      k56flex_rxfe_gain(client->fe));
             event(user, (int)n, "K56flex", "P1 probe acquired", detail);
         }
@@ -212,5 +217,15 @@ int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
         event(user, processed ? (int)processed - 1 : 0, "Diagnostic", "K56flex receiver outcome", detail);
     }
     k56flex_client_free(client);
-    return 0;
+    return locked;
+}
+
+int legacy_pcm_decode_flex(const int16_t *samples, size_t count, int alaw,
+                           legacy_pcm_event_fn event, void *user)
+{
+    int r;
+    if (!samples || !event || count > INT_MAX) return -1;
+    r = decode_flex_law(samples, count, alaw, alaw, event, user);
+    if (r == 0) r = decode_flex_law(samples, count, alaw, !alaw, event, user);
+    return r < 0 ? -1 : 0;
 }

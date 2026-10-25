@@ -1,0 +1,13 @@
+{
+  "source": "CT 117 /root/hunt5/3/live-rx.g711 (7910, PCMU leg, plain V.34 call, INFO1c fo=1); retained copy reference-data/artifacts/k56flex-7910-info1c-k56-20261025/hunt5-3/live-rx.g711",
+  "source_sha256": "01927ddabf802c341d6a317e4435d0c65cf659fb6f274ad09ff7594fdc5cee3c",
+  "first_sample": 99104,
+  "samples": 18496,
+  "sha256": "029fdfbf417ecb5b8fb3cc52f91ed4dfab9b65e8f21b2956897bbb84e0a4f58f",
+  "p1_start_sample": 810,
+  "p1_samples": 16368,
+  "finding": "P1 equals our A-law P1 (k56flex_probe K56FLEX_PROBE_1, seed FFFF) through SpanDSP alaw_to_ulaw with every sign inverted, 16368/16368; card then leaves our P2/P3 timeline",
+  "consumer": "k56flex_7910_p1_test",
+  "doc": "docs/k56flex_implementation.md",
+  "cut": "from the start of the 536-sample silence before the 2 kHz marker (the front end learns its floor there) to 14.70 s"
+}

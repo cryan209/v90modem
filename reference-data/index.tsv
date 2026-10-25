@@ -416,3 +416,4 @@ reference-data/artifacts/cx-rig-ready-20261023	4	110310	docs/v90_hardware_intero
 reference-data/artifacts/cx-early-loss-20261023	20	794886	docs/v90_hardware_interop.md; early-loss controls, actual-PTY carrier gate, 628 test rows and final Linux validation; local diagnostic evidence
 reference-data/artifacts/cx-b1-states-20261023	20	725460	docs/v90_hardware_interop.md; B1 state exact payload, negative controls, callback profiles, Linux sanitizers and 629-row validation; local evidence
 reference-data/artifacts/k56flex-7910-info1c-k56-20261025	10	2497140	docs/k56flex_implementation.md; 7910 K56flex P1 after INFO1c bit 0 (CT 117 /root/hunt5 calls 3,17) and our server's P1 for the byte-exact comparison; local hardware evidence
+reference-data/k56flex-7910	2	19344	k56flex_7910_p1_test (tests/fast.list); tracked regression fixture: 7910 K56flex marker + P1 + hold start on PCMU, cut from hunt5 call 3

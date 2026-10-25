@@ -35,6 +35,7 @@ python3 tools/test_k56flex_probe_timeout.py
 ./k56flex_probe_test
 python3 tools/k56flex_hsf_probe_check.py reference-data/k56flex-hsf/downstream-probes-ulaw.g711
 ./k56flex_client_test
+./k56flex_7910_p1_test
 ./k56flex_train_test
 ./k56flex_v8bis_test
 ./x2_test

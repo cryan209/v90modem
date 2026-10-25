@@ -2080,9 +2080,15 @@ What the card sends after INFO1a (call 3, first attempt; tap time):
   and each magnitude one codeword higher (`2f->30`, `30->31`). It matches for
   16368 codewords (1364 pairs x 12, our `K56T_P1` length to the sample) on all
   four bursts (calls 3 and 17, attempts 1 and 3). So our scrambler, seed,
-  mapping and P1 length are right for real hardware; the open differences
-  are the sign convention and the level table (the card's is presumably the
-  D811 pad-group variant that `k56flex_probe_init` does not use).
+  mapping and P1 length are right for real hardware.
+- **The level "shift" is A-law.** Our *A-law* P1 (`k56flex_probe`, base table
+  3904/4032), coded with SpanDSP `linear_to_alaw` and converted with
+  `alaw_to_ulaw`, equals the card's PCMU P1 sign-inverted, 16368/16368, with
+  no remapping. The card sends A-law K56flex (the NZ ISDN line law) and the
+  path transcodes it to our PCMU leg, so on 7910 every PCM mode crosses an
+  A->mu converter. The identification marker does not survive the same
+  check exactly (card `2a 41 c1 aa`, ours `2a 40 c0 aa`): its 1888 level
+  lands one mu codeword lower than SpanDSP's conversion puts it.
 - The card then **skips our P2**: the 2-level signal is biphase (one bit per
   `01`/`10` sample pair, no violations), and the bits obey
   `b ^ b(n-5) ^ b(n-23) = 0` exactly, scrambled constant input like our P3.
@@ -2092,9 +2098,23 @@ What the card sends after INFO1a (call 3, first attempt; tap time):
   **silent** (11.0-16.25 s) and starts its upstream at 16.5 s, about 0.25 s
   after our server enters GATE_A. Against the card we were sending V.34
   Phase 3 (S/TRN) instead.
-- `vpcm_decode --k56flex` acquires P1 on our server's tap (0 mismatched blocks)
-  but not on the card's, even with the levels remapped: its exact-replica model
-  does not try the inverted sign.
+- `vpcm_decode --k56flex` acquired P1 on our server's tap (0 mismatched blocks)
+  but not on the card's, even with the levels remapped: the front end took
+  only a positive correlation. Fixed: `k56flex_rxfe` acquires on |correlation|
+  and the signed gain carries the polarity (the LS equalizer starts at
+  1/gain; the timing loop compares phase block to block, so a constant pi
+  drops out). `legacy_pcm_decode_flex` now also tries the other server law
+  when the line law does not acquire. `k56flex_7910_p1_test` runs the client
+  over `reference-data/k56flex-7910/p1-ulaw.g711` (the card's marker, whole
+  P1 and the start of its hold, cut from the silence before the marker):
+  mu-law and A-law models, card and sign-flipped polarity, all four lock and
+  check all 2728 P1 blocks with 0 mismatches at 54 dB; gain -1.041 (mu model)
+  and -1.0065 (A-law model, the closer fit). Without the front-end change
+  the card-polarity cases do not lock. Past P1 the model follows our P2 and
+  mismatches, because the card does not send it: after P1 it sends about 20
+  four-level samples and then the biphase hold, which neither our P2 nor a
+  P3 entered straight from P1 reproduces (A-law, sign-inverted). That stage
+  is not recovered.
 
 So the client path is not blocked on evidence. What it needs, in order:
 1. A client Phase 2 that sets INFO1c bits 40:49 = 1 (mu-law K56) when

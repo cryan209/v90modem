@@ -118,7 +118,9 @@ static void try_acquire(k56flex_rxfe_t *fe)
         }
         c = sxx > 0 ? sxr / sqrt(sxx * rr) : 0;
         if (cand == lo - 1) cm1 = c;
-        if (cand >= lo && cand <= hi && c > best) { best = c; best_p = (uint64_t)cand; }
+        /* Either polarity: the 7910's P1 is ours with every sign inverted
+         * (docs/k56flex_implementation.md, 2026-10-25); the signed gain carries it. */
+        if (cand >= lo && cand <= hi && fabs(c) > best) { best = fabs(c); best_p = (uint64_t)cand; }
     }
     if (best < 0.5) {                        /* not the P1 probe: look for the next onset */
         fe->state = FE_ENERGY;
@@ -138,7 +140,7 @@ static void try_acquire(k56flex_rxfe_t *fe)
                 sxr += x * fe->ref[i];
             }
             c = sxx > 0 ? sxr / sqrt(sxx * rr) : 0;
-            if (cand == (int64_t)p - 1) cm1 = c; else if (cand == (int64_t)p) { c0 = c; g = sxr / rr; fe->gain = (float)g; } else cp1 = c;
+            if (cand == (int64_t)p - 1) cm1 = fabs(c); else if (cand == (int64_t)p) { c0 = fabs(c); g = sxr / rr; fe->gain = (float)g; } else cp1 = fabs(c);
         }
         {
             double den = cm1 - 2 * c0 + cp1;
@@ -147,7 +149,7 @@ static void try_acquire(k56flex_rxfe_t *fe)
             if (frac < -0.5) frac = -0.5;
         }
     }
-    if (fe->gain < 1e-3f) fe->gain = 1e-3f;
+    if (fabsf(fe->gain) < 1e-3f) fe->gain = fe->gain < 0 ? -1e-3f : 1e-3f;
     fe->pos = (double)p;
     (void)frac;
     fe->m = 0;
