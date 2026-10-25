@@ -1958,3 +1958,12 @@ retrains is not significant. The stalled pass's silence is >3 s, far past the
 normal 2.4 s, so the lead is late or its J is missed, which the timer at 1.8 s
 should have bypassed; call 24 retrained anyway, so in that call the card was not
 waiting for our S. Conclusion: not a TX-timing fix; left as an env knob.
+
+Card-side view of 7910 (attempt, 2026-10-25): `sudo /usr/lib/divas/mlog -c 1 -o -b`
+on eicon420 during 14 PPP calls to 7910 captured no Q.931 or TRAINPROGRESS lines at
+all (header only), so the MultiTech ISI card is not on Diva adapter 1 and the DSP
+step trace used for 7900 (controller 2) is not available for 7910. The 7910 stall
+therefore cannot be seen from the card side with the tools on eicon420; the J/PP
+question remains answerable only from our own taps. (The calls from that attempt
+were also lost: a second launch of the hunt script deleted the first run's output
+directory.)
