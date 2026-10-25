@@ -1984,3 +1984,14 @@ dead band): 900/900 echoed, 0% loss on every call, RTT min/avg/max
 403/432/455, 420/440/471 and 404/433/472 ms (mdev ~10 ms). No mid-call retrain
 or hangup. This is the first 7910 data-quality figure; earlier runs only sent 3
 pings. Default buffer; at 40 ms the earlier 3-ping runs showed ~290 ms.
+
+7900 long soak (alaw, default buffer, 400 echo lines of 201 bytes per call, ~35
+minutes each): V.34 400/400, V.90 #2 400/400, no retrain in either. V.90 #1
+echoed 282 lines clean over 31.5 minutes, then the card sent Tone B (we logged
+"peer Tone B; 9.5.2 retrain 1 (3200/31200)"); we answered per 9.5.2.2, ran
+Phase 2-4 again in 12 s and re-entered DATA (upstream 31200, downstream 56000).
+Line 283 was in flight and was never echoed, and the batch harness waits 40 s for
+an echo and does not resend, so it recorded a failure. One card-initiated
+retrain in ~100 minutes of V.90 data; our side recovered. Not a modem defect as
+far as these logs show; the harness could resend after a retrain if the 7900
+echo menu were to be used for longer runs.
