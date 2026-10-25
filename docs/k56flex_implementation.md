@@ -2019,3 +2019,10 @@ What is missing, in order, for an analogue K56flex data role against 7910:
 Step 1 is the cheapest: log both INFO0a/INFO1a frames from the card under K56 and
 under plain V.34 and diff the reserved bits. Nothing in the tree was changed for
 this section.
+
+The card's INFO0a under `AT+MS=K56` (V.8bis acked) and under plain V.34 is
+byte-identical (`V34_INFO0_DBG=1` prints the received frame, 2 calls each, all
+`ff 21 e2 37 9b 00 00 00`). So INFO0a does not change with our K56flex offer and
+carries no K56flex indication that we can see; whatever makes the card a K56flex
+server is not in that frame. Remaining candidates: INFO1a, or a K56-specific
+Phase 2 that the card only starts on a signal we have not sent.

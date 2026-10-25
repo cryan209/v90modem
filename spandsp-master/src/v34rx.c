@@ -4455,6 +4455,10 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
     const uint8_t *t;
     uint8_t raw_26_27;
 
+    if (getenv("V34_INFO0_DBG"))
+        fprintf(stderr, "[INFO0RX] calling=%d v90=%d raw=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                s->calling_party, s->v90_mode,
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
     memset(&s->far_capabilities, 0, sizeof(s->far_capabilities));
     s->info0d_extensions_valid = false;
     s->info0_raw_26_27 = 0;
