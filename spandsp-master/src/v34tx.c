@@ -1401,7 +1401,9 @@ static int v34_probe_frequency_offset(const v34_state_t *s)
    which the 7910 K56flex card reads as something else: of its first Phase 3
    attempts, every one with a nonzero offset in INFO1c got a wideband PCM-style
    signal our V.34 receiver cannot lock to, every one with 0 got V.34 (17
-   calls, forced 0 against measured, interleaved).  INFO1a keeps the raw value:
+   calls, forced 0 against measured, interleaved).  That signal is K56flex P1:
+   bit 0 of this field is the K56 enable flag (docs/k56flex_implementation.md,
+   "7910 starts K56flex on INFO1c bit 0").  INFO1a keeps the raw value:
    it is checked bit for bit and nothing showed a problem there. */
 static int v34_info1c_frequency_offset(const v34_state_t *s)
 {

@@ -2033,9 +2033,10 @@ and plain 1, 3); the other frames (`02 20 34 09 a0 8e fa`, `2f 20 36 09 20 db 4f
 appear once each, one K56 and one plain, and track our INFO1c request (they differ
 in the carrier/pre-emphasis fields), not our K56 offer. So neither INFO0a nor INFO1a
 differs with the V.8bis K56flex exchange: the card signals nothing K56flex-specific
-in V.34 Phase 2 as a result of our offer. If it will do K56flex at all it needs
-something we have not sent (a different CL/MS content, a K56 CM, or the
-analogue-side start signal); the INFO frames give no lead.
+in V.34 Phase 2 as a result of our offer. **Superseded, see the next section:** the
+frame comparison missed that every card INFO1a carries 0x200 in bits 40:49 (K56
+bit 0 clear), the answer to our INFO1c, which since the dead band always says 0.
+What the card needs is the K56 flag in *our* INFO1c, not anything in V.8bis.
 
 Tone timeline of a K56 call to 7910 (hunt-style `k56c/k1`, tap time): card sends the
 40 ms CRe-pair burst at 2.3 s, ANSam (2100 Hz) from 4.1 s to about 6.9 s, then FSK
@@ -2048,4 +2049,59 @@ would for a client that sends something other than our MS/CL (the Rockwell clien
 exact sequence is in `cruft/patton-re/K56-client-comparison.md`) is the open
 question; this needs a known-good Rockwell/K56flex client capture against the same
 card, which we do not have. The client path is therefore blocked on evidence, not
-only on code.
+only on code. (Wrong: the card's K56flex training was already in the hunt5 taps;
+see below.)
+
+## 7910 starts K56flex on INFO1c bit 0, and its P1 is ours (2026-10-25)
+
+The "wideband PCM-style Phase 3" that the INFO1c dead band suppresses
+(`v34tx.c` `v34_info1c_frequency_offset`) is the card's K56flex downstream
+training, started by our own INFO1c. Evidence: CT 117 `/root/hunt5` (plain
+`--mode v34` PPP calls, no V.8bis at all), calls 3 and 17, two attempts each
+with `fo=1`; retained locally in
+`reference-data/artifacts/k56flex-7910-info1c-k56-20261025/`.
+
+INFO1c bits 40:49 are the K56 flags legacy HSF `1201efa0` reads (bit 0 enable,
+bit 3 A-law; see "HSF INFO1a mode/law selection" above). Per attempt in
+hunt5: bit 0 set (`fo=1`, or `fo=-1` = 0x3ff) -> PCM Phase 3 every time;
+bit 0 clear (`fo=0`, `fo=2`, stale `-290`/`-282`) -> V.34 Phase 3. The card's
+INFO1a after a bit-0-clear INFO1c has 0x200 in the same field (decoded from
+the 2026-10-25 `[INFO1ARX]` frames).
+
+What the card sends after INFO1a (call 3, first attempt; tap time):
+
+| time | codewords | our server (HSF staged-8k run) |
+|---|---|---|
+| 12.455 s | `2a 41 c1 aa` repeated (2 kHz marker) | `2a 42 c2 aa` at 11.05 s |
+| 12.489-14.535 s | 4-level ±`2f`/±`30` (±4092/±3900) | P1, ±`30`/±`31` |
+| 14.535 s on | 2-level ±`2f`, biphase, until we retrain at ~15.9 s | P2 (12 levels), then P3 ±`30` |
+
+- **P1 is byte-exact ours** after two fixed transforms: every sign inverted
+  and each magnitude one codeword higher (`2f->30`, `30->31`). It matches for
+  16368 codewords (1364 pairs x 12, our `K56T_P1` length to the sample) on all
+  four bursts (calls 3 and 17, attempts 1 and 3). So our scrambler, seed,
+  mapping and P1 length are right for real hardware; the open differences
+  are the sign convention and the level table (the card's is presumably the
+  D811 pad-group variant that `k56flex_probe_init` does not use).
+- The card then **skips our P2**: the 2-level signal is biphase (one bit per
+  `01`/`10` sample pair, no violations), and the bits obey
+  `b ^ b(n-5) ^ b(n-23) = 0` exactly, scrambled constant input like our P3.
+  It holds this until **we** give up: our "no PP/TRN lock 3500 ms into
+  Phase 3" watchdog retrains, not the card.
+- During the same stretch of our server's run the native HSF client is
+  **silent** (11.0-16.25 s) and starts its upstream at 16.5 s, about 0.25 s
+  after our server enters GATE_A. Against the card we were sending V.34
+  Phase 3 (S/TRN) instead.
+- `vpcm_decode --k56flex` acquires P1 on our server's tap (0 mismatched blocks)
+  but not on the card's, even with the levels remapped: its exact-replica model
+  does not try the inverted sign.
+
+So the client path is not blocked on evidence. What it needs, in order:
+1. A client Phase 2 that sets INFO1c bits 40:49 = 1 (mu-law K56) when
+   K56flex is wanted (`V34_INFO1C_FO=1` already forces this for experiments),
+   and on the card's INFO1a goes silent instead of starting V.34 Phase 3.
+2. A receiver that accepts the card's polarity and level table (P1 acquisition,
+   then the biphase hold).
+3. The client's upstream reply after the hold, as the HSF client sends from
+   16.5 s in `artifacts/k56flex-hsf-staged-8k-20261021/client-tx.g711`; we have
+   no client transmitter for it yet.
