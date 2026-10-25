@@ -1978,3 +1978,9 @@ a marker, not the cause.
 V.92 mode (AT+MS V.92 offer) against 7900, alaw, default buffer, dead band:
 4/4 complete with 10/10 echoes exact (call 1's log: V.8 result mods=V90|V34, "V8 selected V90 analogue role", so
 the card answers a V.92 offer as V.90 and the call ran as V.90, not V.92).
+
+7910 PPP soak (3 calls x 300 pings over ~5 minutes, V.34 21600-24000, JB 200 ms,
+dead band): 900/900 echoed, 0% loss on every call, RTT min/avg/max
+403/432/455, 420/440/471 and 404/433/472 ms (mdev ~10 ms). No mid-call retrain
+or hangup. This is the first 7910 data-quality figure; earlier runs only sent 3
+pings. Default buffer; at 40 ms the earlier 3-ping runs showed ~290 ms.
