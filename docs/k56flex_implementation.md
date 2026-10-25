@@ -2172,3 +2172,59 @@ early windows): it changed `v90_t3_acquire_pass` and
 `v90_t3_acq_retry_or_abandon` but three call sites in `v34rx.c` keep the old
 argument lists. Trees with the uncommitted `v34rx.c` work in them build; the
 CT 117 tree above carries only those three call-site fixes.
+
+### A known-good K56flex client on the 7910 path: native HSF over SIP (2026-10-25)
+
+`ME_AUDIO_RELAY=<socket>` (57340d44) bypasses the engine DSP and exchanges a
+call's G.711 byte-exact with a peer; `tools/k56flex_hsf_sip.py` puts cruft's
+native legacy HSF Flex client on it (built on CT 117 with
+`python3 -m native.hsf.lift.build --opt 1 --jobs 4`, 16.5 min; it runs at
+2.7x real time there). Evidence: `reference-data/artifacts/k56flex-7910-hsf-sip-20261025/`
+(local, indexed; `RUN.txt` says which call is which).
+
+**The 7910 path squelches the card's CRe.** Asterisk bridges our leg to
+`6501` at 192.168.88.62 (context `from-cisco`, a Cisco gateway; Asterisk's own
+legs are RFC 4733 with fax detection off, and on PCMA as well as PCMU the
+card's CRe arrives as 40 ms of 1375+2002 Hz followed by exact digital
+silence for the rest of the 500 ms. That is a tone detector muting a tone it
+has recognised, not the card: no CRe detector fires on it, HSF's included.
+Without help HSF hears ANSam, never starts V.8bis, sends nothing and the card
+clears at 12.5 s (call 1). `--repair-cre` writes the missing part of the CRe
+(1375+2002 Hz to 400 ms, then 400 Hz for 100 ms) over the muted codewords of
+the *client's input only*; the line recording is untouched and everything the
+client sends is its own. (The 2910 path through our own `diva-sip-gateway`
+avoids the Cisco but its MultiTech BRI has never answered: the gateway sends no
+called number and the BRI clears with 0x3490.)
+
+**Call 2 (repaired CRe, 60 ms relay cushion):** HSF detects the CRe, parses the
+card's MS (`12c180808009b502009401834355e1`, accepted), replies with its own MS
+(`11c180808009b50200948181024785`), the card ACKs (`14`), V.8 runs and HSF
+starts its K56 pump; Phase 2 completes, INFO1a is received and HSF reaches
+CallWaitJ, then **CallWaitAfterRxGotJ** about 5.3 s later (it has seen the
+card's gate A Jd). Line timeline of the first cycle:
+
+| line time | card | HSF |
+|---|---|---|
+| 13.85-15.9 s | P1 | silent |
+| 16.0-17.0 s | **P2** (12 levels) | silent |
+| 17.0 s | P3, then gate A (+-`2f`) | silent |
+| 19.5 s | | upstream starts after Jd |
+| 19.75-22.7 s | one constant codeword `29` | upstream continues |
+| 22.75 s | Phase 2 again (retrain) | follows into its own retrain |
+
+So against a real client the card *does* send P2 (with our INFO1c-only client
+it skipped it: the V.8bis exchange or the INFO1c content selects that), leaves
+gate A when the client's upstream starts, and then waits ~3 s in a stage that
+sends a constant level before giving up. Three such cycles, then HSF reports
+"K56flex training fell back to another modulation". That call had 2720 relay
+underrun codewords (17 frames: HSF took up to 87 ms on a frame, more than the
+cushion), so its upstream had silence inserted and may not be judgeable.
+**Call 3 (300 ms cushion):** 0 underrun, but V.8bis never completes (CRe seen,
+no MS): the added round trip breaks V.8bis timing. **Call 4 (120 ms):**
+dropped at 4.6 s because `multitech-ppp.service` (the 7910 answerer on
+eicon420) was stopped by another session working on the rig at the same time;
+it was left failed. No conclusion from calls 3 and 4.
+
+Next, when the rig is free: 120 ms cushion (with `nice`) to get an
+underrun-free call 2; then compare HSF's upstream after Jd with what our client
+must send, and what releases the card's constant-level stage.
