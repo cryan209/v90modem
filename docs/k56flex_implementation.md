@@ -1967,3 +1967,10 @@ therefore cannot be seen from the card side with the tools on eicon420; the J/PP
 question remains answerable only from our own taps. (The calls from that attempt
 were also lost: a second launch of the hunt script deleted the first run's output
 directory.)
+
+hunt12 (14 PPP calls to 7910, base build, ME_JB_MS=200): 14/14 connected; 6 high
+and 8 low first-pass carrier (24000 on every high call, 21600 on every low call);
+one retrain (call 2, low, 42.8 s). Retrain totals by first-pass carrier across
+hunt7-12 are still skewed to low (low carrier ~10 of ~46 calls, high ~1 of ~37 in
+the base arms), but forcing high (hunt10) did not remove them, so the carrier is
+a marker, not the cause.
