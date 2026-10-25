@@ -1974,3 +1974,7 @@ one retrain (call 2, low, 42.8 s). Retrain totals by first-pass carrier across
 hunt7-12 are still skewed to low (low carrier ~10 of ~46 calls, high ~1 of ~37 in
 the base arms), but forcing high (hunt10) did not remove them, so the carrier is
 a marker, not the cause.
+
+V.92 mode (AT+MS V.92 offer) against 7900, alaw, default buffer, dead band:
+4/4 complete with 10/10 echoes exact (what the card actually negotiated was not
+checked; the call sends a V.92 offer and the card is a V.90-class answerer).
