@@ -1976,5 +1976,5 @@ the base arms), but forcing high (hunt10) did not remove them, so the carrier is
 a marker, not the cause.
 
 V.92 mode (AT+MS V.92 offer) against 7900, alaw, default buffer, dead band:
-4/4 complete with 10/10 echoes exact (what the card actually negotiated was not
-checked; the call sends a V.92 offer and the card is a V.90-class answerer).
+4/4 complete with 10/10 echoes exact (call 1's log: V.8 result mods=V90|V34, "V8 selected V90 analogue role", so
+the card answers a V.92 offer as V.90 and the call ran as V.90, not V.92).
