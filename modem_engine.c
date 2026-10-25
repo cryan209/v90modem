@@ -34,6 +34,7 @@
 #include "v8bis_modem.h"
 #include "k56flex_train.h"
 #include "k56flex_startup.h"
+#include "k56flex_client.h"
 #include "k56flex_upstream_pcm.h"
 #include "v91.h"
 #include "v90_cp_live.h"
@@ -4889,6 +4890,117 @@ static bool me_k56flex_enabled(void)
 }
 
 static int me_start_or_restart_v8_locked(int answer_tone);
+
+/* ME_K56FLEX_CLIENT_PROBE=<ms>: experiment for a calling V.34 modem whose INFO1c
+ * carries the K56flex enable flag (V34_INFO1C_FO=1: INFO1c bits 40:49, which a
+ * K56flex server reads as K56 flags, Draft 0.23 4.1).  The 7910 card answers that
+ * with K56flex PCM training instead of V.34 Phase 3.  Once our receiver enters
+ * Phase 3 we transmit silence (the native HSF client is silent there), suspend
+ * the 3.5 s Phase 3 retrain, run the client receive model for both server laws
+ * on the raw line, log what it acquires, and hang up after <ms>.  There is no
+ * client upstream yet: this only observes the server's training and its hold.
+ * See docs/k56flex_implementation.md, 2026-10-25. */
+static k56flex_client_t *g_k56c[2];          /* server law mu, A */
+static bool g_k56c_active, g_k56c_hangup;
+static uint64_t g_k56c_samples, g_k56c_rms_acc;
+static unsigned g_k56c_rms_n;
+static k56flex_train_phase_t g_k56c_phase[2];
+static int g_k56c_locked[2];
+
+static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", 0); }
+
+static void me_k56c_reset_locked(void)
+{
+    for (int i = 0;  i < 2;  i++) {
+        if (g_k56c[i])
+            k56flex_client_free(g_k56c[i]);
+        g_k56c[i] = NULL;
+        g_k56c_phase[i] = K56T_SIL0;
+        g_k56c_locked[i] = 0;
+    }
+    g_k56c_active = g_k56c_hangup = false;
+    g_k56c_samples = g_k56c_rms_acc = 0;
+    g_k56c_rms_n = 0;
+}
+
+static void me_k56c_start_locked(void)
+{
+    me_k56c_reset_locked();
+    for (int i = 0;  i < 2;  i++) {
+        k56flex_client_cfg_t cc;
+
+        memset(&cc, 0, sizeof(cc));
+        cc.law = i ? K56FLEX_LAW_A : K56FLEX_LAW_MU;
+        cc.report_word = 0x8880;             /* receiver-model assumption, not negotiated */
+        cc.gate_b_pairs = 2;
+        g_k56c[i] = k56flex_client_new(&cc);
+    }
+    g_k56c_active = true;
+    ME_LOG("[K56C] Phase 3 entered after a K56 INFO1c: transmitting silence, "
+           "client receiver armed for %d ms\n", me_k56c_hold_ms());
+    trace_phase("K56flex client probe: silent hold armed");
+}
+
+static void me_k56c_stop_locked(const char *why)
+{
+    for (int i = 0;  i < 2;  i++) {
+        k56flex_client_t *c = g_k56c[i];
+
+        if (!c)
+            continue;
+        ME_LOG("[K56C] %s-law model at end: locked=%d phase=%s P1/stage blocks %u "
+               "mismatched %u gain=%.4f snr=%.1f dB\n", i ? "A" : "mu",
+               c->fe_started, k56flex_train_phase_name(k56flex_client_phase(c)),
+               c->blocks_checked, c->blocks_mismatched,
+               c->fe ? k56flex_rxfe_gain(c->fe) : 0.0f,
+               c->fe ? k56flex_rxfe_snr_db(c->fe) : 0.0f);
+    }
+    ME_LOG("[K56C] hold ended after %llu ms: %s; hanging up\n",
+           (unsigned long long) (g_k56c_samples/8), why);
+    trace_phase("K56flex client probe ended: %s", why);
+    g_k56c_active = false;
+    g_k56c_hangup = true;
+}
+
+static void me_k56c_rx_locked(const int16_t *amp, int len)
+{
+    if (!g_k56c_active)
+        return;
+    for (int n = 0;  n < len;  n++) {
+        g_k56c_rms_acc += (uint64_t) ((int32_t) amp[n]*amp[n]);
+        if (++g_k56c_rms_n == 800) {
+            ME_LOG("[K56C] +%llu ms rx rms %.0f\n",
+                   (unsigned long long) (g_k56c_samples/8),
+                   sqrt((double) g_k56c_rms_acc/g_k56c_rms_n));
+            g_k56c_rms_acc = 0;
+            g_k56c_rms_n = 0;
+        }
+        for (int i = 0;  i < 2;  i++) {
+            k56flex_client_t *c = g_k56c[i];
+
+            if (!c  ||  c->failed)
+                continue;
+            k56flex_client_rx_linear(c, &amp[n], 1);
+            if (!g_k56c_locked[i]  &&  c->fe_started) {
+                g_k56c_locked[i] = 1;
+                ME_LOG("[K56C] +%llu ms %s-law model: P1 acquired, gain %.4f (%s polarity)\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
+                       k56flex_rxfe_gain(c->fe),
+                       k56flex_rxfe_gain(c->fe) < 0 ? "inverted" : "normal");
+            }
+            if (g_k56c_locked[i]  &&  k56flex_client_phase(c) != g_k56c_phase[i]) {
+                g_k56c_phase[i] = k56flex_client_phase(c);
+                ME_LOG("[K56C] +%llu ms %s-law model enters %s: blocks %u mismatched %u snr %.1f dB\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
+                       k56flex_train_phase_name(g_k56c_phase[i]),
+                       c->blocks_checked, c->blocks_mismatched, k56flex_rxfe_snr_db(c->fe));
+            }
+        }
+        g_k56c_samples++;
+    }
+    if (g_k56c_samples >= (uint64_t) me_k56c_hold_ms()*8)
+        me_k56c_stop_locked("hold window elapsed");
+}
 
 static void me_k56_start_locked(void)
 {
@@ -10525,6 +10637,7 @@ static void me_v90_prepare_info0a_preroll(void)
 static void start_v34_training(void)
 {
     g_v34_startup_restarts = 0;
+    me_k56c_reset_locked();
     /* Must be called with g_state_mtx held */
     /* The V.90 call site sets g_mod before calling in, and this function
      * overwrites it a line below (the caller puts it back).  Read it first:
@@ -14514,6 +14627,13 @@ skip_8k_codewords:
             if (extended > training_limit)
                 training_limit = extended;
         }
+        if (g_k56c_hangup) {
+            pthread_mutex_lock(&g_state_mtx);
+            me_k56c_reset_locked();
+            pthread_mutex_unlock(&g_state_mtx);
+            me_hangup();
+            return;
+        }
         if (state == ME_TRAINING && elapsed > training_limit) {
             ME_LOG("[ME] Training timed out after %llu ms (mod=%s)\n",
                     (unsigned long long)elapsed, me_mod_to_str(g_mod));
@@ -14908,6 +15028,7 @@ skip_8k_codewords:
                             && lec_msg[0])
                             ME_LOG("[ME] V.90 %s\n", lec_msg);
                     }
+                    me_k56c_rx_locked(amp, len);
                     ME_CB_PROF(1, v34_rx(g_v34, filtered, len));
                     me_v90_report_deferred_connect();
                     me_rx_accounting_check();
@@ -15307,7 +15428,15 @@ skip_8k_codewords:
                      * fail whatever its INFO1a says).  Retrain at 3500 ms instead,
                      * which is 2800 ms plus the round trip of the lab path.
                      * ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 restores the wait. */
-                    if (g_mod == ME_MOD_V34  &&  g_calling_party
+                    if (me_k56c_hold_ms() > 0  &&  g_mod == ME_MOD_V34  &&  g_calling_party
+                        &&  !g_k56c_hangup) {
+                        if (!g_k56c_active  &&  rx_stage == V34_RX_STAGE_PHASE3_TRAINING)
+                            me_k56c_start_locked();
+                        else if (g_k56c_active  &&  rx_stage != V34_RX_STAGE_PHASE3_TRAINING
+                                 &&  rx_stage != V34_RX_STAGE_PHASE3_WAIT_S)
+                            me_k56c_stop_locked("V.34 receiver left Phase 3 (peer retrain?)");
+                    }
+                    if (g_mod == ME_MOD_V34  &&  g_calling_party  &&  !g_k56c_active
                         &&  rx_stage == V34_RX_STAGE_PHASE3_TRAINING) {
                         int limit = parse_env_int("ME_V34_PHASE3_TRAIN_TIMEOUT_MS", 3500);
 
@@ -17703,6 +17832,9 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                 } else {
                     v34_tx(g_v34, amp, len);
                 }
+                /* K56flex client probe: the client is silent while the server trains */
+                if (g_k56c_active)
+                    memset(amp, 0, len*sizeof(amp[0]));
             }
             pthread_mutex_unlock(&g_state_mtx);
             /* TX PCM dump + RMS diagnostic during training */
