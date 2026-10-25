@@ -70,6 +70,9 @@
 #include <string.h>
 #include <pthread.h>
 #include <math.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -5894,6 +5897,7 @@ static void v92_su_rx_reset_locked(void);
 static void me_v92a_progress_locked(void);
 static void me_v92a_tx_locked(int16_t *samples, int count);
 void me_hangup(void);
+static void me_relay_reset(void);
 
 /* Format constellation `c`'s transmitter Ucodes (descending, §5.4.4) into buf,
  * for interop diagnostics -- e.g. to check a recovered CPt against the
@@ -13146,6 +13150,7 @@ void me_on_sip_disconnected(void)
 
 void me_on_sip_disconnected_status(int sip_status)
 {
+    me_relay_reset();
     pthread_mutex_lock(&g_state_mtx);
 
     if (g_k56) { k56flex_v8bis_free(g_k56); g_k56 = NULL; }
@@ -20176,12 +20181,156 @@ static uint64_t me_mono_ns(void)
     return (uint64_t) ts.tv_sec*1000000000ULL + (uint64_t) ts.tv_nsec;
 }
 
+/* ME_AUDIO_RELAY=<unix socket path>: an interop bridge, not a modem mode.  For
+ * the whole call the engine's own DSP is bypassed and the call's G.711 is
+ * exchanged byte-exact with a peer listening on the socket: every received
+ * frame is written to it, and what it writes back is transmitted.  RTP stays
+ * the clock; the peer must answer each n codewords with n (the audio_sock_modem
+ * contract).  The transmit queue starts with ME_AUDIO_RELAY_CUSHION_MS (60) of
+ * silence, a fixed extra delay that absorbs a late reply; one that is later
+ * still is replaced by silence and counted, because a missing sample is a slip
+ * for the far end.  Used to put a
+ * reference peer (tools/k56flex_hsf_sip.py: the native HSF K56flex client) on a
+ * real SIP call.  Nothing is transcoded. */
+static int g_relay_fd = -1;
+static bool g_relay_failed;
+static pthread_mutex_t g_relay_mtx = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t g_relay_q[8000];
+static unsigned g_relay_head, g_relay_len;
+static uint64_t g_relay_rx, g_relay_tx, g_relay_replied, g_relay_underruns;
+
+static bool me_relay_wanted(void)
+{
+    const char *p = getenv("ME_AUDIO_RELAY");
+
+    return p  &&  *p;
+}
+
+static void me_relay_close_locked(const char *why)
+{
+    if (g_relay_fd >= 0) {
+        ME_LOG("[RELAY] closed (%s): %llu codewords in, %llu replied, %llu sent, "
+               "%llu underrun\n", why,
+               (unsigned long long) g_relay_rx, (unsigned long long) g_relay_replied,
+               (unsigned long long) g_relay_tx, (unsigned long long) g_relay_underruns);
+        close(g_relay_fd);
+    }
+    g_relay_fd = -1;
+    g_relay_head = g_relay_len = 0;
+    g_relay_rx = g_relay_tx = g_relay_replied = g_relay_underruns = 0;
+}
+
+static void me_relay_reset(void)
+{
+    pthread_mutex_lock(&g_relay_mtx);
+    me_relay_close_locked("call ended");
+    g_relay_failed = false;
+    pthread_mutex_unlock(&g_relay_mtx);
+}
+
+/* Returns false when the peer has gone and the call should end. */
+static bool me_relay_rx(const uint8_t *codewords, int count)
+{
+    bool alive = true;
+
+    pthread_mutex_lock(&g_relay_mtx);
+    if (g_relay_fd < 0  &&  !g_relay_failed) {
+        struct sockaddr_un a;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+        memset(&a, 0, sizeof(a));
+        a.sun_family = AF_UNIX;
+        snprintf(a.sun_path, sizeof(a.sun_path), "%s", getenv("ME_AUDIO_RELAY"));
+        if (fd < 0  ||  connect(fd, (struct sockaddr *) &a, sizeof(a)) < 0) {
+            ME_LOG("[RELAY] cannot connect to %s: %s\n", a.sun_path, strerror(errno));
+            if (fd >= 0)
+                close(fd);
+            g_relay_failed = true;
+        } else {
+            unsigned cushion = (unsigned) parse_env_int("ME_AUDIO_RELAY_CUSHION_MS", 60)*8;
+
+            if (cushion > sizeof(g_relay_q)/2)
+                cushion = sizeof(g_relay_q)/2;
+            g_relay_fd = fd;
+            g_relay_head = 0;
+            g_relay_len = cushion;
+            memset(g_relay_q, g_law == ME_LAW_ALAW ? 0xD5 : 0xFF, cushion);
+            g_relay_tx = 0;
+            ME_LOG("[RELAY] connected to %s: engine DSP bypassed for this call, "
+                   "%u ms cushion\n", a.sun_path, cushion/8);
+        }
+    }
+    if (g_relay_fd >= 0  &&  codewords  &&  count > 0) {
+        size_t off = 0;
+        /* the cushion is transmitted, not a reply: count replies only */
+        uint64_t want = g_relay_rx + (uint64_t) count;
+
+        while (off < (size_t) count) {
+            ssize_t w = write(g_relay_fd, codewords + off, (size_t) count - off);
+
+            if (w <= 0) {
+                alive = false;
+                break;
+            }
+            off += (size_t) w;
+        }
+        g_relay_rx += (uint64_t) count;
+        /* Collect what the peer has replied so far, waiting at most 2 ms for
+           this frame's reply; the cushion covers the rest. */
+        while (alive  &&  g_relay_replied < want) {
+            struct pollfd pf = { g_relay_fd, POLLIN, 0 };
+            uint8_t buf[512];
+            ssize_t r;
+
+            if (poll(&pf, 1, 2) <= 0)
+                break;
+            r = read(g_relay_fd, buf, sizeof(buf));
+            if (r <= 0) {
+                alive = false;
+                break;
+            }
+            g_relay_replied += (uint64_t) r;
+            for (ssize_t i = 0;  i < r  &&  g_relay_len < sizeof(g_relay_q);  i++)
+                g_relay_q[(g_relay_head + g_relay_len++) % sizeof(g_relay_q)] = buf[i];
+        }
+        if (!alive)
+            me_relay_close_locked("peer closed");
+    }
+    pthread_mutex_unlock(&g_relay_mtx);
+    return alive;
+}
+
+static void me_relay_tx(uint8_t *codewords, int count)
+{
+    uint8_t silence = g_law == ME_LAW_ALAW ? 0xD5 : 0xFF;
+
+    pthread_mutex_lock(&g_relay_mtx);
+    for (int i = 0;  i < count;  i++) {
+        if (g_relay_len) {
+            codewords[i] = g_relay_q[g_relay_head];
+            g_relay_head = (g_relay_head + 1) % sizeof(g_relay_q);
+            g_relay_len--;
+            g_relay_tx++;
+        } else {
+            codewords[i] = silence;
+            if (g_relay_fd >= 0  &&  g_relay_underruns++ < 4)
+                ME_LOG("[RELAY] underrun at codeword %llu\n", (unsigned long long) g_relay_tx);
+        }
+    }
+    pthread_mutex_unlock(&g_relay_mtx);
+}
+
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
     memset(g_cb_prof_ns, 0, sizeof g_cb_prof_ns);
     if (codewords && count > 0)
         lm_feed_g711(LM_RX, codewords, count, g_law == ME_LAW_ALAW);
+    if (me_relay_wanted()) {
+        if (!me_relay_rx(codewords, count))
+            me_hangup();
+        return;
+    }
     me_rx_g711_impl(codewords, count);
     me_media_timing_note("rx", me_mono_ns() - t0);
     if (count > 0)
@@ -20193,6 +20342,11 @@ int me_tx_g711(uint8_t *codewords, int count)
     uint64_t t0 = me_mono_ns();
     int n;
 
+    if (me_relay_wanted()  &&  codewords  &&  count > 0) {
+        me_relay_tx(codewords, count);
+        lm_feed_g711(LM_TX, codewords, count, g_law == ME_LAW_ALAW);
+        return count;
+    }
     g_tx_from_g711 = true;
     n = me_tx_g711_impl(codewords, count);
     g_tx_from_g711 = false;
