@@ -14118,7 +14118,7 @@ search:
             bool built = v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, initial);
             b1_template_skip_cma = false;
             if (!built) return;
-            match = v90_t3_acquire_pass(s, lo, hi, coeff, &first, &conjugate, &coarse);
+            match = v90_t3_acquire_pass(s, lo, hi, coeff, &first, &conjugate, &coarse, 0.0f);
             V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 state refinement: state=%d tap=%d trellis=%d fit=%.1f%%\n",
                      initial, mp_tap, mp_trellis, 100.0f*match);
@@ -14239,7 +14239,7 @@ search:
            matrix calls: one "acquisition failed" and then 115 s of silence.
            It is the same situation the out-of-sample rejection below handles
            by sliding the window forward, so handle it the same way. */
-        v90_t3_acq_retry_or_abandon(s, "in-sample fit");
+        v90_t3_acq_retry_or_abandon(s, "in-sample fit", search_start, search_end);
         return;
     }
     /* Validate the winner OUT OF SAMPLE before committing to it.  The fit is
@@ -14437,7 +14437,7 @@ search:
                    on identical samples every symbol, which is tens of
                    millions of complex MACs per symbol in the media thread,
                    and the far end hears the stall as a discontinuity. */
-                v90_t3_acq_retry_or_abandon(s, "out-of-sample distance");
+                v90_t3_acq_retry_or_abandon(s, "out-of-sample distance", 0, -1);
                 return;
             }
             /*endif*/
