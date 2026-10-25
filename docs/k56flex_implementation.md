@@ -2026,3 +2026,13 @@ byte-identical (`V34_INFO0_DBG=1` prints the received frame, 2 calls each, all
 carries no K56flex indication that we can see; whatever makes the card a K56flex
 server is not in that frame. Remaining candidates: INFO1a, or a K56-specific
 Phase 2 that the card only starts on a signal we have not sent.
+
+INFO1a from the card (`V34_INFO0_DBG=1` also prints it as `[INFO1ARX]`), 3 K56 and
+3 plain V.34 calls: the common frame is `2f e0 34 09 a0 b2 66` (K56 calls 1, 2, 3,
+and plain 1, 3); the other frames (`02 20 34 09 a0 8e fa`, `2f 20 36 09 20 db 4f`)
+appear once each, one K56 and one plain, and track our INFO1c request (they differ
+in the carrier/pre-emphasis fields), not our K56 offer. So neither INFO0a nor INFO1a
+differs with the V.8bis K56flex exchange: the card signals nothing K56flex-specific
+in V.34 Phase 2 as a result of our offer. If it will do K56flex at all it needs
+something we have not sent (a different CL/MS content, a K56 CM, or the
+analogue-side start signal); the INFO frames give no lead.

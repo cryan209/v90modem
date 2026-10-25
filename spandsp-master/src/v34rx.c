@@ -4610,6 +4610,10 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
 
     bitstream_init(&bs, true);
     t = buf;
+    if (getenv("V34_INFO0_DBG"))
+        fprintf(stderr, "[INFO1ARX] calling=%d v90=%d raw=%02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                s->calling_party, s->v90_mode,
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8]);
 
     if (s->v90_mode)
     {
