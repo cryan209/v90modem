@@ -2125,3 +2125,50 @@ So the client path is not blocked on evidence. What it needs, in order:
 3. The client's upstream reply after the hold, as the HSF client sends from
    16.5 s in `artifacts/k56flex-hsf-staged-8k-20261021/client-tx.g711`; we have
    no client transmitter for it yet.
+
+### Live: a silent K56flex client holds the 7910 through P1, P3 and gate A (2026-10-25)
+
+`ME_K56FLEX_CLIENT_PROBE=<ms>` (4fd1277b, off by default): on a calling V.34
+call, once our receiver enters Phase 3 the engine transmits silence, skips the
+3.5 s Phase 3 retrain, runs the client model for both server laws on the raw
+line and hangs up when the window ends or the V.34 receiver leaves Phase 3.
+INFO1c's K56 flag comes from `V34_INFO1C_FO=1`. One call from CT 117
+(`/root/k56probe`, recipe in the evidence's `RUN.txt`):
+
+    V34_INFO1C_FO=1 ME_K56FLEX_CLIENT_PROBE=20000 ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 \
+    V34_INFO1C_DBG=1 V34_INFO0_DBG=1 ME_JB_MS=40 \
+    python3 tools/eicon_ppp_direct.py OUT --law ulaw --mode v34 --local-port 5079 --rtp-port 14610 --pings 3
+
+- **INFO1a answers the flag.** With our INFO1c bits 40:49 = 1 the card's INFO1a
+  carries `0x005` there (`2f 60 36 59 c0 95 c6`): bit 0 K56 enabled, bit 2
+  A-law, as legacy HSF `1201efa0` reads them. Without the flag it is `0x200`.
+  So the card itself declares the A-law server the transcode analysis found.
+- **P1 acquired live**: both models lock 142 ms into Phase 3 at inverted
+  polarity (gain -1.041 mu, -1.0065 A) and check all 2728 P1 blocks with 0
+  mismatches at 53.9 dB. The tap matches our A-law P1 (A->mu, inverted)
+  16368/16368 again. Our transmit tap is exactly zero from Phase 3 on.
+- **The card's timeline, now complete to its timeout** (tap time): P1
+  12.489-14.535 s; 19 transition samples; then the biphase two-level stage,
+  whose descrambled source (complemented for the polarity) is FFFF for 8169
+  bits = 2.048 s (our P3, 1366 pairs) and then the word **`8990`** repeated
+  from 16.585 s: the same four-point Jd word our server appends at GATE_A
+  (`K56T_GATE_A`, `training_word`). So the card runs our sequence
+  P1 -> P3 -> GATE_A and **omits P2**. It holds gate A for 10.87 s waiting
+  for the client and then sends its retrain tone (27.455 s); our receiver
+  answers it (11.5), the probe logs its state and hangs up.
+- Past P1 the client model follows our P2 and fails, as expected: it needs a
+  timeline without P2 for this server, and the inverted complement in its
+  descrambled bits.
+
+What the client still needs to go further: skip P2 for this server (or
+detect it), recognise gate A's Jd word, and then the client's upstream reply
+within ~10.9 s of gate A (the native HSF client starts its upstream 0.25 s
+after our server's GATE_A). No upstream is transmitted yet.
+Evidence: `reference-data/artifacts/k56flex-7910-client-probe-20261025/`
+(local, indexed).
+
+Build note: HEAD has not built from a clean tree since c9b9a3af (V.90 T/3
+early windows): it changed `v90_t3_acquire_pass` and
+`v90_t3_acq_retry_or_abandon` but three call sites in `v34rx.c` keep the old
+argument lists. Trees with the uncommitted `v34rx.c` work in them build; the
+CT 117 tree above carries only those three call-site fixes.
