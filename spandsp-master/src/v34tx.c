@@ -1535,6 +1535,10 @@ static void prepare_info1c(v34_state_t *s)
                                   configured_max)
             : 0;
         s->tx.info1c.rate_data[i].use_high_carrier = measured_carrier != 0;
+        if (getenv("V34_INFO1C_FORCE_HIGH")
+            &&  s->tx.info1c.rate_data[i].max_bit_rate > 0
+            &&  v34_capabilities.support_baud_rate_high_carrier[i])
+            s->tx.info1c.rate_data[i].use_high_carrier = true;
         s->tx.info1c.rate_data[i].pre_emphasis = measured_pre_emphasis;
         /* V.90 §8.2.3.2 Tables 9/10: INFO1a selects a row but does not
            repeat that row's carrier bit.  Retain exactly what this digital

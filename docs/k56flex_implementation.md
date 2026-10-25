@@ -1921,3 +1921,18 @@ negotiated card-to-us carrier (3200 low, 1828.6 Hz). The lightweight scan cannot
 settle whether a J is on the wire. A decision needs the real receiver at the
 negotiated carrier on those windows (v34 receiver with the negotiated Phase 3
 parameters), not this scan.
+
+7910 carrier lead (hunt7-9, 69 calls): the card-to-us carrier our first pass
+negotiated for 3200 baud was high in 31 calls (0 retrains) and low in 38 (9
+retrains, 24%). It is our own INFO1c request (L1/L2 probe result per baud, so it
+varies call to call), and the card's Phase 3 signal centres near 1908 Hz, closer
+to the high carrier (1920 Hz) than the low (1828.6 Hz).
+
+A/B `V34_INFO1C_FORCE_HIGH=1` (INFO1c asks for the high carrier wherever the
+rate is offered and high is supported), hunt10 interleaved, first 34 of 40
+calls: base 17 calls / 0 FAIL / 2 retrains (7 of the 17 negotiated low; 2 of
+those retrained; the low calls ran at 21600), forced-high 17 calls / 0 FAIL /
+1 retrain (call 30, so high is not immune), every call high and 24000. The
+stall rate difference (2/17 vs 1/17) is not significant; the clear effect is
+rate: forcing high removes the 21600 low-carrier calls. Env knob only, default
+unchanged.
