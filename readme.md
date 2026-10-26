@@ -13,7 +13,9 @@ not a fully qualified replacement for every hardware modem. Completion varies
 by role and peer; a loopback pass or CONNECT message alone does not establish
 hardware compatibility. The strongest sustained hardware evidence currently
 comes from **our analogue V.90 caller against an Eicon Diva digital answerer**.
-The [documentation index](docs/README.md) lists every topic note.
+The [documentation index](docs/README.md) lists every topic note, the
+[AT command reference](docs/at_commands.md) every command and S-register, and
+[tools/README.md](tools/README.md) every analysis tool and make target.
 
 | Area | Implemented and demonstrated | Qualification still needed |
 |---|---|---|
