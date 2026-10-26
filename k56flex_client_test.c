@@ -87,6 +87,52 @@ done:
     k56flex_channel_free(channel);
 }
 
+/* The 7910 (Lucent) on our PCMU leg: its PT_C leaves our generator, so the
+ * client loses the parameter record and must find priming by content
+ * (k56flex_client.c blind_symbol).  Fixture cut from a live call with our
+ * report 00/89b0: A-law mapper at 52000 through the A->mu transcode, priming
+ * at 13.72 s, then V.42 ODP and HDLC flags. */
+static uint8_t blind_bits[65536];
+static unsigned blind_nbits;
+
+static void blind_data(void *user, const uint8_t *bits, unsigned n)
+{
+    (void)user;
+    for (unsigned i = 0; i < n && blind_nbits < sizeof(blind_bits); i++) blind_bits[blind_nbits++] = bits[i];
+}
+
+static void blind_7910(const char *path)
+{
+    k56flex_client_cfg_t cc = {0};
+    k56flex_client_t *c;
+    FILE *f = fopen(path, "rb");
+    unsigned flags = 0, i, shift = 0;
+    int b;
+    CHECK(f != NULL, "open %s", path);
+    if (!f) return;
+    cc.law = K56FLEX_LAW_A;
+    cc.report_word = 0x89b0;
+    cc.gate_b_pairs = 2;
+    cc.codec_identity = 1;
+    cc.ctl.data = blind_data;
+    c = k56flex_client_new(&cc);
+    while ((b = fgetc(f)) != EOF && !c->failed) {
+        int16_t x = (int16_t)k56flex_level_from_g711(K56FLEX_LAW_MU, (uint8_t)b);
+        k56flex_client_rx_linear(c, &x, 1);
+    }
+    fclose(f);
+    for (i = 0; i < blind_nbits; i++) {
+        shift = ((shift << 1) | blind_bits[i]) & 0xff;
+        if (i >= 7 && shift == 0x7e) ++flags;
+    }
+    CHECK(c->blind == 3 && c->rate_bps == 52000, "7910 priming by content: blind %d rate %d", c->blind, c->rate_bps);
+    CHECK(c->data_frames >= 770 && !c->failed, "7910 data frames %u failed %d", c->data_frames, c->failed);
+    CHECK(flags >= 200, "7910 data carries HDLC flags: %u", flags);
+    printf("7910 capture: blind priming at %d bps, %u data frames, %u flags, %u derived signs off our DC\n",
+           c->rate_bps, c->data_frames, flags, c->rx.derived_sign_misses);
+    k56flex_client_free(c);
+}
+
 int main(void)
 {
     for (int law = 0; law < 2; law++)
@@ -94,6 +140,7 @@ int main(void)
             prefix((k56flex_law_t)law, 32000, linear);
             prefix((k56flex_law_t)law, 56000, linear);
         }
-    printf("k56flex_client_test: %d failures (prefix/gate checks only)\n", failures);
+    blind_7910("reference-data/k56flex-7910/blind-data-ulaw.g711");
+    printf("k56flex_client_test: %d failures\n", failures);
     return failures != 0;
 }

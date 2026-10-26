@@ -4859,6 +4859,8 @@ static k56flex_upstream_pcm_t *g_k56_upstream = NULL;
 static int g_k56_baud_code, g_k56_high_carrier, g_k56_upstream_bps;
 static bool g_k56_b1_started;
 static bool g_k56_negotiated = false;
+/* This call's V.8bis offered K56flex as the client (ME_K56FLEX_ROLE=client). */
+static bool g_k56_client_role = false;
 static k56flex_train_phase_t g_k56_last_phase = K56T_FAILED;
 
 /* ME_K56FLEX, when set, wins (0 forces it off, probe adds the training
@@ -5160,6 +5162,9 @@ static void me_k56c_start_locked(void)
         cc.report_ext = g_k56c_up_on ? g_k56c_up.cfg.ext : 0;
         cc.report_word = g_k56c_up_on ? g_k56c_up.cfg.report : 0x8880;
         cc.gate_b_pairs = 2;
+        /* The SIP leg's G.711 is the server's own: its samples are the
+           server's levels, with no codec clock or filter to undo. */
+        cc.codec_identity = 1;
         cc.ctl.data = me_k56c_data_bits;
         cc.ctl.user = (void *) (intptr_t) i;
         g_k56c[i] = k56flex_client_new(&cc);
@@ -5381,6 +5386,7 @@ static void me_k56_start_locked(void)
     {
         const char *role = getenv("ME_K56FLEX_ROLE"), *blind = getenv("ME_K56FLEX_BLIND");
         cfg.client_model = role && strcmp(role, "client") == 0;     /* send the client octet */
+        g_k56_client_role = cfg.client_model;
         cfg.blind = blind && *blind && *blind != '0';
     }
     if (g_k56)
@@ -5865,6 +5871,14 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         v250_ctl_ec_policy(&cfg, g_calling_party, &pol);
         if (cfg.es_set && !pol.attempt)
             v8_parms.jm_cm.protocols = V8_PROTOCOL_NONE;
+    }
+    if (g_k56_client_role) {
+        /* A K56flex client's CM carries no protocols octet, as native HSF's
+           does not: with V8_PROTOCOL_LAPM_V42 in it the 7910 reached
+           priming on 0 of 4 calls, without it on 7 of 14 (weak evidence;
+           docs/k56flex_implementation.md, 27 October).  +ES still decides
+           the data framing, so V.42 runs in data mode either way. */
+        v8_parms.jm_cm.protocols = V8_PROTOCOL_NONE;
     }
     if (g_advertise_v90 && me_v90_analogue_role()) {
         /*
@@ -13523,6 +13537,7 @@ void me_on_sip_disconnected_status(int sip_status)
     k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
     k56flex_upstream_pcm_free(g_k56_upstream); g_k56_upstream = NULL;
     g_k56_negotiated = false;
+    g_k56_client_role = false;
     g_k56_last_phase = K56T_FAILED;
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     g_v8bis_handoff = false;

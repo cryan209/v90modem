@@ -60,5 +60,10 @@ unsigned k56flex_probe_block_src(k56flex_probe_t *p, uint32_t src, int16_t out[K
  * how many source values reproduce `samples` (1 = unambiguous), *src the first. */
 unsigned k56flex_probe_invert(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
                               uint32_t *src);
+/* The same, but the DC-flipped samples (cfg[10] bits 1 and 3: every second
+ * one) are matched by magnitude only: their sign carries no source bits and
+ * follows the server's running DC, which a receiver need not share. */
+unsigned k56flex_probe_invert_magnitude(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
+                                        uint32_t *src);
 
 #endif

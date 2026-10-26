@@ -396,7 +396,10 @@ int k56flex_pcm_rx_frame(k56flex_pcm_rx_t *rx, const uint8_t octets[K56FLEX_FRAM
         extra[i] = (uint8_t)(idx & wmask);
         if (extra[i] & stolen[i]) return -1;       /* forced-even index */
         neg[i] = v < 0;
-        if (!sign[i] && neg[i] != (dc >= 0)) return -1;
+        if (!sign[i] && neg[i] != (dc >= 0)) {
+            if (!rx->ignore_derived_sign) return -1;
+            ++rx->derived_sign_misses;
+        }
         dc += v;
     }
     rank = t->cum[0];

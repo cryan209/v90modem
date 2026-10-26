@@ -1,6 +1,7 @@
 #include "k56flex_probe.h"
 #include "k56flex_probe_tables.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 int k56flex_probe_init(k56flex_probe_t *p, k56flex_probe_stage_t stage, k56flex_law_t law,
@@ -155,6 +156,26 @@ unsigned k56flex_probe_block(k56flex_probe_t *p, int16_t out[K56FLEX_PROBE_MAX_S
 {
     unsigned nbits = p->cfg[3];
     return k56flex_probe_block_src(p, fetch_bits(p, nbits > 32 ? 32 : nbits), out);
+}
+
+unsigned k56flex_probe_invert_magnitude(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
+                                        uint32_t *src)
+{
+    unsigned nbits = p->cfg[3] > 20 ? 20 : p->cfg[3], matches = 0;
+    int flips = (p->cfg[10] & 2) && (p->cfg[10] & 8);
+    uint32_t cand, first = 0;
+    for (cand = 0; cand < (1u << nbits); ++cand) {
+        k56flex_probe_t t = *p;
+        int16_t out[K56FLEX_PROBE_MAX_SAMPLES];
+        unsigned n = k56flex_probe_block_src(&t, cand, out), i, ok = 1;
+        for (i = 0; i < n && ok; ++i) {
+            if (flips && (i & 1)) ok = abs(out[i]) == abs(samples[i]);
+            else ok = out[i] == samples[i];
+        }
+        if (ok) { if (!matches++) first = cand; }
+    }
+    if (src) *src = first;
+    return matches;
 }
 
 unsigned k56flex_probe_invert(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],

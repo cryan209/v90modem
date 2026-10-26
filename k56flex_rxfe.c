@@ -19,6 +19,7 @@ typedef enum { FE_ENERGY, FE_CORR, FE_RUN } fe_state_t;
 
 struct k56flex_rxfe {
     k56flex_law_t law;
+    int identity;                 /* digital codec path: no clock correction, no equalizer */
     k56flex_rxfe_sink_fn sink;
     void *user;
     fe_state_t state;
@@ -240,14 +241,21 @@ static void run_symbols(k56flex_rxfe_t *fe)
             }
         }
         ++fe->nout;
+        if (fe->identity) {
+            /* The codec is the network's own G.711 (a softmodem on a SIP
+               leg): the samples are the server's levels already. */
+            y = fe->xr[(unsigned)((fe->m - 1 + XR * 4 - LOOK) % XR)];
+            fe->baseline = 0;
+        }
         emit_symbol(fe, (float)(y + fe->baseline));
     }
 }
 
 void k56flex_rxfe_push(k56flex_rxfe_t *fe, int16_t sample)
 {
-    /* Learn the codec offset from the initial quiet floor, before identification. */
-    if (fe->nin < 160) {
+    /* Learn the codec offset from the initial quiet floor, before identification
+       (an analogue codec's; a digital leg's samples are the server's levels). */
+    if (fe->nin < 160 && !fe->identity) {
         fe->dc_sum += sample;
         if (fe->nin == 159) fe->input_dc = fe->dc_sum / 160.0;
     }
@@ -368,7 +376,8 @@ static void timing_block(k56flex_rxfe_t *fe, uint64_t first)
             unsigned i;
             for (i = 0; i < fe->nehist; ++i) mean += fe->ehist[i];
             mean /= fe->nehist;
-            fe->ppm += TIMING_GAIN * 1e6 * mean / TBLK;       /* pulse later each block: step faster */
+            if (!fe->identity)
+                fe->ppm += TIMING_GAIN * 1e6 * mean / TBLK;   /* pulse later each block: step faster */
             if (fe->ppm > 500) fe->ppm = 500;
             if (fe->ppm < -500) fe->ppm = -500;
             fe->nehist = 0;
@@ -469,3 +478,5 @@ void k56flex_rxfe_block(k56flex_rxfe_t *fe, uint64_t first_symbol, const int16_t
      * ycap includes the correction already applied, so this is incremental. */
     if (known == 0) fe->baseline += residual / n;
 }
+
+void k56flex_rxfe_set_codec_identity(k56flex_rxfe_t *fe, int on) { fe->identity = on != 0; }

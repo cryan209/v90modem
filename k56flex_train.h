@@ -69,6 +69,7 @@ typedef struct {
     int16_t buf[8];
     unsigned buf_len, buf_pos;
     unsigned prime_word_idx;
+    int hold_pt_b;               /* receiver mirror only: stay in PT_B until released */
 } k56flex_train_t;
 
 int k56flex_train_init(k56flex_train_t *t, const k56flex_train_cfg_t *cfg);

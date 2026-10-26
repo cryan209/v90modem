@@ -208,7 +208,11 @@ static void pair_done(k56flex_train_t *t)
     case K56T_ID2_A: if (!t->pairs_left) enter(t, K56T_ID2_B); break;
     case K56T_ID2_B: if (!t->pairs_left) enter(t, K56T_PT_A); break;
     case K56T_PT_A:  if (!t->pairs_left) enter(t, K56T_PT_B); break;
-    case K56T_PT_B:  if (!t->pairs_left) enter(t, K56T_PT_C); break;
+    case K56T_PT_B:
+        /* A receiver mirroring a server whose PT_B is longer holds it here
+           until the signal shows PT_C (k56flex_client.c). */
+        if (!t->pairs_left) { if (t->hold_pt_b) t->pairs_left = 1; else enter(t, K56T_PT_C); }
+        break;
     case K56T_PT_C:  if (!t->pairs_left) enter(t, K56T_GATE_C); break;
     case K56T_GATE_C:
         ++t->gate_pairs;

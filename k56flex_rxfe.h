@@ -29,6 +29,10 @@ typedef struct k56flex_rxfe k56flex_rxfe_t;
 
 k56flex_rxfe_t *k56flex_rxfe_new(k56flex_law_t law, k56flex_rxfe_sink_fn sink, void *user);
 void k56flex_rxfe_free(k56flex_rxfe_t *fe);
+/* The client's codec is the network's (G.711 octets on a SIP leg): keep the
+ * acquired timing and pass samples through unequalized (MicaEmu's
+ * "codec-identity" receiver, which its MICA connection used). */
+void k56flex_rxfe_set_codec_identity(k56flex_rxfe_t *fe, int on);
 /* One linear input sample; symbols are delivered through the sink as they become available
  * (none until acquisition, several at once when it completes). */
 void k56flex_rxfe_push(k56flex_rxfe_t *fe, int16_t sample);

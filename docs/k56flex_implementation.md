@@ -2786,8 +2786,8 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | Phase 2 | works with HSF's CM (no protocols octet) and INFO0c (bits 21:23 = 0) and INFO1c's K56 flag (`fo=1`); none is a default. |
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
-| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
-| parameter record, priming, data | not reached on the 7910. Against the MICA firmware the client receiver decodes them and the call connects (above). |
+| gate C | **passed on about half the calls** with MP repeated 400 times before MP' (27 October, below). Before that: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
+| parameter record, priming, data | record: not decoded (our PT_C generator leaves the card's). Priming and data: **decoded** by content (blind priming, below), error-free on a PCMA leg. |
 | E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware. |
 
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
@@ -2811,3 +2811,54 @@ sixteen-point), MP repeats (to 40+8), MP downstream rate.
 The decisive evidence would be a capture of any K56flex client getting past gate
 C against this card (a hardware K56flex modem on an analogue line to 7910, if one
 of the rig modems has K56flex firmware); native HSF never gets past gate B here.
+
+### The 7910 reaches data on our side; its upstream receiver never locks (27 October)
+
+Recipe as above plus `ME_K56FLEX_CLIENT_DATA=1 ME_K56FLEX_CLIENT_MP_REPEATS=400
+ME_K56FLEX_CLIENT_MP_ACK_REPEATS=8`, `eicon_ppp_direct.py --law alaw --ext 7910`.
+Runs: `artifacts/k56flex-7910-{blind,lapm,lapm2,alaw}-20261027/` (local).
+
+**Blind priming.** Our PT_C generator leaves the card's after a block or two
+(matching the DC-flipped samples by magnitude, `k56flex_probe_invert_magnitude`,
+rescues one more block, no more; the report word does not change it), so the
+parameter record cannot be read. The data path does not need it:
+`k56flex_client.c` (`blind_symbol`) slices the last 48 symbols to every rate's
+table and takes the first rate and frame phase whose six frames descramble to
+ones after the self-synchronising descrambler's 23 bits (Draft 0.23 4.12).
+Derived signs carry no bits and follow the server's running DC, which we
+cannot follow here (`k56flex_pcm_rx_t.ignore_derived_sign`; the best DC model,
+a running sum of levels plus a constant, fits only 94% of them). On every
+call that left gate C the card primes at **52000, A-law mapper**, and its data
+is ones for 0.6 s, then HDLC flags (`k56flex_client_test` on
+`reference-data/k56flex-7910/blind-data-ulaw.g711`).
+
+**Codec identity.** On a SIP leg the client's samples are the server's levels;
+the front end's acquired fractional phase was already integral, but it
+subtracted a "codec DC" learned from the first 160 samples. Off now when
+`codec_identity` is set, as the engine sets it.
+
+**Use a PCMA leg.** Over PCMU the gateway transcodes the card's A-law to mu by
+nearest level (not G.711's table: `alaw_to_ulaw` fails frame 27 of mp400-1),
+and A-law levels 4032/4224 (and others) share a mu codeword: 11% of 52000
+frames are ambiguous, which corrupted 11% of the flag words. On PCMA
+(`--law alaw --ext 7910`) the same decoder reads the flags with **0 errors**.
+
+**The V.8 CM protocols octet.** With `V8_PROTOCOL_LAPM_V42` in our CM (as
+`+ES=3` sends) the card reached priming on 0 of 4 calls; without it, on 7 of
+14. HSF's CM has no such octet, so the client role now omits it
+(`modem_engine.c`) and `+ES` alone picks the data framing. Weak evidence:
+priming is itself only about 50%.
+
+**What still fails: the card never hears our upstream data.** Every call that
+reaches data ends the same way: we enter DATA (CONNECT 52000 on our side with
+`+ES=1`), the card sends ones then flags (no ADP: our "V.42 detection
+succeeded" fired on its flags), never answers our LAPM frames (no frame with a
+good FCS downstream), and starts a V.34 retrain 4.7-5.7 s into data. The card's
+host never logs CONNECT (`journalctl -t pppd -t chat` on eicon420: nothing
+since 26 October). Not the cause, each tried live: upstream scrambler GPC (17)
+or GPA (4); E sent 120 ms before the card's priming or 250 ms after it
+(MP' x60); V.14 or V.42 framing. Most likely the card's parameter record
+asks our upstream for something we cannot read while PT_C is undecoded
+(precoding coefficients, trellis or rate, as a V.34 MP would), so decoding
+the 7910's PT_C is the next step; alternatively its MP acceptance (and so
+gate C) is marginal for the same reason.

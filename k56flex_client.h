@@ -19,6 +19,8 @@
 #include "k56flex_rxfe.h"
 #include "k56flex_train.h"
 
+#define K56FLEX_BLIND_RATES 15     /* 32000..60000 in 2000 steps */
+
 typedef struct {
     void (*data)(void *user, const uint8_t *bits, unsigned n);  /* descrambled data bits */
     void *user;
@@ -30,6 +32,7 @@ typedef struct {
     uint16_t report_word;        /* must satisfy k56flex_report_header_ok; bit 4 = pacing */
     unsigned gate_b_pairs;       /* silence pairs observed before signalling bit 10 */
     k56flex_client_ctl_t ctl;
+    int codec_identity;          /* linear path from G.711 octets: see k56flex_rxfe_set_codec_identity */
 } k56flex_client_cfg_t;
 
 typedef struct {
@@ -61,9 +64,23 @@ typedef struct {
     int seek, in_frames;
     int first_bad;               /* phase*100000 + pairs at the first mirror mismatch */
     int input_silent;            /* linear path: the last received sample was codec silence */
+    int input_static;            /* linear path: the last received sample repeated the one before */
+    int16_t last_input;
+    float prev_y;                /* last equalized symbol handed to the training path */
+    unsigned magnitude_blocks;   /* blocks inverted on the flipped samples' magnitudes (7910) */
+    unsigned dc_pushes;          /* times the carried DC had to change sign to fit (7910) */
+    int32_t dc_offset;           /* learned difference between the server's DC and the shadow's */
+    float pt_b_level;            /* the PT_B magnitude, to find where PT_C starts */
     uint8_t prime_oct[6][8];     /* linear path: priming frames held until the rate is known */
     unsigned prime_buffered, rate_candidates;
     int rate_selected;
+    /* Blind priming (the 7910): after PT_C the timeline is lost, so priming
+       is found by its content, six frames that descramble to ones. */
+    int blind;
+    int16_t blind_lv[K56FLEX_BLIND_RATES][256];     /* each rate's signed levels */
+    unsigned blind_nl[K56FLEX_BLIND_RATES];
+    unsigned blind_run[K56FLEX_BLIND_RATES];        /* consecutive symbols near that table */
+    uint8_t blind_ring[K56FLEX_BLIND_RATES][48];    /* the last 48 symbols sliced to it */
 } k56flex_client_t;
 
 k56flex_client_t *k56flex_client_new(const k56flex_client_cfg_t *cfg);

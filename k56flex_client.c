@@ -127,9 +127,12 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
        the shadow's: over audio, follow it on decisions rather than train the
        front end on a reference that may be the other word. */
     int gate_a_free = c->detect && ph == K56T_GATE_A;
-    int known_ref = ph < unknown_from && !gate_a_free;
+    /* With a learned DC offset (below) the shadow's flip samples are not the
+       server's: the front end then follows decisions. */
+    int known_ref = ph < unknown_from && !gate_a_free && !c->dc_offset;
     level_block(c, o, 6, lv);
     k56flex_train_samples(sh, exp, 6);           /* advances the mirror phase machine */
+    int agree = 0;
     if (ph < unknown_from && !gate_a_free) {
         int same = 1;
         for (i = 0; i < 6; ++i) {
@@ -137,14 +140,55 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
             if (e != o[i]) same = 0;
         }
         ++c->blocks_checked;
+        agree = same;
         if (!same && !c->blocks_mismatched++) c->first_bad = (int)ph * 100000 + (int)sh->pairs_total;
     }
     if (ph >= K56T_PT_A) {
-        if (!c->cp_valid || ph < unknown_from) { c->cp = pre; c->cp_valid = 1; }
+        if (!c->cp_valid || ph < unknown_from) { c->cp = pre; c->cp.dc += c->dc_offset; c->cp_valid = 1; }
         matches = k56flex_probe_invert(&c->cp, lv, &src);
-        if (matches == 0) { c->failed = 1; return; }
+        if (matches == 0 && c->detect) {
+            /* Every second PT sample's sign is the server's running DC
+               (k56flex_probe_block_src), not a source bit: match it by
+               magnitude before concluding the block is foreign. */
+            matches = k56flex_probe_invert_magnitude(&c->cp, lv, &src);
+            if (matches) ++c->magnitude_blocks;
+        }
+        if (matches == 0 && c->detect) {
+            /* The flip samples follow the sign of the server's running DC,
+               which need not be ours: the 7910 does not clear it where MICA
+               does (PT_A), so the two differ by a constant once both follow
+               the same received levels.  Find the smallest offset that lets
+               this block invert, and keep it. */
+            int32_t base = c->cp.dc - c->dc_offset;
+            for (int k = 1; k <= 64 && !matches; ++k) {
+                for (int sgn = -1; sgn <= 1 && !matches; sgn += 2) {
+                    int32_t off = sgn*k*2016;
+                    k56flex_probe_t t = c->cp;
+                    t.dc = base + off;
+                    matches = k56flex_probe_invert(&t, lv, &src);
+                    if (matches) { c->cp.dc = base + off; c->dc_offset = off; ++c->dc_pushes; }
+                }
+            }
+        }
+        if (matches == 0) {
+            /* The 7910's PT_C generator leaves ours after a few blocks
+               (docs/k56flex_implementation.md), so its parameter record
+               cannot be read; its priming and data still can (blind_symbol). */
+            if (c->detect && ph >= K56T_PT_C) c->blind = 1;
+            else c->failed = 1;
+            return;
+        }
         if (matches > 1) ++c->ambiguous_blocks;
         k56flex_probe_block_src(&c->cp, src, tmp);
+        if (c->detect && !agree) {
+            /* Over audio the shadow's generator must follow what the server
+               sent, not what it would have sent: seq (a shift register of
+               recent source bits) and DC carry into the next stage, and a
+               server whose stages run longer than ours (the 7910's PT_B)
+               would otherwise hand PT_C a state it never had. */
+            sh->probe.seq = c->cp.seq;
+            sh->probe.dc = c->cp.dc - c->dc_offset;
+        }
         for (i = 0; i < c->cp.cfg[3]; ++i) {
             unsigned y = (src >> i) & 1, k = c->nbits;
             if (k >= MAX_BITS) { c->failed = 1; return; }
@@ -258,26 +302,64 @@ static unsigned stage_levels(const k56flex_client_t *c, int16_t *lv, unsigned ma
     return i;
 }
 
-static int is_silent(const float *y, unsigned n)
+/* Gate B is the silence stage in MICA's output, but a Lucent server (Eicon
+   7910) holds one constant non-zero codeword there: either is "static", a
+   block with no swing.  The signal stages never hold a level that long. */
+static int is_static(const float *y, unsigned n)
 {
     unsigned i;
-    for (i = 0; i < n; ++i) if (fabsf(y[i]) > SILENT_LEVEL) return 0;
-    return 1;
+    float lo = y[0], hi = y[0];
+    for (i = 1; i < n; ++i) { if (y[i] < lo) lo = y[i]; if (y[i] > hi) hi = y[i]; }
+    return hi - lo <= SILENT_LEVEL;
 }
 
-static void training_symbols(k56flex_client_t *c, const float *y)
+/* Returns the symbols consumed: 6, or fewer when the block grid is moved
+   onto the sample where the server leaves gate B. */
+static unsigned training_symbols(k56flex_client_t *c, const float *y)
 {
     int16_t lv[256];
     uint8_t o[6];
-    unsigned nl;
+    unsigned nl, j;
     k56flex_train_phase_t ph = k56flex_train_phase(&c->shadow);
     /* The server leaves its gates at pair boundaries; the signal shows when. */
-    if (ph == K56T_GATE_A && is_silent(y, 6)) k56flex_train_force_phase(&c->shadow, K56T_GATE_B);
+    if (ph == K56T_GATE_A && is_static(y, 6) && c->input_static) k56flex_train_force_phase(&c->shadow, K56T_GATE_B);
     /* Equalizer ringing is not the end of the gate: the codec input must be active too. */
-    else if (ph == K56T_GATE_B && !is_silent(y, 6) && !c->input_silent) k56flex_train_force_phase(&c->shadow, K56T_ID2_A);
+    else if (ph == K56T_GATE_B && !is_static(y, 6) && !c->input_static) {
+        /* The second identification starts its own pair grid, wherever that
+           falls in our blocks (on MICA it coincided; on the 7910 it does
+           not), and the 7910 also steps its gate-B level once just before
+           it.  A level step is one jump followed by the front end's slow DC
+           decay; the identification swings by thousands on every symbol.
+           Start it on the first symbol of two consecutive large changes. */
+        float prev = c->prev_y;
+        int found = -1;
+        for (j = 0; j + 1 < 6; ++j) {
+            float d0 = fabsf(y[j] - (j ? y[j - 1] : prev)), d1 = fabsf(y[j + 1] - y[j]);
+            if (d0 > 2*SILENT_LEVEL && d1 > 2*SILENT_LEVEL) { found = (int) j; break; }
+        }
+        if (found > 0) { c->prev_y = y[found - 1]; return (unsigned) found; }
+        if (found == 0) k56flex_train_force_phase(&c->shadow, K56T_ID2_A);
+    }
+    /* PT_B ends where the server's PT_C starts, not after our pair count:
+       the 7910's PT_A/PT_B run about 110 samples longer than MICA's.  PT_B
+       is two-level; hold it while the block still is, and start PT_C on the
+       first symbol off that level. */
+    if (c->detect && k56flex_train_phase(&c->shadow) == K56T_PT_B) {
+        float m = c->pt_b_level;
+        c->shadow.hold_pt_b = 1;
+        for (j = 0; j < 6 && (m == 0 || fabsf(fabsf(y[j]) - m) <= 0.25f*m); ++j) {}
+        if (j > 0 && j < 6) { c->prev_y = y[j - 1]; return j; }
+        if (j == 0) {
+            c->shadow.hold_pt_b = 0;
+            k56flex_train_force_phase(&c->shadow, K56T_PT_C);
+        } else if (m == 0)
+            c->pt_b_level = 0.5f*(fabsf(y[0]) + fabsf(y[1]));
+    }
+    c->prev_y = y[5];
     nl = stage_levels(c, lv, 256);
     slice(c, y, 6, lv, nl, o);
     training_block(c, o);
+    return 6;
 }
 
 /* Nearest codeword of the law, whatever the mapper's level set. */
@@ -385,6 +467,86 @@ static int pair_is_training(const k56flex_client_t *c, const float *y)
     return 1;
 }
 
+/* Blind priming: every rate's table is tried on the last 48 symbols.  The
+   descrambler is self-synchronising (y ^ y>>5 ^ y>>23, Draft 0.23 4.12), so
+   after its first 23 bits six priming frames are ones whatever came before;
+   derived signs carry no bits, so the server's DC (which we cannot follow
+   here) is not needed either.  A wrong rate or frame phase fails within a
+   few bits. */
+static int blind_try(k56flex_client_t *c, unsigned r, k56flex_pcm_rx_t *out)
+{
+    k56flex_pcm_config_t pc;
+    uint8_t bits[K56FLEX_MAX_FRAME_BITS];
+    unsigned f, i, seen = 0;
+    pc.law = c->cfg.law;
+    pc.rate_bps = 32000 + 2000*(int) r;
+    pc.report_field = c->report_field;
+    if (k56flex_pcm_rx_init(out, &pc) < 0) return 0;
+    out->ignore_derived_sign = 1;
+    for (f = 0; f < 6; ++f) {
+        int n = k56flex_pcm_rx_frame(out, c->blind_ring[r] + 8*f, bits);
+        if (n < 0) return 0;
+        for (i = 0; i < (unsigned) n; ++i, ++seen) if (seen >= 23 && !bits[i]) return 0;
+    }
+    return 1;
+}
+
+static void blind_start(k56flex_client_t *c)
+{
+    unsigned r;
+    for (r = 0; r < K56FLEX_BLIND_RATES; ++r) {
+        k56flex_pcm_config_t pc;
+        k56flex_pcm_rx_t rx;
+        c->blind_run[r] = 0;
+        c->blind_nl[r] = 0;
+        pc.law = c->cfg.law;
+        pc.rate_bps = 32000 + 2000*(int) r;
+        pc.report_field = c->report_field;
+        if (k56flex_pcm_rx_init(&rx, &pc) == 0)
+            c->blind_nl[r] = k56flex_pcm_levels(&rx.m, c->blind_lv[r], 256);
+    }
+    c->blind = 2;
+}
+
+/* A symbol is on a rate's table when it is within the codec's own step of
+   one of its levels: a server mapping in the other law reaches us through a
+   G.711 transcoder (the 7910 maps A-law onto a mu-law leg), which moves a
+   level by up to a step of the law it lands in, about 1/16 of it. */
+static void blind_symbol(k56flex_client_t *c, float y)
+{
+    unsigned r, i, hits = 0;
+    k56flex_pcm_rx_t rx, chosen;
+    int rate = 0;
+    if (c->blind == 1) blind_start(c);
+    for (r = 0; r < K56FLEX_BLIND_RATES; ++r) {
+        const int16_t *lv = c->blind_lv[r];
+        float bd = 1e30f;
+        int best = 0;
+        for (i = 0; i < c->blind_nl[r]; ++i) {
+            float d = fabsf(y - (float) lv[i]);
+            if (d < bd) { bd = d; best = lv[i]; }
+        }
+        memmove(c->blind_ring[r], c->blind_ring[r] + 1, sizeof(c->blind_ring[r]) - 1);
+        c->blind_ring[r][sizeof(c->blind_ring[r]) - 1] = (uint8_t) k56flex_g711_from_level(c->cfg.law, best);
+        c->blind_run[r] = (c->blind_nl[r] && bd <= 16.0f + fabsf((float) best)/12.0f) ? c->blind_run[r] + 1 : 0;
+        if (c->blind_run[r] >= sizeof(c->blind_ring[r]) && blind_try(c, r, &rx)) {
+            if (!hits++) { chosen = rx; rate = 32000 + 2000*(int) r; }
+        }
+    }
+    if (!hits) return;
+    /* The lowest rate that decodes; the count is kept for the log. */
+    c->rate_candidates = hits;
+    c->rate_bps = rate;
+    c->rx = chosen;
+    c->rx_ready = 1;
+    c->rate_selected = 1;
+    c->prime_frames = 6;
+    c->blind = 3;
+    c->in_frames = 1;
+    c->qn = 0;
+    k56flex_train_force_phase(&c->shadow, K56T_DATA);
+}
+
 static void fe_sink(void *user, float y)
 {
     k56flex_client_t *c = user;
@@ -396,6 +558,7 @@ static void fe_sink(void *user, float y)
         c->qn = 0;
     }
     if (c->failed) return;
+    if (c->blind == 1 || c->blind == 2) { blind_symbol(c, y); return; }
     if (c->qn == 0) c->qfirst = k56flex_rxfe_symbols(c->fe) - 1;
     c->qy[c->qn++] = y;
     if (c->in_frames) {
@@ -410,7 +573,13 @@ static void fe_sink(void *user, float y)
     if (!c->seek) {
         if (c->qn < 6) return;
         if (c->final_param_seen && c->sym_idx % 12 == 0) { c->seek = 1; }   /* wait for a pair boundary */
-        else { training_symbols(c, c->qy); c->qn = 0; return; }
+        else {
+            unsigned used = training_symbols(c, c->qy);
+            c->qn -= used;
+            c->qfirst += used;
+            memmove(c->qy, c->qy + used, c->qn * sizeof(c->qy[0]));
+            return;
+        }
     }
     if (c->qn < 12) return;
     if (pair_is_training(c, c->qy)) {
@@ -435,9 +604,12 @@ void k56flex_client_rx_linear(k56flex_client_t *c, const int16_t *samples, size_
         c->detect = 1;
         c->fe = k56flex_rxfe_new(c->cfg.law, fe_sink, c);
         if (!c->fe) { c->failed = 1; return; }
+        k56flex_rxfe_set_codec_identity(c->fe, c->cfg.codec_identity);
     }
     for (i = 0; i < n && !c->failed; ++i) {
         c->input_silent = samples[i] >= -SILENT_LEVEL && samples[i] <= SILENT_LEVEL;
+        c->input_static = fabsf((float) samples[i] - (float) c->last_input) <= SILENT_LEVEL;
+        c->last_input = samples[i];
         k56flex_rxfe_push(c->fe, samples[i]);
     }
 }

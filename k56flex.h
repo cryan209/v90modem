@@ -82,13 +82,16 @@ unsigned k56flex_pcm_frame_bits(const k56flex_pcm_config_t *cfg);
 typedef struct {
     k56flex_pcm_tx_t m;              /* shares geometry with the transmitter */
     uint32_t descrambler;            /* received y history */
+    int ignore_derived_sign;         /* derived signs carry no bits: skip their DC check */
+    unsigned derived_sign_misses;    /* derived signs that disagreed with our DC */
 } k56flex_pcm_rx_t;
 
 int k56flex_pcm_rx_init(k56flex_pcm_rx_t *rx, const k56flex_pcm_config_t *cfg);
 /* Exact inverse of one frame: eight G.711 octets -> descrambled source bits
  * (LSB-first order, one per byte).  Returns the bit count, or -1 for a
- * non-codeword, an inconsistent derived sign, or a rank outside the frame's
- * power-of-two subset. */
+ * non-codeword, an inconsistent derived sign (unless ignore_derived_sign:
+ * then it is only counted), or a rank outside the frame's power-of-two
+ * subset. */
 int k56flex_pcm_rx_frame(k56flex_pcm_rx_t *rx, const uint8_t octets[K56FLEX_FRAME_SAMPLES],
                          uint8_t bits[K56FLEX_MAX_FRAME_BITS]);
 
