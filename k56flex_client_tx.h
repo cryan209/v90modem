@@ -46,6 +46,7 @@ typedef struct {
     unsigned mp_down_code;     /* downstream rate / 2000 - 15 */
     unsigned mp_mask;          /* 15-bit rate mask, bits 35:49 */
     unsigned mp_asymmetric;    /* bit 50, set by native HSF */
+    unsigned trn2_hold;        /* 1: after J', idle until k56flex_client_tx_release_trn2() */
 } k56flex_client_tx_cfg_t;
 
 typedef enum {
@@ -59,7 +60,8 @@ typedef enum {
     K56CT_GAP,                 /* the second TRN */
     K56CT_MP,
     K56CT_MP_ACK,
-    K56CT_TAIL                 /* idle ones after MP' */
+    K56CT_TAIL,                /* idle ones after MP' */
+    K56CT_HOLD                 /* idle after J', waiting to start TRN2 (trn2_hold) */
 } k56flex_client_tx_stage_t;
 
 typedef struct {
@@ -71,6 +73,7 @@ typedef struct {
     unsigned prev;             /* differential: previous transmitted label */
     uint8_t bits[188];         /* frame being sent */
     unsigned nbits, bitpos, frames;
+    int trn2_released;
     uint64_t symbols;          /* since start */
 } k56flex_client_tx_t;
 
@@ -78,6 +81,10 @@ typedef struct {
 void k56flex_client_tx_defaults(k56flex_client_tx_cfg_t *cfg);
 int k56flex_client_tx_init(k56flex_client_tx_t *t, const k56flex_client_tx_cfg_t *cfg);
 void k56flex_client_tx_start(k56flex_client_tx_t *t);
+/* With cfg.trn2_hold: start the second TRN (now, or straight after J' if J'
+ * is still to come).  Experiment: the server may want TRN2 against its own PT
+ * stages rather than straight after J'. */
+void k56flex_client_tx_release_trn2(k56flex_client_tx_t *t);
 /* Next symbol, unit RMS.  Returns the stage it belongs to. */
 k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float *re, float *im);
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st);

@@ -54,6 +54,8 @@ static outcome_t run(int baud, int high, int power_reduction, int preemph, int a
     for (int block = 0; block < seconds*50; block++) {
         if (block == 25)
             k56flex_client_tx_start(&tx);           /* after 0.5 s of silence */
+        if (tx.stage == K56CT_HOLD  &&  tx.n >= 1500)
+            k56flex_client_tx_release_trn2(&tx);    /* a held TRN2, released */
         v34_tx(v34, amp, 160);
         for (int i = 0; i < 160; i++) {
             /* The bearer: one G.711 encode/decode, no transcoding. */
@@ -123,6 +125,29 @@ static void second_trn_is_fresh(void)
     CHECK(k56flex_client_tx_symbol(&tx, &re, &im) == K56CT_MP, "MP follows the second TRN");
 }
 
+/* trn2_hold: idle after J' until released, then the same fresh TRN and MP. */
+static void trn2_hold_waits(void)
+{
+    k56flex_client_tx_cfg_t cfg;
+    k56flex_client_tx_t tx;
+    float re, im;
+    unsigned held = 0;
+    k56flex_client_tx_stage_t st;
+
+    k56flex_client_tx_defaults(&cfg);
+    cfg.trn2_hold = 1;
+    k56flex_client_tx_init(&tx, &cfg);
+    k56flex_client_tx_start(&tx);
+    do
+        st = k56flex_client_tx_symbol(&tx, &re, &im);
+    while (st != K56CT_HOLD  &&  tx.symbols < 20000);
+    while (held < 5000  &&  k56flex_client_tx_symbol(&tx, &re, &im) == K56CT_HOLD)
+        held++;
+    CHECK(held == 5000, "holds after J' until released (%u)", held);
+    k56flex_client_tx_release_trn2(&tx);
+    CHECK(k56flex_client_tx_symbol(&tx, &re, &im) == K56CT_GAP, "TRN2 starts on release");
+}
+
 int main(void)
 {
     static const struct { int baud, high, pr, pe, alaw; } cases[] = {
@@ -136,6 +161,7 @@ int main(void)
 
     mp_matches_native_hsf();
     second_trn_is_fresh();
+    trn2_hold_waits();
 
     k56flex_client_tx_defaults(&cfg);
     cfg.gap_symbols = 1600;                         /* keep the run short */
@@ -160,6 +186,15 @@ int main(void)
               && r->report_sample > r->trn_sample && r->end_sample > r->report_sample
               && r->mp_sample > r->end_sample && r->mp_ack_sample > r->mp_sample,
               "case %u: events in order", c);
+    }
+
+    /* A held TRN2 (cfg.trn2_hold) still ends in a decodable MP and MP'. */
+    {
+        k56flex_client_tx_cfg_t held = cfg;
+        held.trn2_hold = 1;
+        outcome_t o = run(BAUD_3200, 1, 7, 3, 0, &held, 7);
+        CHECK((o.events & (K56U_MP | K56U_MP_ACK)) == (K56U_MP | K56U_MP_ACK)
+              && o.r.mp_down == cfg.mp_down_code, "held TRN2: MP and MP' decoded (events %02x)", o.events);
     }
 
     /* V.34 11.2.1.1.8: the INFO1a power reduction must reach the line. */

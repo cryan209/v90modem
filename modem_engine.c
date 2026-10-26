@@ -4938,6 +4938,15 @@ static k56flex_client_tx_t g_k56c_up;
 static bool g_k56c_up_on, g_k56c_up_started;
 static int64_t g_k56c_gate_a_at;
 static k56flex_client_tx_stage_t g_k56c_up_stage;
+/* ME_K56FLEX_CLIENT_TRN2_START=eight: hold the second TRN after J' until the
+ * server's eight-level stage (its PT_C/gate C, Draft 0.23 4.11) is seen on the
+ * line: 50 ms windows with exactly eight distinct codewords, three in a row.
+ * The detector also logs the stage's start on every call.  Default: TRN2
+ * straight after J', as native HSF sends it. */
+static bool g_k56c_trn2_on_eight, g_k56c_eight_seen;
+static unsigned g_k56c_win_n, g_k56c_eight_run;
+static int16_t g_k56c_win_vals[9];
+static unsigned g_k56c_win_distinct;
 
 static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", 0); }
 
@@ -4968,6 +4977,14 @@ static void me_k56c_up_init_locked(void)
         cfg.ext = (uint8_t) (v >> 16);
         cfg.report = (uint16_t) v;
     }
+    {
+        const char *at = getenv("ME_K56FLEX_CLIENT_TRN2_START");
+
+        g_k56c_trn2_on_eight = at  &&  strcmp(at, "eight") == 0;
+        cfg.trn2_hold = g_k56c_trn2_on_eight;
+    }
+    g_k56c_eight_seen = false;
+    g_k56c_win_n = g_k56c_eight_run = g_k56c_win_distinct = 0;
     cfg.trn_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_TRN_SYMBOLS", (int) cfg.trn_symbols);
     cfg.gap_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_GAP_SYMBOLS", (int) cfg.gap_symbols);
     cfg.mp_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_REPEATS", (int) cfg.mp_repeats);
@@ -4984,8 +5001,9 @@ static void me_k56c_up_init_locked(void)
                                       me_k56c_up_symbol, &g_k56c_up) != 0)
         return;
     g_k56c_up_on = true;
-    ME_LOG("[K56C] client upstream armed: report %02x/%04x, TRN %u, TRN2 %u symbols, "
+    ME_LOG("[K56C] client upstream armed: report %02x/%04x, TRN %u, TRN2 %u symbols%s, "
            "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.trn_symbols, cfg.gap_symbols,
+           g_k56c_trn2_on_eight ? " (held until the eight-level stage)" : "",
            v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low");
 }
 
@@ -5102,11 +5120,41 @@ static void me_k56c_stop_locked(const char *why)
     g_k56c_hangup = true;
 }
 
+/* The eight-level detector (see g_k56c_trn2_on_eight), one sample at a time. */
+static void me_k56c_eight_level_locked(int16_t v)
+{
+    unsigned i;
+
+    for (i = 0;  i < g_k56c_win_distinct  &&  g_k56c_win_vals[i] != v;  i++)
+        ;
+    if (i == g_k56c_win_distinct  &&  g_k56c_win_distinct < 9)
+        g_k56c_win_vals[g_k56c_win_distinct++] = v;
+    if (++g_k56c_win_n < 400)
+        return;
+    g_k56c_eight_run = (g_k56c_win_distinct == 8) ? g_k56c_eight_run + 1 : 0;
+    g_k56c_win_n = g_k56c_win_distinct = 0;
+    if (g_k56c_eight_run < 3)
+        return;
+    if (!g_k56c_eight_seen  &&  g_k56c_up_stage >= K56CT_REPORT) {
+        g_k56c_eight_seen = true;
+        ME_LOG("[K56C] +%llu ms server eight-level stage seen (began ~150 ms earlier)\n",
+               (unsigned long long) (g_k56c_samples/8));
+    }
+    if (g_k56c_eight_seen  &&  g_k56c_trn2_on_eight  &&  g_k56c_up.stage == K56CT_HOLD
+        &&  !g_k56c_up.trn2_released) {
+        k56flex_client_tx_release_trn2(&g_k56c_up);
+        ME_LOG("[K56C] +%llu ms TRN2 released on the eight-level stage\n",
+               (unsigned long long) (g_k56c_samples/8));
+    }
+}
+
 static void me_k56c_rx_locked(const int16_t *amp, int len)
 {
     if (!g_k56c_active)
         return;
     for (int n = 0;  n < len;  n++) {
+        if (g_k56c_up_on)
+            me_k56c_eight_level_locked(amp[n]);
         g_k56c_rms_acc += (uint64_t) ((int32_t) amp[n]*amp[n]);
         if (++g_k56c_rms_n == 800) {
             ME_LOG("[K56C] +%llu ms rx rms %.0f\n",

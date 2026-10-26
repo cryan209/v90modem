@@ -2442,3 +2442,25 @@ card shows neither. Open candidates: what the Lucent server needs to call its
 upstream training complete (TRN2 length or timing against its PT stages), MP
 fields other than the rates (reserved bits, type 1), and the report value
 (`89b0` is HSF's report of our own server's downstream, not of this card's).
+
+**TRN2 length and start time do not move gate C (A/B, same day).** New, off by
+default: `cfg.trn2_hold` / `ME_K56FLEX_CLIENT_TRN2_START=eight` holds the second
+TRN after J' (differential idle) until the card's eight-level stage is seen on the
+line (three 50 ms windows of exactly eight distinct codewords after our report;
+logged on every call as "server eight-level stage seen"). Calls from CT 117
+(`/root/k56len`, `/root/k56start`), arms alternated, only calls whose V.8bis
+completed and whose upstream started counted (9 of 22; the rest missed the
+clipped CRe):
+
+| arm | TRN2 | MP at | card's eight-level stage | then | calls |
+|---|---|---|---|---|---|
+| length 4800, after J' | +6.95 s | +8.45 s | 6.50, 6.60 s | retrain | 2 |
+| length 9614, after J' | +6.95 s | +9.97 s | 6.55, 6.50, 6.50 s | retrain | 3 |
+| length 19000, after J' | +6.95 s | +12.89 s | 6.50, 6.50 s | retrain | 2 |
+| length 9614, released on the eight-level stage | +8.61, +8.65 s | +11.6 s | 6.50, 6.50 s | retrain | 2 |
+
+(Times from Phase 3 entry.) The card's eight-level stage starts at the same
+point every call (~22.7 s tap, detected +8.6 s into Phase 3) and lasts 6.5 s
+whatever we send, so it ends on a fixed timer, not on anything of ours we have
+varied. Neither TRN2 length (4800-19000) nor its timing against the card's PT
+stages is what this server waits for.

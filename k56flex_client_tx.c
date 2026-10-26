@@ -50,10 +50,15 @@ void k56flex_client_tx_start(k56flex_client_tx_t *t)
     t->n = 0;
 }
 
+void k56flex_client_tx_release_trn2(k56flex_client_tx_t *t)
+{
+    t->trn2_released = 1;
+}
+
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st)
 {
     static const char *n[] = {"silent", "S", "S-bar", "PP", "TRN", "report", "J'",
-                              "TRN2", "MP", "MP'", "tail"};
+                              "TRN2", "MP", "MP'", "tail", "hold"};
     return (unsigned) st < sizeof(n)/sizeof(n[0]) ? n[st] : "?";
 }
 
@@ -242,10 +247,17 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
             break;
         case K56CT_JPRIME:
             if (!frame_bits(t, &b0, &b1, 1)) {
-                enter(t, K56CT_GAP);
+                enter(t, (t->cfg.trn2_hold && !t->trn2_released) ? K56CT_HOLD : K56CT_GAP);
                 continue;
             }
             diff_symbol(t, b0, b1, re, im);
+            break;
+        case K56CT_HOLD:
+            if (t->trn2_released) {
+                enter(t, K56CT_GAP);
+                continue;
+            }
+            diff_symbol(t, 1, 1, re, im);
             break;
         case K56CT_MP:
         case K56CT_MP_ACK:
