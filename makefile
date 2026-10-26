@@ -1154,6 +1154,8 @@ k56flex_client_tx_test: $(K56FLEX_CLIENT_TX_TEST_OBJS) spandsp
 K56FLEX_CLIENT_SPLICE_OBJS = tools/k56flex_client_splice.o k56flex_client_tx.o
 k56flex_client_splice: $(K56FLEX_CLIENT_SPLICE_OBJS) spandsp
 	$(CC) $(K56FLEX_CLIENT_SPLICE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+k56flex_modulate: tools/k56flex_modulate.o spandsp
+	$(CC) tools/k56flex_modulate.o -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 K56FLEX_UPSTREAM_TEST_OBJS = k56flex_upstream_test.o k56flex_upstream.o k56flex.o
 k56flex_upstream_test: $(K56FLEX_UPSTREAM_TEST_OBJS)

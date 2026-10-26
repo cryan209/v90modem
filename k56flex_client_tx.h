@@ -62,7 +62,9 @@ typedef struct {
     unsigned mp_down_code;     /* downstream rate / 2000 - 15 */
     unsigned mp_mask;          /* 15-bit rate mask, bits 35:49 */
     unsigned mp_asymmetric;    /* bit 50, set by native HSF */
+    unsigned mp_extra_fill;    /* zero fill bits after V.34's 85:87, 0..96 (native HSF: 8, a 96-bit frame) */
     unsigned trn2_hold;        /* 1: after J', idle until k56flex_client_tx_release_trn2() */
+    unsigned report_bare;      /* 1: the report is the bare 16-bit word, repeated, no extension octet */
     unsigned jprime_records;   /* J' records (0 = 1, as native HSF) */
     unsigned jprime_bare;      /* 1: J' is the bare 16-bit 899F word, no extension octet */
     unsigned jprime_none;      /* 1: no J' at all (diagnostic: does the server see J'?) */

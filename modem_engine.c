@@ -4995,6 +4995,15 @@ static void me_k56c_up_init_locked(void)
     g_k56c_win_n = g_k56c_eight_run = g_k56c_win_distinct = 0;
     cfg.trn_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_TRN_SYMBOLS", (int) cfg.trn_symbols);
     cfg.report_records = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_REPORT_RECORDS", (int) cfg.report_records);
+    {
+        /* V.34 11.3.1.1.4: send the MD that our INFO1c announced
+           (V34_INFO1C_MD, 35 ms units), between two S/S-bar pairs. */
+        static const int rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+        int units = parse_env_int("V34_INFO1C_MD", 0), code = v34_get_tx_baud_rate(g_v34);
+
+        if (units > 0  &&  units <= 127  &&  code >= 0  &&  code < 6)
+            cfg.md_symbols = (unsigned) (units*35*rates[code]/1000);
+    }
     cfg.jprime_records = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_JPRIME_RECORDS", 0);
     {
         const char *j = getenv("ME_K56FLEX_CLIENT_JPRIME");
@@ -5020,8 +5029,8 @@ static void me_k56c_up_init_locked(void)
                                       me_k56c_up_symbol, &g_k56c_up) != 0)
         return;
     g_k56c_up_on = true;
-    ME_LOG("[K56C] client upstream armed: report %02x/%04x, TRN %u, TRN2 %u symbols%s, "
-           "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.trn_symbols, cfg.gap_symbols,
+    ME_LOG("[K56C] client upstream armed: report %02x/%04x, MD %u, TRN %u, TRN2 %u symbols%s, "
+           "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.md_symbols, cfg.trn_symbols, cfg.gap_symbols,
            g_k56c_trn2_on_eight ? " (held until the eight-level stage)" : "",
            v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low");
 }

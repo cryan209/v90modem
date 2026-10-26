@@ -1502,6 +1502,24 @@ static void prepare_info1c(v34_state_t *s)
     s->tx.info1c.power_reduction = 0;
     s->tx.info1c.additional_power_reduction = 0;
     s->tx.info1c.md = 0;
+    {
+        /* V34_INFO1C_MD=<0..127>: announce an MD of that many 35 ms units
+           (V.34 Table 12, bits 18:24), as native HSF's K56flex client does
+           (20).  Experiment only: this transmitter sends no MD itself
+           (11.3.1.1.4); the K56flex client probe sends one of the announced
+           length (docs/k56flex_implementation.md). */
+        const char *md = getenv("V34_INFO1C_MD");
+
+        if (md  &&  *md)
+        {
+            int units = atoi(md);
+
+            if (units >= 0  &&  units <= 127)
+                s->tx.info1c.md = units;
+            /*endif*/
+        }
+        /*endif*/
+    }
     s->tx.info1c.freq_offset = 0;
     /* V.92 §9.3 switches INFO1d to Table 17 only after the two INFO0
        capability bits agree.  Table 17 keeps the V.34 probing fields, but

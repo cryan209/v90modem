@@ -2595,7 +2595,7 @@ mica_trace ours.ulaw --map mica-portware-map.bin --seconds 35 --greg 0x80 --watc
 | ... then silence from 0.34 s after J' | 0400, 1000 at the same instant |
 | ... without J' | 0400, then abandoned 180 ms later |
 | ... any TRN2 length (160 ms to 3 s), 4- or 16-point, J' as one record, 100 records or bare `899F` | 1000 every time |
-| MP / MP' in any variant tried (16- or 4-point, x1.5 and x2.24 16-point scale, mask `3fff`, down code 4, 80 MP', J' straight into MP) | **never 2000 or 4000** |
+| MP / MP' in any variant tried (16- or 4-point, x1.5 and x2.24 16-point scale, mask `3fff`, down code 4, 80 MP', J' straight into MP) | never 2000 or 4000: an artefact of the 2200-symbol MD, see the next section |
 
 The MD row is a property of the splice, not of our client: HSF's INFO1c,
 which MICA heard in Phase 2, announces an MD of ~700 ms, and V.34 11.3.1.2
@@ -2639,6 +2639,77 @@ for these experiments (all off by default): `ME_K56FLEX_CLIENT_REPORT_RECORDS`,
 `ME_K56FLEX_CLIENT_JPRIME=record|bare|none`, `ME_K56FLEX_CLIENT_JPRIME_RECORDS`;
 `cfg.md_symbols` exists in the transmitter only.
 
+### MICA accepts our MP; the earlier rejection was the splice's MD (26 October, later)
+
+The previous section ended on MICA never posting 2000/4000 (MP, MP'
+accepted) for our upstream. Done since, offline against the MICA firmware:
+
+1. **Reference.** MicaEmu's accepted client call
+   (`artifacts/k56flex-client-20261009/connection-verification-call-command.json`)
+   reruns with `tools/k56flex_upstream_rig/tee_peer.py` capturing what MICA
+   is fed (MicaEmu's live client must reuse its 18 October receiver library:
+   rebuilding it fails since v90modem removed `ctl.status`/`ctl.report` on
+   21 October). MICA posts 2000 at 15.842 s and 4000 at 16.009 s, and a
+   replay of the capture reproduces that exactly.
+2. **Symbol-level comparison.** `tools/k56flex_lsdemod.py` (new; numpy and
+   `make k56flex_modulate`) recovers a recording's symbols on our own
+   modulator's grid by least squares (7% interior residual on HSF's MICA
+   call, 1.4% symbol error on our own signal) and re-modulates symbol vectors.
+   Findings:
+   - **Native HSF follows our conventions**: S 45/135 degrees, S-bar
+     -135/-45, PP and TRN within 2 degrees, TRN2 the same 16-point sequence
+     (|c| 0.989), the same power for 16-point as for 4-point. MicaEmu's
+     reference rotates S by -45 and TRN by 180 degrees against PP; MICA
+     tolerates both.
+   - **HSF's MP' frames are 96 bits** (11 zero fill bits after the CRC
+     instead of V.34 Table 20's 3) and start exactly 9600 symbols into TRN2;
+     MICA reads them as up 4, down 11, mask `7fff`, bit 50, ack. MicaEmu's
+     reference sends up 12, down 10, mask `07fe`. Both are V.34 10.1.3.9
+     16-point MP and decode with our decoder.
+   - In MicaEmu's call MICA wants the **report as a bare repeated 16-bit
+     word** (it decodes `8990` every 16 bits); our 24-bit record (HSF's
+     form) is decoded but never accepted there, whereas in HSF's call it is
+     the 24-bit record that MICA accepts and the bare word it rejects. The
+     expected form follows the call's V.8bis/Phase 2. On the 7910 we send
+     HSF's MS, so HSF's form is the relevant one. `cfg.report_bare` /
+     `RBARE` added.
+   - MICA reads the report only once its decision-directed stage has run
+     for a while: about 0.7 s after TRN starts at 3000 baud in MicaEmu's
+     call, 1.4 s at 3200 baud in HSF's.
+3. **Bisection by re-modulation.** HSF's recording with HSF's own MP'
+   re-modulated (control): 4000 at 32.212 s. Our MP' on HSF's grid after
+   HSF's TRN2: **4000 at 32.204 s**. Ours from progressively earlier points
+   (TRN2, report, J', TRN1, PP, S-bar, the second S): accepted every time.
+   Only HSF's first S/S-bar and its MD were left to differ, so the fault was
+   the MD: HSF's INFO1c announces 20 x 35 ms, MICA waits exactly 700 ms
+   (V.34 11.3.1.2), and our splice's 2200-symbol MD was 12.5 ms short.
+4. **With MD = 2240 symbols (700 ms) our own generator is accepted end to
+   end**: 0400 29.228 s, 1000 30.580 s, **2000 32.318 s, 4000 32.324 s**
+   with the default MP (88-bit, 2 MP + 1 MP', TRN2 9614); with 8 + 8 frames
+   MICA goes on to `c000` at 34.66 s. So our MP was never wrong, and the
+   "MP never accepted" row above was a property of the splice.
+
+```sh
+make k56flex_client_splice
+MD=2240 TRN=4600 ./k56flex_client_splice hsf-mica-k56-9600.client.ulaw ours.ulaw 26.88 0 5 0 1 14
+mica_trace ours.ulaw --map mica-portware-map.bin --seconds 35 --greg 0x80 --watch 0x8f31 --host
+```
+
+**On the 7910, MD does not move gate C (live A/B, CT 117 `/root/k56md-runs`,
+10 calls, 7 with V.8bis).** New experiment knob `V34_INFO1C_MD=<units>`
+(V.34 Table 12 bits 18:24; our transmitter sends no MD itself, the client
+probe sends one of the announced length): with 20, as HSF, the card waits it
+out (our report, TRN2 and its eight-level stage all 0.76 s later), then holds
+gate C to the same 15.2 s; with 0, 15.2 s on all five.
+
+So the upstream that the card sees is, by the MICA firmware's standard,
+correct through MP'. MICA ends gate C on a timer 1.3 s after the report;
+whatever ends the Lucent card's gate C is not something MICA needs. Native
+HSF, the only other K56flex client tried on this card, never gets past its
+gate B, so there is no reference for it. New transmitter options (all off by
+default): `cfg.report_bare`, `cfg.mp_extra_fill` (8 gives HSF's 96-bit
+frame), MP' without a preceding MP (`mp_repeats` 0).
+
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
 Every piece below is an experiment knob inside the client probe; there is no
@@ -2654,7 +2725,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | Phase 2 | works with HSF's CM (no protocols octet) and INFO0c (bits 21:23 = 0) and INFO1c's K56 flag (`fo=1`); none is a default. |
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
-| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It does see our J' (without one it quits at once, as MICA does). MICA passes gate C on our upstream but cannot read our MP; see the MICA oracle section above. |
+| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
 | parameter record, priming, data | not reached; no client receiver for this card's PT, parameter record or PCM data. |
 | E, B1, upstream data | not implemented on the client side. |
 

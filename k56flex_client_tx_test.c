@@ -293,6 +293,42 @@ static void jprime_and_md_options(void)
     }
 }
 
+/* Bare 16-bit report, a 96-bit MP frame (native HSF's fill) and MP' alone:
+   stage lengths in symbols. */
+static void report_and_mp_framing(void)
+{
+    static const struct { unsigned bare, fill, trn16, mprep, ackrep; unsigned rep_syms, mp_syms, ack_syms; } v[] = {
+        {0, 0, 0, 2, 1, 21*12, 2*44, 44},
+        {1, 0, 0, 2, 1, 21*8, 2*44, 44},
+        {0, 8, 0, 2, 1, 21*12, 2*48, 48},
+        {0, 8, 1, 0, 3, 21*12, 0, 3*24},
+        {0, 0, 1, 2, 1, 21*12, 2*22, 22},
+    };
+    for (unsigned c = 0; c < sizeof(v)/sizeof(v[0]); c++) {
+        k56flex_client_tx_cfg_t cfg;
+        k56flex_client_tx_t tx;
+        unsigned count[16] = {0};
+        k56flex_client_tx_stage_t st;
+        float re, im;
+
+        k56flex_client_tx_defaults(&cfg);
+        cfg.report_bare = v[c].bare;
+        cfg.mp_extra_fill = v[c].fill;
+        cfg.trn16 = v[c].trn16;
+        cfg.mp_repeats = v[c].mprep;
+        cfg.mp_ack_repeats = v[c].ackrep;
+        cfg.gap_symbols = 100;
+        k56flex_client_tx_init(&tx, &cfg);
+        k56flex_client_tx_start(&tx);
+        while ((st = k56flex_client_tx_symbol(&tx, &re, &im)) != K56CT_TAIL  &&  tx.symbols < 40000)
+            count[st]++;
+        CHECK(count[K56CT_REPORT] == v[c].rep_syms  &&  count[K56CT_MP] == v[c].mp_syms
+              &&  count[K56CT_MP_ACK] == v[c].ack_syms,
+              "case %u: report %u MP %u MP' %u symbols (want %u %u %u)", c, count[K56CT_REPORT],
+              count[K56CT_MP], count[K56CT_MP_ACK], v[c].rep_syms, v[c].mp_syms, v[c].ack_syms);
+    }
+}
+
 int main(void)
 {
     static const struct { int baud, high, pr, pe, alaw; } cases[] = {
@@ -310,6 +346,7 @@ int main(void)
     sixteen_point_follows_jd();
     jd_detector();
     jprime_and_md_options();
+    report_and_mp_framing();
 
     k56flex_client_tx_defaults(&cfg);
     cfg.gap_symbols = 1600;                         /* keep the run short */

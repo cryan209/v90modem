@@ -55,7 +55,7 @@ void k56flex_client_tx_defaults(k56flex_client_tx_cfg_t *cfg)
 
 int k56flex_client_tx_init(k56flex_client_tx_t *t, const k56flex_client_tx_cfg_t *cfg)
 {
-    if (!t || !cfg || cfg->mp_up_code > 15 || cfg->mp_down_code > 15 || cfg->mp_mask > 0x7fff)
+    if (!t || !cfg || cfg->mp_up_code > 15 || cfg->mp_down_code > 15 || cfg->mp_mask > 0x7fff || cfg->mp_extra_fill > 96)
         return -1;
     memset(t, 0, sizeof(*t));
     t->cfg = *cfg;
@@ -149,10 +149,11 @@ static void diff_symbol16(k56flex_client_tx_t *t, const unsigned b[4], float *re
 
 static void load_record(k56flex_client_tx_t *t)
 {
-    uint32_t rec = (uint32_t) t->cfg.ext | ((uint32_t) t->cfg.report << 8);
-    for (unsigned i = 0; i < 24; i++)
+    uint32_t rec = t->cfg.report_bare ? t->cfg.report
+                                      : (uint32_t) t->cfg.ext | ((uint32_t) t->cfg.report << 8);
+    t->nbits = t->cfg.report_bare ? 16 : 24;
+    for (unsigned i = 0; i < t->nbits; i++)
         t->bits[i] = (rec >> i) & 1;
-    t->nbits = 24;
     t->bitpos = 0;
 }
 
@@ -196,7 +197,9 @@ static void enter(k56flex_client_tx_t *t, k56flex_client_tx_stage_t st)
     case K56CT_MP:
     case K56CT_MP_ACK:
         k56flex_client_tx_mp_bits(&t->cfg, st == K56CT_MP_ACK, t->bits);
-        t->nbits = 88;
+        /* Native HSF extends the fill with zeros to a 96-bit frame. */
+        memset(t->bits + 88, 0, t->cfg.mp_extra_fill);
+        t->nbits = 88 + t->cfg.mp_extra_fill;
         t->bitpos = 0;
         break;
     default:
@@ -270,7 +273,7 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
                 if (st == K56CT_TRN)
                     enter(t, K56CT_REPORT);
                 else
-                    enter(t, t->cfg.mp_repeats ? K56CT_MP : K56CT_TAIL);
+                    enter(t, t->cfg.mp_repeats ? K56CT_MP : t->cfg.mp_ack_repeats ? K56CT_MP_ACK : K56CT_TAIL);
                 continue;
             }
             {
@@ -302,7 +305,8 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
         case K56CT_JPRIME:
             if (!frame_bits(t, &b0, &b1, (t->cfg.jprime_records && !t->cfg.jprime_none) ? t->cfg.jprime_records : 1)) {
                 enter(t, (t->cfg.trn2_hold && !t->trn2_released) ? K56CT_HOLD :
-                         t->cfg.gap_symbols ? K56CT_GAP : (t->cfg.mp_repeats ? K56CT_MP : K56CT_TAIL));
+                         t->cfg.gap_symbols ? K56CT_GAP : t->cfg.mp_repeats ? K56CT_MP :
+                         t->cfg.mp_ack_repeats ? K56CT_MP_ACK : K56CT_TAIL);
                 continue;
             }
             diff_symbol(t, b0, b1, re, im);
