@@ -6,25 +6,27 @@ Its primary goal is the **digital answerer** in a V.90/V.92 connection:
 an analogue modem dials in over a transparent G.711 bearer. It also implements
 an analogue caller, lower-speed modem families, digital bearers and fax.
 
-## Implementation status (13 October 2026)
+## Implementation status (26 October 2026)
 
 This is an active interoperability project with working data connections,
 not a fully qualified replacement for every hardware modem. Completion varies
 by role and peer; a loopback pass or CONNECT message alone does not establish
 hardware compatibility. The strongest sustained hardware evidence currently
 comes from **our analogue V.90 caller against an Eicon Diva digital answerer**.
+The [documentation index](docs/README.md) lists every topic note.
 
 | Area | Implemented and demonstrated | Qualification still needed |
 |---|---|---|
 | V.90 analogue caller | Eicon hardware: 56000 downstream / 31200 upstream, LAPM/V.42bis, both PCMU and PCMA; checked sustained transfers, PPP and HTTP | Broader peer/network coverage; emulator training results have separate limitations |
 | V.90 digital answerer (primary goal) | Native training, byte-exact PCM downstream, V.34 upstream and directed PCM/startup regressions | Repeatable analogue-client/FXS hardware qualification and sustained bidirectional transfers across chipsets |
-| V.92 | PCM-upstream datapump, Phase 3/4 codecs and procedure tests; Quick Connect: short Phase 1 (digital answerer and analogue caller, over V.8 and V.8bis) and short Phase 2 (`AT+PQC`, engine-level tests) | Complete native foreign-peer call, remaining timing/trellis/recovery integration, Quick Connect against a real modem, and sustained payload qualification |
-| V.34 | Full-duplex data and impaired-line tests; Eicon hardware checked echo in both laws at 31200 upstream / 21600 downstream | Native V.34 sustained-transfer coverage comparable to the V.90 soaks |
-| V.32/V.32bis, V.22/V.22bis, V.21, V.23, Bell 103/212A | Datapumps, engine-pair payload tests and legacy automode | Broad hardware compatibility coverage |
+| V.92 | PCM-upstream datapump, Phase 3/4 codecs and procedure tests; slmodemd dialling us over SIP links at V.92 32000 up / 56000 down with payload both ways (24 of 30 calls clean for a 150 s hold); Quick Connect: short Phase 1 (digital answerer and analogue caller, over V.8 and V.8bis) and short Phase 2 (`AT+PQC`, engine-level tests) | A hardware V.92 peer (the Eicon card answers a V.92 offer as V.90), remaining timing/trellis/recovery integration, Quick Connect against a real modem, and sustained payload qualification |
+| V.34 | Full-duplex data and impaired-line tests; Eicon hardware checked echo in both laws at 31200 upstream / 21600 downstream; as caller, ~35-minute echo soaks against Eicon extension 7900 (V.34 and V.90, 400/400 lines) and PPP to 7910 (V.34 21600-24000, 900/900 pings) | Native V.34 sustained-transfer coverage comparable to the V.90 soaks; an occasional Phase 3 stall against 7910 still costs one retrain |
+| V.32/V.32bis, V.22/V.22bis, V.21, V.23, Bell 103/212A | Datapumps, engine-pair payload tests and legacy automode; V.22bis holds the trained datapump through a short carrier drop (S10), found against a CX93001 | Broad hardware compatibility coverage |
+| Error control | V.42/LAPM, V.42bis, V.44; MNP 2-4 (V.42 Annex A) when detection finds no LAPM peer: 8 of 9 live calls to the RasFinder's MultiTech modems connected with MNP | MNP 5 compression is not implemented |
 | V.91, clear channel, V.110/V.120 | Digital bearer implementations and local/engine-pair tests | Foreign digital-peer qualification; a byte-exact compatible bearer is required |
 | Fax | T.31/T.32 interfaces and V.34 half-duplex; Eicon pages verified in both directions/laws up to 28800 bit/s | Class 2.1 33600 has local SIP/RTP coverage; hardware qualification at that rate and broader peers remain |
-| x2 | Initial asymmetric bidirectional PTY transfer against original Courier firmware in an emulator; symmetric engine-pair support | After the 54666-bit/s rate change, the emulator loses correctly demodulated words at its DSP/supervisor output bank; real hardware and sustained qualification remain |
-| K56flex | Payload components, V.8bis exchange and experimental training probes | Complete live upstream training/data connection; the client remains test-only |
+| x2 | Server and analogue client; LAPM qualified against emulated peers in both roles (original Courier firmware as client, Ie030002 as server); symmetric engine-pair support | Real hardware and sustained qualification; at the higher rate indices the emulated Courier corrupts payload that our transmit tap decodes byte-exact |
+| K56flex | Server: raw duplex connection against a native HSF client over PCMU (64 KiB exact each way in two minutes); first V.8bis exchanges with real hardware (Eicon 7910) | Hardware interoperability, in-data renegotiation, and a client for real servers (K56flex training against the 7910 has not yet completed) |
 | Application | SIP calling/registration, AT control, PTY/TCP, diagnostics, GUI and supervised multi-line workers | Each line uses a separate worker process; interoperability depends on the bearer and selected mode |
 
 On 8 October, two uninterrupted Eicon V.90 calls lasted about 26 minutes
@@ -125,6 +127,10 @@ can resolve after a single D/A conversion at the far-end ATA/FXS port.
 - Outputs steady 8000 Hz sample stream to spandsp
 - Preserves 8000 Hz sample accounting; sample insertion/deletion or resampling breaks PCM modem operation
 
+### `data_stack.c` / `mnp.c` — error control and compression
+- V.14 async framing, V.42/LAPM with V.42bis or V.44, and MNP (V.42 Annex A)
+- Selected by `AT+ES`/`AT+DS`; see [docs/v42_reliability.md](docs/v42_reliability.md) and [docs/mnp.md](docs/mnp.md)
+
 ### `data_interface.c` — User data I/O
 - Creates PTY pair (virtual serial port)
 - Optionally listens on TCP socket
@@ -150,7 +156,7 @@ make
 ```
 
 Select the highest modem family offered in V.8 with
-`--mode v22|v32|v32bis|v34|v90|v92|v91|k56|x2|clear|clear56|v120|v120-56`. The default is `v90`; lower fallback
+`--mode v21|b103|b212|v23c|v22|v22-1200|v32|v32bis|v34|v90|v92|v91|k56|x2|x2-symm|clear|clear56|v120|v120-56|v110`. The default is `v90`; lower fallback
 modes remain advertised (V.32bis and V.22bis; `ME_V8_ADVERTISE_V32=0` drops the
 V.32 bit). `v32bis` offers V.32bis + V.22bis, `v32` the same capped at
 V.32's 9600/4800. A pre-V.8 modem is met through V.32bis Annex A automode
@@ -183,7 +189,8 @@ touched, and `ATZ`/`AT&F` restore the default:
 | `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
 | `V92`      | as V90, with V.92                                        | V.92 + V.34       |
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
-| `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
+| `X2`       | x2, asymmetric (V.34 upstream): server when answering, analogue client when calling | same |
+| `X2S` (`X2SYMM`) | x2 digital symmetric (PCM both ways) | same |
 | `CLEAR` (`CLEARMODE`, `64K`) | no V.8: the DS0 is the bit pipe, V.14 (or LAPM) on it; max rate <=56000 selects restricted 56k | same |
 | `V120`     | no V.8: V.120 UI frames on the DS0; max rate <=56000 selects 56k | same |
 | `V21`, `B103` | 300-bit/s FSK | same |
@@ -200,8 +207,7 @@ The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
 `...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
 maximum (14400 for V32B, 33600 for V34, 56000 for V90/V92, 60000 for K56 --
 the shipped K56flex firmware tables run to 58000/60000 -- and 64000 for V91
-and X2, whose digital symmetric mode carries 64000 both ways; only the
-asymmetric x2 session exists here); they are stored and reported, not enforced -- rates come from training (`V32`'s 9600 cap is the one exception, since V.32 has no higher rate).
+and X2/X2S, whose digital symmetric mode carries 64000 both ways); they are stored and reported, not enforced -- rates come from training (`V32`'s 9600 cap is the one exception, since V.32 has no higher rate).
 `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
 
 ### On-line help and ATI pages
@@ -430,13 +436,17 @@ GPL-2.0 (due to spandsp LGPL and linmodem GPL heritage)
 
 ## Experimental x2
 
-`--mode x2` selects the experimental x2 implementation. Initial asymmetric
-bidirectional payload delivery is verified through real PTYs against original
-Courier firmware running in an emulator at 32000 downstream / 24000 upstream.
-The observed rate change to 54666 / 31200 completes, but downstream payload
-injected after it is corrupted at the emulated Courier DTE. Both our raw
-transmit tap and the Courier receive DSP recover it exactly; the emulator
-drops words at its DSP-to-supervisor output bank. Symmetric x2 also has engine-pair coverage.
-These results do not qualify sustained or real-hardware x2 interoperability.
-Run `make x2-test x2-session-test x2-sym-test`. See
+`--mode x2` (`AT+MS=X2`) selects the experimental asymmetric x2
+implementation: the digital server when answering, the analogue client when
+calling. `--mode x2-symm` (`AT+MS=X2S`) selects digital symmetric x2.
+Against original Courier firmware running in an emulator, the server carries
+PTY payload both ways, with V.42 LAPM (`CONNECT 53333/ARQ/x2/LAPM`), honours
+`AT+MS` rate bounds in both directions and answers in-data fall-forward
+renegotiation. The client dials both our own server and the native Ie030002
+server. A LAPM soak at index 3 (40000 down, 31200 up) delivered 15750 of
+15750 bytes over 132 s; at higher indices the emulated Courier corrupts payload
+that our transmit tap decodes byte-exact.
+Symmetric x2 has engine-pair coverage. None of this qualifies sustained or
+real-hardware x2 interoperability. The x2 tests are in `tests/fast.list`
+(`x2_test`, `x2_session_test`, `x2_client_test`, `x2_sym_test`). See
 [x2 implementation and evidence](docs/x2_implementation.md).
