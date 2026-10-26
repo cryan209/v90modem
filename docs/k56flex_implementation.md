@@ -2270,4 +2270,41 @@ with `0x005` K56 flags every time. Its INFO0a differs too: `ff 21 e2 37 9b`
 today against `7f 21 2e bb dd` in the 25 October probe, which looks like a
 different modem answering. Since 22:45 on 25 October 7910 has two MultiTech
 answerers (`ttyM4`, `ttyM5`, same chat script `ATE0V1S0=1S109=1`), and the
-`ttyM4` chat has been waiting since an abnormal call end at 23:51. Untested.
+`ttyM4` chat has been waiting since an abnormal call end at 23:51.
+
+**That was not it (later the same day).** Both answerers were restarted
+(15:39, fresh chat init `ATE0V1S0=1S109=1`) and 16 more probe calls got the same
+plain-V.34 answer. Two short PPP calls with INFO0 logging both landed on `ttyM4`
+(peer 10.254.104.1) and both got the non-K56 INFO0a, so it is the same modem
+that answered the K56 flag on 25 October; a held call on `ttyM4` put a
+concurrent probe on `ttyM5`, which answered the same way. Both modems are
+**Lucent ISI56128 Central Site Data Modem 2.10V1** (`ATI0`), with identical
+registers: S37=0 (line rate automatic), S38=200, S109=1, S40=0, S41=13, profile
+not stored.
+
+**The one INFO0a bit that moves is bit 19, 3429 allowed** (`vpcm_decode --v34`
+on the taps; everything else is CRC): clear on every call where the card went
+on to K56flex (CRC `0xDD97`, SpanDSP's raw `7f 21 2e bb dd`), set on every call
+where it did not (`0x9BF1`, `ff 21 e2 37 9b`). Across every retained 7910 log
+the first form always comes with an INFO1a carrying the K56 flags and the
+second never does. The card sends INFO0a after the client's INFO0c (HSF's
+INFO0c at 9.89 s, the card's INFO0a at 10.29 s), so it can react to it.
+
+**The card still offers K56flex to HSF, deterministically.** A native HSF call
+at 16:13 (`/root/k56h/6`, same recipe as call 5) got bit 19 clear and P1 at
+14.4 s. Our calls, with signalling byte-identical to the 25 October probe that
+got K56 (CM `C1 45 10 10 2A`, INFO0c with bits 21:23 = 5, INFO1c `fo=1`), get bit
+19 set. Neither of the visible differences from HSF is the cause on its own:
+
+| tried | INFO0a bit 19 | calls |
+|---|---|---|
+| `--mode v34`, JB 40 ms (the 25 October recipe) | set | 9 |
+| plus V.8bis K56flex client exchange first (`AT+MS=K56,1`, completes, card ACKs) | set | 3 |
+| V.8bis, default 200 ms jitter buffer | set | 3 |
+| `AT+MS=V34,0` | set | 2 |
+| native HSF (CM `C1 45 10 10`, INFO0c bits 21:23 = 0) | clear | 2 |
+
+Not yet compared: our INFO0c with bits 21:23 = 0 as HSF sends them, CM without
+the third modulation octet, and V.8/Phase 2 timing. The recorded-upstream
+question (does a report release gate B?) is still open: no call today reached
+gate A.
