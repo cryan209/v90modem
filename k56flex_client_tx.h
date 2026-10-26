@@ -23,6 +23,14 @@
  *   MP, MP'    V.34 10.1.3.9, Tables 20/21, with K56's rate fields: bits
  *              20:23 upstream rate/2400, bits 24:27 downstream rate/2000-15.
  *
+ * The server's Jd at its gate A chooses the constellation of TRN2, MP, MP'
+ * and E (V.34 10.1.3.3, Table 18): 8990 four-point, 89B0 sixteen-point
+ * (cfg.trn16; 10.1.3.8, 10.1.3.9, 10.1.3.2).  Native HSF does the same
+ * (legacy V124 2202fa20 records the received J, 2202c2a0 switches TRN2 and
+ * MP to four bits per symbol).  Our server sends 8990; the 7910 sends 89B0
+ * once it has accepted the client's V.8bis MS.  S to J' are four-point
+ * either way.
+ *
  * Until k56flex_client_tx_start() it returns zero symbols (silence).  After
  * MP' it sends idle ones; B1 and data are not implemented here.
  */
@@ -47,6 +55,9 @@ typedef struct {
     unsigned mp_mask;          /* 15-bit rate mask, bits 35:49 */
     unsigned mp_asymmetric;    /* bit 50, set by native HSF */
     unsigned trn2_hold;        /* 1: after J', idle until k56flex_client_tx_release_trn2() */
+    unsigned trn16;            /* 1: TRN2, MP, MP' and the tail on the 16-point
+                                  constellation, as the server's Jd 89B0 asks
+                                  (V.34 10.1.3.3, Table 18) */
 } k56flex_client_tx_cfg_t;
 
 typedef enum {
@@ -90,5 +101,23 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st);
 /* The 88-bit type 0 MP (ack 0 or 1) as k56flex_client_tx sends it. */
 void k56flex_client_tx_mp_bits(const k56flex_client_tx_cfg_t *cfg, int ack, uint8_t bits[88]);
+
+/* The server's Jd at its gate A (Draft 0.23 4.10): a two-level biphase
+ * signal whose bits, descrambled with 1 + x^-5 + x^-23, repeat one of V.34
+ * Table 18's J words (our server's K56T_GATE_A appends its training_word to
+ * the P3 stream).  Fed every received sample (linear); returns 0x8990 or
+ * 0x89B0 once that word has repeated for 32 words, otherwise 0.  Polarity,
+ * pair alignment and word phase are all resolved blind; P3's descrambled
+ * ones and the four-level P1 never qualify. */
+typedef struct {
+    uint32_t y;                /* received bit history */
+    uint32_t d;                /* descrambled bits, newest in bit 0 */
+    unsigned run;              /* consecutive bits equal to the bit 16 before */
+    unsigned odd;              /* pair alignment: every other sample */
+    uint16_t word;
+} k56flex_jd_rx_t;
+
+void k56flex_jd_rx_init(k56flex_jd_rx_t *j);
+uint16_t k56flex_jd_rx_sample(k56flex_jd_rx_t *j, int16_t v);
 
 #endif

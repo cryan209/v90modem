@@ -148,6 +148,111 @@ static void trn2_hold_waits(void)
     CHECK(k56flex_client_tx_symbol(&tx, &re, &im) == K56CT_GAP, "TRN2 starts on release");
 }
 
+/* trn16 (the server's Jd 89B0): TRN2 is V.34 10.1.3.8's sixteen-point TRN,
+   and MP, MP' are 10.1.3.9's sixteen-point MP.  Checked against the
+   clause's text with an independent mapper and decoder: quarter point
+   2*Q2+Q1 of Figure 5 ((1,1) (-3,1) (1,-3) (-3,-3)) rotated clockwise by
+   I*90 degrees, I differential for MP. */
+static void sixteen_point_follows_jd(void)
+{
+    static const double qr[4] = {1, -3, 1, -3}, qi[4] = {1, 1, -3, -3};
+    k56flex_client_tx_cfg_t cfg;
+    k56flex_client_tx_t tx;
+    uint32_t h = 0, dh = 0;
+    unsigned seen = 0, match = 0, prev = 0, nbits = 0, frames[2] = {0, 0};
+    double e = 0;
+    float re, im;
+    uint8_t bits[4096], want[2][88];
+    k56flex_client_tx_stage_t st;
+
+    k56flex_client_tx_defaults(&cfg);
+    cfg.trn16 = 1;
+    cfg.mp_repeats = 3;
+    cfg.mp_ack_repeats = 2;
+    k56flex_client_tx_init(&tx, &cfg);
+    k56flex_client_tx_start(&tx);
+    k56flex_client_tx_mp_bits(&cfg, 0, want[0]);
+    k56flex_client_tx_mp_bits(&cfg, 1, want[1]);
+    while ((st = k56flex_client_tx_symbol(&tx, &re, &im)) != K56CT_TAIL  &&  tx.symbols < 40000) {
+        double best = 1e9;
+        unsigned bq = 0, bz = 0;
+
+        if (st != K56CT_GAP  &&  st != K56CT_MP  &&  st != K56CT_MP_ACK)
+            continue;
+        for (unsigned q = 0; q < 4; q++)
+            for (unsigned z = 0; z < 4; z++) {
+                /* clockwise z*90: multiply by exp(-j*z*pi/2) */
+                double c = cos(-z*M_PI/2), sn = sin(-z*M_PI/2);
+                double pr = (qr[q]*c - qi[q]*sn)/sqrt(10), pi = (qr[q]*sn + qi[q]*c)/sqrt(10);
+                double dd = (re - pr)*(re - pr) + (im - pi)*(im - pi);
+                if (dd < best) { best = dd; bq = q; bz = z; }
+            }
+        CHECK(best < 1e-6, "symbol %llu is a sixteen-point symbol", (unsigned long long) tx.symbols);
+        if (st == K56CT_GAP) {
+            unsigned y[4];
+            for (int k = 0; k < 4; k++) {
+                y[k] = 1 ^ ((h >> 17) & 1) ^ ((h >> 22) & 1);
+                h = (h << 1) | y[k];
+            }
+            match += bz == (y[0] | y[1] << 1)  &&  bq == (y[2] | y[3] << 1);
+            e += (double) re*re + (double) im*im;
+            seen++;
+        }
+        /* The receiver's view: I differential, everything descrambled with
+           1 + x^-18 + x^-23 from history that runs on through TRN2. */
+        unsigned i = (bz - prev) & 3, y4[4] = {i & 1, i >> 1, bq & 1, bq >> 1};
+        prev = bz;
+        for (int k = 0; k < 4; k++) {
+            unsigned x = y4[k] ^ ((dh >> 17) & 1) ^ ((dh >> 22) & 1);
+            dh = (dh << 1) | y4[k];
+            if (st != K56CT_GAP  &&  nbits < sizeof(bits))
+                bits[nbits++] = (uint8_t) x;
+        }
+    }
+    CHECK(seen == cfg.gap_symbols  &&  match == seen, "sixteen-point TRN2: %u/%u", match, seen);
+    CHECK(fabs(e/seen - 1.0) < 0.05, "sixteen-point TRN2 is unit RMS (%.3f)", e/seen);
+    for (unsigned at = 0; at + 88 <= nbits; at += 88)
+        for (int a = 0; a < 2; a++)
+            frames[a] += memcmp(bits + at, want[a], 88) == 0;
+    CHECK(frames[0] == cfg.mp_repeats  &&  frames[1] == cfg.mp_ack_repeats,
+          "sixteen-point MP %u/%u, MP' %u/%u", frames[0], cfg.mp_repeats, frames[1], cfg.mp_ack_repeats);
+}
+
+/* The gate-A Jd detector on a synthetic server signal: P3's ones then the
+   word, scrambled with 1 + x^-5 + x^-23 and sent biphase, at either
+   polarity and pair alignment. */
+static void jd_detector(void)
+{
+    static const uint16_t words[2] = {0x8990, 0x89b0};
+
+    for (int c = 0; c < 8; c++) {
+        k56flex_jd_rx_t j;
+        uint32_t h = 0;
+        uint16_t got = 0, word = words[c & 1];
+        int sign = (c & 2) ? -1 : 1;
+        long at = -1, n = 0;
+
+        k56flex_jd_rx_init(&j);
+        if (c & 4)
+            k56flex_jd_rx_sample(&j, 0);            /* shift the pair alignment */
+        for (int b = 0; b < 8000; b++) {
+            unsigned x = b < 4000 ? 1 : (word >> (b & 15)) & 1;
+            unsigned y = x ^ ((h >> 4) & 1) ^ ((h >> 22) & 1);
+            int16_t v = (int16_t) (sign*(y ? 1000 : -1000));
+            h = (h << 1) | y;
+            for (int k = 0; k < 2; k++, n++) {
+                uint16_t w = k56flex_jd_rx_sample(&j, (int16_t) (k ? -v : v));
+                if (w  &&  !got) {
+                    got = w;
+                    at = n;
+                }
+            }
+        }
+        CHECK(got == word  &&  at > 8000  &&  at < 8000 + 2*16*40,
+              "Jd %04x (case %d) detected as %04x at sample %ld", word, c, got, at);
+    }
+}
+
 int main(void)
 {
     static const struct { int baud, high, pr, pe, alaw; } cases[] = {
@@ -162,6 +267,8 @@ int main(void)
     mp_matches_native_hsf();
     second_trn_is_fresh();
     trn2_hold_waits();
+    sixteen_point_follows_jd();
+    jd_detector();
 
     k56flex_client_tx_defaults(&cfg);
     cfg.gap_symbols = 1600;                         /* keep the run short */

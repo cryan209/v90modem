@@ -4933,8 +4933,13 @@ static uint64_t g_k56c_tx_n;
  * (9614, the second TRN between J' and MP), ME_K56FLEX_CLIENT_MP_REPEATS (2) and
  * ME_K56FLEX_CLIENT_MP_ACK_REPEATS (1), ME_K56FLEX_CLIENT_MP_UP_CODE (4: rate
  * /2400), _MP_DOWN_CODE (11: rate/2000 - 15) and _MP_MASK (0x7fff).  The
- * defaults are native HSF's MP (9600 up, 52000 down). */
+ * defaults are native HSF's MP (9600 up, 52000 down).
+ * TRN2, MP, MP' and E use the constellation the server's gate-A Jd asks for
+ * (V.34 10.1.3.3, Table 18: 8990 four-point, 89B0 sixteen-point), read off
+ * the downstream by k56flex_jd_rx; ME_K56FLEX_CLIENT_TRN16=0/1 forces it. */
 static k56flex_client_tx_t g_k56c_up;
+static k56flex_jd_rx_t g_k56c_jd;
+static int g_k56c_trn16_forced;     /* -1: follow the Jd */
 static bool g_k56c_up_on, g_k56c_up_started;
 static int64_t g_k56c_gate_a_at;
 static k56flex_client_tx_stage_t g_k56c_up_stage;
@@ -4992,6 +4997,9 @@ static void me_k56c_up_init_locked(void)
     cfg.mp_up_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_UP_CODE", (int) cfg.mp_up_code);
     cfg.mp_down_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_DOWN_CODE", (int) cfg.mp_down_code);
     cfg.mp_mask = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_MASK", (int) cfg.mp_mask);
+    g_k56c_trn16_forced = parse_env_int("ME_K56FLEX_CLIENT_TRN16", -1);
+    cfg.trn16 = g_k56c_trn16_forced > 0;
+    k56flex_jd_rx_init(&g_k56c_jd);
     if (k56flex_client_tx_init(&g_k56c_up, &cfg) != 0)
         return;
     /* Phase 3 set-up has already applied INFO1a's power reduction and
@@ -5155,6 +5163,17 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
     for (int n = 0;  n < len;  n++) {
         if (g_k56c_up_on)
             me_k56c_eight_level_locked(amp[n]);
+        if (g_k56c_up_on  &&  !g_k56c_jd.word  &&  k56flex_jd_rx_sample(&g_k56c_jd, amp[n])) {
+            bool sixteen = g_k56c_jd.word == 0x89b0;
+
+            ME_LOG("[K56C] +%llu ms server Jd %04x (%s-point TRN2/MP)%s\n",
+                   (unsigned long long) (g_k56c_samples/8), g_k56c_jd.word,
+                   sixteen ? "sixteen" : "four",
+                   g_k56c_trn16_forced >= 0 ? ", overridden by ME_K56FLEX_CLIENT_TRN16" :
+                   g_k56c_up.stage >= K56CT_GAP ? ", too late: TRN2 already started" : "");
+            if (g_k56c_trn16_forced < 0  &&  g_k56c_up.stage < K56CT_GAP)
+                g_k56c_up.cfg.trn16 = sixteen;
+        }
         g_k56c_rms_acc += (uint64_t) ((int32_t) amp[n]*amp[n]);
         if (++g_k56c_rms_n == 800) {
             ME_LOG("[K56C] +%llu ms rx rms %.0f\n",

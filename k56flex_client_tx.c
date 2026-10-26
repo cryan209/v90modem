@@ -13,6 +13,27 @@
 static const float pt_re[4] = { R2,  R2, -R2, -R2};
 static const float pt_im[4] = { R2, -R2, -R2,  R2};
 
+/* V.34 Figure 5 quarter-superconstellation points 0..3; the sixteen-point
+   set has mean energy 10, so 1/sqrt(10) makes it unit RMS. */
+static const float q16_re[4] = {1, -3,  1, -3};
+static const float q16_im[4] = {1,  1, -3, -3};
+#define RS10 0.31622776601683794f
+
+/* 10.1.3.8, 10.1.3.9: 2*Q2+Q1 selects the quarter point, which is rotated
+   clockwise by z*90 degrees (z = 0 leaves it where label 0's point is). */
+static void point16(unsigned q, unsigned z, float *re, float *im)
+{
+    float x = q16_re[q & 3]*RS10, y = q16_im[q & 3]*RS10, t;
+
+    for (z &= 3; z; z--) {
+        t = x;
+        x = y;
+        y = -t;
+    }
+    *re = x;
+    *im = y;
+}
+
 void k56flex_client_tx_defaults(k56flex_client_tx_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
@@ -114,6 +135,18 @@ static void diff_symbol(k56flex_client_tx_t *t, unsigned b0, unsigned b1, float 
     *im = pt_im[raw];
 }
 
+/* Four data bits, LSB first in time, as one sixteen-point symbol (V.34
+   10.1.3.9): I1 I2 differentially encoded as in the four-point case, Q1 Q2
+   pick the quarter point. */
+static void diff_symbol16(k56flex_client_tx_t *t, const unsigned b[4], float *re, float *im)
+{
+    unsigned i = scramble(t, b[0]) | (scramble(t, b[1]) << 1);
+    unsigned q = scramble(t, b[2]) | (scramble(t, b[3]) << 1);
+
+    t->prev = (t->prev + i) & 3;
+    point16(q, t->prev, re, im);
+}
+
 static void load_record(k56flex_client_tx_t *t)
 {
     uint32_t rec = (uint32_t) t->cfg.ext | ((uint32_t) t->cfg.report << 8);
@@ -182,7 +215,7 @@ static int frame_bits(k56flex_client_tx_t *t, unsigned *b0, unsigned *b1, unsign
 k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float *re, float *im)
 {
     k56flex_client_tx_stage_t st;
-    unsigned b0, b1;
+    unsigned b0, b1, b[4];
 
     *re = *im = 0.0f;
     for (;;) {
@@ -236,6 +269,13 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
                 t->prev = d;
                 *re = pt_re[d];
                 *im = pt_im[d];
+                if (st == K56CT_GAP  &&  t->cfg.trn16) {
+                    /* 10.1.3.8: Q1 Q2 follow I1 I2 in time. */
+                    unsigned q = trn_bit(t) | (trn_bit(t) << 1);
+                    t->scr = (t->scr << 1) | (q & 1);
+                    t->scr = (t->scr << 1) | (q >> 1);
+                    point16(q, d, re, im);
+                }
             }
             break;
         case K56CT_REPORT:
@@ -265,9 +305,23 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
                 enter(t, (st == K56CT_MP && t->cfg.mp_ack_repeats) ? K56CT_MP_ACK : K56CT_TAIL);
                 continue;
             }
+            if (t->cfg.trn16) {
+                /* 88 bits is 22 symbols: the second pair never crosses a frame. */
+                b[0] = b0;
+                b[1] = b1;
+                frame_bits(t, &b[2], &b[3], ~0u);
+                diff_symbol16(t, b, re, im);
+                break;
+            }
             diff_symbol(t, b0, b1, re, im);
             break;
         case K56CT_TAIL:
+            /* E (10.1.3.2) is ones on J's constellation; so is the idle after it. */
+            if (t->cfg.trn16) {
+                b[0] = b[1] = b[2] = b[3] = 1;
+                diff_symbol16(t, b, re, im);
+                break;
+            }
             diff_symbol(t, 1, 1, re, im);
             break;
         }
@@ -275,4 +329,45 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
         t->symbols++;
         return st;
     }
+}
+
+void k56flex_jd_rx_init(k56flex_jd_rx_t *j)
+{
+    memset(j, 0, sizeof(*j));
+}
+
+/* w, LSB first in time, is a rotation of `want` or of its complement. */
+static int is_rotation(uint16_t w, uint16_t want)
+{
+    for (unsigned r = 0; r < 16; r++) {
+        uint16_t x = (uint16_t) ((w >> r) | (w << (16 - r)));
+        if (x == want  ||  (uint16_t) ~x == want)
+            return 1;
+    }
+    return 0;
+}
+
+uint16_t k56flex_jd_rx_sample(k56flex_jd_rx_t *j, int16_t v)
+{
+    unsigned y, x;
+    uint16_t w = 0;
+
+    if (j->word)
+        return j->word;
+    if ((j->odd ^= 1) == 0)
+        return 0;
+    y = v < 0;
+    x = y ^ ((j->y >> 4) & 1) ^ ((j->y >> 22) & 1);
+    j->y = (j->y << 1) | y;
+    j->d = (j->d << 1) | x;
+    j->run = (x == ((j->d >> 16) & 1)) ? j->run + 1 : 0;
+    if (j->run < 32*16)
+        return 0;
+    for (unsigned i = 0; i < 16; i++)
+        w |= (uint16_t) (((j->d >> (15 - i)) & 1) << i);
+    if (is_rotation(w, 0x8990))
+        j->word = 0x8990;
+    else if (is_rotation(w, 0x89b0))
+        j->word = 0x89b0;
+    return j->word;
 }

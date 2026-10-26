@@ -2521,6 +2521,46 @@ left is the upstream itself during the card's PT/gate C stages, and the
 downstream: the client presumably has to train on the server's PT signal and
 answer something the server can see before gate C will end.
 
+**The card's Jd asks for a sixteen-point TRN2; sending one does not move gate C
+either (A/B, 26 October).** Native HSF's own client logic, read from the legacy
+V124 VxD in cruft (`native/hsf/recovered/legacy-stack/LEGACYV124.decompiled.c`,
+object 1): on `RX_GOT_J` (`2202fa20`) it records the server's Jd, `8990` or
+`89b0`; `Tx_Jtag` (`2202e0f0`, the J' with `899F`) then calls `2202c2a0`, which
+puts TRN2 (`2202d990`), MP (`2202e240`) and E (`2202e490`) on the sixteen-point
+constellation, four bits per symbol, when that Jd was `89b0`. That is V.34
+10.1.3.3 (J chooses the remote's TRN, MP, MP' and E constellation), 10.1.3.8
+and 10.1.3.9. Our server sends `8990`, so every HSF upstream we copied was
+four-point. The 7910 does not: decoding its gate-A word (two-level biphase, bits
+descrambled with 1 + x^-5 + x^-23) gives `8990` on the 25 October INFO1c-only
+probe but **`89b0`** on both native-HSF calls that reached gate A (25 October
+call 2, 26 October call 5); the V.8bis MS exchange is what changes it.
+
+New: `k56flex_jd_rx` (in `k56flex_client_tx.c`) reads the Jd off the downstream
+blind to polarity, pair alignment and word phase (8990 on our server's taps,
+nothing on any upstream tap or on calls that never reach gate A), and
+`cfg.trn16` sends TRN2, MP, MP' and the E/idle tail sixteen-point; the engine
+sets it from the Jd before TRN2 starts, `ME_K56FLEX_CLIENT_TRN16=0/1` forces it.
+`k56flex_client_tx_test` checks TRN2 symbol by symbol against 10.1.3.8 and
+decodes MP/MP' back with an independent 10.1.3.9 decoder.
+
+Live (CT 117 `/root/k56j16-runs`, the recipe below, arms alternated, 10 calls):
+
+| arm | V.8bis completed | card's Jd | TRN2 | eight-level stage | probe ended |
+|---|---|---|---|---|---|
+| follow the Jd (sixteen-point) | 4/5 | `89b0` at +5.36 s, all 4 | +6.95 s | +8.65 s | 15.2 s, retrain, all 4 |
+| forced four-point (as before) | 5/5 | `89b0`, all 5 | +6.95 s | +8.60-8.65 s | 15.2 s, retrain, all 5 |
+
+So the card's timeline is identical whichever constellation TRN2 and MP use:
+the four-point TRN2 was a spec violation (kept as the follow-the-Jd default,
+which leaves calls to our own server unchanged), but it is not what gate C
+waits for. Two further things the VxD shows about HSF's side, neither tried yet:
+it sends MP only when its receiver has an MP ready (`2202dbb0`; otherwise "MP
+NOT READY - Going To ReTrn"), and it repeats MP until its receiver reports the
+server's MP (event `0xb`, then MP') or MP' (event `0xc`, then E and B1); TRN2
+also ends early on the receiver's "ClearDown" event `0xf`. Every exit from
+HSF's TRN2/MP is driven by its downstream receiver, which our client still does
+not have past P1.
+
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
 Every piece below is an experiment knob inside the client probe; there is no
@@ -2535,7 +2575,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | V.8bis | works when the clipped CRe is caught (about half the calls; the Cisco path mutes it after 40 ms). Our default MS is **wrong** for this card: only HSF's (no NPar block, NS octet 7 `81`) gets K56flex. |
 | Phase 2 | works with HSF's CM (no protocols octet) and INFO0c (bits 21:23 = 0) and INFO1c's K56 flag (`fo=1`); none is a default. |
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
-| upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`). |
+| upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
 | gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. |
 | parameter record, priming, data | not reached; no client receiver for this card's PT, parameter record or PCM data. |
 | E, B1, upstream data | not implemented on the client side. |
@@ -2543,8 +2583,8 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
 gate C ends on "training complete" or "MP accepted"; the card gives neither.
 Varied without effect: report word and extension, TRN2 length (4800-19000) and
-start (after J' or on the card's PT stage), MP repeats (to 40+8), MP downstream
-rate.
+start (after J' or on the card's PT stage), TRN2/MP constellation (four- or
+sixteen-point), MP repeats (to 40+8), MP downstream rate.
 
 1. **The card does not accept our MP as K56flex MP.** HSF's MP layout came from
    HSF talking to *our* server, which reads K56 rate fields exactly as HSF writes
