@@ -4020,14 +4020,17 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_B:
         /* Send pure tone (V.34 answerer side). */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK
-            ||  (s->rx.info0_received  &&  s->rx.received_event == V34_EVENT_TONE_SEEN))
+        if (s->rx.received_event == V34_EVENT_INFO0_OK  ||  s->rx.info0_received)
         {
             /* INFO0a is a durable fact.  The receiver publishes INFO0_OK and
                then, moving on to Tone A, overwrites the single event slot with
                TONE_SEEN; reading that as "Tone A without INFO0a" sent a call
                modem that HAD the INFO0a back into INFO0c retries it could
-               never leave (two engines never trained V.34 against each other). */
+               never leave (two engines never trained V.34 against each other).
+               Any later event can take the slot, not only TONE_SEEN: against
+               MICA the receiver had moved on to the reversal and L1/L2 while
+               this stage, waiting for one of two event values, kept sending
+               Tone B for the rest of the call.  So test the fact alone. */
             s->tx.stage = V34_TX_STAGE_FIRST_B_INFO_SEEN;
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD
@@ -4101,7 +4104,10 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_B_INFO_SEEN:
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        /* V.34 11.2.1.1.3: the first Tone A reversal.  phase2_reversal_count
+           is the detector's durable count; the event slot may already hold
+           whatever came after it. */
+        if (s->rx.received_event == V34_EVENT_REVERSAL_1  ||  s->rx.phase2_reversal_count >= 1)
         {
             /* First reversal seen - continue sending pure tone for 40+-1ms */
             s->tx.tone_duration = 1;
@@ -4675,6 +4681,23 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
             /* V.34 call modem (§11.2.1.1): Tone B. */
             s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
             s->tx.stage = V34_TX_STAGE_FIRST_B;
+            /* §11.2.1.2.3: the answer modem reverses Tone A only after it has
+               detected Tone B, which starts here.  A reversal counted before
+               now is the INFO0a/Tone A seam, not the peer's: MICA's produces
+               one on the first Tone A bauds, and taking it as the reversal
+               sent our Tone B reversal 40 ms into Tone B, before MICA had
+               even detected B, and Phase 2 never progressed. */
+            if (s->rx.phase2_reversal_count > 0)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - discarding %d Tone A reversal(s) seen before Tone B\n",
+                         s->rx.phase2_reversal_count);
+                s->rx.phase2_reversal_count = 0;
+                if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+                    s->rx.received_event = V34_EVENT_TONE_SEEN;
+                /*endif*/
+            }
+            /*endif*/
         }
         else if (!s->tx.calling_party  &&  s->tx.v90_mode)
         {
@@ -10345,6 +10368,9 @@ static complex_sig_t get_external_baud(v34_state_t *s)
                                   s->tx.v90_data_expanded,
                                   s->tx.v90_data_precoder) == 0)
         {
+            for (int i = 0;  i < s->tx.ext_data_advance;  i++)
+                (void) get_data_baud(s);
+            /*endfor*/
             return get_data_baud(s);
         }
         /*endif*/
@@ -10384,6 +10410,24 @@ SPAN_DECLARE(int) v34_v90_arm_tx_data(v34_state_t *s,
     s->tx.external_done_func = done_fn;
     s->tx.v90_data_armed = true;
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_tx_set_data_advance(v34_state_t *s, int symbols)
+{
+    /* Diagnostic: MicaEmu's K56flex reference needed its encoder advanced
+       25 symbols at B1 to meet MICA's data-frame position. */
+    s->tx.ext_data_advance = symbols < 0 ? 0 : symbols;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_tx_set_data_scrambler_tap(v34_state_t *s, int tap)
+{
+    /* V.34 clause 7: a call modem scrambles with GPC (1 + x^-18 + x^-23,
+       zero-based tap 17), an answer modem with GPA (x^-5, tap 4).  V.90's
+       analogue upstream is GPA (8.5.1), the default; a K56flex client is a
+       V.34 call modem upstream and uses GPC. */
+    s->tx.ext_data_tap = tap;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -10850,7 +10894,7 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
     /* V.90 §8.5.1: B1 and upstream data use the analogue-modem GPA
        scrambler (1 + x^-5 + x^-23), i.e. zero-based tap 4.  Do not inherit
        the answer-modem/downstream GPC tap from an earlier role. */
-    s->tx.scrambler_tap = 4;
+    s->tx.scrambler_tap = s->tx.ext_data_tap ? s->tx.ext_data_tap : 4;
     if (v34_seed_tx_data(s, bit_rate_n, trellis_size,
                          use_non_linear_encoder, expanded_shaping,
                          precoder_coeffs) != 0)

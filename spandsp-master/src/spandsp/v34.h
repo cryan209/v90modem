@@ -793,6 +793,14 @@ SPAN_DECLARE(int) v34_v90_arm_tx_data(v34_state_t *s,
                                       const int16_t precoder_coeffs[6],
                                       bool (*done_fn)(void *user_data));
 
+/*! Zero-based scrambler tap for v34_v90_begin_tx_data() and
+    v34_v90_arm_tx_data(): 0 (default) for V.90's GPA, 17 for GPC. */
+SPAN_DECLARE(void) v34_tx_set_data_scrambler_tap(v34_state_t *s, int tap);
+
+/*! Diagnostic: symbols the data encoder runs ahead (generated and discarded)
+    when v34_v90_arm_tx_data() hands over. */
+SPAN_DECLARE(void) v34_tx_set_data_advance(v34_state_t *s, int symbols);
+
 /*! Produce one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
                                               int16_t bits[16]);

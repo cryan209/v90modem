@@ -86,7 +86,8 @@ static void try_decode_param(k56flex_client_t *c, k56flex_train_phase_t ph)
         if (parse_record(c, marker, raw) < 0) { from = marker + 2; continue; }
         {
             unsigned w = raw[0], final = (w >> 15) & 1;
-            if (!c->param_ok) {
+            /* The final record (bit 15) may revise the first: decode it too. */
+            if (!c->param_ok || final) {
                 c->param.mode = w & 3;
                 c->param.extra = (w >> 2) & 15;
                 c->param.rate = (w >> 6) & 0x7f;
@@ -122,10 +123,14 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
     uint32_t src = 0;
     unsigned matches, i;
     const k56flex_train_phase_t unknown_from = c->detect ? K56T_GATE_C : K56T_PARAM_1;
-    int known_ref = ph < unknown_from;
+    /* Gate A's Jd is the server's choice (8990 or 89B0, V.34 Table 18), not
+       the shadow's: over audio, follow it on decisions rather than train the
+       front end on a reference that may be the other word. */
+    int gate_a_free = c->detect && ph == K56T_GATE_A;
+    int known_ref = ph < unknown_from && !gate_a_free;
     level_block(c, o, 6, lv);
     k56flex_train_samples(sh, exp, 6);           /* advances the mirror phase machine */
-    if (ph < unknown_from) {
+    if (ph < unknown_from && !gate_a_free) {
         int same = 1;
         for (i = 0; i < 6; ++i) {
             int e = k56flex_g711_from_level(c->cfg.law, exp[i]);
@@ -182,6 +187,7 @@ static int ensure_rx(k56flex_client_t *c)
     if (k56flex_pcm_rx_init(&c->rx, &pc) < 0) return 0;
     for (i = 0; i < 23 && i < c->nbits; ++i) hist |= (unsigned)c->y[c->nbits - 1 - i] << i;
     c->rx.descrambler = hist;
+    c->rx.m.dc = c->cp.dc;                       /* the server carries training DC into the mapper */
     c->rx_ready = 1;
     return 1;
 }
@@ -267,17 +273,88 @@ static void training_symbols(k56flex_client_t *c, const float *y)
     k56flex_train_phase_t ph = k56flex_train_phase(&c->shadow);
     /* The server leaves its gates at pair boundaries; the signal shows when. */
     if (ph == K56T_GATE_A && is_silent(y, 6)) k56flex_train_force_phase(&c->shadow, K56T_GATE_B);
-    else if (ph == K56T_GATE_B && !is_silent(y, 6)) k56flex_train_force_phase(&c->shadow, K56T_ID2_A);
+    /* Equalizer ringing is not the end of the gate: the codec input must be active too. */
+    else if (ph == K56T_GATE_B && !is_silent(y, 6) && !c->input_silent) k56flex_train_force_phase(&c->shadow, K56T_ID2_A);
     nl = stage_levels(c, lv, 256);
     slice(c, y, 6, lv, nl, o);
     training_block(c, o);
+}
+
+/* Nearest codeword of the law, whatever the mapper's level set. */
+static void slice_any(const k56flex_client_t *c, const float *y, unsigned n, uint8_t *o)
+{
+    unsigned i;
+    int j;
+    for (i = 0; i < n; ++i) {
+        float bd = 1e30f;
+        int best = 0xff;
+        for (j = 0; j < 256; ++j) {
+            float d = fabsf(y[i] - (float)k56flex_level_from_g711(c->cfg.law, (uint8_t)j));
+            if (d < bd) { bd = d; best = j; }
+        }
+        o[i] = (uint8_t)best;
+    }
+}
+
+/* The record's rate field is not always the mapper's: MICA advertises 60000
+   and maps with the 56000 table (MicaEmu, 10 October).  The six priming
+   frames carry ones (Draft 0.23 4.12, resident DC3B), so the rate whose
+   decoder turns all six into ones is the one in use; adopt it only if it is
+   the only one, then decode the six again with it. */
+static int select_rate(k56flex_client_t *c)
+{
+    uint8_t bits[K56FLEX_MAX_FRAME_BITS];
+    unsigned hist = 0, i, f, candidates = 0;
+    int rate, chosen = 0;
+    for (i = 0; i < 23 && i < c->nbits; ++i) hist |= (unsigned)c->y[c->nbits - 1 - i] << i;
+    for (rate = 32000; rate <= 60000; rate += 2000) {
+        k56flex_pcm_config_t pc;
+        k56flex_pcm_rx_t rx;
+        int ok = 1;
+        pc.law = c->cfg.law;
+        pc.rate_bps = rate;
+        pc.report_field = c->report_field;
+        if (k56flex_pcm_rx_init(&rx, &pc) < 0) continue;
+        rx.descrambler = hist;
+        rx.m.dc = c->cp.dc;
+        for (f = 0; f < 6 && ok; ++f) {
+            int n = k56flex_pcm_rx_frame(&rx, c->prime_oct[f], bits);
+            if (n < 0) ok = 0;
+            for (i = 0; ok && i < (unsigned) n; ++i) if (bits[i] != 1) ok = 0;
+        }
+        if (ok) { ++candidates; chosen = rate; }
+    }
+    c->rate_candidates = candidates;
+    if (candidates != 1) return -1;
+    c->rate_bps = chosen;
+    return 0;
 }
 
 static void frame_symbols(k56flex_client_t *c, const float *y)
 {
     int16_t lv[256];
     uint8_t o[8];
-    unsigned nl;
+    unsigned nl, f;
+    if (!c->rate_selected) {
+        if (k56flex_train_phase(&c->shadow) != K56T_PRIME || !c->param_ok) { c->failed = 1; return; }
+        slice_any(c, y, 8, c->prime_oct[c->prime_buffered++]);
+        if (c->prime_buffered < 6) return;
+        if (select_rate(c) < 0) { c->failed = 1; return; }
+        c->rate_selected = 1;
+        c->rx_ready = 0;
+        if (!ensure_rx(c)) { c->failed = 1; return; }
+        {
+            /* The front end's decision update is indexed by symbol: give
+               each held frame its own position (this one is the sixth). */
+            uint64_t now = c->qfirst;
+            for (f = 0; f < 6 && !c->failed; ++f) {
+                c->qfirst = now - 8*(5 - f);
+                frame_block(c, c->prime_oct[f]);
+            }
+            c->qfirst = now;
+        }
+        return;
+    }
     if (!ensure_rx(c)) { c->failed = 1; return; }
     nl = k56flex_pcm_levels(&c->rx.m, lv, 256);
     slice(c, y, 8, lv, nl, o);
@@ -359,5 +436,8 @@ void k56flex_client_rx_linear(k56flex_client_t *c, const int16_t *samples, size_
         c->fe = k56flex_rxfe_new(c->cfg.law, fe_sink, c);
         if (!c->fe) { c->failed = 1; return; }
     }
-    for (i = 0; i < n && !c->failed; ++i) k56flex_rxfe_push(c->fe, samples[i]);
+    for (i = 0; i < n && !c->failed; ++i) {
+        c->input_silent = samples[i] >= -SILENT_LEVEL && samples[i] <= SILENT_LEVEL;
+        k56flex_rxfe_push(c->fe, samples[i]);
+    }
 }

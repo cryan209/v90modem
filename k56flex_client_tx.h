@@ -45,6 +45,7 @@
 #ifndef K56FLEX_CLIENT_TX_H
 #define K56FLEX_CLIENT_TX_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
@@ -69,6 +70,7 @@ typedef struct {
     unsigned jprime_bare;      /* 1: J' is the bare 16-bit 899F word, no extension octet */
     unsigned jprime_none;      /* 1: no J' at all (diagnostic: does the server see J'?) */
     unsigned md_symbols;       /* V.34 11.3.1: S, S-bar, MD, S, S-bar, PP when non-zero */
+    unsigned send_e;           /* 1: E after MP', then k56flex_client_tx_done() for B1/data */
     unsigned trn16;            /* 1: TRN2, MP, MP' and the tail on the 16-point
                                   constellation, as the server's Jd 89B0 asks
                                   (V.34 10.1.3.3, Table 18) */
@@ -87,7 +89,8 @@ typedef enum {
     K56CT_MP_ACK,
     K56CT_TAIL,                /* idle ones after MP' */
     K56CT_HOLD,                /* idle after J', waiting to start TRN2 (trn2_hold) */
-    K56CT_MD                   /* MD between the two S/S-bar (md_symbols) */
+    K56CT_MD,                  /* MD between the two S/S-bar (md_symbols) */
+    K56CT_E                    /* V.34 10.1.3.2: 20 ones after MP', then B1 (cfg.send_e) */
 } k56flex_client_tx_stage_t;
 
 typedef struct {
@@ -115,6 +118,9 @@ void k56flex_client_tx_release_trn2(k56flex_client_tx_t *t);
 /* Next symbol, unit RMS.  Returns the stage it belongs to. */
 k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float *re, float *im);
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st);
+/* With cfg.send_e: true once E has been sent, so the modulator can start B1
+   on the next symbol (v34_v90_arm_tx_data's done_fn). */
+bool k56flex_client_tx_done(void *user);
 /* The 88-bit type 0 MP (ack 0 or 1) as k56flex_client_tx sends it. */
 void k56flex_client_tx_mp_bits(const k56flex_client_tx_cfg_t *cfg, int ack, uint8_t bits[88]);
 

@@ -921,6 +921,12 @@ typedef struct
     int v90_data_nonlinear;
     int v90_data_expanded;
     int16_t v90_data_precoder[6];
+    /*! \brief Zero-based scrambler tap for that B1/data handover: 0 keeps
+               V.90's GPA (4); a K56flex client upstream uses GPC (17). */
+    int ext_data_tap;
+    /*! \brief Diagnostic: data symbols generated and discarded right after
+               that handover, advancing the encoder's frame position. */
+    int ext_data_advance;
 
     /*! \brief Mapping frame parsed input */
     uint32_t r0;

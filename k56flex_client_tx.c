@@ -79,7 +79,7 @@ void k56flex_client_tx_release_trn2(k56flex_client_tx_t *t)
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st)
 {
     static const char *n[] = {"silent", "S", "S-bar", "PP", "TRN", "report", "J'",
-                              "TRN2", "MP", "MP'", "tail", "hold", "MD"};
+                              "TRN2", "MP", "MP'", "tail", "hold", "MD", "E"};
     return (unsigned) st < sizeof(n)/sizeof(n[0]) ? n[st] : "?";
 }
 
@@ -321,7 +321,8 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
         case K56CT_MP:
         case K56CT_MP_ACK:
             if (!frame_bits(t, &b0, &b1, st == K56CT_MP ? t->cfg.mp_repeats : t->cfg.mp_ack_repeats)) {
-                enter(t, (st == K56CT_MP && t->cfg.mp_ack_repeats) ? K56CT_MP_ACK : K56CT_TAIL);
+                enter(t, (st == K56CT_MP && t->cfg.mp_ack_repeats) ? K56CT_MP_ACK :
+                         t->cfg.send_e ? K56CT_E : K56CT_TAIL);
                 continue;
             }
             if (t->cfg.trn16) {
@@ -334,6 +335,12 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
             }
             diff_symbol(t, b0, b1, re, im);
             break;
+        case K56CT_E:
+            if (t->n >= (t->cfg.trn16 ? 5u : 10u)) {
+                enter(t, K56CT_TAIL);
+                continue;
+            }
+            /* fall through: E is the first 20 bits of ones */
         case K56CT_TAIL:
             /* E (10.1.3.2) is ones on J's constellation; so is the idle after it. */
             if (t->cfg.trn16) {
@@ -389,4 +396,10 @@ uint16_t k56flex_jd_rx_sample(k56flex_jd_rx_t *j, int16_t v)
     else if (is_rotation(w, 0x89b0))
         j->word = 0x89b0;
     return j->word;
+}
+
+bool k56flex_client_tx_done(void *user)
+{
+    const k56flex_client_tx_t *t = user;
+    return (t->stage == K56CT_E  &&  t->n >= (t->cfg.trn16 ? 5u : 10u))  ||  t->stage == K56CT_TAIL;
 }

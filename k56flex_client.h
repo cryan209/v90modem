@@ -60,6 +60,10 @@ typedef struct {
     uint64_t qfirst;             /* absolute front-end index of qy[0] */
     int seek, in_frames;
     int first_bad;               /* phase*100000 + pairs at the first mirror mismatch */
+    int input_silent;            /* linear path: the last received sample was codec silence */
+    uint8_t prime_oct[6][8];     /* linear path: priming frames held until the rate is known */
+    unsigned prime_buffered, rate_candidates;
+    int rate_selected;
 } k56flex_client_t;
 
 k56flex_client_t *k56flex_client_new(const k56flex_client_cfg_t *cfg);

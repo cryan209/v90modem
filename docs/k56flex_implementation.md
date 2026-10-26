@@ -2710,6 +2710,60 @@ gate B, so there is no reference for it. New transmitter options (all off by
 default): `cfg.report_bare`, `cfg.mp_extra_fill` (8 gives HSF's 96-bit
 frame), MP' without a preceding MP (`mp_repeats` 0).
 
+### Our K56flex client connects to the MICA firmware, data both ways (27 October)
+
+Closed loop, our whole engine as the calling K56flex client against the
+original MICA firmware in MicaEmu (`mica_trace ... -- v90_engine_peer`, built
+from this tree by MicaEmu's `tools/mica_peer_probe.py`): **CONNECT 52000,
+V.42 LAPM with V.42bis, 9600 upstream, exact text both ways** (MICA's host
+receives 119 copies of our test line byte for byte; our DTE receives
+`CONNECT 52000` and both lines MICA's host sent). With `ME_DATA_FRAMING=v14`
+the same call carries async data both ways. Checked on a clean build of HEAD
+plus only these changes. What it took, in call order:
+
+1. **V.34 Phase 2 as the call modem** (`v34tx.c`). Against MICA our caller
+   never left Tone B. Two stages waited on the single receiver event slot:
+   `FIRST_B` for `INFO0_OK` (or `TONE_SEEN`), `FIRST_B_INFO_SEEN` for
+   `REVERSAL_1`; MICA's events overwrote both. Both now test durable state
+   (`info0_received`, `phase2_reversal_count`). That exposed a second fault:
+   the receiver counts a "reversal" on MICA's INFO0a/Tone A seam, before
+   MICA can legally reverse (V.34 11.2.1.2.3: only after it detects Tone B),
+   so our Tone B reversal went out 40 ms into Tone B and MICA never advanced.
+   Reversals counted before Tone B starts are now discarded. MICA then
+   completes Phase 2 with our INFO0c only as HSF sends it
+   (`V34_INFO0_MAX_BAUD_DIFF=0`).
+2. **Upstream through MP'** (`k56flex_client_tx.c`, as before; Jd-following
+   16-point TRN2/MP): MICA posts 0800, 0400, 1000, 2000, 4000.
+3. **Downstream receiver** (`k56flex_client.c`, the linear path, following
+   MicaEmu's 10 October client): the front end is not trained on the
+   shadow's gate-A word (the server chooses 8990 or 89B0); gate B ends on
+   received PCM activity, not equalizer ringing; the PT_C table follows the
+   report we actually sent (the engine used a placeholder `8880`); the final
+   parameter record is decoded; training DC carries into the mapper; and the
+   mapper rate is identified from the six all-ones priming frames, because
+   MICA's record says rate field 15 (60000) and maps at 52000 (exactly one
+   candidate decodes them). Replaying held frames must keep each frame's
+   symbol index for the front end's decision update. The model then decodes
+   MICA's data frames exactly (checked against a raw-codeword decode).
+4. **E, B1 and data** (`k56flex_client_tx.c` `send_e`, SpanDSP
+   `v34_tx_set_data_scrambler_tap`): after MP', E (20 ones, V.34 10.1.3.2),
+   then SpanDSP's existing B1/data handover (`v34_v90_arm_tx_data`) at the
+   MP's upstream rate with the call modem's GPC scrambler. MICA's trellis
+   input (captured at PC 47B9) equals our transmitted data symbols, index for
+   index (correlation 1.000).
+5. **Engine DATA** (`modem_engine.c`, as the x2 client does): the data stack
+   starts on the model's first data frame, DATA and CONNECT once our
+   transmitter is past B1. V.34's own B1 rate check must be marked done: its
+   mark hold times from a native V.34 data entry this path never makes, and
+   without that the upstream idled at mark for the whole call (which is what
+   the earlier "MICA decodes noise" sweeps were misreading).
+
+Knobs (experiment, off by default): `ME_K56FLEX_CLIENT_DATA=1` (the above),
+`ME_K56FLEX_CLIENT_DATA_TAP` (17), `ME_K56FLEX_CLIENT_DATA_N` (MP's rate),
+`ME_K56FLEX_CLIENT_DATA_ADVANCE` (0; MicaEmu's fixture needed 25, ours needs
+none), `ME_K56FLEX_CLIENT_MP_FILL`. MICA's IOS sequence matches native HSF's
+connected call (`1901`, then `1e01` about 5 s later).
+
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
 Every piece below is an experiment knob inside the client probe; there is no

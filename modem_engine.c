@@ -4910,6 +4910,7 @@ static uint64_t g_k56c_samples, g_k56c_rms_acc;
 static unsigned g_k56c_rms_n;
 static k56flex_train_phase_t g_k56c_phase[2];
 static int g_k56c_locked[2];
+static unsigned g_k56c_logged[2], g_k56c_data_logged[2];
 /* ME_K56FLEX_CLIENT_TX_FILE=<mu-law file>: experiment inside the probe.  Instead
  * of silence, transmit a recorded client upstream (for example
  * reference-data/k56flex-hsf/upstream-mp-ulaw.g711: native HSF's S/S-bar, PP,
@@ -4942,6 +4943,24 @@ static uint64_t g_k56c_tx_n;
  * the downstream by k56flex_jd_rx; ME_K56FLEX_CLIENT_TRN16=0/1 forces it. */
 static k56flex_client_tx_t g_k56c_up;
 static k56flex_jd_rx_t g_k56c_jd;
+static bool g_k56c_data_on;         /* ME_K56FLEX_CLIENT_DATA: E, B1 and data after MP' */
+static int g_k56c_data_law = -1;    /* the receiver model (0 mu, 1 A) whose PCM data we use */
+static bool g_k56c_ds_started;
+
+static void me_data_rx_first_bit(void);
+static bool g_v34_b1_rate_checked;
+
+/* Draft 0.23 4.12: after the priming frames the server's data frames carry
+   the DTE stream; the model hands over descrambled bits. */
+static void me_k56c_data_bits(void *user, const uint8_t *bits, unsigned n)
+{
+    if ((int) (intptr_t) user != g_k56c_data_law  ||  !g_k56c_ds_started)
+        return;
+    for (unsigned i = 0;  i < n;  i++) {
+        me_data_rx_first_bit();
+        ds_rx_put_bit(&g_data_stack, bits[i] & 1);
+    }
+}
 static int g_k56c_trn16_forced;     /* -1: follow the Jd */
 static bool g_k56c_up_on, g_k56c_up_started;
 static int64_t g_k56c_gate_a_at;
@@ -5017,7 +5036,10 @@ static void me_k56c_up_init_locked(void)
     cfg.mp_up_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_UP_CODE", (int) cfg.mp_up_code);
     cfg.mp_down_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_DOWN_CODE", (int) cfg.mp_down_code);
     cfg.mp_mask = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_MASK", (int) cfg.mp_mask);
+    cfg.mp_extra_fill = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_FILL", (int) cfg.mp_extra_fill);
     g_k56c_trn16_forced = parse_env_int("ME_K56FLEX_CLIENT_TRN16", -1);
+    g_k56c_data_on = parse_env_int("ME_K56FLEX_CLIENT_DATA", 0) != 0;
+    cfg.send_e = g_k56c_data_on;
     cfg.trn16 = g_k56c_trn16_forced > 0;
     k56flex_jd_rx_init(&g_k56c_jd);
     if (k56flex_client_tx_init(&g_k56c_up, &cfg) != 0)
@@ -5028,6 +5050,17 @@ static void me_k56c_up_init_locked(void)
                                       v34_get_tx_high_carrier(g_v34),
                                       me_k56c_up_symbol, &g_k56c_up) != 0)
         return;
+    if (g_k56c_data_on) {
+        /* V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the
+           upstream rate our MP proposed, 16-state trellis, no shaping or
+           precoding (MP bits 28:31 as k56flex_client_tx_mp_bits sends
+           them).  A K56flex client is a V.34 call modem: GPC (clause 7). */
+        v34_tx_set_data_scrambler_tap(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_TAP", 17));
+        v34_tx_set_data_advance(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_ADVANCE", 0));
+        if (v34_v90_arm_tx_data(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_N", (int) cfg.mp_up_code),
+                                0, 0, 0, NULL, k56flex_client_tx_done) != 0)
+            ME_LOG("[K56C] could not arm the upstream B1/data handover\n");
+    }
     g_k56c_up_on = true;
     ME_LOG("[K56C] client upstream armed: report %02x/%04x, MD %u, TRN %u, TRN2 %u symbols%s, "
            "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.md_symbols, cfg.trn_symbols, cfg.gap_symbols,
@@ -5101,8 +5134,12 @@ static void me_k56c_reset_locked(void)
         g_k56c[i] = NULL;
         g_k56c_phase[i] = K56T_SIL0;
         g_k56c_locked[i] = 0;
+        g_k56c_logged[i] = 0;
+        g_k56c_data_logged[i] = 0;
     }
     g_k56c_active = g_k56c_hangup = false;
+    g_k56c_data_law = -1;
+    g_k56c_ds_started = false;
     g_k56c_samples = g_k56c_rms_acc = 0;
     g_k56c_rms_n = 0;
 }
@@ -5110,17 +5147,23 @@ static void me_k56c_reset_locked(void)
 static void me_k56c_start_locked(void)
 {
     me_k56c_reset_locked();
+    me_k56c_tx_load_locked();
+    me_k56c_up_init_locked();
     for (int i = 0;  i < 2;  i++) {
         k56flex_client_cfg_t cc;
 
         memset(&cc, 0, sizeof(cc));
         cc.law = i ? K56FLEX_LAW_A : K56FLEX_LAW_MU;
-        cc.report_word = 0x8880;             /* receiver-model assumption, not negotiated */
+        /* The server's PT_C table and parameter-stage lengths follow the
+           report it accepted (report bit 8, k56flex_train.c): with our own
+           upstream that is the report we send, otherwise only a guess. */
+        cc.report_ext = g_k56c_up_on ? g_k56c_up.cfg.ext : 0;
+        cc.report_word = g_k56c_up_on ? g_k56c_up.cfg.report : 0x8880;
         cc.gate_b_pairs = 2;
+        cc.ctl.data = me_k56c_data_bits;
+        cc.ctl.user = (void *) (intptr_t) i;
         g_k56c[i] = k56flex_client_new(&cc);
     }
-    me_k56c_tx_load_locked();
-    me_k56c_up_init_locked();
     g_k56c_active = true;
     ME_LOG("[K56C] Phase 3 entered after a K56 INFO1c: transmitting silence, "
            "client receiver armed for %d ms\n", me_k56c_hold_ms());
@@ -5176,6 +5219,59 @@ static void me_k56c_eight_level_locked(int16_t v)
     }
 }
 
+/* The client's own DATA entry, as the x2 client's: the downstream data stack
+   starts with the first data frame of the model whose priming chose a rate;
+   DATA (and CONNECT) once our transmitter is past B1 (V.34 10.1.3.1). */
+static void me_k56c_data_progress_locked(void)
+{
+    if (g_k56c_data_law < 0) {
+        for (int i = 0;  i < 2;  i++) {
+            k56flex_client_t *c = g_k56c[i];
+
+            if (c  &&  !c->failed  &&  c->rate_selected  &&  c->data_frames > 0) {
+                g_k56c_data_law = i;
+                break;
+            }
+        }
+        if (g_k56c_data_law < 0)
+            return;
+    }
+    if (!g_k56c_ds_started) {
+        int rate = g_k56c[g_k56c_data_law]->rate_bps;
+
+        if (data_stack_start_online(rate, true)) {
+            me_k56c_stop_locked("data stack would not start");
+            return;
+        }
+        if (g_data_framing == DS_FRAMING_V42) {
+            ds_v42_restart_t400(&g_data_stack, ME_V42_T400_DEFER_MS);
+            g_data_t400_deferred = true;
+        }
+        g_k56c_ds_started = true;
+        trace_phase("K56flex client downstream data: %s-law model, %d bps",
+                    g_k56c_data_law ? "A" : "mu", rate);
+    }
+    if (g_state != ME_DATA  &&  g_v34  &&  v34_get_tx_data_mode(g_v34)) {
+        int downstream = g_k56c[g_k56c_data_law]->rate_bps;
+        int upstream = (int) g_k56c_up.cfg.mp_up_code*2400;
+
+        g_state = ME_DATA;
+        g_phase_start_ms = 0;
+        g_report_tx_rate = upstream;
+        g_report_rx_rate = downstream;
+        /* v34_get_bit_cb holds mark until V.34's own B1 rate check, which
+           times from a native data entry this path never makes: the rates
+           here came from MP and the parameter record, so there is nothing
+           to check, and without this the upstream idled for the whole call. */
+        g_v34_b1_rate_checked = true;
+        trace_phase("K56flex client enter DATA: downstream=%d upstream=%d", downstream, upstream);
+        if (g_data_framing != DS_FRAMING_V42  &&  !g_data_connect_reported) {
+            g_data_connect_reported = true;
+            di_on_connected(downstream);
+        }
+    }
+}
+
 static void me_k56c_rx_locked(const int16_t *amp, int len)
 {
     if (!g_k56c_active)
@@ -5205,8 +5301,18 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
         for (int i = 0;  i < 2;  i++) {
             k56flex_client_t *c = g_k56c[i];
 
-            if (!c  ||  c->failed)
+            if (!c)
                 continue;
+            if (c->failed) {
+                if (!(g_k56c_logged[i] & 8)) {
+                    g_k56c_logged[i] |= 8;
+                    ME_LOG("[K56C] +%llu ms %s-law model failed in %s (prime buffered %u, candidates %u, data frames %u)\n",
+                           (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
+                           k56flex_train_phase_name(k56flex_client_phase(c)), c->prime_buffered,
+                           c->rate_candidates, c->data_frames);
+                }
+                continue;
+            }
             k56flex_client_rx_linear(c, &amp[n], 1);
             if (!g_k56c_locked[i]  &&  c->fe_started) {
                 g_k56c_locked[i] = 1;
@@ -5214,6 +5320,34 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
                        (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
                        k56flex_rxfe_gain(c->fe),
                        k56flex_rxfe_gain(c->fe) < 0 ? "inverted" : "normal");
+            }
+            if (c->param_ok  &&  !(g_k56c_logged[i] & 1)) {
+                g_k56c_logged[i] |= 1;
+                ME_LOG("[K56C] +%llu ms %s-law model: parameter record, rate field %u (%d bps), control %04x, final %u\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->param.rate, c->rate_bps,
+                       c->param.control, c->param.final);
+            }
+            if (c->final_param_seen  &&  !(g_k56c_logged[i] & 2)) {
+                g_k56c_logged[i] |= 2;
+                ME_LOG("[K56C] +%llu ms %s-law model: final parameter record (rate field %u)\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->param.rate);
+            }
+            if (c->rate_selected  &&  !(g_k56c_logged[i] & 4)) {
+                g_k56c_logged[i] |= 4;
+                ME_LOG("[K56C] +%llu ms %s-law model: priming selects %d bps (%u candidate%s), %u priming bits not one\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->rate_bps,
+                       c->rate_candidates, c->rate_candidates == 1 ? "" : "s", c->prime_ones_bad);
+            }
+            if (c->data_frames  &&  c->data_frames % 2000 == 0  &&  c->data_frames != g_k56c_data_logged[i]) {
+                g_k56c_data_logged[i] = c->data_frames;
+                ME_LOG("[K56C] +%llu ms %s-law model: %u data frames, %u bits\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->data_frames, c->data_bits_out);
+            }
+            if (c->failed  &&  !(g_k56c_logged[i] & 8)) {
+                g_k56c_logged[i] |= 8;
+                ME_LOG("[K56C] +%llu ms %s-law model failed in %s (prime buffered %u, candidates %u, data frames %u)\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
+                       k56flex_train_phase_name(k56flex_client_phase(c)), c->prime_buffered, c->rate_candidates, c->data_frames);
             }
             if (g_k56c_locked[i]  &&  k56flex_client_phase(c) != g_k56c_phase[i]) {
                 g_k56c_phase[i] = k56flex_client_phase(c);
@@ -5227,7 +5361,9 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
         }
         g_k56c_samples++;
     }
-    if (g_k56c_samples >= (uint64_t) me_k56c_hold_ms()*8)
+    if (g_k56c_data_on)
+        me_k56c_data_progress_locked();
+    if (g_state != ME_DATA  &&  g_k56c_samples >= (uint64_t) me_k56c_hold_ms()*8)
         me_k56c_stop_locked("hold window elapsed");
 }
 
