@@ -2335,3 +2335,49 @@ on. What still differs before its INFO0a: our V.8bis MS reply's contents (not
 yet logged), the timing of our INFO0c against the card's (ours 10.07 s, HSF's
 9.89 s on these taps; the card answers HSF 0.4 s later), and levels/spectrum.
 The recorded-upstream question is still open: no call reached gate A.
+
+### Our V.8bis MS reply is what turned the 7910 away; a played-back report does not release its gate B (2026-10-26)
+
+Our client MS against native HSF's, both after the card's MS
+(`12 c1 80 80 80 09 b5 02 00 94 01 83 43 55 e1`), now logged as `our message [...]`:
+
+```
+ours: 11 c1 80 80 81 80 b0 cf 09 b5 02 00 94 81 83 02 47 85
+HSF : 11 c1 80 80 80          09 b5 02 00 94 81 81 02 47 85
+```
+
+Two differences: SPar(1) `81` with a three-octet NPar block (`80 b0 cf`) where
+HSF sends `80` and none, and NS octet 7 `83` where HSF sends `81` (in our server's
+own template that octet is `v90_capable ? 0x83 : 0x81`, so our client claims
+V.90). `K56FLEX_CLIENT_MS_HEX` (new, off by default, `k56flex_v8bis.c`) replaces
+the client MS payload. A/B on 7910 with everything else HSF-identical (V.8bis
+client exchange, CM `C1 45 10 10` via `AT+ES=1`, `V34_INFO0_MAX_BAUD_DIFF=0`),
+arms alternated, only calls whose V.8bis completed counted (`/root/k56ms`):
+
+| MS | INFO0a bit 19 | K56 INFO1a | P1 acquired | calls |
+|---|---|---|---|---|
+| HSF's (`11c180808009b50200948181024785`) | clear | yes (`2f e0 34 59 40 4b b5`) | yes, both models | 2/2 |
+| ours | set | no | no | 0/2 |
+
+Which of the two differences matters is not yet split. The card also sends P2
+after this MS (as it does for HSF, not after an INFO1c-only offer).
+
+**The played-back upstream reaches the card but its report does not release
+gate B.** With the K56 session up, the probe played HSF's recorded upstream
+from +4.5 s. Our own receiver decodes it from our transmit tap: S/S-bar 18.9 s,
+PP/TRN 19.2 s (correlation 0.79), report `00/89b0` 20.24 s, 899F 20.32 s, MP
+(9600/52000) 23.3 s. The card's downstream (tap time):
+
+| call | gate A | gate B (`29`) | then |
+|---|---|---|---|
+| hsf1 | 17.4-19.6 s | 19.6-22.4 s | retrain (Phase 2) |
+| hsf3 | 17.4 s to hang-up at 29.3 s | never | - |
+
+In hsf1 the card left gate A 0.7 s after our S/S-bar, received the report
+0.6 s into gate B and still timed out 2.8 s later, as it does against HSF
+itself. In hsf3 it never saw the S/S-bar. Both calls' INFO1a asked our transmitter
+for 3200/high **with 7+5 dB power reduction and pre-emphasis 3**, which a
+recording cannot honour (its level and filter are those HSF used against our own
+server). That, and the report's contents (`89b0` is HSF's report of our server's
+downstream), are the open candidates. Next: our own client upstream
+transmitter, so level, pre-emphasis, timing and report value are ours to set.

@@ -68,6 +68,8 @@ const char *k56flex_v8bis_state_name(k56flex_v8bis_state_t st);
 const char *k56flex_v8bis_result_name(k56flex_v8bis_result_t r);
 /* Peer CL/MS payload (FCS stripped); NULL until one has been received. */
 const uint8_t *k56flex_v8bis_peer_payload(const k56flex_v8bis_t *s, size_t *len);
+/* Our last CL/MS payload (FCS stripped); NULL until one has been queued. */
+const uint8_t *k56flex_v8bis_sent_payload(const k56flex_v8bis_t *s, size_t *len);
 /* 1 = peer sent ACK1, 2 = NAK1, 0 = none seen.  For the initiator this is what
  * we sent. */
 int k56flex_v8bis_ack(const k56flex_v8bis_t *s);

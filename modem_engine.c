@@ -4909,8 +4909,65 @@ static uint64_t g_k56c_samples, g_k56c_rms_acc;
 static unsigned g_k56c_rms_n;
 static k56flex_train_phase_t g_k56c_phase[2];
 static int g_k56c_locked[2];
+/* ME_K56FLEX_CLIENT_TX_FILE=<mu-law file>: experiment inside the probe.  Instead
+ * of silence, transmit a recorded client upstream (for example
+ * reference-data/k56flex-hsf/upstream-mp-ulaw.g711: native HSF's S/S-bar, PP,
+ * TRN, report, 899F, MP and MP' after Jd, Draft 0.23 clause 11) starting
+ * ME_K56FLEX_CLIENT_TX_AT_MS after Phase 3 entry, then silence again.  It asks
+ * one question of a real server: does a valid client report release its gate B
+ * (Draft 0.23 4.10-4.11)?  It is not a client transmitter.  PCMU calls only:
+ * the codewords are expanded as mu-law and re-encoded by the bearer law. */
+static uint8_t *g_k56c_tx;
+static size_t g_k56c_tx_len, g_k56c_tx_pos;
+static uint64_t g_k56c_tx_n;
 
 static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", 0); }
+
+static void me_k56c_tx_load_locked(void)
+{
+    const char *path = getenv("ME_K56FLEX_CLIENT_TX_FILE");
+    FILE *f;
+    long n;
+
+    free(g_k56c_tx);
+    g_k56c_tx = NULL;
+    g_k56c_tx_len = g_k56c_tx_pos = 0;
+    g_k56c_tx_n = 0;
+    if (!path  ||  !*path)
+        return;
+    if (!(f = fopen(path, "rb"))) {
+        ME_LOG("[K56C] cannot open ME_K56FLEX_CLIENT_TX_FILE %s\n", path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n > 0  &&  (g_k56c_tx = malloc((size_t) n))
+        &&  fread(g_k56c_tx, 1, (size_t) n, f) == (size_t) n)
+        g_k56c_tx_len = (size_t) n;
+    fclose(f);
+    ME_LOG("[K56C] recorded upstream %s: %zu codewords from +%d ms\n", path,
+           g_k56c_tx_len, parse_env_int("ME_K56FLEX_CLIENT_TX_AT_MS", 4500));
+}
+
+/* The probe's transmit samples: silence, or the recorded upstream in its window. */
+static void me_k56c_tx_locked(int16_t *amp, int len)
+{
+    uint64_t at = (uint64_t) parse_env_int("ME_K56FLEX_CLIENT_TX_AT_MS", 4500)*8;
+
+    for (int n = 0;  n < len;  n++, g_k56c_tx_n++) {
+        amp[n] = 0;
+        if (g_k56c_tx_n < at  ||  g_k56c_tx_pos >= g_k56c_tx_len)
+            continue;
+        if (g_k56c_tx_pos == 0)
+            ME_LOG("[K56C] +%llu ms recorded upstream starts\n",
+                   (unsigned long long) (g_k56c_tx_n/8));
+        amp[n] = ulaw_to_linear(g_k56c_tx[g_k56c_tx_pos++]);
+        if (g_k56c_tx_pos == g_k56c_tx_len)
+            ME_LOG("[K56C] +%llu ms recorded upstream ends\n",
+                   (unsigned long long) (g_k56c_tx_n/8));
+    }
+}
 
 static void me_k56c_reset_locked(void)
 {
@@ -4938,6 +4995,7 @@ static void me_k56c_start_locked(void)
         cc.gate_b_pairs = 2;
         g_k56c[i] = k56flex_client_new(&cc);
     }
+    me_k56c_tx_load_locked();
     g_k56c_active = true;
     ME_LOG("[K56C] Phase 3 entered after a K56 INFO1c: transmitting silence, "
            "client receiver armed for %d ms\n", me_k56c_hold_ms());
@@ -5140,16 +5198,19 @@ static void me_k56_progress_locked(void)
     if (st != K56V8B_DONE && st != K56V8B_FAILED)
         return;
     {
-        size_t n = 0;
+        size_t n = 0, sn = 0;
         const uint8_t *p = k56flex_v8bis_peer_payload(g_k56, &n);
-        char hex[3 * 32 + 1] = "";
+        const uint8_t *sp = k56flex_v8bis_sent_payload(g_k56, &sn);
+        char hex[3 * 32 + 1] = "", shex[3 * 32 + 1] = "";
         for (size_t i = 0; p && i < n && i < 32; i++)
             snprintf(hex + 3 * i, 4, "%02x ", p[i]);
-        ME_LOG("[ME] K56flex V.8bis %s: %s at %u ms, peer message [%s], ack=%d\n",
+        for (size_t i = 0; sp && i < sn && i < 32; i++)
+            snprintf(shex + 3 * i, 4, "%02x ", sp[i]);
+        ME_LOG("[ME] K56flex V.8bis %s: %s at %u ms, peer message [%s], ack=%d, our message [%s]\n",
                st == K56V8B_DONE ? "complete" : "ended", 
                k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)),
                k56flex_v8bis_elapsed_ms(g_k56), p ? hex : "none",
-               k56flex_v8bis_ack(g_k56));
+               k56flex_v8bis_ack(g_k56), sp ? shex : "none");
         trace_phase("K56flex V.8bis %s: %s", st == K56V8B_DONE ? "done" : "failed",
                     k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)));
     }
@@ -17837,9 +17898,10 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                 } else {
                     v34_tx(g_v34, amp, len);
                 }
-                /* K56flex client probe: the client is silent while the server trains */
+                /* K56flex client probe: the client is silent while the server
+                   trains, unless a recorded upstream is being played */
                 if (g_k56c_active)
-                    memset(amp, 0, len*sizeof(amp[0]));
+                    me_k56c_tx_locked(amp, len);
             }
             pthread_mutex_unlock(&g_state_mtx);
             /* TX PCM dump + RMS diagnostic during training */

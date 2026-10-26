@@ -62,6 +62,8 @@ struct k56flex_v8bis_s {
     unsigned tx_n, tx_i, tx_trail;
     uint8_t peer[32];
     size_t peer_len;
+    uint8_t sent[32];                 /* our last CL/MS payload, FCS stripped */
+    size_t sent_len;
     bool peer_ok;
     int ack;
     int frames_seen;
@@ -146,12 +148,49 @@ static void on_frame(void *user, const uint8_t *pkt, int len, int ok)
     }
 }
 
+/* K56FLEX_CLIENT_MS_HEX=<hex octets>: experiment.  Replaces the client
+ * model's MS payload (FCS excluded) with these octets, at most 18, e.g. the
+ * native HSF client's reply to the 7910, 11c180808009b50200948181024785:
+ * no NPar block and NS octet 7 0x81 where ours sends 0x83
+ * (docs/k56flex_implementation.md, 2026-10-26).  Returns the octet count,
+ * 0 if unset or malformed. */
+static size_t client_ms_override(uint8_t out[18])
+{
+    const char *e = getenv("K56FLEX_CLIENT_MS_HEX");
+    size_t n = 0;
+
+    if (!e)
+        return 0;
+    while (e[0] && e[1] && n < 18) {
+        char h[3] = { e[0], e[1], 0 }, *end;
+        unsigned long v = strtoul(h, &end, 16);
+
+        if (*end)
+            return 0;
+        out[n++] = (uint8_t)v;
+        e += 2;
+    }
+    return *e ? 0 : n;
+}
+
 static void queue_message(k56flex_v8bis_t *s, k56flex_v8bis_msg_t type)
 {
     uint8_t payload[18], frame[32], bits[300];
     size_t n = s->cfg.client_model ? k56flex_v8bis_rockwell_client_payload(type, payload)
                                    : k56flex_v8bis_payload(type, s->cfg.v90_capable, s->cfg.mu_law, payload);
     size_t fn, nb, i;
+    if (s->cfg.client_model && type == K56FLEX_V8BIS_MS) {
+        uint8_t over[18];
+        size_t on = client_ms_override(over);
+        if (on) {
+            memcpy(payload, over, on);
+            n = on;
+        }
+    }
+    if (n > 1) {
+        memcpy(s->sent, payload, n);
+        s->sent_len = n;
+    }
     fn = k56flex_v8bis_frame(payload, n, frame);
     nb = k56flex_v8bis_stuff(frame, fn, bits);
     s->tx_n = 0;
@@ -410,6 +449,13 @@ k56flex_v8bis_state_t k56flex_v8bis_state(const k56flex_v8bis_t *s) { return s->
 k56flex_v8bis_result_t k56flex_v8bis_result(const k56flex_v8bis_t *s) { return s->result; }
 int k56flex_v8bis_ack(const k56flex_v8bis_t *s) { return s->ack; }
 unsigned k56flex_v8bis_elapsed_ms(const k56flex_v8bis_t *s) { return (unsigned)(s->last_change * 1000 / RATE); }
+
+const uint8_t *k56flex_v8bis_sent_payload(const k56flex_v8bis_t *s, size_t *len)
+{
+    if (!s->sent_len) return NULL;
+    if (len) *len = s->sent_len;
+    return s->sent;
+}
 
 const uint8_t *k56flex_v8bis_peer_payload(const k56flex_v8bis_t *s, size_t *len)
 {
