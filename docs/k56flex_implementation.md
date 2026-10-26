@@ -2764,6 +2764,13 @@ Knobs (experiment, off by default): `ME_K56FLEX_CLIENT_DATA=1` (the above),
 none), `ME_K56FLEX_CLIENT_MP_FILL`. MICA's IOS sequence matches native HSF's
 connected call (`1901`, then `1e01` about 5 s later).
 
+**The same client on the 7910 (CT 117 `/root/k56conn-runs`, 6 calls, 5 with
+V.8bis): unchanged.** The card ends its gate C at 15.2 s and retrains on all
+five. Our receiver model also stops following the card in PT_A there (both
+law models, failing at the retrain); against MICA it follows PT_A bit-exact,
+so the card's A->mu transcoded downstream needs its own look. Nothing the
+client transmits depends on the model, so that cannot explain gate C.
+
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
 Every piece below is an experiment knob inside the client probe; there is no
@@ -2780,8 +2787,8 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
 | gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
-| parameter record, priming, data | not reached; no client receiver for this card's PT, parameter record or PCM data. |
-| E, B1, upstream data | not implemented on the client side. |
+| parameter record, priming, data | not reached on the 7910. Against the MICA firmware the client receiver decodes them and the call connects (above). |
+| E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware. |
 
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
 gate C ends on "training complete" or "MP accepted"; the card gives neither.
