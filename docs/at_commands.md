@@ -18,8 +18,8 @@ Related notes: [v250_command_conformance_audit.md](v250_command_conformance_audi
 (`&W`, `&Y`, `--profile`), [fax_class_at.md](fax_class_at.md) (every `+F`
 command), [v54_diagnostics.md](v54_diagnostics.md) (`+T*`),
 [carrier_loss.md](carrier_loss.md) (S10), [mnp.md](mnp.md) (`+ES` and MNP),
-[v92_quick_connect.md](v92_quick_connect.md) (`+PQC`, `+PSS`). `+MS` and the
-`ATI` pages are tabulated in the [top-level readme](../readme.md).
+[v92_quick_connect.md](v92_quick_connect.md) (`+PQC`, `+PSS`). `--mode` and the
+other start-up options are in the [top-level readme](../readme.md).
 
 ## Common tasks
 
@@ -123,7 +123,7 @@ Each takes the V.250 `=`, `?` and `=?` forms.
 | `+GMI`, `+GMM`, `+GMR` | Manufacturer, model, revision |
 | `+GCAP` | Capabilities: `+FCLASS`, `+MS`, `+ES`, `+DS` |
 | `+ASTO=n,s` | Store dial string *s* in slot *n* (0-9); `ATDS=n` dials it |
-| `+MS` | Modulation for the next call (`AT+MS$`; table in the readme) |
+| `+MS` | Modulation for the next call (below) |
 | `+MR=0/1` | Report `+MCR`/`+MRR` before CONNECT |
 | `+MSC=0/1` | V.34 seamless rate change (V.34 11.6) on/off |
 | `+IPR=n` | Fixed DTE rate; 0 = whatever the DTE sets |
@@ -159,14 +159,63 @@ Each takes the V.250 `=`, `?` and `=?` forms.
 
 `+MA` and `+PMHF` are not implemented (ERROR: there is no line to flash).
 
+## Modulation (`AT+MS`)
+
+`--mode` (or `ME_MODE`) sets the power-on offer. `AT+MS` changes the offer
+for later calls, never the call in progress; `ATZ` and `AT&F` restore the
+power-on offer. The automode column is what `AT+MS=<carrier>,0` offers.
+
+| `AT+MS=` | Next call offers | With automode 0 |
+|---|---|---|
+| `V22`, `V22B` | V.22/V.22bis                                          | same              |
+| `V32B` (`V32BIS`) | V.32bis + V.22bis                                 | V.32bis alone     |
+| `V32`      | as V32B, rates capped at 9600/4800                      | V.32 alone        |
+| `HST`, `V32TERBO` (`TERBO`), `VFC` (`V.FC`) | V.32bis + V.22bis (no datapump for these; V.250 fallback) | ERROR |
+| `V34` (`V34+`, `V34B`, `V34BIS`) | V.34 + V.22bis                     | V.34 alone        |
+| `K56` (`56`, `56K`, `K56FLEX`) | K56flex V.8bis, then V.8 offering V.90/V.34/V.22 (no K56flex data mode) | ERROR |
+| `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
+| `V92`      | as V90, with V.92                                        | V.92 + V.34       |
+| `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
+| `X2`       | x2, asymmetric (V.34 upstream): server when answering, analogue client when calling | same |
+| `X2S` (`X2SYMM`) | x2 digital symmetric (PCM both ways) | same |
+| `CLEAR` (`CLEARMODE`, `64K`) | no V.8: the DS0 is the bit pipe, V.14 (or LAPM) on it; max rate <=56000 selects restricted 56k | same |
+| `V120`     | no V.8: V.120 UI frames on the DS0; max rate <=56000 selects 56k | same |
+| `V21`, `B103` | 300-bit/s FSK | same |
+| `B212` | Bell 212A at 1200 bit/s; legacy Bell 103 fallback | same |
+| `V23C` | V.23 1200/75 bit/s, with direction selected by rate bounds | same |
+| `V110` | V.110 rate adaptation on a compatible digital bearer | same |
+| `X75` | recognised, no datapump here | ERROR (both) |
+
+- `AT+MS?` reads back the setting, for example `+MS: V34,1,0,0,0,0`.
+- `AT+MS=?` lists the carriers.
+- `AT+MS$` prints help: the syntax, every carrier with its aliases and
+  automodes, its maximum rate, what the next call will offer, and the current
+  setting.
+- Rate bounds (`<carrier>,<automode>,<min>,<max>`, or V.250's
+  `...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
+  maximum: 14400 for V32B, 33600 for V34, 56000 for V90/V92, 60000 for K56
+  (the K56flex firmware tables run to 60000), and 64000 for V91 and X2/X2S.
+- The bounds are stored and reported but not enforced: rates come from
+  training. The exception is `V32`'s 9600 cap, since V.32 has no higher rate.
+- `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
+
+CLEAR and V120 need the bearer byte-exact end to end and both ends set alike;
+there is no negotiation, as on ISDN ([clear_channel_v120.md](clear_channel_v120.md)).
+
 ## Identification and diagnostics (`ATI$`)
 
-`ATI0` product, `ATI3` software version (`git describe`), `ATI4` current
-settings, `ATI6` link diagnostics, `ATI7` product configuration, `ATI11`
-extended link diagnostics, `ATY11` line level per 150 Hz band. What each page
-shows is tabulated in the readme. `ATI6`, `ATI11` and `ATY11` keep the last
-call's state after NO CARRIER; during a call, read them on the control console
-or after a guarded `+++`.
+| ATI | Shows |
+|---|---|
+| `ATI0` / `ATI3` | product / build version (`git describe`) |
+| `ATI4` | current settings: E/Q/V/X/&C/&D, S-registers, +FCLASS, +MS, +MR/+ER/+DR/+ES/+DS, console |
+| `ATI6` | link diagnostics, live during a call (the engine pushes twice a second) and kept after it: direction, state (data / retraining), carrier, rates, error control, compression, octets each way, duration, line level each way, disconnect reason (also for a call that failed before data mode) |
+| `ATI7` | product configuration: line, modulations, protocols, fax classes, diagnostics |
+| `ATI11` | engine detail, live: mode and offer, role, V.92, G.711 law, framing, fallback, retrains, and for V.34/V.90 symbol rates, carriers, bit rate, round-trip delay, B1 SNR |
+| `ATY11` | line spectrum after the Courier's frequency/level table: RX and TX level in dBm0 per 150 Hz band, 150-3900 Hz, over the last second, with a bar graph and the totals |
+
+`ATI6`, `ATI11` and `ATY11` keep the last call's state (and its last second of
+audio) after NO CARRIER. During a call, read them on the control console or
+after a guarded `+++`.
 
 ## S-registers (`ATS$`)
 
