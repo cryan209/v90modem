@@ -161,7 +161,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
-SRCS   = k56flex_startup.c k56flex_upstream_pcm.c k56flex_upstream.c v8bis_modem.c v8bis_fsm.c v8bis_ie.c v8bis_msg.c v8bis_tones.c profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_qc.c v92_anspcm_decode.c v92_short_phase1_decode.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c mnp.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_client.c x2_mp_rx.c line_supervisor.c near_echo.c v90_analogue_pr4.c
+SRCS   = k56flex_client_tx.c k56flex_startup.c k56flex_upstream_pcm.c k56flex_upstream.c v8bis_modem.c v8bis_fsm.c v8bis_ie.c v8bis_msg.c v8bis_tones.c profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_qc.c v92_anspcm_decode.c v92_short_phase1_decode.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c mnp.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_client.c x2_mp_rx.c line_supervisor.c near_echo.c v90_analogue_pr4.c
 SRCS += vfc_mapper.c vfc_signature.c vfc_frame.c vfc_trellis.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
@@ -202,6 +202,7 @@ NEAR_ECHO_TEST_OBJS = near_echo_test.o near_echo.o
 V34_LINE_EC_TEST_OBJS = v34_line_ec_test.o v34_line_ec.o
 V90_JA_MATCH_TEST_OBJS = v90_ja_match_test.o
 TEST_TARGETS += v90_ja_match_test
+TEST_TARGETS += k56flex_client_tx_test
 V90_ANALOGUE_PR4_TEST_OBJS = v90_analogue_pr4_test.o v90_analogue_pr4.o
 LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
 # The two DTE console arrangements (classic combined, control + data).
@@ -1141,6 +1142,12 @@ k56flex_startup_test: $(K56FLEX_STARTUP_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 K56FLEX_UPSTREAM_PCM_TEST_OBJS = k56flex_upstream_pcm_test.o k56flex_upstream_pcm.o k56flex_upstream.o k56flex.o p3_demod.o
 k56flex_upstream_pcm_test: $(K56FLEX_UPSTREAM_PCM_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+# Draft 0.23 clause 11: our K56flex client upstream through SpanDSP's V.34
+# modulator and G.711 into our server's upstream receiver.
+K56FLEX_CLIENT_TX_TEST_OBJS = k56flex_client_tx_test.o k56flex_client_tx.o k56flex_upstream_pcm.o k56flex_upstream.o k56flex.o p3_demod.o
+k56flex_client_tx_test: $(K56FLEX_CLIENT_TX_TEST_OBJS) spandsp
+	$(CC) $(K56FLEX_CLIENT_TX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 K56FLEX_UPSTREAM_TEST_OBJS = k56flex_upstream_test.o k56flex_upstream.o k56flex.o
 k56flex_upstream_test: $(K56FLEX_UPSTREAM_TEST_OBJS)

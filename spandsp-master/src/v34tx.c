@@ -10658,6 +10658,19 @@ SPAN_DECLARE(void) v34_tx_power(v34_state_t *s, float power)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_tx_phase3_from_info1a(v34_state_t *s, int baud_rate, int high_carrier,
+                                             int power_reduction, int preemphasis)
+{
+    s->rx.info1a.baud_rate_c_to_a = baud_rate;
+    s->rx.info1a.use_high_carrier = (high_carrier != 0);
+    s->rx.info1a.power_reduction = power_reduction;
+    s->rx.info1a.additional_power_reduction = 0;
+    s->rx.info1a.preemphasis_filter = preemphasis;
+    s->rx.info1a_received = true;
+    s_not_s_baud_init(s);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_set_get_bit(v34_state_t *s, span_get_bit_func_t get_bit, void *user_data)
 {
     if (s->tx.get_bit == s->tx.current_get_bit)

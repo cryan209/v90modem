@@ -353,6 +353,12 @@ SPAN_DECLARE(logging_state_t *) v34_get_logging_state(v34_state_t *s);
     \param user_data An opaque pointer. */
 SPAN_DECLARE(void) v34_set_get_bit(v34_state_t *s, span_get_bit_func_t get_bit, void *user_data);
 
+/*! Test hook: set up the Phase 3 transmitter as a call modem would on
+    receiving an INFO1a with these values (V.34 Table 16 bits 37:39, 25, 12:14,
+    26:29), without running Phase 2. */
+SPAN_DECLARE(void) v34_tx_phase3_from_info1a(v34_state_t *s, int baud_rate, int high_carrier,
+                                             int power_reduction, int preemphasis);
+
 /*! Change the get_aux_bit function associated with a V.34 modem context.
     \brief Change the get_aux_bit function associated with a V.34 modem context.
     \param s The modem context.

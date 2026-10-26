@@ -2381,3 +2381,64 @@ recording cannot honour (its level and filter are those HSF used against our own
 server). That, and the report's contents (`89b0` is HSF's report of our server's
 downstream), are the open candidates. Next: our own client upstream
 transmitter, so level, pre-emphasis, timing and report value are ours to set.
+
+### Our own client upstream: the 7910 accepts our report; it waits in gate C past our MP (2026-10-26)
+
+`k56flex_client_tx.c` is a K56flex client upstream generator: one unit-RMS
+symbol per baud for SpanDSP's V.34 modulator, through the existing
+`v34_tx_start_external_symbols()`, so the symbol rate, carrier, power reduction
+and pre-emphasis are what the server's INFO1a set for our transmitter (V.34
+11.2.1.1.8; Phase 3 set-up has already applied them). What it sends, measured
+off native HSF's upstream (`reference-data/k56flex-hsf/upstream-mp-ulaw.g711`)
+with our own receiver's conventions:
+
+| stage | content | native HSF |
+|---|---|---|
+| S, S-bar | V.34 10.1.3.7 | 128T S-bar at 16T |
+| PP | V.34 10.1.3.6 | 288T |
+| TRN | four-point, scrambled ones, GPC from zero | **3910** symbols (our receiver uses 512) |
+| report | 24-bit record (ext, report), differential, histories carried from TRN | 21 records of `00/89b0` |
+| J' | **one more record with `899F` in the report word's place** | a bare 899F after the last record misses the receiver's record phase |
+| TRN2 | **a second TRN, fresh scrambler** | **9614** symbols straight after J' |
+| MP, MP' | V.34 10.1.3.9, K56 rate fields; histories carried from TRN2 | type 0: 9600 up / 52000 down, mask 0x7fff, bit 50 set |
+
+`k56flex_client_tx_test` (fast list) runs it through the V.34 modulator and
+G.711 into our server's streaming upstream receiver: every event in order, the
+report, MP fields and MP' decoded, at 3200 high and low carrier, pre-emphasis
+0/3/6, both laws, with INFO1a power reduction measured on the line (7.00 dB for
+7); the default MP is native HSF's bit for bit; an invalid report header is
+rejected; the post-J' symbols are a fresh TRN.
+
+In the engine it runs inside the client probe (`ME_K56FLEX_CLIENT_UPSTREAM=1`,
+off by default), started 250 ms after the client model enters the server's gate A
+(after its Jd; the recorded playback started during P3, which is one reason it
+failed). Overrides: `ME_K56FLEX_CLIENT_REPORT`, `_TRN_SYMBOLS`, `_GAP_SYMBOLS`
+(TRN2), `_MP_REPEATS`, `_MP_ACK_REPEATS`, `_MP_UP_CODE`, `_MP_DOWN_CODE`,
+`_MP_MASK`.
+
+**Live, 7910** (CT 117 `/root/k56up`, `/root/k56mp`, `/root/k56rate`, `/root/k56t2`,
+`/root/k56t2b`; every call with HSF's V.8bis MS, CM and INFO0c, so the card
+offers K56flex): the card's INFO1a asked for 3200/high, 7 dB power reduction,
+pre-emphasis 3, and our upstream went out with them. On every call where V.8bis
+completed (10):
+
+| tap time | card | us |
+|---|---|---|
+| 17.5-19.9 s | P3, gate A | S at +280 ms after gate A, PP, TRN |
+| 19.9-21.6 s | gate B (constant `29`) | report from 21.1 s, J' |
+| **21.6 s** | **leaves gate B**: identification marker | TRN2 |
+| 21.75-22.75 s | PT_A (two-level) | |
+| 22.6-29.1 s | eight-level PT_C / gate C | MP, MP' at 24.2 s |
+| 29.3 s | retrain (Phase 2) | |
+
+**The card accepts our report**: it leaves gate B 0.4 s after it, which neither the
+played-back recording nor native HSF itself ever achieved. It then holds gate C
+for 6.5 s and retrains; the hold ends at the same 15.2 s into Phase 3 on every
+call whatever we send. Not the cause, each A/B'd one variable at a time:
+MP repeats (2+1 against 40+4, and 40+8 with TRN2), downstream rate code (11,
+52000 against 1, 32000), TRN2 instead of differential idle. In MICA's server
+logic gate C ends on DM 8F31 bit 12 (training complete) or 13 (MP accepted); the
+card shows neither. Open candidates: what the Lucent server needs to call its
+upstream training complete (TRN2 length or timing against its PT stages), MP
+fields other than the rates (reserved bits, type 1), and the report value
+(`89b0` is HSF's report of our own server's downstream, not of this card's).

@@ -30,6 +30,7 @@ python3 tools/mt5634mu_diag_test.py
 ./k56flex_startup_test
 ./k56flex_upstream_test
 ./k56flex_upstream_pcm_test
+./k56flex_client_tx_test
 python3 tools/test_k56flex_probe_timeout.py
 ./mica_qam_test
 ./k56flex_probe_test

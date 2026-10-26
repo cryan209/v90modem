@@ -35,6 +35,7 @@
 #include "k56flex_train.h"
 #include "k56flex_startup.h"
 #include "k56flex_client.h"
+#include "k56flex_client_tx.h"
 #include "k56flex_upstream_pcm.h"
 #include "v91.h"
 #include "v90_cp_live.h"
@@ -4920,8 +4921,73 @@ static int g_k56c_locked[2];
 static uint8_t *g_k56c_tx;
 static size_t g_k56c_tx_len, g_k56c_tx_pos;
 static uint64_t g_k56c_tx_n;
+/* ME_K56FLEX_CLIENT_UPSTREAM=1: experiment inside the probe.  Our own client
+ * upstream (k56flex_client_tx.c: S/S-bar, PP, TRN, report, J', idle, MP, MP')
+ * through SpanDSP's V.34 modulator at the symbol rate, carrier, power
+ * reduction and pre-emphasis the server's INFO1a set for this transmitter
+ * (V.34 11.2.1.1.8), started ME_K56FLEX_CLIENT_UP_DELAY_MS (default 250, as
+ * native HSF against our server) after the client model enters the server's
+ * gate A, i.e. after its Jd (Draft 0.23 4.10).  Overrides, all optional:
+ * ME_K56FLEX_CLIENT_REPORT (hex, extension octet then report word, default
+ * 0089b0), ME_K56FLEX_CLIENT_TRN_SYMBOLS (3910), ME_K56FLEX_CLIENT_GAP_SYMBOLS
+ * (9614, the second TRN between J' and MP), ME_K56FLEX_CLIENT_MP_REPEATS (2) and
+ * ME_K56FLEX_CLIENT_MP_ACK_REPEATS (1), ME_K56FLEX_CLIENT_MP_UP_CODE (4: rate
+ * /2400), _MP_DOWN_CODE (11: rate/2000 - 15) and _MP_MASK (0x7fff).  The
+ * defaults are native HSF's MP (9600 up, 52000 down). */
+static k56flex_client_tx_t g_k56c_up;
+static bool g_k56c_up_on, g_k56c_up_started;
+static int64_t g_k56c_gate_a_at;
+static k56flex_client_tx_stage_t g_k56c_up_stage;
 
 static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", 0); }
+
+static void me_k56c_up_symbol(void *user, float *re, float *im)
+{
+    k56flex_client_tx_stage_t st = k56flex_client_tx_symbol((k56flex_client_tx_t *) user, re, im);
+
+    if (st != g_k56c_up_stage) {
+        ME_LOG("[K56C] +%llu ms client upstream: %s\n",
+               (unsigned long long) (g_k56c_samples/8), k56flex_client_tx_stage_name(st));
+        g_k56c_up_stage = st;
+    }
+}
+
+static void me_k56c_up_init_locked(void)
+{
+    k56flex_client_tx_cfg_t cfg;
+    const char *rep_hex = getenv("ME_K56FLEX_CLIENT_REPORT");
+
+    g_k56c_up_on = g_k56c_up_started = false;
+    g_k56c_gate_a_at = -1;
+    g_k56c_up_stage = K56CT_IDLE_SILENT;
+    if (!g_v34  ||  parse_env_int("ME_K56FLEX_CLIENT_UPSTREAM", 0) == 0)
+        return;
+    k56flex_client_tx_defaults(&cfg);
+    if (rep_hex  &&  *rep_hex) {
+        unsigned long v = strtoul(rep_hex, NULL, 16);
+        cfg.ext = (uint8_t) (v >> 16);
+        cfg.report = (uint16_t) v;
+    }
+    cfg.trn_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_TRN_SYMBOLS", (int) cfg.trn_symbols);
+    cfg.gap_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_GAP_SYMBOLS", (int) cfg.gap_symbols);
+    cfg.mp_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_REPEATS", (int) cfg.mp_repeats);
+    cfg.mp_ack_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_ACK_REPEATS", (int) cfg.mp_ack_repeats);
+    cfg.mp_up_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_UP_CODE", (int) cfg.mp_up_code);
+    cfg.mp_down_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_DOWN_CODE", (int) cfg.mp_down_code);
+    cfg.mp_mask = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_MASK", (int) cfg.mp_mask);
+    if (k56flex_client_tx_init(&g_k56c_up, &cfg) != 0)
+        return;
+    /* Phase 3 set-up has already applied INFO1a's power reduction and
+       pre-emphasis; external symbols inherit both. */
+    if (v34_tx_start_external_symbols(g_v34, v34_get_tx_baud_rate(g_v34),
+                                      v34_get_tx_high_carrier(g_v34),
+                                      me_k56c_up_symbol, &g_k56c_up) != 0)
+        return;
+    g_k56c_up_on = true;
+    ME_LOG("[K56C] client upstream armed: report %02x/%04x, TRN %u, TRN2 %u symbols, "
+           "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.trn_symbols, cfg.gap_symbols,
+           v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low");
+}
 
 static void me_k56c_tx_load_locked(void)
 {
@@ -4955,6 +5021,18 @@ static void me_k56c_tx_locked(int16_t *amp, int len)
 {
     uint64_t at = (uint64_t) parse_env_int("ME_K56FLEX_CLIENT_TX_AT_MS", 4500)*8;
 
+    if (g_k56c_up_on) {
+        /* Our own upstream is on the line; only start it. */
+        if (!g_k56c_up_started  &&  g_k56c_gate_a_at >= 0
+            &&  g_k56c_samples >= (uint64_t) g_k56c_gate_a_at
+                                   + (uint64_t) parse_env_int("ME_K56FLEX_CLIENT_UP_DELAY_MS", 250)*8) {
+            k56flex_client_tx_start(&g_k56c_up);
+            g_k56c_up_started = true;
+            ME_LOG("[K56C] +%llu ms client upstream started\n",
+                   (unsigned long long) (g_k56c_samples/8));
+        }
+        return;
+    }
     for (int n = 0;  n < len;  n++, g_k56c_tx_n++) {
         amp[n] = 0;
         if (g_k56c_tx_n < at  ||  g_k56c_tx_pos >= g_k56c_tx_len)
@@ -4996,6 +5074,7 @@ static void me_k56c_start_locked(void)
         g_k56c[i] = k56flex_client_new(&cc);
     }
     me_k56c_tx_load_locked();
+    me_k56c_up_init_locked();
     g_k56c_active = true;
     ME_LOG("[K56C] Phase 3 entered after a K56 INFO1c: transmitting silence, "
            "client receiver armed for %d ms\n", me_k56c_hold_ms());
@@ -5051,6 +5130,8 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
             }
             if (g_k56c_locked[i]  &&  k56flex_client_phase(c) != g_k56c_phase[i]) {
                 g_k56c_phase[i] = k56flex_client_phase(c);
+                if (g_k56c_phase[i] == K56T_GATE_A  &&  g_k56c_gate_a_at < 0)
+                    g_k56c_gate_a_at = (int64_t) g_k56c_samples;
                 ME_LOG("[K56C] +%llu ms %s-law model enters %s: blocks %u mismatched %u snr %.1f dB\n",
                        (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu",
                        k56flex_train_phase_name(g_k56c_phase[i]),
