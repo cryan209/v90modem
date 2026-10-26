@@ -188,6 +188,23 @@ int main(void)
               "case %u: events in order", c);
     }
 
+    /* Other report values (pad-table groups 0x40/0x80, field bits clear,
+       pacing only) decode as sent. */
+    {
+        static const struct { uint8_t ext; uint16_t report; } v[] = {
+            {0x40, 0x89b0}, {0x80, 0x89b0}, {0x00, 0x8880}, {0x00, 0x8890}
+        };
+        for (unsigned i = 0; i < sizeof(v)/sizeof(v[0]); i++) {
+            k56flex_client_tx_cfg_t c = cfg;
+            c.ext = v[i].ext;
+            c.report = v[i].report;
+            outcome_t o = run(BAUD_3200, 1, 7, 3, 0, &c, 4);
+            CHECK((o.events & K56U_REPORT_END) && o.r.ext == c.ext && o.r.report == c.report,
+                  "report %02x/%04x decoded as %02x/%04x (events %02x)",
+                  c.ext, c.report, o.r.ext, o.r.report, o.events);
+        }
+    }
+
     /* A held TRN2 (cfg.trn2_hold) still ends in a decodable MP and MP'. */
     {
         k56flex_client_tx_cfg_t held = cfg;

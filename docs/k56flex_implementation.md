@@ -2464,3 +2464,25 @@ point every call (~22.7 s tap, detected +8.6 s into Phase 3) and lasts 6.5 s
 whatever we send, so it ends on a fixed timer, not on anything of ours we have
 varied. Neither TRN2 length (4800-19000) nor its timing against the card's PT
 stages is what this server waits for.
+
+**The 7910 checks the report word; the extension octet changes nothing (A/B,
+same day).** Arms each one change from `00/89b0`, round-robin, two calls each
+whose upstream started (`/root/k56rep` on CT 117; 10 of 14 calls; offline, every
+value decodes as sent in `k56flex_client_tx_test`):
+
+| report | change | gate B | eight-level stage | probe ended |
+|---|---|---|---|---|
+| `00/89b0` | baseline | left 0.4 s after the report (21.55, 21.65 s) | 6.60, 6.50 s, then retrain | 15.2 s |
+| `40/89b0` | pad-table group 0x40 | left (21.60, 21.55 s) | 6.50, 6.50 s, retrain | 15.2 s |
+| `80/89b0` | pad-table group 0x80 | left (21.65, 21.55 s) | 6.50, 6.50 s, retrain | 15.2 s |
+| `00/8880` | field bits clear | **held to its 2.7 s timeout** (22.60, 22.65 s) | none: retrain | 8.6 s |
+| `00/8890` | pacing bit (4) only | **held to timeout** (22.75, 22.75 s) | none: retrain | 8.6 s |
+
+So the card does not accept every header-valid report: with bits 4, 5 and 8 set
+(`89b0`) it releases gate B every time, with bit 5 and 8 clear it never does.
+Bit 8 is the one our server reads to choose D9AD for the parameter-training
+stage (report bit 8, see the stage list above); what bit 5 means is not
+recovered. The extension octet's pad-table group made no difference anywhere,
+and no accepted variant changed the 6.5 s gate C. Next candidates: the other
+field bits one at a time from `89b0` (5, 6, 8, 9, 10, 12-14), to map which
+values the card accepts and whether any of them moves gate C.
