@@ -2520,3 +2520,44 @@ word, extension octet, TRN2 length and timing, MP repeats and rate). What is
 left is the upstream itself during the card's PT/gate C stages, and the
 downstream: the client presumably has to train on the server's PT signal and
 answer something the server can see before gate C will end.
+
+## K56flex client against the 7910: where it stands (27 October 2026)
+
+Every piece below is an experiment knob inside the client probe; there is no
+client call mode yet. Recipe that gets furthest (CT 117, `eicon_ppp_direct.py
+--ms 'AT+MS=V34,0;+ES=1'`): `K56FLEX_CLIENT_MS_HEX=11c180808009b50200948181024785
+ME_K56FLEX=1 ME_K56FLEX_LISTEN=1 ME_K56FLEX_ROLE=client K56FLEX_DETECT_BLOCKS=2
+V34_INFO0_MAX_BAUD_DIFF=0 V34_INFO1C_FO=1 ME_K56FLEX_CLIENT_PROBE=40000
+ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
+
+| stage | state |
+|---|---|
+| V.8bis | works when the clipped CRe is caught (about half the calls; the Cisco path mutes it after 40 ms). Our default MS is **wrong** for this card: only HSF's (no NPar block, NS octet 7 `81`) gets K56flex. |
+| Phase 2 | works with HSF's CM (no protocols octet) and INFO0c (bits 21:23 = 0) and INFO1c's K56 flag (`fo=1`); none is a default. |
+| downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
+| upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`). |
+| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. |
+| parameter record, priming, data | not reached; no client receiver for this card's PT, parameter record or PCM data. |
+| E, B1, upstream data | not implemented on the client side. |
+
+What gate C is waiting for, most likely first. In the MICA server our own mirrors,
+gate C ends on "training complete" or "MP accepted"; the card gives neither.
+Varied without effect: report word and extension, TRN2 length (4800-19000) and
+start (after J' or on the card's PT stage), MP repeats (to 40+8), MP downstream
+rate.
+
+1. **The card does not accept our MP as K56flex MP.** HSF's MP layout came from
+   HSF talking to *our* server, which reads K56 rate fields exactly as HSF writes
+   them; no K56flex client has ever reached gate C of this Lucent server, so its
+   MP format is unverified. Candidates: MP type 1 (with precoder), the reserved
+   bits (19, 28, 51-67), a V.34-style downstream field.
+2. **The card waits for the client to have trained on its PT stage** and to say
+   so in a form we do not send (a second report or J after PT, or an MP sent only
+   after the client's receiver has locked to PT). This needs a client receiver
+   for the card's PT signal before it can even be tried properly.
+3. **The card's upstream receiver loses us after the report.** Least likely: the
+   report is accepted, and TRN2 and MP use the same modulator.
+
+The decisive evidence would be a capture of any K56flex client getting past gate
+C against this card (a hardware K56flex modem on an analogue line to 7910, if one
+of the rig modems has K56flex firmware); native HSF never gets past gate B here.
