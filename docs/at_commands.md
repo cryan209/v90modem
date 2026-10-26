@@ -21,6 +21,22 @@ command), [v54_diagnostics.md](v54_diagnostics.md) (`+T*`),
 [v92_quick_connect.md](v92_quick_connect.md) (`+PQC`, `+PSS`). `+MS` and the
 `ATI` pages are tabulated in the [top-level readme](../readme.md).
 
+## Common tasks
+
+| To | Send |
+|---|---|
+| See what the modem supports, live | `AT$`, then `AT+MS$`, `ATS$` and the other pages it names |
+| Dial an extension | `ATD6001` (the number goes to `--sip-server`) |
+| Answer by hand instead of after two rings | `ATS0=0`, then `ATA` on RING |
+| Offer V.34 at most on the next call | `AT+MS=V34` |
+| Offer V.92 with PCM upstream | `AT+MS=V92`, `AT+PIG=0` |
+| Require V.42 error control | `AT&M5` |
+| Turn compression off | `AT&K0` |
+| See the rate and protocol before CONNECT | `AT+MR=1;+ER=1;+DR=1` |
+| Read why the last call ended, and its rates | `ATI6` (and `ATI11` for training detail) |
+| Keep settings across restarts | start with `--profile file`, then `AT&W0` and `AT&Y0` |
+| Go back to factory settings | `AT&F` |
+
 ## Consoles
 
 `--pty-link` is the classic combined console: commands and data on one port,
