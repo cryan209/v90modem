@@ -283,7 +283,9 @@ all: $(TARGET) $(TEST_TARGETS)
 RUN_TESTS = python3 tools/run_tests.py $(TEST_ARGS)
 TEST_LISTS = tests/fast.list tests/slow.list
 
-test-build: $(TEST_TARGETS)
+# $(TARGET) too: tools/multi_line_test.py rows run sip_v90_modem itself, so
+# after `make clean` they failed on a missing binary rather than a test.
+test-build: $(TARGET) $(TEST_TARGETS)
 
 test: test-build
 	$(RUN_TESTS) $(TEST_LISTS)

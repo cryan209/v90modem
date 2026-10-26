@@ -972,3 +972,17 @@ callback stall fixed in 164f9dfe.  What remains is a modest inefficiency (a 6
 degree TRN plateau after a retained-equalizer start) with no known cost, since B1
 refits afterwards and data resumes at 0.02 from the grid on the successful
 renegotiations.  Left as is.
+
+## 3000/9600 u-law timed out from 81d25940 to 1b9a6361 (bisected 2026-10-26)
+
+`./v34_duplex_test 3000 9600 ulaw` read `trained=0/0 rx_bits=0/0 time=60.00s`
+(stages `rx=16 tx=50`) on every commit from 81d25940 (2026-09-30) up to
+1b9a6361 (2026-10-02, TX shaper / answer-side echo). Cause: 81d25940 started
+decision-directed LMS on Phase 4 TRN at TRN symbol 256 (§11.4.1.1.2/§11.4.1.2.2,
+"until the receiver is trained adequately") whatever the decisions were worth.
+At 81d25940, `ME_V34_P4_TRN_DD=0`, 512 or 1024 all pass with zero errors; 256
+times out. 1b9a6361 fixed it as a side effect, and a0f2450b's coherence gate
+(`ME_V34_P4_TRN_COH`, above and in `project_history.md`) later added the guard
+in principle. At 11c20378 the row passes at `V34_DUPLEX_DELAY` 0-7, with
+the gate on or off (`ME_V34_P4_TRN_COH=0`), so it does not depend on the gate.
+A report of this signature means an old checkout, not a current regression.
