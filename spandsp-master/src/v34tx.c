@@ -1004,6 +1004,23 @@ static int v90_info0d_nominal_power_code(const v34_tx_state_t *s)
     return code < 0 ? 0 : code > 15 ? 15 : code;
 }
 
+/* V34_INFO0_MAX_BAUD_DIFF=0..5: experiment.  Replaces INFO0 bits 21:23, the
+   maximum allowed difference between the two directions' symbol rates (V.34
+   Table 12), in the INFO0 we send, and in the bound this modem itself applies
+   when it answers (10.1.2.3.5, Table 16), so it never advertises a limit it
+   ignores.  The native HSF K56flex client sends 0 where we send 5; the 7910
+   offers K56flex to HSF and not to us (docs/k56flex_implementation.md,
+   2026-10-26).  Unset: the capability table's value. */
+static int info0_max_baud_difference(void)
+{
+    const char *e = getenv("V34_INFO0_MAX_BAUD_DIFF");
+
+    if (e  &&  *e  &&  atoi(e) >= 0  &&  atoi(e) <= 5)
+        return atoi(e);
+    return v34_capabilities.max_baud_rate_difference;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int info0_sequence_tx(v34_tx_state_t *s)
 {
     uint8_t *t;
@@ -1147,7 +1164,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     /* 21:23    Maximum allowed difference in symbol rates in the transmit and receive directions. With the symbol rates
                 labelled in increasing order, where 0 represents 2400 and 5 represents 3429, an integer between 0 and 5
                 indicates the difference allowed in number of symbol rate steps. */
-    bitstream_put(&bs, &t, v34_capabilities.max_baud_rate_difference, 3);
+    bitstream_put(&bs, &t, info0_max_baud_difference(), 3);
     /* 24       Set to 1 in an INFO0 sequence transmitted from a CME modem. */
     bitstream_put(&bs, &t, v34_capabilities.from_cme_modem, 1);
     /* 25       Set to 1 indicates the ability to support up to 1664-point signal constellations. */
@@ -1610,7 +1627,7 @@ static void prepare_info1a(v34_state_t *s)
     /* V.34 10.1.2.3.5/Table 16: INFO1a jointly selects answer->call from
        the caller's INFO1c rows and call->answer from this receiver's L1/L2
        result.  The two INFO0 values bound their symbol-rate difference. */
-    allowed_difference = v34_capabilities.max_baud_rate_difference;
+    allowed_difference = info0_max_baud_difference();
     if (allowed_difference > s->rx.far_capabilities.max_baud_rate_difference)
         allowed_difference = s->rx.far_capabilities.max_baud_rate_difference;
     answer_to_call = -1;

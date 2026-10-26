@@ -2308,3 +2308,30 @@ Not yet compared: our INFO0c with bits 21:23 = 0 as HSF sends them, CM without
 the third modulation octet, and V.8/Phase 2 timing. The recorded-upstream
 question (does a report release gate B?) is still open: no call today reached
 gate A.
+
+**Matching HSF's CM and INFO0c does not do it either (A/B, same day).** Correction to
+the table above: our CM's fifth octet `2A` is the **protocols** octet (V.8 tag
+`0x0A`, LAPM), not a modulation octet; `AT+ES=1` (originator error control off)
+drops it and gives HSF's `C1 45 10 10`. `V34_INFO0_MAX_BAUD_DIFF=0` (new, off by
+default, `v34tx.c`) sends INFO0 bits 21:23 = 0 as HSF does, and applies the same
+bound to our own Table 16 choice. Both checked on our own taps (offline engine
+pair: CONNECT both ways, INFO0c bits 21:23 = 0 with the knob, 5 without; CM
+`C1 45 10 10` with `+ES=1`) and on the rig's taps for every arm. Calls to 7910 from
+CT 117 (`/root/k56ab`), arms alternated:
+
+| arm | card INFO0a bit 19 | K56 INFO1a | calls |
+|---|---|---|---|
+| baseline `AT+MS=V34,0` | set | no | 2 |
+| INFO0c bits 21:23 = 0 | set | no | 2 |
+| CM without the protocols octet (`AT+MS=V34,0;+ES=1`) | set | no | 2 |
+| both | set | no | 2 |
+| both, after a completed V.8bis client exchange (`ME_K56FLEX=1`, listen) | set | no | 2 |
+
+In the last arm our CM and INFO0c are bit-identical to HSF's (INFO0c CRC `0x9BF1`
+both), and the card still answers HSF's INFO0c with bit 19 clear and ours with it
+set (two V.8bis attempts more failed with "no CRe heard" in the 3 s window and
+are not counted). So neither field, nor V.8bis as such, is what the card keys
+on. What still differs before its INFO0a: our V.8bis MS reply's contents (not
+yet logged), the timing of our INFO0c against the card's (ours 10.07 s, HSF's
+9.89 s on these taps; the card answers HSF 0.4 s later), and levels/spectrum.
+The recorded-upstream question is still open: no call reached gate A.
