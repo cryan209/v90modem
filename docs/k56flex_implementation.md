@@ -2486,3 +2486,37 @@ recovered. The extension octet's pad-table group made no difference anywhere,
 and no accepted variant changed the 6.5 s gate C. Next candidates: the other
 field bits one at a time from `89b0` (5, 6, 8, 9, 10, 12-14), to map which
 values the card accepts and whether any of them moves gate C.
+
+**The report word is a V.34 J pattern: the 7910 accepts exactly 8990 and 89b0
+(A/B, 27 October).** One field bit changed at a time from `89b0`, round-robin,
+two calls each whose upstream started (`/root/k56bits` on CT 117, 18 of 25):
+
+| report | change | gate B | stage after PT_A | probe ended |
+|---|---|---|---|---|
+| `89b0` | baseline | left (21.60, 21.65 s) | eight-level, 6.50 s, retrain | 15.2 s |
+| `8990` | bit 5 clear | left (21.65, 21.55 s) | **four-level** (`c0 29 a9 40`), 6.50, 6.55 s, retrain | 15.2 s |
+| `88b0` | bit 8 clear | held to timeout | - | 8.6 s |
+| `89f0` | bit 6 set | held to timeout | - | 8.6 s |
+| `8bb0` | bit 9 set | held to timeout | - | 8.6 s |
+| `8db0` | bit 10 set | held to timeout | - | 8.6 s |
+| `99b0` | bit 12 set | held to timeout | - | 8.6 s |
+| `a9b0` | bit 13 set | held to timeout | - | 8.6 s |
+| `c9b0` | bit 14 set | held to timeout | - | 8.6 s |
+
+The two accepted words are V.34 Table 18's J patterns, `8990` asking for
+four-point and `89b0` for sixteen-point training, and the card's parameter
+training follows the choice: four levels after `8990`, eight after `89b0`. They
+are also the two values resident B31D returns (above). So "the report", as far
+as this server is concerned, is J with the extension octet, and nothing else is
+accepted. Either choice still ends in the same 6.5 s gate C timeout.
+
+Offline, `00/99b0` cannot be decoded by a header-only collector: rotated 21
+bits its record reads `04/cd80`, which also passes `(report & 888F) == 8880`,
+so our receiver takes the wrong record phase and misses J' (the test asserts
+the alias). Irrelevant in practice now: the card rejects `99b0` anyway.
+
+Every report-side variable we have is now exhausted against gate C (report
+word, extension octet, TRN2 length and timing, MP repeats and rate). What is
+left is the upstream itself during the card's PT/gate C stages, and the
+downstream: the client presumably has to train on the server's PT signal and
+answer something the server can see before gate C will end.

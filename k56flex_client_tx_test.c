@@ -192,7 +192,10 @@ int main(void)
        pacing only) decode as sent. */
     {
         static const struct { uint8_t ext; uint16_t report; } v[] = {
-            {0x40, 0x89b0}, {0x80, 0x89b0}, {0x00, 0x8880}, {0x00, 0x8890}
+            {0x40, 0x89b0}, {0x80, 0x89b0}, {0x00, 0x8880}, {0x00, 0x8890},
+            /* 89b0 with one field bit changed: 5, 8 clear; 6, 9, 10, 12-14 set */
+            {0x00, 0x8990}, {0x00, 0x88b0}, {0x00, 0x89f0}, {0x00, 0x8bb0},
+            {0x00, 0x8db0}, {0x00, 0xa9b0}, {0x00, 0xc9b0}
         };
         for (unsigned i = 0; i < sizeof(v)/sizeof(v[0]); i++) {
             k56flex_client_tx_cfg_t c = cfg;
@@ -203,6 +206,15 @@ int main(void)
                   "report %02x/%04x decoded as %02x/%04x (events %02x)",
                   c.ext, c.report, o.r.ext, o.r.report, o.events);
         }
+    }
+
+    /* 00/99b0 is ambiguous to a header-only collector: rotated by 21 bits,
+       the record reads 04/cd80, which also passes (report & 888F) == 8880, so
+       the record phase (and with it J') is not determined by the header. */
+    {
+        uint32_t rec = 0x99b0u << 8, rot = ((rec >> 21) | (rec << 3)) & 0xffffff;
+        CHECK((uint16_t)(rot >> 8) == 0xcd80 && (rot & 0xff) == 0x04
+              && ((rot >> 8) & 0x888f) == 0x8880, "00/99b0 aliases 04/cd80");
     }
 
     /* A held TRN2 (cfg.trn2_hold) still ends in a decodable MP and MP'. */
