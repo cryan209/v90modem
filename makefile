@@ -1149,6 +1149,12 @@ K56FLEX_CLIENT_TX_TEST_OBJS = k56flex_client_tx_test.o k56flex_client_tx.o k56fl
 k56flex_client_tx_test: $(K56FLEX_CLIENT_TX_TEST_OBJS) spandsp
 	$(CC) $(K56FLEX_CLIENT_TX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+# Our client upstream spliced into a recorded call, for MicaEmu's mica_trace.
+# Diagnostic, not in TEST_TARGETS.
+K56FLEX_CLIENT_SPLICE_OBJS = tools/k56flex_client_splice.o k56flex_client_tx.o
+k56flex_client_splice: $(K56FLEX_CLIENT_SPLICE_OBJS) spandsp
+	$(CC) $(K56FLEX_CLIENT_SPLICE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
 K56FLEX_UPSTREAM_TEST_OBJS = k56flex_upstream_test.o k56flex_upstream.o k56flex.o
 k56flex_upstream_test: $(K56FLEX_UPSTREAM_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -lm

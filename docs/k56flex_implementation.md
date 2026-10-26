@@ -2561,6 +2561,84 @@ also ends early on the receiver's "ClearDown" event `0xf`. Every exit from
 HSF's TRN2/MP is driven by its downstream receiver, which our client still does
 not have past P1.
 
+### The real MICA firmware as a gate oracle; J' matters, PT does not (26 October)
+
+Asked for next: a client receiver for the 7910's PT/parameter stage. Before
+building one, two checks on whether the server waits for anything the client
+derives from PT.
+
+**The 7910's PT stage is our server's.** On today's taps the card sends, after
+our report: its second identification, PT_A (scrambled ones, biphase, 1.03 s,
+descrambled bit-exact all ones as in our `K56T_PT_A`), then the eight-level
+PT_C running on into gate C. Stage lengths match `k56flex_train.c`; the
+scrambler phase differs, as expected for a self-synchronising scrambler.
+
+**MICA replay oracle.** MicaEmu's `mica_trace` replays a recorded upstream
+into the original MICA firmware deterministically and watches its gate word
+DM 8F31. Native HSF's MICA call (`cruft/artifacts/hsf-mica-k56-9600.client.ulaw`)
+replays exactly: 0800 (S/S-bar) 26.935 s, 0400 (report accepted) 29.062 s,
+**1000 (training complete, ends gate C) 30.469 s**, 4000 (MP') 32.212 s.
+`tools/k56flex_client_splice` (new, not in the test lists) keeps that call's
+V.8bis/Phase 2 and replaces everything from S on with ours:
+
+```sh
+make k56flex_client_splice
+MD=2200 TRN=4600 ./k56flex_client_splice hsf-mica-k56-9600.client.ulaw ours.ulaw 26.88 0 5 0 1 14
+mica_trace ours.ulaw --map mica-portware-map.bin --seconds 35 --greg 0x80 --watch 0x8f31 --host
+```
+
+| our upstream after S | MICA 8F31 |
+|---|---|
+| as sent live (one S/S-bar, TRN 3910, 21 records) | 0800, then 2.7 s gate-B timeout; its TRN worker (DM 8D24) never leaves `582d` |
+| + MD 2200 symbols and a second S/S-bar | TRN worker runs (`588d`, `58f2`); report still missed |
+| + TRN 4600 (or 100 report records) | **0400, then 1000 at +1.335 s**: gate C passed |
+| ... then silence from 0.34 s after J' | 0400, 1000 at the same instant |
+| ... without J' | 0400, then abandoned 180 ms later |
+| ... any TRN2 length (160 ms to 3 s), 4- or 16-point, J' as one record, 100 records or bare `899F` | 1000 every time |
+| MP / MP' in any variant tried (16- or 4-point, x1.5 and x2.24 16-point scale, mask `3fff`, down code 4, 80 MP', J' straight into MP) | **never 2000 or 4000** |
+
+The MD row is a property of the splice, not of our client: HSF's INFO1c,
+which MICA heard in Phase 2, announces an MD of ~700 ms, and V.34 11.3.1.2
+makes the answerer wait that long after S-bar. Our own INFO1c says `md=0`.
+The TRN/report row is a MICA timer: it reads the report only from about 1.4 s
+after TRN starts, and native HSF repeats its report until it hears the
+server's second identification (VxD `2202dce0`). So in MICA, **gate C needs
+nothing the client derives from PT**: a valid report, J', and a few hundred
+ms of carrier. A PT receiver would not change it. What MICA cannot do is
+read our MP: its received-bit register DM 8F13 shows HSF's MP' frames cleanly
+(sync, up 4, down 11, mask `7fff`, ack bit set) but ours as random bits (88-bit
+autocorrelation 0.50), although the sixteen-point labelling is identical to
+the one MicaEmu's own client used to get 2000/4000 (all 16 points checked).
+MICA was also sending Jd `89b0` in this call.
+
+**The 7910 sees our J' too (live A/B, CT 117 `/root/k56jp-runs`, 12 calls, 8
+with V.8bis):**
+
+| J' | calls | card |
+|---|---|---|
+| one record (`00` + `899F`, as before) | 2 | PT_A, eight-level, gate C to 15.2 s |
+| 100 records | 2 | the same |
+| bare `899F` x150 | 2 | the same |
+| **none** | 2 | second identification, PT_A cut after 0.25 s, call over at 7.8 s |
+
+The card's reaction to a missing J' is MICA's. **Neither the first TRN nor the
+report length moves gate C** either (`/root/k56trn-runs`, 10 calls with
+V.8bis: TRN 3910/4600/6000, 21/100 records: 15.2 s on all; the eight-level
+stage just shifts with our report). So on the 7910, everything up to J' is
+accepted as on MICA. The difference is after it: MICA sets "training
+complete" on a timer, the Lucent card does not, and the one thing both
+servers fail to read is our MP. If the card's gate C waits for an accepted MP
+(DM 8F31 bit 13 in MICA's terms), that would explain the 6.5 s hold.
+
+Next: make MICA accept our MP. MicaEmu's accepted client (`MicaEmu/artifacts/
+k56flex-client-20261009`, `connection-verification-call-command.json`) sends
+TRN 512, 8 report records, bare `899F` until its receiver sees MICA's
+training-ready, then MP. Rerunning it with its upstream captured gives a
+reference MP waveform to compare symbol by symbol with ours. New client knobs
+for these experiments (all off by default): `ME_K56FLEX_CLIENT_REPORT_RECORDS`,
+`ME_K56FLEX_CLIENT_JPRIME=record|bare|none`, `ME_K56FLEX_CLIENT_JPRIME_RECORDS`;
+`cfg.md_symbols` exists in the transmitter only.
+
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
 Every piece below is an experiment knob inside the client probe; there is no
@@ -2576,7 +2654,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | Phase 2 | works with HSF's CM (no protocols octet) and INFO0c (bits 21:23 = 0) and INFO1c's K56 flag (`fo=1`); none is a default. |
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
-| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. |
+| gate C | **open**: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It does see our J' (without one it quits at once, as MICA does). MICA passes gate C on our upstream but cannot read our MP; see the MICA oracle section above. |
 | parameter record, priming, data | not reached; no client receiver for this card's PT, parameter record or PCM data. |
 | E, B1, upstream data | not implemented on the client side. |
 

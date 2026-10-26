@@ -79,7 +79,7 @@ void k56flex_client_tx_release_trn2(k56flex_client_tx_t *t)
 const char *k56flex_client_tx_stage_name(k56flex_client_tx_stage_t st)
 {
     static const char *n[] = {"silent", "S", "S-bar", "PP", "TRN", "report", "J'",
-                              "TRN2", "MP", "MP'", "tail", "hold"};
+                              "TRN2", "MP", "MP'", "tail", "hold", "MD"};
     return (unsigned) st < sizeof(n)/sizeof(n[0]) ? n[st] : "?";
 }
 
@@ -170,12 +170,18 @@ static void enter(k56flex_client_tx_t *t, k56flex_client_tx_stage_t st)
            extension octet, then 899F (native HSF, decoded from
            reference-data/k56flex-hsf/upstream-mp-ulaw.g711).  A bare 899F
            after the last record misses the receiver's record phase. */
-        for (unsigned i = 0; i < 8; i++)
-            t->bits[i] = (t->cfg.ext >> i) & 1;
-        for (unsigned i = 0; i < 16; i++)
-            t->bits[8 + i] = (0x899f >> i) & 1;
-        t->nbits = 24;
-        t->bitpos = 0;
+        if (t->cfg.jprime_bare) {
+            for (unsigned i = 0; i < 16; i++)
+                t->bits[i] = (0x899f >> i) & 1;
+            t->nbits = 16;
+        } else {
+            for (unsigned i = 0; i < 8; i++)
+                t->bits[i] = (t->cfg.ext >> i) & 1;
+            for (unsigned i = 0; i < 16; i++)
+                t->bits[8 + i] = (0x899f >> i) & 1;
+            t->nbits = 24;
+        }
+        t->bitpos = t->cfg.jprime_none ? t->nbits : 0;
         break;
     case K56CT_GAP:
         /* A second TRN from a fresh scrambler, on which the server trains
@@ -226,7 +232,8 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
         case K56CT_S:
         case K56CT_SBAR:
             if (t->n >= (st == K56CT_S ? t->cfg.s_symbols : t->cfg.sbar_symbols)) {
-                enter(t, st == K56CT_S ? K56CT_SBAR : K56CT_PP);
+                enter(t, st == K56CT_S ? K56CT_SBAR :
+                         (t->cfg.md_symbols && !t->md_done) ? K56CT_MD : K56CT_PP);
                 continue;
             }
             /* The alternation runs on through S-bar: count from the start of S. */
@@ -238,6 +245,13 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
                 *im = si;
             }
             break;
+        case K56CT_MD:
+            if (t->n >= t->cfg.md_symbols) {
+                t->md_done = 1;
+                enter(t, K56CT_S);
+                continue;
+            }
+            break;                                  /* silent MD */
         case K56CT_PP:
             if (t->n >= t->cfg.pp_symbols) {
                 enter(t, K56CT_TRN);
@@ -286,8 +300,9 @@ k56flex_client_tx_stage_t k56flex_client_tx_symbol(k56flex_client_tx_t *t, float
             diff_symbol(t, b0, b1, re, im);
             break;
         case K56CT_JPRIME:
-            if (!frame_bits(t, &b0, &b1, 1)) {
-                enter(t, (t->cfg.trn2_hold && !t->trn2_released) ? K56CT_HOLD : K56CT_GAP);
+            if (!frame_bits(t, &b0, &b1, (t->cfg.jprime_records && !t->cfg.jprime_none) ? t->cfg.jprime_records : 1)) {
+                enter(t, (t->cfg.trn2_hold && !t->trn2_released) ? K56CT_HOLD :
+                         t->cfg.gap_symbols ? K56CT_GAP : (t->cfg.mp_repeats ? K56CT_MP : K56CT_TAIL));
                 continue;
             }
             diff_symbol(t, b0, b1, re, im);

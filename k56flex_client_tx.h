@@ -15,7 +15,15 @@
  *              LSB first), repeated, scrambled and differentially encoded
  *              with both histories continuing from TRN, as the receiver
  *              decodes them (resident PM 0294/02B0 labels).
- *   J'         one more record with 899F in the report word's place.
+ *   J'         one more record with 899F in the report word's place
+ *              (cfg.jprime_records repeats it, cfg.jprime_bare sends the bare
+ *              899F word, cfg.jprime_none omits it: diagnostics).  MICA's
+ *              gate C hinges on it: without J' it abandons the call 180 ms
+ *              after accepting the report, with any of these forms it posts
+ *              training complete whatever follows (MicaEmu replay, 26 Oct).
+ *   MD         optional, V.34 11.3.1: S, S-bar, MD, S, S-bar, PP.  Only for a
+ *              peer told a non-zero MD length in INFO1c (cfg.md_symbols);
+ *              our INFO1c says 0.
  *   TRN2       a second TRN from a fresh scrambler (original HSF 120342c0
  *              "resets for TRN"): native HSF sends 9614 symbols, and a server
  *              trains on it before it looks for MP.  Our own server never
@@ -55,6 +63,10 @@ typedef struct {
     unsigned mp_mask;          /* 15-bit rate mask, bits 35:49 */
     unsigned mp_asymmetric;    /* bit 50, set by native HSF */
     unsigned trn2_hold;        /* 1: after J', idle until k56flex_client_tx_release_trn2() */
+    unsigned jprime_records;   /* J' records (0 = 1, as native HSF) */
+    unsigned jprime_bare;      /* 1: J' is the bare 16-bit 899F word, no extension octet */
+    unsigned jprime_none;      /* 1: no J' at all (diagnostic: does the server see J'?) */
+    unsigned md_symbols;       /* V.34 11.3.1: S, S-bar, MD, S, S-bar, PP when non-zero */
     unsigned trn16;            /* 1: TRN2, MP, MP' and the tail on the 16-point
                                   constellation, as the server's Jd 89B0 asks
                                   (V.34 10.1.3.3, Table 18) */
@@ -72,7 +84,8 @@ typedef enum {
     K56CT_MP,
     K56CT_MP_ACK,
     K56CT_TAIL,                /* idle ones after MP' */
-    K56CT_HOLD                 /* idle after J', waiting to start TRN2 (trn2_hold) */
+    K56CT_HOLD,                /* idle after J', waiting to start TRN2 (trn2_hold) */
+    K56CT_MD                   /* MD between the two S/S-bar (md_symbols) */
 } k56flex_client_tx_stage_t;
 
 typedef struct {
@@ -85,6 +98,7 @@ typedef struct {
     uint8_t bits[188];         /* frame being sent */
     unsigned nbits, bitpos, frames;
     int trn2_released;
+    int md_done;
     uint64_t symbols;          /* since start */
 } k56flex_client_tx_t;
 

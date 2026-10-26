@@ -4929,7 +4929,10 @@ static uint64_t g_k56c_tx_n;
  * native HSF against our server) after the client model enters the server's
  * gate A, i.e. after its Jd (Draft 0.23 4.10).  Overrides, all optional:
  * ME_K56FLEX_CLIENT_REPORT (hex, extension octet then report word, default
- * 0089b0), ME_K56FLEX_CLIENT_TRN_SYMBOLS (3910), ME_K56FLEX_CLIENT_GAP_SYMBOLS
+ * 0089b0), ME_K56FLEX_CLIENT_TRN_SYMBOLS (3910), _REPORT_RECORDS (21),
+ * _JPRIME (record: extension octet + 899F, default; bare: 899F alone; none),
+ * _JPRIME_RECORDS (1),
+ * ME_K56FLEX_CLIENT_GAP_SYMBOLS
  * (9614, the second TRN between J' and MP), ME_K56FLEX_CLIENT_MP_REPEATS (2) and
  * ME_K56FLEX_CLIENT_MP_ACK_REPEATS (1), ME_K56FLEX_CLIENT_MP_UP_CODE (4: rate
  * /2400), _MP_DOWN_CODE (11: rate/2000 - 15) and _MP_MASK (0x7fff).  The
@@ -4991,6 +4994,14 @@ static void me_k56c_up_init_locked(void)
     g_k56c_eight_seen = false;
     g_k56c_win_n = g_k56c_eight_run = g_k56c_win_distinct = 0;
     cfg.trn_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_TRN_SYMBOLS", (int) cfg.trn_symbols);
+    cfg.report_records = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_REPORT_RECORDS", (int) cfg.report_records);
+    cfg.jprime_records = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_JPRIME_RECORDS", 0);
+    {
+        const char *j = getenv("ME_K56FLEX_CLIENT_JPRIME");
+
+        cfg.jprime_bare = j  &&  strcmp(j, "bare") == 0;
+        cfg.jprime_none = j  &&  strcmp(j, "none") == 0;
+    }
     cfg.gap_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_GAP_SYMBOLS", (int) cfg.gap_symbols);
     cfg.mp_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_REPEATS", (int) cfg.mp_repeats);
     cfg.mp_ack_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_ACK_REPEATS", (int) cfg.mp_ack_repeats);

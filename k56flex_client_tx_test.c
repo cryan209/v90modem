@@ -253,6 +253,46 @@ static void jd_detector(void)
     }
 }
 
+/* J' variants (bare 899F, repeated, none) and V.34 11.3.1's MD: stage
+   order and lengths in symbols. */
+static void jprime_and_md_options(void)
+{
+    static const struct { unsigned bare, none, records, md; unsigned jsyms; } v[] = {
+        {0, 0, 0, 0, 12}, {0, 0, 100, 0, 1200}, {1, 0, 150, 0, 1200}, {0, 1, 0, 0, 0}, {0, 0, 0, 2200, 12}
+    };
+    for (unsigned c = 0; c < sizeof(v)/sizeof(v[0]); c++) {
+        k56flex_client_tx_cfg_t cfg;
+        k56flex_client_tx_t tx;
+        unsigned count[16] = {0}, order[32], n = 0, s_runs = 0;
+        k56flex_client_tx_stage_t st, last = K56CT_IDLE_SILENT;
+        float re, im;
+
+        k56flex_client_tx_defaults(&cfg);
+        cfg.jprime_bare = v[c].bare;
+        cfg.jprime_none = v[c].none;
+        cfg.jprime_records = v[c].records;
+        cfg.md_symbols = v[c].md;
+        k56flex_client_tx_init(&tx, &cfg);
+        k56flex_client_tx_start(&tx);
+        while ((st = k56flex_client_tx_symbol(&tx, &re, &im)) != K56CT_MP  &&  tx.symbols < 40000) {
+            count[st]++;
+            if (st != last) {
+                if (n < 32) order[n++] = st;
+                s_runs += st == K56CT_S;
+                last = st;
+            }
+            if (st == K56CT_MD)
+                CHECK(re == 0  &&  im == 0, "case %u: MD is silent", c);
+        }
+        CHECK(count[K56CT_JPRIME] == v[c].jsyms, "case %u: J' %u symbols (want %u)",
+              c, count[K56CT_JPRIME], v[c].jsyms);
+        CHECK(count[K56CT_MD] == v[c].md  &&  s_runs == (v[c].md ? 2u : 1u),
+              "case %u: MD %u symbols, %u S runs", c, count[K56CT_MD], s_runs);
+        CHECK(n >= 2  &&  order[n - 1] == K56CT_GAP  &&  order[n - 2] == (v[c].none ? K56CT_REPORT : K56CT_JPRIME),
+              "case %u: TRN2 follows %s", c, v[c].none ? "the report" : "J'");
+    }
+}
+
 int main(void)
 {
     static const struct { int baud, high, pr, pe, alaw; } cases[] = {
@@ -269,6 +309,7 @@ int main(void)
     trn2_hold_waits();
     sixteen_point_follows_jd();
     jd_detector();
+    jprime_and_md_options();
 
     k56flex_client_tx_defaults(&cfg);
     cfg.gap_symbols = 1600;                         /* keep the run short */
