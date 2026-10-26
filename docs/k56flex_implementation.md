@@ -2228,3 +2228,46 @@ it was left failed. No conclusion from calls 3 and 4.
 Next, when the rig is free: 120 ms cushion (with `nice`) to get an
 underrun-free call 2; then compare HSF's upstream after Jd with what our client
 must send, and what releases the card's constant-level stage.
+
+### The 7910 holds gate B for a report that HSF never sends (2026-10-26)
+
+**Call 5 (120 ms cushion, `nice -n -10`, `--repair-cre`):** no underrun in the
+first training cycle (the only four are at 60.5 s), and it fails exactly like
+call 2. Evidence: `artifacts/k56flex-7910-hsf-sip-20261026-call5/` (local).
+Line timeline, by codeword statistics per 125 ms:
+
+| line time | card |
+|---|---|
+| 14.0-16.1 s | P1 (4 levels, `2f/30/af/b0`) |
+| 16.1-17.1 s | P2 (12 levels) |
+| 17.1-20.1 s | P3, then gate A (`2f/af`) |
+| 20.1-22.9 s | one constant codeword `29` |
+| 22.9 s on | Phase 2 again (retrain) |
+
+Our server's upstream receiver (`k56flex_upstream_pcm_rx`, 3200/high) on HSF's
+`client-tx.g711` finds **S/S-bar at 19.8 s** and nothing after it: no PP/TRN
+acquisition, no report, although HSF keeps transmitting to 23.75 s. The card
+leaves gate A 0.3 s after that S/S-bar, which is our server's GATE_A rule (S/S-bar
+releases it, `k56flex_train.c`), and the constant `29` stretch is its gate B,
+which in our server ends only on an accepted client report (DM 8F31 bit 10).
+The card gives up 2.8 s into it. Against our own server HSF's report arrives
+2.1 s after its S/S-bar (`00/89b0`, staged-8k run: S/S-bar +16800 ms, report
++18880 ms, MP +22000 ms) and HSF moves on to `Tx_MD`; against the card it stays
+in `CallWaitPh3_10ms`. So the 7910 stall is HSF waiting for something in the
+downstream before it sends its report, and the card waiting for that report.
+Underruns were not the cause. One visible difference: our server's gate B is
+an 8-level signal, the card's a single constant level.
+
+**A recorded client upstream** (uncommitted experiment knob
+`ME_K56FLEX_CLIENT_TX_FILE` / `ME_K56FLEX_CLIENT_TX_AT_MS` in the client probe):
+play HSF's own S/S-bar, PP, TRN, report, 899F, MP and MP'
+(`reference-data/k56flex-hsf/upstream-mp-ulaw.g711`) into the hold 4.5 s after
+Phase 3 entry, to ask whether a valid report releases the card's gate B. Not
+yet answered: on 4 of 4 calls (`/root/k56tx/1-4` on CT 117) the card answered
+our K56-flagged INFO1c (`fo=1`) with a plain V.34 INFO1a (`00 e0 34 09 a0 df 4f`,
+`00 20 36 09 20 b6 66`) and ran V.34 Phase 3, where on 25 October it answered
+with `0x005` K56 flags every time. Its INFO0a differs too: `ff 21 e2 37 9b`
+today against `7f 21 2e bb dd` in the 25 October probe, which looks like a
+different modem answering. Since 22:45 on 25 October 7910 has two MultiTech
+answerers (`ttyM4`, `ttyM5`, same chat script `ATE0V1S0=1S109=1`), and the
+`ttyM4` chat has been waiting since an abnormal call end at 23:51. Untested.
