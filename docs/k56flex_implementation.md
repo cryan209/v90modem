@@ -2787,7 +2787,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | downstream P1-P3, gate A | received: P1 byte-exact through the A->mu transcode (sign inverted), P2, P3, gate A's Jd. Our receive model follows them only by timing past P1. |
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
 | gate C | **passed on about half the calls** with MP repeated 400 times before MP' (27 October, below). Before that: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
-| parameter record, priming, data | record: not decoded (our PT_C generator leaves the card's). Priming and data: **decoded** by content (blind priming, below), error-free on a PCMA leg. |
+| parameter record, priming, data | record: **decoded** (short form, read by magnitude; 27 October, last section). Priming and data: **decoded** by content (blind priming, below), error-free on a PCMA leg. |
 | E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware. |
 
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
@@ -2862,3 +2862,63 @@ asks our upstream for something we cannot read while PT_C is undecoded
 (precoding coefficients, trellis or rate, as a V.34 MP would), so decoding
 the 7910's PT_C is the next step; alternatively its MP acceptance (and so
 gate C) is marginal for the same reason.
+
+### The 7910's parameter record decodes; calls that fail stop before its final record (27 October)
+
+Offline, on the three PCMA calls above (`artifacts/k56flex-7910-alaw-20261027/mp400-{2,3,4}`).
+Our model of the 7910 is exact through P3 and inverts every PT_A/PT_B block.
+"Our PT_C generator leaves the card's" was a sign problem. The card's PT_C
+is our PARAM_B stage, A-law table (levels ±1008/2752/4480/6016, Draft 0.23
+4.10), and in that stage the source bits set only the **magnitudes**. Each
+block has exactly one magnitude inverse. The signs come from the sequence
+state and the running DC, and the card runs those differently: odd samples
+follow our DC rule only 82% of the time. `k56flex_probe_invert_abs` matches
+on magnitude only, and the client falls back to it from PT_C on
+(`abs_blocks`). Every block of the card's 4.3 s eight-level stage then
+inverts, and the descrambled source reads:
+
+- 0101... alternation for about 2.7 s (our PT_C source is FFFF; the card's
+  differs and nothing depends on it);
+- then the **short (mode 0) record**: FFFF prefix, marker, three words and
+  a CRC in 96 bits. MICA sends the long one. `parse_record` now tries both
+  forms and checks the mode field in the record's own first word.
+
+| call | initial record (repeats) | final record | then |
+|---|---|---|---|
+| mp400-3 | `6374 9fff 0000` (x2) | `e374 9fff 0000` (x385) | priming at 52000, data |
+| mp400-4 | `6354 9fff 0000` | `e354 ...` | priming at 52000, data |
+| mp400-2 | `634c 9fff 0000` (x752, about 6 s) | **never** | retrain |
+
+Fields (`k56flex_param_raw` layout): mode 0, rate field 13, u = v = 1,
+control 1FFF, bit 1. **extra** (DM 8C77 in MICA) changes from call to call:
+13, 5, 3. The rate field is not the mapper rate. The card maps at 52000 on
+every call, and MICA's field 15 also mapped at 52000, so priming still
+chooses the rate. The engine log now prints the record's fields instead of
+a bps derived from the field.
+
+Timing, in hold time: the initial record starts at +10.55 s on all three
+calls, about 580 ms after our MP starts (+9.97 s). On the calls that reach
+data, the final record follows 24 ms later, long before our MP' (+12.71 s),
+and repeats until priming (+12.89 s, just after our E at +12.77 s). So the
+half of the calls that fail are failing **between the card's two records**.
+The card has finished its gate C and sends PARAM_1, but its condition for
+PARAM_2 never arrives. In MICA the initial record follows gate C's
+"training complete" (bit 12, `1000`), and PARAM_1 runs until bit 13, which
+`15EE` posts when it accepts MP (`2000`; `k56flex_train.c`, MICA sections
+above). Read the same way, the 7910 finished training on our upstream on
+all three calls and accepted our MP only on the two that reached data. That
+supports cause 1 in the list above (MP acceptance) over causes 2 and 3. It also means the
+answer is on the wire: in a failing call, our MP is being sent for those
+6 s, and the card does not accept it.
+
+When the record path's rate check finds no candidate, the client now
+replays the held symbols into the blind search instead of failing. The
+card's priming does not start on the pair the record path chooses (28
+samples early on mp400-3). `k56flex_client_test` checks the record on the
+retained PCMU fixture: it survives the A->mu transcode.
+
+Next: compare our upstream MP between a call that got the final record and
+one that did not (`live-tx.g711` of mp400-3 and mp400-2). The varying
+**extra** field is the card's only per-call output, so it is the first
+thing to check against the MP's fields and the upstream level.
+

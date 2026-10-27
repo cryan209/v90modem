@@ -65,5 +65,12 @@ unsigned k56flex_probe_invert(const k56flex_probe_t *p, const int16_t samples[K5
  * follows the server's running DC, which a receiver need not share. */
 unsigned k56flex_probe_invert_magnitude(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
                                         uint32_t *src);
+/* Every sample by magnitude.  In PARAM_B (eight levels) the source bits set
+ * only magnitudes, one inverse per block; the signs come from the sequence
+ * state and the DC, which the 7910 (Lucent) runs differently from module 8C,
+ * so its PT_C and parameter record are read this way
+ * (docs/k56flex_implementation.md). */
+unsigned k56flex_probe_invert_abs(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
+                                  uint32_t *src);
 
 #endif

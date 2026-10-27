@@ -68,19 +68,20 @@ typedef struct {
     int16_t last_input;
     float prev_y;                /* last equalized symbol handed to the training path */
     unsigned magnitude_blocks;   /* blocks inverted on the flipped samples' magnitudes (7910) */
-    unsigned dc_pushes;          /* times the carried DC had to change sign to fit (7910) */
-    int32_t dc_offset;           /* learned difference between the server's DC and the shadow's */
+    unsigned abs_blocks;         /* blocks inverted on every sample's magnitude (7910 PT_C on) */
     float pt_b_level;            /* the PT_B magnitude, to find where PT_C starts */
     uint8_t prime_oct[6][8];     /* linear path: priming frames held until the rate is known */
     unsigned prime_buffered, rate_candidates;
     int rate_selected;
-    /* Blind priming (the 7910): after PT_C the timeline is lost, so priming
-       is found by its content, six frames that descramble to ones. */
+    /* Blind priming (the 7910): its stage boundaries are not on our pair
+       grid and its record's rate field is not the mapper rate, so priming is
+       found by its content, six frames that descramble to ones. */
     int blind;
     int16_t blind_lv[K56FLEX_BLIND_RATES][256];     /* each rate's signed levels */
     unsigned blind_nl[K56FLEX_BLIND_RATES];
     unsigned blind_run[K56FLEX_BLIND_RATES];        /* consecutive symbols near that table */
     uint8_t blind_ring[K56FLEX_BLIND_RATES][48];    /* the last 48 symbols sliced to it */
+    k56flex_pcm_rx_t blind_rx[K56FLEX_BLIND_RATES]; /* each rate's receiver, initialised once */
 } k56flex_client_t;
 
 k56flex_client_t *k56flex_client_new(const k56flex_client_cfg_t *cfg);

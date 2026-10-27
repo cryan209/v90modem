@@ -63,17 +63,26 @@ static int find_record(const k56flex_client_t *c, unsigned from, unsigned *marke
     return 0;
 }
 
+/* Draft 0.23 4.12: the long record (mode 1, nine words; MICA) or the short
+   one (mode 0, three words; the 7910), each checked by its CRC and by the
+   mode field in its own first word.  Returns the raw word count or -1. */
 static int parse_record(const k56flex_client_t *c, unsigned marker, uint16_t raw[9])
 {
     uint16_t src[12];
-    unsigned i, b;
-    if (marker + 11 * 16 > c->nbits) return -1;
-    src[0] = 0xffff;
-    for (i = 1; i < 12; ++i) {
-        src[i] = 0;
-        for (b = 0; b < 16; ++b) src[i] |= (uint16_t)(c->x[marker + 16 * (i - 1) + b] << b);
+    unsigned i, b, mode;
+    for (mode = 2; mode-- > 0; ) {
+        unsigned nwords = mode ? 12 : 6;
+        int n;
+        if (marker + (nwords - 1) * 16 > c->nbits) continue;
+        src[0] = 0xffff;
+        for (i = 1; i < nwords; ++i) {
+            src[i] = 0;
+            for (b = 0; b < 16; ++b) src[i] |= (uint16_t)(c->x[marker + 16 * (i - 1) + b] << b);
+        }
+        n = k56flex_param_parse(mode, src, raw);
+        if (n > 0 && (raw[0] & 3) == mode) return n;
     }
-    return k56flex_param_parse(1, src, raw);
+    return -1;
 }
 
 static void try_decode_param(k56flex_client_t *c, k56flex_train_phase_t ph)
@@ -82,8 +91,9 @@ static void try_decode_param(k56flex_client_t *c, k56flex_train_phase_t ph)
     uint16_t raw[9];
     (void)ph;
     while (find_record(c, from, &marker)) {
+        int nraw;
         if (marker + 11 * 16 > c->nbits) return;               /* wait for more bits */
-        if (parse_record(c, marker, raw) < 0) { from = marker + 2; continue; }
+        if ((nraw = parse_record(c, marker, raw)) < 0) { from = marker + 2; continue; }
         {
             unsigned w = raw[0], final = (w >> 15) & 1;
             /* The final record (bit 15) may revise the first: decode it too. */
@@ -100,7 +110,7 @@ static void try_decode_param(k56flex_client_t *c, k56flex_train_phase_t ph)
                 c->param_ok = 1;
                 c->shadow.cfg.rate_bps = c->rate_bps;
             }
-            c->rec_end = marker + 2 + 17 * 10;
+            c->rec_end = marker + 2 + 17 * (unsigned) (nraw + 1);
             if (!c->response_modeled) { c->response_modeled = 1; mirror_status(c, 1u << 13); }
             if (final && !c->final_param_seen) { c->final_param_seen = 1; mirror_status(c, K56FLEX_STATUS_PARAM_DONE); }
             from = c->rec_end;
@@ -127,9 +137,9 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
        the shadow's: over audio, follow it on decisions rather than train the
        front end on a reference that may be the other word. */
     int gate_a_free = c->detect && ph == K56T_GATE_A;
-    /* With a learned DC offset (below) the shadow's flip samples are not the
-       server's: the front end then follows decisions. */
-    int known_ref = ph < unknown_from && !gate_a_free && !c->dc_offset;
+    /* Once a block has matched only by magnitude (below) the shadow's flip
+       samples are not the server's: the front end then follows decisions. */
+    int known_ref = ph < unknown_from && !gate_a_free && !c->magnitude_blocks;
     level_block(c, o, 6, lv);
     k56flex_train_samples(sh, exp, 6);           /* advances the mirror phase machine */
     int agree = 0;
@@ -144,7 +154,7 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
         if (!same && !c->blocks_mismatched++) c->first_bad = (int)ph * 100000 + (int)sh->pairs_total;
     }
     if (ph >= K56T_PT_A) {
-        if (!c->cp_valid || ph < unknown_from) { c->cp = pre; c->cp.dc += c->dc_offset; c->cp_valid = 1; }
+        if (!c->cp_valid || ph < unknown_from) { c->cp = pre; c->cp_valid = 1; }
         matches = k56flex_probe_invert(&c->cp, lv, &src);
         if (matches == 0 && c->detect) {
             /* Every second PT sample's sign is the server's running DC
@@ -153,27 +163,17 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
             matches = k56flex_probe_invert_magnitude(&c->cp, lv, &src);
             if (matches) ++c->magnitude_blocks;
         }
-        if (matches == 0 && c->detect) {
-            /* The flip samples follow the sign of the server's running DC,
-               which need not be ours: the 7910 does not clear it where MICA
-               does (PT_A), so the two differ by a constant once both follow
-               the same received levels.  Find the smallest offset that lets
-               this block invert, and keep it. */
-            int32_t base = c->cp.dc - c->dc_offset;
-            for (int k = 1; k <= 64 && !matches; ++k) {
-                for (int sgn = -1; sgn <= 1 && !matches; sgn += 2) {
-                    int32_t off = sgn*k*2016;
-                    k56flex_probe_t t = c->cp;
-                    t.dc = base + off;
-                    matches = k56flex_probe_invert(&t, lv, &src);
-                    if (matches) { c->cp.dc = base + off; c->dc_offset = off; ++c->dc_pushes; }
-                }
-            }
+        if (matches == 0 && c->detect && ph >= K56T_PT_C) {
+            /* The 7910's PT_C signs follow neither our sequence state nor
+               our DC, but its magnitudes are the source bits: its record
+               decodes from them (docs/k56flex_implementation.md). */
+            matches = k56flex_probe_invert_abs(&c->cp, lv, &src);
+            if (matches) ++c->abs_blocks;
         }
         if (matches == 0) {
-            /* The 7910's PT_C generator leaves ours after a few blocks
-               (docs/k56flex_implementation.md), so its parameter record
-               cannot be read; its priming and data still can (blind_symbol). */
+            /* No PT block: the server has started priming, found by
+               content (blind_symbol) since the 7910's stage lengths are
+               not ours. */
             if (c->detect && ph >= K56T_PT_C) c->blind = 1;
             else c->failed = 1;
             return;
@@ -187,7 +187,7 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
                server whose stages run longer than ours (the 7910's PT_B)
                would otherwise hand PT_C a state it never had. */
             sh->probe.seq = c->cp.seq;
-            sh->probe.dc = c->cp.dc - c->dc_offset;
+            sh->probe.dc = c->cp.dc;
         }
         for (i = 0; i < c->cp.cfg[3]; ++i) {
             unsigned y = (src >> i) & 1, k = c->nbits;
@@ -412,6 +412,8 @@ static int select_rate(k56flex_client_t *c)
     return 0;
 }
 
+static void blind_symbol(k56flex_client_t *c, float y);
+
 static void frame_symbols(k56flex_client_t *c, const float *y)
 {
     int16_t lv[256];
@@ -421,7 +423,16 @@ static void frame_symbols(k56flex_client_t *c, const float *y)
         if (k56flex_train_phase(&c->shadow) != K56T_PRIME || !c->param_ok) { c->failed = 1; return; }
         slice_any(c, y, 8, c->prime_oct[c->prime_buffered++]);
         if (c->prime_buffered < 6) return;
-        if (select_rate(c) < 0) { c->failed = 1; return; }
+        if (select_rate(c) < 0) {
+            /* The 7910's priming need not start on the pair the record
+               path chose: find it by content from the held symbols on. */
+            if (!c->detect) { c->failed = 1; return; }
+            c->blind = 1;
+            for (f = 0; f < 6; ++f)
+                for (unsigned i = 0; i < 8; ++i)
+                    blind_symbol(c, (float) k56flex_level_from_g711(c->cfg.law, c->prime_oct[f][i]));
+            return;
+        }
         c->rate_selected = 1;
         c->rx_ready = 0;
         if (!ensure_rx(c)) { c->failed = 1; return; }
@@ -473,22 +484,29 @@ static int pair_is_training(const k56flex_client_t *c, const float *y)
    derived signs carry no bits, so the server's DC (which we cannot follow
    here) is not needed either.  A wrong rate or frame phase fails within a
    few bits. */
-static int blind_try(k56flex_client_t *c, unsigned r, k56flex_pcm_rx_t *out)
+static int blind_try(k56flex_client_t *c, unsigned r)
 {
-    k56flex_pcm_config_t pc;
+    k56flex_pcm_rx_t *rx = &c->blind_rx[r];
     uint8_t bits[K56FLEX_MAX_FRAME_BITS];
     unsigned f, i, seen = 0;
-    pc.law = c->cfg.law;
-    pc.rate_bps = 32000 + 2000*(int) r;
-    pc.report_field = c->report_field;
-    if (k56flex_pcm_rx_init(out, &pc) < 0) return 0;
-    out->ignore_derived_sign = 1;
+    /* Back to the state k56flex_pcm_rx_init left: k56flex_pcm_rx_frame
+       changes only these. */
+    rx->descrambler = 0;
+    rx->m.dc = 0;
+    rx->m.mask = rx->m.mask_field;
+    rx->m.phase = 0;
+    rx->m.frame = 0;
     for (f = 0; f < 6; ++f) {
-        int n = k56flex_pcm_rx_frame(out, c->blind_ring[r] + 8*f, bits);
+        int n = k56flex_pcm_rx_frame(rx, c->blind_ring[r] + 8*f, bits);
         if (n < 0) return 0;
         for (i = 0; i < (unsigned) n; ++i, ++seen) if (seen >= 23 && !bits[i]) return 0;
     }
     return 1;
+}
+
+static int cmp_level(const void *a, const void *b)
+{
+    return (int) *(const int16_t *) a - (int) *(const int16_t *) b;
 }
 
 static void blind_start(k56flex_client_t *c)
@@ -496,14 +514,17 @@ static void blind_start(k56flex_client_t *c)
     unsigned r;
     for (r = 0; r < K56FLEX_BLIND_RATES; ++r) {
         k56flex_pcm_config_t pc;
-        k56flex_pcm_rx_t rx;
+        k56flex_pcm_rx_t *rx = &c->blind_rx[r];
         c->blind_run[r] = 0;
         c->blind_nl[r] = 0;
         pc.law = c->cfg.law;
         pc.rate_bps = 32000 + 2000*(int) r;
         pc.report_field = c->report_field;
-        if (k56flex_pcm_rx_init(&rx, &pc) == 0)
-            c->blind_nl[r] = k56flex_pcm_levels(&rx.m, c->blind_lv[r], 256);
+        if (k56flex_pcm_rx_init(rx, &pc) == 0) {
+            rx->ignore_derived_sign = 1;
+            c->blind_nl[r] = k56flex_pcm_levels(&rx->m, c->blind_lv[r], 256);
+            qsort(c->blind_lv[r], c->blind_nl[r], sizeof(c->blind_lv[r][0]), cmp_level);
+        }
     }
     c->blind = 2;
 }
@@ -514,30 +535,34 @@ static void blind_start(k56flex_client_t *c)
    level by up to a step of the law it lands in, about 1/16 of it. */
 static void blind_symbol(k56flex_client_t *c, float y)
 {
-    unsigned r, i, hits = 0;
-    k56flex_pcm_rx_t rx, chosen;
-    int rate = 0;
+    unsigned r, i, hits = 0, chosen = 0;
     if (c->blind == 1) blind_start(c);
     for (r = 0; r < K56FLEX_BLIND_RATES; ++r) {
+        /* Nearest level by bisection: this runs for every symbol and rate,
+           in the engine's media path (a linear search delayed our RTP). */
         const int16_t *lv = c->blind_lv[r];
+        unsigned lo = 0, hi = c->blind_nl[r];
         float bd = 1e30f;
         int best = 0;
-        for (i = 0; i < c->blind_nl[r]; ++i) {
+        while (hi - lo > 1) {
+            unsigned mid = (lo + hi)/2;
+            if ((float) lv[mid] <= y) lo = mid; else hi = mid;
+        }
+        for (i = lo; i < lo + 2 && i < c->blind_nl[r]; ++i) {
             float d = fabsf(y - (float) lv[i]);
             if (d < bd) { bd = d; best = lv[i]; }
         }
         memmove(c->blind_ring[r], c->blind_ring[r] + 1, sizeof(c->blind_ring[r]) - 1);
         c->blind_ring[r][sizeof(c->blind_ring[r]) - 1] = (uint8_t) k56flex_g711_from_level(c->cfg.law, best);
         c->blind_run[r] = (c->blind_nl[r] && bd <= 16.0f + fabsf((float) best)/12.0f) ? c->blind_run[r] + 1 : 0;
-        if (c->blind_run[r] >= sizeof(c->blind_ring[r]) && blind_try(c, r, &rx)) {
-            if (!hits++) { chosen = rx; rate = 32000 + 2000*(int) r; }
-        }
+        if (c->blind_run[r] >= sizeof(c->blind_ring[r]) && blind_try(c, r) && !hits++)
+            chosen = r;
     }
     if (!hits) return;
     /* The lowest rate that decodes; the count is kept for the log. */
     c->rate_candidates = hits;
-    c->rate_bps = rate;
-    c->rx = chosen;
+    c->rate_bps = 32000 + 2000*(int) chosen;
+    c->rx = c->blind_rx[chosen];
     c->rx_ready = 1;
     c->rate_selected = 1;
     c->prime_frames = 6;

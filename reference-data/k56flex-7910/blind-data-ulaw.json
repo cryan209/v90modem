@@ -4,7 +4,7 @@
   "first_sample": 108000,
   "samples": 116000,
   "sha256": "2f3c5f4a3beb5c57e145e34e0585f536ae613e05f96bc51a798a86cda9afa88e",
-  "finding": "7910 downstream from before P1 to 0.78 s into data: our PT_C generator loses the card's after a few blocks, priming (six frames of descrambled ones) at 13.72 s in the cut, A-law mapper at 52000 through the A->mu transcode; data is V.42 detection then HDLC flags",
+  "finding": "7910 downstream from before P1 to 0.78 s into data: PT_C read by magnitude gives the short parameter record 6374/9fff then final e374, priming (six frames of descrambled ones) at 13.72 s in the cut, A-law mapper at 52000 through the A->mu transcode; data is V.42 detection then HDLC flags",
   "consumer": "k56flex_client_test",
   "doc": "docs/k56flex_implementation.md"
 }

@@ -5328,9 +5328,11 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
             }
             if (c->param_ok  &&  !(g_k56c_logged[i] & 1)) {
                 g_k56c_logged[i] |= 1;
-                ME_LOG("[K56C] +%llu ms %s-law model: parameter record, rate field %u (%d bps), control %04x, final %u\n",
-                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->param.rate, c->rate_bps,
-                       c->param.control, c->param.final);
+                /* The rate field is not the mapper rate (MICA 15, the 7910
+                   13, both map at 52000): priming selects that below. */
+                ME_LOG("[K56C] +%llu ms %s-law model: parameter record, mode %u, extra %u, rate field %u, u %u v %u, control %04x bit %u, final %u\n",
+                       (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->param.mode, c->param.extra,
+                       c->param.rate, c->param.u, c->param.v, c->param.control, c->param.bit, c->param.final);
             }
             if (c->final_param_seen  &&  !(g_k56c_logged[i] & 2)) {
                 g_k56c_logged[i] |= 2;

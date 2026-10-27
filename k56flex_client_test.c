@@ -87,11 +87,13 @@ done:
     k56flex_channel_free(channel);
 }
 
-/* The 7910 (Lucent) on our PCMU leg: its PT_C leaves our generator, so the
- * client loses the parameter record and must find priming by content
- * (k56flex_client.c blind_symbol).  Fixture cut from a live call with our
- * report 00/89b0: A-law mapper at 52000 through the A->mu transcode, priming
- * at 13.72 s, then V.42 ODP and HDLC flags. */
+/* The 7910 (Lucent) on our PCMU leg: its PT_C signs follow neither our
+ * sequence state nor our DC, so the client reads PT_C by magnitude, which
+ * yields the card's short (mode 0) parameter record, and finds priming by
+ * content (k56flex_client.c blind_symbol).  Fixture cut from a live call with
+ * our report 00/89b0: record 6374 9fff 0000 then the final e374, A-law mapper
+ * at 52000 through the A->mu transcode, priming at 13.72 s, then V.42 ODP and
+ * HDLC flags. */
 static uint8_t blind_bits[65536];
 static unsigned blind_nbits;
 
@@ -125,11 +127,16 @@ static void blind_7910(const char *path)
         shift = ((shift << 1) | blind_bits[i]) & 0xff;
         if (i >= 7 && shift == 0x7e) ++flags;
     }
+    CHECK(c->param_ok && c->final_param_seen && c->param.mode == 0 && c->param.rate == 13 &&
+          c->param.control == 0x1fff && c->param.bit == 1 && c->param.u && c->param.v,
+          "7910 short parameter record: ok %d final %d mode %u rate %u control %04x",
+          c->param_ok, c->final_param_seen, c->param.mode, c->param.rate, c->param.control);
     CHECK(c->blind == 3 && c->rate_bps == 52000, "7910 priming by content: blind %d rate %d", c->blind, c->rate_bps);
     CHECK(c->data_frames >= 770 && !c->failed, "7910 data frames %u failed %d", c->data_frames, c->failed);
     CHECK(flags >= 200, "7910 data carries HDLC flags: %u", flags);
-    printf("7910 capture: blind priming at %d bps, %u data frames, %u flags, %u derived signs off our DC\n",
-           c->rate_bps, c->data_frames, flags, c->rx.derived_sign_misses);
+    printf("7910 capture: record %04x final, %u PT blocks by magnitude, blind priming at %d bps, "
+           "%u data frames, %u flags, %u derived signs off our DC\n",
+           c->param.control, c->abs_blocks, c->rate_bps, c->data_frames, flags, c->rx.derived_sign_misses);
     k56flex_client_free(c);
 }
 
