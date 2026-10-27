@@ -82,7 +82,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_K56FLEX_CLIENT_DATA_ADVANCE` | modem_engine.c | 0 | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
 | `ME_K56FLEX_CLIENT_DATA_EXPANDED` | modem_engine.c | -1 | d |  |
 | `ME_K56FLEX_CLIENT_DATA_N` | modem_engine.c | (int | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
-| `ME_K56FLEX_CLIENT_DATA_NONLINEAR` | modem_engine.c | 0 | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
+| `ME_K56FLEX_CLIENT_DATA_NONLINEAR` | modem_engine.c | -1 | d |  |
 | `ME_K56FLEX_CLIENT_GAP_SYMBOLS` | modem_engine.c | (int | - |  |
 | `ME_K56FLEX_CLIENT_JPRIME` | modem_engine.c |  | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
 | `ME_K56FLEX_CLIENT_JPRIME_RECORDS` | modem_engine.c | 0 | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
