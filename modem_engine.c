@@ -3363,6 +3363,11 @@ static bool g_advertise_v22 = true;
  * when set, override them; see me_k56flex_mode() and me_advertise_v91(). */
 static bool g_offer_k56 = false;
 static bool g_offer_v91 = false;
+/* This call is a K56flex client call: K56flex V.8bis on a call we
+ * originate (AT+MS=K56, or ME_K56FLEX=1), unless ME_K56FLEX_ROLE=server.
+ * The client is the analogue end, the one that dials, as an asymmetric x2
+ * client is.  It selects the defaults the 7910 needs (me_k56c_call()). */
+static bool g_k56c_call = false;
 /* AT+MS=CLEAR / V120 / V110: no V.8, the DS0 itself is the bit pump. */
 static bool g_offer_clear = false;
 static bool g_offer_v120 = false;
@@ -3839,6 +3844,19 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_offer_automode = automode;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
+    {
+        const char *kr = getenv("ME_K56FLEX_ROLE");
+
+        /* me_k56flex_mode() reads g_offer_k56, set above. */
+        g_k56c_call = me_k56flex_mode() == 1 && g_state == ME_DIALING && !(kr && strcmp(kr, "server") == 0);
+        /* The client offers V.34 and below in V.8: the K56flex PCM direction
+           is negotiated in V.8bis and run inside V.34 Phase 3/4, and a V.90
+           bit would offer this end as a V.90 digital modem. */
+        if (g_k56c_call) {
+            g_advertise_v90 = g_enable_v92 = false;
+            ME_LOG("[ME] K56flex client call: V.8bis as client, V.8 offer %s\n", me_offer_str());
+        }
+    }
     return true;
 }
 
@@ -4983,7 +5001,10 @@ static unsigned g_k56c_win_n, g_k56c_eight_run;
 static int16_t g_k56c_win_vals[9];
 static unsigned g_k56c_win_distinct;
 
-static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", 0); }
+static bool me_k56c_call(void) { return g_k56c_call; }
+/* In a K56flex client call the receiver runs until DATA or 40 s; elsewhere
+   ME_K56FLEX_CLIENT_PROBE=<ms> arms it as an experiment. */
+static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", me_k56c_call() ? 40000 : 0); }
 
 static void me_k56c_up_symbol(void *user, float *re, float *im)
 {
@@ -5004,7 +5025,7 @@ static void me_k56c_up_init_locked(void)
     g_k56c_up_on = g_k56c_up_started = false;
     g_k56c_gate_a_at = -1;
     g_k56c_up_stage = K56CT_IDLE_SILENT;
-    if (!g_v34  ||  parse_env_int("ME_K56FLEX_CLIENT_UPSTREAM", 0) == 0)
+    if (!g_v34  ||  parse_env_int("ME_K56FLEX_CLIENT_UPSTREAM", me_k56c_call()) == 0)
         return;
     k56flex_client_tx_defaults(&cfg);
     if (rep_hex  &&  *rep_hex) {
@@ -5039,6 +5060,23 @@ static void me_k56c_up_init_locked(void)
         cfg.jprime_none = j  &&  strcmp(j, "none") == 0;
     }
     cfg.gap_symbols = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_GAP_SYMBOLS", (int) cfg.gap_symbols);
+    if (me_k56c_call()) {
+        /* The 7910 sends its final record (accepts MP) only when MP runs
+           on: x400 then MP' x8 passed 13 of 15 calls, the default x2 none
+           (docs/k56flex_implementation.md, 27 October). */
+        cfg.mp_repeats = 400;
+        cfg.mp_ack_repeats = 8;
+        /* V.34 10.1.2.3.5, Table 16 bits 30:33: the answer modem's INFO1a
+           projects the rate our direction supports; propose that.  It
+           arrives before Phase 3, and the server's record later reports the
+           same N (its extra field). */
+        {
+            int n = v34_get_info1a_projected_n(g_v34);
+
+            if (n >= 1  &&  n <= 14)
+                cfg.mp_up_code = (unsigned) n;
+        }
+    }
     cfg.mp_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_REPEATS", (int) cfg.mp_repeats);
     cfg.mp_ack_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_ACK_REPEATS", (int) cfg.mp_ack_repeats);
     cfg.mp_up_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_UP_CODE", (int) cfg.mp_up_code);
@@ -5046,7 +5084,7 @@ static void me_k56c_up_init_locked(void)
     cfg.mp_mask = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_MASK", (int) cfg.mp_mask);
     cfg.mp_extra_fill = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_FILL", (int) cfg.mp_extra_fill);
     g_k56c_trn16_forced = parse_env_int("ME_K56FLEX_CLIENT_TRN16", -1);
-    g_k56c_data_on = parse_env_int("ME_K56FLEX_CLIENT_DATA", 0) != 0;
+    g_k56c_data_on = parse_env_int("ME_K56FLEX_CLIENT_DATA", me_k56c_call()) != 0;
     g_k56c_expanded_forced = parse_env_int("ME_K56FLEX_CLIENT_DATA_EXPANDED", -1);
     g_k56c_nonlinear_forced = parse_env_int("ME_K56FLEX_CLIENT_DATA_NONLINEAR", -1);
     g_k56c_options_from_record = false;
@@ -5083,9 +5121,10 @@ static void me_k56c_up_init_locked(void)
     }
     g_k56c_up_on = true;
     ME_LOG("[K56C] client upstream armed: report %02x/%04x, MD %u, TRN %u, TRN2 %u symbols%s, "
-           "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.md_symbols, cfg.trn_symbols, cfg.gap_symbols,
+           "baud index %d, %s carrier, MP up N=%u (INFO1a projects %d) x%u\n", cfg.ext, cfg.report, cfg.md_symbols, cfg.trn_symbols, cfg.gap_symbols,
            g_k56c_trn2_on_eight ? " (held until the eight-level stage)" : "",
-           v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low");
+           v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low",
+           cfg.mp_up_code, v34_get_info1a_projected_n(g_v34), cfg.mp_repeats);
 }
 
 /* Draft 0.23 4.12 record flags u (bit 14) and v (bit 13), read as the
@@ -5431,11 +5470,19 @@ static void me_k56_start_locked(void)
        instead of sending its own (experiment: a K56flex RAS may initiate). */
     if (g_calling_party && getenv("ME_K56FLEX_LISTEN") && *getenv("ME_K56FLEX_LISTEN") != '0')
         cfg.role = K56FLEX_V8BIS_RESPOND;
+    if (me_k56c_call()) {
+        /* A K56flex server starts V.8bis itself (the 7910 sends CRe at
+           ~2.1 s); a gateway may mute it after 23 ms, so accept 20 ms.  Our
+           reply is native HSF's client MS, the one the 7910 takes. */
+        cfg.role = K56FLEX_V8BIS_RESPOND;
+        cfg.detect_ms = 20;
+        cfg.hsf_client_ms = 1;
+    }
     cfg.mu_law = g_law == ME_LAW_ULAW;
     cfg.v90_capable = g_advertise_v90;
     {
         const char *role = getenv("ME_K56FLEX_ROLE"), *blind = getenv("ME_K56FLEX_BLIND");
-        cfg.client_model = role && strcmp(role, "client") == 0;     /* send the client octet */
+        cfg.client_model = me_k56c_call() || (role && strcmp(role, "client") == 0); /* send the client octet */
         g_k56_client_role = cfg.client_model;
         cfg.blind = blind && *blind && *blind != '0';
     }
@@ -11168,6 +11215,14 @@ static void start_v34_training(void)
     /* V.250 6.4.1 +MS: our MP never offers a rate outside the DTE's bounds. */
     v34_set_mp_rate_limits(g_v34, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX],
                            g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]);
+    if (g_v34  &&  me_k56c_call()) {
+        /* As native HSF's client: INFO0 symbol-rate difference 0 (V.34
+           Table 12 bits 21:23; with 5 the 7910 completes no Phase 2), and
+           INFO1c frequency offset 1 (Table 15 bits 40:49), which is what
+           starts K56flex on the 7910 (docs/k56flex_implementation.md). */
+        v34_set_info0_max_baud_difference(g_v34, 0);
+        v34_set_info1c_frequency_offset(g_v34, true, 1);
+    }
     if (!g_v34) {
         ME_LOG("[ME] v34_init failed, falling back to V.22bis\n");
         start_v22bis_training();
@@ -15873,7 +15928,9 @@ skip_8k_codewords:
                     }
                     if (g_mod == ME_MOD_V34  &&  g_calling_party  &&  !g_k56c_active
                         &&  rx_stage == V34_RX_STAGE_PHASE3_TRAINING) {
-                        int limit = parse_env_int("ME_V34_PHASE3_TRAIN_TIMEOUT_MS", 3500);
+                        /* A K56flex server trains its PCM downstream while our
+                           V.34 receiver waits in Phase 3: no retrain timer. */
+                        int limit = parse_env_int("ME_V34_PHASE3_TRAIN_TIMEOUT_MS", me_k56c_call() ? 0 : 3500);
 
                         if (g_v34_phase3_train_ms == 0) {
                             g_v34_phase3_train_ms = trace_now_ms();

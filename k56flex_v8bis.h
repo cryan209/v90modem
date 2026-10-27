@@ -52,6 +52,8 @@ typedef struct {
                              * whichever role it plays on a call. */
     int blind;              /* initiator: if no CRd arrives, send CL anyway and wait for MS */
     unsigned listen_ms;     /* responder CRe window / initiator CRd window; 0 = defaults */
+    unsigned detect_ms;     /* CRe/CRd acceptance, continuous tone; 0 = 120 ms (env still wins) */
+    int hsf_client_ms;      /* client model: send native HSF's MS (K56FLEX_CLIENT_MS_HEX still wins) */
 } k56flex_v8bis_cfg_t;
 
 k56flex_v8bis_t *k56flex_v8bis_new(const k56flex_v8bis_cfg_t *cfg);

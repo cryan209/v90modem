@@ -927,6 +927,14 @@ typedef struct
     /*! \brief Diagnostic: data symbols generated and discarded right after
                that handover, advancing the encoder's frame position. */
     int ext_data_advance;
+    /*! \brief INFO0 bits 21:23 (maximum symbol-rate difference), plus 1;
+               0 = the capability table's value.  A K56flex client sends 0. */
+    int info0_baud_diff_plus1;
+    /*! \brief INFO1c bits 40:49 (frequency offset) to send instead of the
+               measured one, when info1c_fo_set.  The 7910 starts K56flex
+               on bit 0. */
+    bool info1c_fo_set;
+    int info1c_fo;
 
     /*! \brief Mapping frame parsed input */
     uint32_t r0;

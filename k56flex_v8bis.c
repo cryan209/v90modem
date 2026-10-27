@@ -15,13 +15,13 @@
 #define WIN 80
 #define HOP (WIN/2)
 #define DETECT_MS 120                 /* a clean dual tone, by default */
-static unsigned detect_samples(void)
+static unsigned detect_samples(unsigned cfg_ms)
 {
     /* K56FLEX_DETECT_MS: shorter acceptance for a tone a gateway clips.
        K56FLEX_DETECT_BLOCKS=N, the earlier 20 ms-block form, accepted N-1
        blocks plus a partial one: (N-1)*20 ms, at least 20. */
     const char *e = getenv("K56FLEX_DETECT_MS"), *b = getenv("K56FLEX_DETECT_BLOCKS");
-    int ms = DETECT_MS;
+    int ms = cfg_ms ? (int) cfg_ms : DETECT_MS;
     if (e && atoi(e) > 0) ms = atoi(e);
     else if (b && atoi(b) > 0) ms = atoi(b) > 1 ? (atoi(b) - 1)*20 : 20;
     if (ms < WIN*1000/RATE) ms = WIN*1000/RATE;
@@ -205,6 +205,14 @@ static size_t client_ms_override(uint8_t out[18])
     return *e ? 0 : n;
 }
 
+/* Native HSF's client MS to the 7910 (FCS excluded): no NPar block, NS
+ * octet 7 0x81 where the Rockwell model sends 0x83.  The 7910 starts
+ * K56flex for this MS and not for ours (docs/k56flex_implementation.md,
+ * 2026-10-26). */
+static const uint8_t hsf_client_ms[15] = {
+    0x11, 0xc1, 0x80, 0x80, 0x80, 0x09, 0xb5, 0x02, 0x00, 0x94, 0x81, 0x81, 0x02, 0x47, 0x85
+};
+
 static void queue_message(k56flex_v8bis_t *s, k56flex_v8bis_msg_t type)
 {
     uint8_t payload[18], frame[32], bits[300];
@@ -214,6 +222,10 @@ static void queue_message(k56flex_v8bis_t *s, k56flex_v8bis_msg_t type)
     if (s->cfg.client_model && type == K56FLEX_V8BIS_MS) {
         uint8_t over[18];
         size_t on = client_ms_override(over);
+        if (!on && s->cfg.hsf_client_ms) {
+            memcpy(over, hsf_client_ms, sizeof(hsf_client_ms));
+            on = sizeof(hsf_client_ms);
+        }
         if (on) {
             memcpy(payload, over, on);
             n = on;
@@ -284,7 +296,7 @@ static void detect_window(k56flex_v8bis_t *s, det_win_t *w)
     if (w->sumsq / n > 60.0 * 60.0 && frac1 > 0.15 && frac2 > 0.15 && frac1 + frac2 > 0.6) {
         uint64_t span = (uint64_t) s->hits * HOP + WIN;
         ++s->hits;
-        if (span >= detect_samples()) {
+        if (span >= detect_samples(s->cfg.detect_ms)) {
             s->hits = 0;
             s->detect_t = s->t - span;
             if (s->cfg.role == K56FLEX_V8BIS_RESPOND && s->state == K56V8B_IDLE_WAIT) {

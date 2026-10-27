@@ -9,8 +9,9 @@ exercised by `make k56flex-test`, `k56flex_v8bis_test`, `k56flex_probe_test`,
 analogue DATA role. It is the digital-side (server) downstream payload core
 and its exact inverse, plus the V.8bis capability frame, the parameter record
 and the accepted-report logic. `AT+MS=K56` (automode enabled) selects the
-V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
-probe. The server now completes raw duplex connections against native HSF
+V.8bis preflight for the next call, and on a call we originate it is a full
+**K56flex client call** (last section; 52000/31200 against the 7910);
+`ME_K56FLEX=probe` selects the transmit probe. The server now completes raw duplex connections against native HSF
 over PCMU at the unchanged 129-tap analogue reconstruction default: negotiated
 V.8bis/V.8, audio-derived S/S-bar, report, MP/MP', upstream B1 and the PCM
 mapper. A two-minute run delivers 64 KiB exactly each way with no carrier
@@ -49,7 +50,7 @@ configuration. Prefer `AT+MS` for normal modulation policy (V.250 6.4.1).
 
 | Control | Current behavior |
 |---|---|
-| `AT+MS=K56` | Enables the V.8bis exchange when `ME_K56FLEX` is unset/empty; does not by itself enable PCM probes. |
+| `AT+MS=K56` | Enables the V.8bis exchange when `ME_K56FLEX` is unset/empty; does not by itself enable PCM probes. On a call we originate it is a K56flex client call (V.8bis as client, V.8 without V.90, K56flex PCM downstream and V.34 upstream); `ME_K56FLEX_ROLE=server` keeps the old calling-server exchange. |
 | `ME_K56FLEX=0` | Disables the K56flex path even if AT+MS offers it. |
 | `ME_K56FLEX=1` | Exchange only, then ordinary V.8. Any nonempty value other than `probe` or a value beginning with `0` also selects exchange-only. |
 | `ME_K56FLEX=probe` | Enables negotiated startup plus transmit probes when agreed; otherwise the legacy transmit-only probe followed by ordinary V.8. Exact lowercase spelling matters. |
@@ -2773,8 +2774,8 @@ client transmits depends on the model, so that cannot explain gate C.
 
 ## K56flex client against the 7910: where it stands (27 October 2026)
 
-Every piece below is an experiment knob inside the client probe; there is no
-client call mode yet. Recipe that gets furthest (CT 117, `eicon_ppp_direct.py
+*Superseded: `AT+MS=K56` on an originating call is now the client call mode
+(last section); the knobs below still override it.* Recipe that got furthest (CT 117, `eicon_ppp_direct.py
 --ms 'AT+MS=V34,0;+ES=1'`): `K56FLEX_CLIENT_MS_HEX=11c180808009b50200948181024785
 ME_K56FLEX=1 ME_K56FLEX_LISTEN=1 ME_K56FLEX_ROLE=client K56FLEX_DETECT_BLOCKS=2
 V34_INFO0_MAX_BAUD_DIFF=0 V34_INFO1C_FO=1 ME_K56FLEX_CLIENT_PROBE=40000
@@ -3161,4 +3162,50 @@ V.8bis MS (`K56FLEX_CLIENT_MS_HEX`), `V34_INFO1C_FO`,
 `V34_INFO0_MAX_BAUD_DIFF`, MP x400 (`ME_K56FLEX_CLIENT_MP_REPEATS`) and the
 MP upstream rate (`ME_K56FLEX_CLIENT_MP_UP_CODE`, which the record's extra
 could supply). V.8bis completes on about two thirds of calls.
+
+### V.8bis: CRe acceptance by duration, not block count (27 October, night)
+
+The calls that missed V.8bis (about a quarter: "no CRe heard at 3020 ms")
+had the card's CRe on the wire at 2.14 s like every other call: inside our
+window, with the same RTP timing. The Cisco gateway mutes it after **23-32
+ms** (not 40), varying per call, and our detector counted fixed 20 ms
+Goertzel blocks needing two consecutive hits. Whether a 23-32 ms burst gave
+two depended on its phase against our sample count: over all 150 captured
+7910 calls at 40 grid phases each, it was caught on 24%. (An engine replay
+reproduces the live misses; an offline harness first reported 100%
+because it counted the listen timeout as a detection.)
+
+`fa1f2fcc`: 10 ms windows every 5 ms, accepted once qualifying windows span
+the required time (`K56FLEX_DETECT_MS`, default 120 ms;
+`K56FLEX_DETECT_BLOCKS=N` maps to (N-1)*20 ms). At 20 ms: all 150 calls at
+every phase; at 40 ms and the default, none (the burst is shorter). No false
+detection in 3,300 s of other audio from the same calls (ANSam, V.8, V.34
+training, data, both directions), even at 15 ms. **Live: V.8bis 10/10,
+CONNECT 52000/31200 with PPP 10/10** (`/root/k56v8b-runs`).
+
+### K56flex client call mode: `AT+MS=K56` (27 October, night)
+
+On a call we originate, `AT+MS=K56` (or `ME_K56FLEX=1`) now makes this end
+the K56flex client, the analogue end. That is the end that dials, as for an
+asymmetric x2 client. `ME_K56FLEX_ROLE=server` restores the old
+calling-server exchange. The 7910 recipe's knobs become the mode's defaults;
+each knob still overrides when set:
+
+| was | now, in a K56flex client call |
+|---|---|
+| `ME_K56FLEX_LISTEN=1 ME_K56FLEX_ROLE=client` | V.8bis responder with the client octets |
+| `K56FLEX_CLIENT_MS_HEX=11c1...4785` | native HSF's MS (`k56flex_v8bis_cfg_t.hsf_client_ms`) |
+| `K56FLEX_DETECT_BLOCKS=2` | 20 ms CRe acceptance (`detect_ms`) |
+| `AT+MS=V34,0` | V.8 offer without V.90/V.92 (V.34 and below) |
+| `V34_INFO0_MAX_BAUD_DIFF=0` | `v34_set_info0_max_baud_difference(s, 0)` |
+| `V34_INFO1C_FO=1` | `v34_set_info1c_frequency_offset(s, true, 1)` |
+| `ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0` | no Phase 3 retrain timer |
+| `ME_K56FLEX_CLIENT_PROBE=40000`, `_UPSTREAM=1`, `_DATA=1` | receiver, upstream and data on (40 s to DATA) |
+| `ME_K56FLEX_CLIENT_MP_REPEATS=400`, `_MP_ACK_REPEATS=8` | the same |
+| `ME_K56FLEX_CLIENT_MP_UP_CODE=13` | **the INFO1a's projected rate** (`v34_get_info1a_projected_n`, V.34 Table 16 bits 30:33) |
+
+The engine logs `K56flex client call: V.8bis as client, V.8 offer ...` and
+`MP up N=.. (INFO1a projects ..)`. Engine replay of a 7910 call with only
+`ME_MODE=k56` and dialling: V.8bis with HSF's MS, MP up N=13 from INFO1a,
+shaping and the non-linear encoder from the record, DATA at 52000/31200.
 

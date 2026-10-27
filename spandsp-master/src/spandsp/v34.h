@@ -801,6 +801,19 @@ SPAN_DECLARE(void) v34_tx_set_data_scrambler_tap(v34_state_t *s, int tap);
     when v34_v90_arm_tx_data() hands over. */
 SPAN_DECLARE(void) v34_tx_set_data_advance(v34_state_t *s, int symbols);
 
+/*! INFO0 bits 21:23 we send and apply (V.34 Table 12): maximum symbol-rate
+    difference in steps, 0..5; anything else restores the capability value.
+    V34_INFO0_MAX_BAUD_DIFF, when set, still wins. */
+SPAN_DECLARE(void) v34_set_info0_max_baud_difference(v34_state_t *s, int steps);
+
+/*! INFO1c bits 40:49 (V.34 Table 15): send `code` as the frequency offset
+    instead of the measured one when `set`.  V34_INFO1C_FO still wins. */
+SPAN_DECLARE(void) v34_set_info1c_frequency_offset(v34_state_t *s, bool set, int code);
+
+/*! The received INFO1a's projected maximum rate for our transmit direction
+    (V.34 Table 16 bits 30:33), as N; -1 before an INFO1a. */
+SPAN_DECLARE(int) v34_get_info1a_projected_n(v34_state_t *s);
+
 /*! Produce one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
                                               int16_t bits[16]);

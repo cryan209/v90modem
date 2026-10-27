@@ -36,7 +36,7 @@ static int clipped_cre_phases(unsigned tone_samples)
 {
     int hits = 0;
     for (unsigned phase = 0; phase < 160; phase += 5) {
-        k56flex_v8bis_cfg_t c = {K56FLEX_V8BIS_RESPOND, 0, 0, 1, 0, 0};
+        k56flex_v8bis_cfg_t c = {K56FLEX_V8BIS_RESPOND, 0, 0, 1, 0, 0, 0, 0};
         k56flex_v8bis_t *s = k56flex_v8bis_new(&c);
         int16_t tx[160], rx[160];
         unsigned t = 0, on = 8000 + phase;
@@ -55,7 +55,7 @@ static int clipped_cre_phases(unsigned tone_samples)
 
 int main(void)
 {
-    k56flex_v8bis_cfg_t ic = {K56FLEX_V8BIS_INITIATE, 1, 1, 1, 0, 0}, rc = {K56FLEX_V8BIS_RESPOND, 1, 1, 0, 0, 0};
+    k56flex_v8bis_cfg_t ic = {K56FLEX_V8BIS_INITIATE, 1, 1, 1, 0, 0, 0, 0}, rc = {K56FLEX_V8BIS_RESPOND, 1, 1, 0, 0, 0, 0, 0};
     k56flex_v8bis_t *ini, *rsp;
     const uint8_t *p;
     size_t n;
@@ -145,7 +145,7 @@ int main(void)
 
     /* The lab case: v90modem (digital server) dials, the analogue client answers. */
     {
-        k56flex_v8bis_cfg_t si = {K56FLEX_V8BIS_INITIATE, 1, 0, 0, 0, 0}, cr = {K56FLEX_V8BIS_RESPOND, 1, 0, 1, 0, 0};
+        k56flex_v8bis_cfg_t si = {K56FLEX_V8BIS_INITIATE, 1, 0, 0, 0, 0, 0, 0}, cr = {K56FLEX_V8BIS_RESPOND, 1, 0, 1, 0, 0, 0, 0};
         ini = k56flex_v8bis_new(&si);
         rsp = k56flex_v8bis_new(&cr);
         run(ini, rsp, 12, 0);
@@ -158,6 +158,23 @@ int main(void)
         CHECK(p && n == 18 && k56flex_v8bis_flex_version(p, n) == 0x02 && p[0] == 0x11, "server saw the client MS");
         p = k56flex_v8bis_peer_payload(rsp, &n);
         CHECK(p && n == 16 && p[13] == 0x42 && p[0] == 0x12, "client saw the server CL");
+        k56flex_v8bis_free(ini);
+        k56flex_v8bis_free(rsp);
+    }
+
+    /* The K56flex client call (modem_engine.c): native HSF's MS, which the
+       7910 takes, in place of the Rockwell model's. */
+    {
+        static const uint8_t hsf[15] = {0x11, 0xc1, 0x80, 0x80, 0x80, 0x09, 0xb5, 0x02, 0x00, 0x94,
+                                        0x81, 0x81, 0x02, 0x47, 0x85};
+        k56flex_v8bis_cfg_t si = {K56FLEX_V8BIS_INITIATE, 1, 0, 0, 0, 0, 0, 0}, cr = {K56FLEX_V8BIS_RESPOND, 1, 0, 1, 0, 0, 20, 1};
+        ini = k56flex_v8bis_new(&si);
+        rsp = k56flex_v8bis_new(&cr);
+        run(ini, rsp, 12, 0);
+        p = k56flex_v8bis_sent_payload(rsp, &n);
+        CHECK(p && n == sizeof(hsf) && !memcmp(p, hsf, sizeof(hsf)), "client sent native HSF's MS (%zu octets)", p ? n : 0);
+        p = k56flex_v8bis_peer_payload(ini, &n);
+        CHECK(p && n == sizeof(hsf) && !memcmp(p, hsf, sizeof(hsf)), "server received it intact");
         k56flex_v8bis_free(ini);
         k56flex_v8bis_free(rsp);
     }
@@ -185,7 +202,7 @@ int main(void)
 
     /* Blind client: no CRd ever comes, but the CL goes out and the wait is for an MS. */
     {
-        k56flex_v8bis_cfg_t bc = {K56FLEX_V8BIS_INITIATE, 1, 0, 1, 1, 0};
+        k56flex_v8bis_cfg_t bc = {K56FLEX_V8BIS_INITIATE, 1, 0, 1, 1, 0, 0, 0};
         int16_t a[160], b[160];
         double cl_energy = 0;
         unsigned i, k;

@@ -46,7 +46,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_BPS` | modem_engine.c | V.34 start bit rate ceiling (0 = the symbol rate's maximum). |
 | `ME_V90_MAX_TX_DBM0_CODE` | v34tx.c, v90.c | INFO0d bits 33:37, the transmit power we can honour. |
 | `ME_V92_MH` | modem_engine.c | 1 arms V.92 modem-on-hold (9.10). |
-| `ME_K56FLEX` | modem_engine.c | Experimental: 0 disables; 1 exchanges V.8bis then ordinary V.8; probe adds negotiated startup/PCM probes. Overrides AT+MS=K56; no complete K56flex DATA link. |
+| `ME_K56FLEX` | modem_engine.c | 0 disables; 1 is AT+MS=K56's V.8bis exchange (a K56flex client call when we dial); probe adds the experimental server startup/PCM probes. Overrides AT+MS=K56. |
 | `ME_CLEARMODE` | sip_modem.c | 1 offers RFC 4040 CLEARMODE for CLEAR/V.110/V.120. |
 | `ME_V110_SYNC` | modem_engine.c | 1 runs V.110 synchronous. |
 | `ME_V120_ACK` | modem_engine.c | 1 runs V.120 acknowledged mode. |
@@ -75,11 +75,11 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 |---|---|---|---|---|
 | `K56FLEX_CLIENT_MS_HEX` | k56flex_v8bis.c |  | d | 0 if unset or malformed. |
 | `K56FLEX_DETECT_BLOCKS` | k56flex_v8bis.c |  | ctd | K56FLEX_DETECT_MS: shorter acceptance for a tone a gateway clips. |
-| `K56FLEX_DETECT_MS` | k56flex_v8bis.c |  | ct | K56FLEX_DETECT_MS: shorter acceptance for a tone a gateway clips. |
+| `K56FLEX_DETECT_MS` | k56flex_v8bis.c |  | ctd | K56FLEX_DETECT_MS: shorter acceptance for a tone a gateway clips. |
 | `ME_AUDIO_RELAY` | modem_engine.c |  | sd | real SIP call.  Nothing is transcoded. |
 | `ME_AUDIO_RELAY_CUSHION_MS` | modem_engine.c | 60 | - |  |
 | `ME_IO_SCHEDULE` | modem_engine.c |  | sdh | 0 unchecked, 1 open, -1 off |
-| `ME_K56FLEX_CLIENT_DATA` | modem_engine.c | 0 | d |  |
+| `ME_K56FLEX_CLIENT_DATA` | modem_engine.c | me_k56c_call( | d |  |
 | `ME_K56FLEX_CLIENT_DATA_ADVANCE` | modem_engine.c | 0 | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
 | `ME_K56FLEX_CLIENT_DATA_EXPANDED` | modem_engine.c | -1 | d |  |
 | `ME_K56FLEX_CLIENT_DATA_N` | modem_engine.c | (int | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
@@ -87,12 +87,12 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_K56FLEX_CLIENT_GAP_SYMBOLS` | modem_engine.c | (int | - |  |
 | `ME_K56FLEX_CLIENT_JPRIME` | modem_engine.c |  | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
 | `ME_K56FLEX_CLIENT_JPRIME_RECORDS` | modem_engine.c | 0 | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
-| `ME_K56FLEX_CLIENT_MP_ACK_REPEATS` | modem_engine.c | (int | d |  |
+| `ME_K56FLEX_CLIENT_MP_ACK_REPEATS` | modem_engine.c | (int | d | V.34 10.1.2.3.5, Table 16 bits 30:33: the answer modem's INFO1a |
 | `ME_K56FLEX_CLIENT_MP_DOWN_CODE` | modem_engine.c | (int | - |  |
 | `ME_K56FLEX_CLIENT_MP_FILL` | modem_engine.c | (int | d |  |
 | `ME_K56FLEX_CLIENT_MP_MASK` | modem_engine.c | (int | - |  |
-| `ME_K56FLEX_CLIENT_MP_REPEATS` | modem_engine.c | (int | d |  |
-| `ME_K56FLEX_CLIENT_MP_UP_CODE` | modem_engine.c | (int | d |  |
+| `ME_K56FLEX_CLIENT_MP_REPEATS` | modem_engine.c | (int | d | V.34 10.1.2.3.5, Table 16 bits 30:33: the answer modem's INFO1a |
+| `ME_K56FLEX_CLIENT_MP_UP_CODE` | modem_engine.c | (int | d | V.34 10.1.2.3.5, Table 16 bits 30:33: the answer modem's INFO1a |
 | `ME_K56FLEX_CLIENT_REPORT` | modem_engine.c |  | d |  |
 | `ME_K56FLEX_CLIENT_REPORT_RECORDS` | modem_engine.c | (int | d |  |
 | `ME_K56FLEX_CLIENT_TRN16` | modem_engine.c | -1 | d |  |
@@ -100,7 +100,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_K56FLEX_CLIENT_TRN_SYMBOLS` | modem_engine.c | (int | - |  |
 | `ME_K56FLEX_CLIENT_TX_AT_MS` | modem_engine.c | 4500 | d | The probe's transmit samples: silence, or the recorded upstream in its window. |
 | `ME_K56FLEX_CLIENT_TX_FILE` | modem_engine.c |  | d |  |
-| `ME_K56FLEX_CLIENT_UPSTREAM` | modem_engine.c | 0 | d |  |
+| `ME_K56FLEX_CLIENT_UPSTREAM` | modem_engine.c | me_k56c_call( | d |  |
 | `ME_K56FLEX_CLIENT_UP_DELAY_MS` | modem_engine.c | 250 | - | Our own upstream is on the line; only start it. |
 | `ME_K56FLEX_LISTEN` | modem_engine.c |  | d | ME_K56FLEX_LISTEN=1: a calling modem that waits for the answerer's CRe |
 | `ME_LAPM_XID_OPTION_OCTETS` | modem_engine.c |  | sd | V.250 +EWIND / +EFRAM: what this end offers in XID. |
@@ -113,7 +113,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_NO_INFO1C_RETRAIN` | modem_engine.c | 0 | d | round trip, and only when the peer is holding Tone A now. |
 | `ME_V34_P4_TRN_COH` | v34rx.c |  | tdh |  |
 | `ME_V34_PHASE3_S_TIMEOUT_MS` | modem_engine.c | 0 | sdh |  |
-| `ME_V34_PHASE3_TRAIN_TIMEOUT_MS` | modem_engine.c | 3500 | d | ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 restores the wait. |
+| `ME_V34_PHASE3_TRAIN_TIMEOUT_MS` | modem_engine.c | me_k56c_call( | d | A K56flex server trains its PCM downstream while our |
 | `ME_V34_RETRAIN_TRAINING_MS` | modem_engine.c |  | d | happened allow 120 s in all.  ME_V34_RETRAIN_TRAINING_MS=0 restores 60 s. |
 | `ME_V8_NO_CI` | modem_engine.c |  | sdh |  |
 | `ME_V90A_PR4` | modem_engine.c | 1 | - | ME_V90A_PR4=0 leaves Phase 4 on the equaliser's own slicer. |
@@ -180,7 +180,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_K56FLEX_BLIND` | modem_engine.c |  | d | experimental V.8bis: nonempty/nonzero-prefix enables blind exchange; normally unset |
 | `ME_K56FLEX_GATE_MS` | modem_engine.c |  | sd | experimental probe gate wait, default 8000 ms, quantized to 12-sample pairs |
 | `ME_K56FLEX_RATE` | modem_engine.c |  | d | experimental PCM probe mapper rate, default 56000 bit/s; not an upstream rate |
-| `ME_K56FLEX_ROLE` | modem_engine.c |  | d | client selects client-model V.8bis capability octet, not an analogue DATA role |
+| `ME_K56FLEX_ROLE` | modem_engine.c |  | d | client: client-model V.8bis octets; server: keep the calling-server exchange instead of a K56flex client call |
 | `ME_SOUNDER` | modem_engine.c |  | d | measurement mode: transmit the channel sounder instead of a modem |
 | `ME_SOUNDER_RMS` | v90_sounder.c |  | - | measurement: level of the channel sounder (ME_SOUNDER) |
 | `ME_TRAINING_TIMEOUT_MS` | modem_engine.c |  | - | interop: lengthens the 60 s training cap for multi-retrain calls |
@@ -327,7 +327,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ATA_TEST_USER` | sip_modem.c |  | sd | Use null sound device — audio is handled by our media port |
 | `DS_V42BIS_FORCE_COMPRESSED` | data_stack.c |  | d | Diagnostic A/B for V.42bis 7.8.1/7.9: compressed transfer |
 | `ME_DATA_HOLD` | modem_engine.c |  | dh | ME_DATA_HOLD=1 keeps a call up after a V.42 failure.  The physical modem is |
-| `ME_K56FLEX_CLIENT_PROBE` | modem_engine.c | 0 | d | straight after J', as native HSF sends it. |
+| `ME_K56FLEX_CLIENT_PROBE` | modem_engine.c | me_k56c_call( | d | In a K56flex client call the receiver runs until DATA or 40 s; elsewhere |
 | `ME_TX_DISRUPT_AFTER_MS` | modem_engine.c | 0 | - | it cannot be mistaken for a signal we meant to send. |
 | `ME_TX_DISRUPT_MS` | modem_engine.c | 1500 | - |  |
 | `ME_V32BIS_RETRAIN_AFTER_MS` | modem_engine.c | 0 | ctdh | initiating path is exercised end to end.  The far end's retrain is followed |

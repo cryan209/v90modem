@@ -1011,12 +1011,14 @@ static int v90_info0d_nominal_power_code(const v34_tx_state_t *s)
    ignores.  The native HSF K56flex client sends 0 where we send 5; the 7910
    offers K56flex to HSF and not to us (docs/k56flex_implementation.md,
    2026-10-26).  Unset: the capability table's value. */
-static int info0_max_baud_difference(void)
+static int info0_max_baud_difference(const v34_tx_state_t *tx)
 {
     const char *e = getenv("V34_INFO0_MAX_BAUD_DIFF");
 
     if (e  &&  *e  &&  atoi(e) >= 0  &&  atoi(e) <= 5)
         return atoi(e);
+    if (tx->info0_baud_diff_plus1 > 0)
+        return tx->info0_baud_diff_plus1 - 1;
     return v34_capabilities.max_baud_rate_difference;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1164,7 +1166,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     /* 21:23    Maximum allowed difference in symbol rates in the transmit and receive directions. With the symbol rates
                 labelled in increasing order, where 0 represents 2400 and 5 represents 3429, an integer between 0 and 5
                 indicates the difference allowed in number of symbol rate steps. */
-    bitstream_put(&bs, &t, info0_max_baud_difference(), 3);
+    bitstream_put(&bs, &t, info0_max_baud_difference(s), 3);
     /* 24       Set to 1 in an INFO0 sequence transmitted from a CME modem. */
     bitstream_put(&bs, &t, v34_capabilities.from_cme_modem, 1);
     /* 25       Set to 1 indicates the ability to support up to 1664-point signal constellations. */
@@ -1584,6 +1586,8 @@ static void prepare_info1c(v34_state_t *s)
             s->tx.info1c.rate_data[i].use_high_carrier;
     }
     s->tx.info1c.freq_offset = v34_info1c_frequency_offset(s);
+    if (s->tx.info1c_fo_set)
+        s->tx.info1c.freq_offset = s->tx.info1c_fo;
     if (getenv("V34_INFO1C_FO"))
         s->tx.info1c.freq_offset = atoi(getenv("V34_INFO1C_FO"));
     /* One line per INFO1c/INFO1d: the per-symbol-rate maxima the far end
@@ -1645,7 +1649,7 @@ static void prepare_info1a(v34_state_t *s)
     /* V.34 10.1.2.3.5/Table 16: INFO1a jointly selects answer->call from
        the caller's INFO1c rows and call->answer from this receiver's L1/L2
        result.  The two INFO0 values bound their symbol-rate difference. */
-    allowed_difference = info0_max_baud_difference();
+    allowed_difference = info0_max_baud_difference(&s->tx);
     if (allowed_difference > s->rx.far_capabilities.max_baud_rate_difference)
         allowed_difference = s->rx.far_capabilities.max_baud_rate_difference;
     answer_to_call = -1;
@@ -10410,6 +10414,29 @@ SPAN_DECLARE(int) v34_v90_arm_tx_data(v34_state_t *s,
     s->tx.external_done_func = done_fn;
     s->tx.v90_data_armed = true;
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_info0_max_baud_difference(v34_state_t *s, int steps)
+{
+    /* V.34 Table 12 bits 21:23; V34_INFO0_MAX_BAUD_DIFF still overrides. */
+    s->tx.info0_baud_diff_plus1 = (steps >= 0  &&  steps <= 5)  ?  steps + 1  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_info1c_frequency_offset(v34_state_t *s, bool set, int code)
+{
+    /* V.34 Table 15 bits 40:49; V34_INFO1C_FO still overrides. */
+    s->tx.info1c_fo_set = set;
+    s->tx.info1c_fo = code;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_info1a_projected_n(v34_state_t *s)
+{
+    /* V.34 Table 16 bits 30:33: the answer modem's projected maximum data
+       rate for our (call->answer) direction, as N (2400*N bit/s). */
+    return s->rx.info1a_received  ?  s->rx.info1a.max_data_rate  :  -1;
 }
 /*- End of function --------------------------------------------------------*/
 
