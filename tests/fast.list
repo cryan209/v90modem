@@ -26,6 +26,7 @@ python3 tools/mt5634mu_diag_test.py
 ./engine_pair_test --both-at 'AT+MS=X2' --expect X2 --seconds 25
 ./engine_pair_test --call-at 'AT+MS=X2,0,0,40000' --answer-at 'AT+MS=X2' --expect X2 --expect-connect 40000 --seconds 25
 ./engine_pair_test --call-at 'AT+MS=X2,0,0,9600,0,0' --answer-at 'AT+MS=X2' --expect X2 --seconds 25
+./engine_pair_test --alaw --call-at 'AT+MS=K56' --call-at 'AT+ES=1' --answer-at 'AT+MS=K56' --answer-at 'AT+ES=1' --answer-env ME_K56FLEX=probe --answer-env ME_V8=1 --expect-connect 52000 --seconds 45
 ./k56flex_test
 ./k56flex_startup_test
 ./k56flex_upstream_test

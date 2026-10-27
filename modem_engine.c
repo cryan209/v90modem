@@ -3368,6 +3368,13 @@ static bool g_offer_v91 = false;
  * The client is the analogue end, the one that dials, as an asymmetric x2
  * client is.  It selects the defaults the 7910 needs (me_k56c_call()). */
 static bool g_k56c_call = false;
+/* This client call has fallen back to initiating V.8bis itself. */
+static bool g_k56c_v8bis_initiated = false;
+/* V.8's calling role when it differs from the SIP direction, -1 otherwise.
+ * After a K56flex V.8bis exchange the MS sender is the V.8 caller (V.8bis
+ * 9.9, as our server reads it): a client call that receives the server's MS
+ * answers V.8 while staying the V.34 call modem (g_calling_party). */
+static int g_v8_calling_override = -1;
 /* AT+MS=CLEAR / V120 / V110: no V.8, the DS0 itself is the bit pump. */
 static bool g_offer_clear = false;
 static bool g_offer_v120 = false;
@@ -3849,6 +3856,7 @@ static bool me_resolve_offer(const char *mode, bool automode)
 
         /* me_k56flex_mode() reads g_offer_k56, set above. */
         g_k56c_call = me_k56flex_mode() == 1 && g_state == ME_DIALING && !(kr && strcmp(kr, "server") == 0);
+        g_v8_calling_override = -1;
         /* The client offers V.34 and below in V.8: the K56flex PCM direction
            is negotiated in V.8bis and run inside V.34 Phase 3/4, and a V.90
            bit would offer this end as a V.90 digital modem. */
@@ -5461,7 +5469,17 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
         me_k56c_stop_locked("hold window elapsed");
 }
 
+static void me_k56_v8bis_new_locked(bool client_initiates);
+
 static void me_k56_start_locked(void)
+{
+    g_k56c_v8bis_initiated = false;
+    me_k56_v8bis_new_locked(false);
+}
+
+/* client_initiates: a K56flex client call heard no server CRe and now sends
+   its own (below). */
+static void me_k56_v8bis_new_locked(bool client_initiates)
 {
     k56flex_v8bis_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -5470,13 +5488,25 @@ static void me_k56_start_locked(void)
        instead of sending its own (experiment: a K56flex RAS may initiate). */
     if (g_calling_party && getenv("ME_K56FLEX_LISTEN") && *getenv("ME_K56FLEX_LISTEN") != '0')
         cfg.role = K56FLEX_V8BIS_RESPOND;
-    if (me_k56c_call()) {
-        /* A K56flex server starts V.8bis itself (the 7910 sends CRe at
-           ~2.1 s); a gateway may mute it after 23 ms, so accept 20 ms.  Our
-           reply is native HSF's client MS, the one the 7910 takes. */
+    if (me_k56c_call() && client_initiates) {
+        /* Servers differ in who starts V.8bis.  MICA's line (and so ours)
+           waits for the client's CRe and CL and answers CRd and MS; the
+           7910 sends CRe and CL itself.  A client that heard no server CRe
+           sends its own, as a Rockwell client does. */
+        cfg.role = K56FLEX_V8BIS_INITIATE;
+    } else if (me_k56c_call()) {
+        /* A K56flex server that starts V.8bis (the 7910 sends CRe at
+           ~2.1 s; a gateway may mute it after 23 ms, so accept 20 ms).  Our
+           reply is native HSF's client MS, the one the 7910 takes.  Listen
+           2.5 s, leaving a server that waits for us time to hear our CRe. */
         cfg.role = K56FLEX_V8BIS_RESPOND;
         cfg.detect_ms = 20;
         cfg.hsf_client_ms = 1;
+        cfg.listen_ms = 2500;
+    } else if (!g_calling_party) {
+        /* Answering: allow for a client that listens 2.5 s for our CRe
+           before sending its own 500 ms later (above). */
+        cfg.listen_ms = 4000;
     }
     cfg.mu_law = g_law == ME_LAW_ULAW;
     cfg.v90_capable = g_advertise_v90;
@@ -5621,6 +5651,12 @@ static void me_k56_progress_locked(void)
         trace_phase("K56flex V.8bis %s: %s", st == K56V8B_DONE ? "done" : "failed",
                     k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)));
     }
+    if (me_k56c_call()  &&  !g_k56c_v8bis_initiated  &&  st == K56V8B_FAILED
+        &&  k56flex_v8bis_result(g_k56) == K56V8B_NO_CRE) {
+        g_k56c_v8bis_initiated = true;
+        me_k56_v8bis_new_locked(true);
+        return;
+    }
     size_t peer_len = 0;
     const uint8_t *peer = k56flex_v8bis_peer_payload(g_k56, &peer_len);
     bool v8_calling = peer && peer_len && (peer[0] & 15) == 2; /* received CL, sent MS */
@@ -5630,6 +5666,11 @@ static void me_k56_progress_locked(void)
                && k56flex_v8bis_ack(g_k56) == 1;
     k56flex_v8bis_free(g_k56);
     g_k56 = NULL;
+    if (me_k56c_call()  &&  agreed) {
+        g_v8_calling_override = v8_calling;
+        ME_LOG("[ME] K56flex client: V.8 %s (the %s sent MS), V.34 call modem\n",
+               v8_calling ? "caller" : "answerer", v8_calling ? "client" : "server");
+    }
     if (me_k56flex_mode() == 2) {
         if (agreed) {
             /* Draft 0.23 4.1 / V.8bis 9.9: ACK precedes V.8, not the
@@ -5903,9 +5944,10 @@ static void me_v8bis_progress_locked(int len)
 
 static int me_start_or_restart_v8_locked(int answer_tone)
 {
+    bool v8_calling = g_v8_calling_override >= 0 ? g_v8_calling_override != 0 : g_calling_party;
     v8_parms_t v8_parms;
     memset(&v8_parms, 0, sizeof(v8_parms));
-    v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
+    v8_parms.modem_connect_tone = v8_calling ? MODEM_CONNECT_TONES_NONE
                                                   : answer_tone;
     /* CI announces a data call to the NETWORK, before the answer.  A caller
      * that starts V.8 because it has ALREADY heard ANSam has nothing to
@@ -5914,7 +5956,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
      * it -- measured against the HT802 leg, 3.7 s from starting V.8 to the CM
      * leaving, against an answerer whose CM-wait budget is 200 + 5000 ms.
      * ME_V8_NO_CI=1 skips CI so V8_AWAIT_ANSAM is entered directly. */
-    v8_parms.send_ci            = g_calling_party && !me_v8_no_ci() && !g_v8bis_handoff;
+    v8_parms.send_ci            = v8_calling && !me_v8_no_ci() && !g_v8bis_handoff;
     g_v8bis_handoff = false;                    /* one start only: a V.8 retry announces itself again */
     /* V.92 Tables 5/14 QC/QCA: this endpoint is always the digital modem.
        The current Jp profile selects the mandatory 4-point TRN2u channel.
@@ -5927,7 +5969,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
        Advertising it and later demoting to V.90 leaves some analogue modems
        waiting for QTs in their V.92 Phase 3 state machine. */
     if (g_enable_v92)
-        v8_parms.v92            = g_calling_party ? 0x45 : 0x47;
+        v8_parms.v92            = v8_calling ? 0x45 : 0x47;
     else
         v8_parms.v92            = -1;
     /* V.92 9.2.4.1: an answering digital modem that detects QC1a answers it
@@ -6045,10 +6087,10 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.jm_cm.t66                = -1;
 
     if (g_v8) {
-        if (v8_restart(g_v8, g_calling_party, &v8_parms) != 0)
+        if (v8_restart(g_v8, v8_calling, &v8_parms) != 0)
             return -1;
     } else {
-        g_v8 = v8_init(NULL, g_calling_party, &v8_parms, v8_result_handler, NULL);
+        g_v8 = v8_init(NULL, v8_calling, &v8_parms, v8_result_handler, NULL);
         if (!g_v8)
             return -1;
         {
@@ -6091,7 +6133,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         }
     }
 
-    g_v8_active_answer_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE : answer_tone;
+    g_v8_active_answer_tone = v8_calling ? MODEM_CONNECT_TONES_NONE : answer_tone;
     g_v8_rx_energy = 0;
     g_v8_rx_count  = 0;
     g_v8_tx_energy = 0;

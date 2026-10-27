@@ -593,6 +593,13 @@ static void fe_sink(void *user, float y)
     if (c->in_frames) {
         if (c->qn >= 8) {
             frame_symbols(c, c->qy);
+            if (c->blind) {
+                /* frame_symbols handed the held priming frames, this one
+                   included, to the blind search, which may already have
+                   reset the queue: nothing here is left to shift. */
+                c->qn = 0;
+                return;
+            }
             c->qn -= 8;
             c->qfirst += 8;
             memmove(c->qy, c->qy + 8, c->qn * sizeof(c->qy[0]));

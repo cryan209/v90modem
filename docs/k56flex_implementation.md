@@ -3215,3 +3215,53 @@ only, PCMA, with every `ME_K56FLEX*`, `K56FLEX*`, `V34_*`, `ME_V34*` and
 N=13 from INFO1a, DATA 52000/31200, CONNECT with LAPM and PPP, 0% ping
 loss; max RTP gaps normal.**
 
+### Our server and our client connect to each other (27 October, night)
+
+`engine_pair_test` (two whole engines over an A-law bearer): caller
+`AT+MS=K56` (the client call mode), answerer `AT+MS=K56` with
+`ME_K56FLEX=probe ME_V8=1` (our server). **Both CONNECT 52000 (52000 down,
+9600 up), and each side's DTE text arrives intact at the other** with
+`AT+ES=1` on both. Now in `tests/fast.list` (4.6 s). Three things stood in
+the way, all ours:
+
+1. **Nobody started V.8bis.** Our server follows MICA: it waits (3 s) for
+   the client's CRe and CL and answers CRd and MS. The 7910 sends CRe and CL
+   itself, so the client mode only listened. Now the client listens for
+   2.5 s and, if it hears no CRe, initiates as a Rockwell client does (CRe,
+   then CL; `g_k56c_v8bis_initiated`). An answering K56flex server listens
+   4 s, so it still hears a CRe that starts 500 ms after the client's
+   2.5 s. The 7910's CRe comes at 2.14 s, inside the client's window.
+2. **Both ends were V.8 callers.** After V.8bis the MS sender is the V.8
+   caller (V.8bis 9.9, as our server reads it). Against the 7910 that is the
+   client, which dials anyway. Against our server it is the server. The
+   client now answers V.8 in that case (`g_v8_calling_override`) while it
+   stays the V.34 call modem (`g_calling_party`, INFO1c with the K56 flag).
+   The server's own startup runs the answer-shaped Phase 2 against that.
+3. **A crash at priming.** Against our server the client's receive model
+   follows the server's timeline exactly (0 mismatched blocks) and so
+   reaches PRIME through the record path, which the 7910 never did. When the
+   record path's rate check failed, the fallback handed the held frames to
+   the blind search. That search reset the symbol queue, and `fe_sink` then
+   took 8 from an empty queue (`memmove` of ~4 GB, SIGBUS). `fe_sink` now
+   drops the queue once the blind search has taken over.
+
+Along the way the client decodes our server's **long (mode 1)** record:
+extra 4, rate field 11, u = v = 0 (minimum shaping, no non-linear encoder,
+as MICA). It proposes MP up N=4 from our server's INFO1a. Our server
+detects the client's S/S-bar, report, J', MP and MP' from audio and enters
+DATA.
+
+Still open between the two:
+
+- **Error control.** Our server's K56flex data path is V.14 only. A client
+  left at the default `+ES` follows V.8's LAPM indication, spends 28 s in
+  V.42 detection, then falls back to V.14 (CONNECT at 58 s, and no payload
+  within the test's 90 s).
+- **The server needs `ME_K56FLEX=probe ME_V8=1`.** Answering `AT+MS=K56`
+  is still exchange-only, then ordinary V.8.
+- **Upstream 9600.** That is what our server's INFO1a projects.
+
+The 7910 path with these changes, live (`/root/k56mode-runs`, `AT+MS=K56`
+only): 6/6 at 52000/31200 with PPP and 0% loss. The card's CRe is heard on
+every call, so the fallback never fires, and the client stays V.8 caller.
+
