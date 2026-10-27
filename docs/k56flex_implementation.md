@@ -2917,8 +2917,61 @@ card's priming does not start on the pair the record path chooses (28
 samples early on mp400-3). `k56flex_client_test` checks the record on the
 retained PCMU fixture: it survives the A->mu transcode.
 
-Next: compare our upstream MP between a call that got the final record and
-one that did not (`live-tx.g711` of mp400-3 and mp400-2). The varying
-**extra** field is the card's only per-call output, so it is the first
-thing to check against the MP's fields and the upstream level.
+### Our MP is identical on passing and failing calls; the record's "extra" is the card's upstream rate (27 October, later)
 
+**Our upstream does not differ.** The `live-tx.g711` taps of mp400-2 (no
+final record), mp400-3 and mp400-4 are **byte-identical** from S through
+TRN, report, J', TRN2, MP x400, MP' and E (0 differing octets over +5.5 to
++12.8 s once aligned on the hold start). The card's own timeline, decoded by
+the client, lines up with our transmitter to within ±10 ms on all three
+calls: P1, P2, P3, gate A, gate B, ID2, PT_A, PT_B, PT_C, gate C at
++9.00..9.02 s, and the initial record at +10.54..10.56 s. Nothing we send,
+and no timing between the two sides, separates the calls.
+
+**All 21 captured 7910 calls** (`artifacts/k56flex-7910-*-2026102[67]`,
+both laws; the record survives the A->mu transcode):
+
+| our MP | calls | final record | extra in initial record |
+|---|---|---|---|
+| x400 then MP' x8 | 15 | 13 (12 then primed and carried data) | 13 (x10), 10, 7, 5 |
+| x400 then MP' x8 | | 2, never | **3, 3** |
+| default repeats | 5 | none | 11, 11, 12, 13, 13 |
+| no J' | 1 | no record at all | - |
+
+So the card accepts our MP on 13 of the 15 x400 calls, and on none of the
+calls with the default repeat count, which is the "MP x400 passes gate C
+about half the time" result read correctly: the gate is passed (the initial
+record follows) and the MP is accepted.
+
+**What extra means.** In MICA (MicaEmu `artifacts/k56flex-client-20261009/rate-selection.md`)
+the record from the real firmware, with our client, carries 8C77 = 12 and
+control 0FFF, as does the Gough Lui call. The 7910 sends control 1FFF and
+extra 13 on most calls. Both fit control = the server's upstream rate mask
+in V.34 N codes (1..12, 1..13) and extra = the upstream N it chose, which
+is never above the mask's top bit. That is how our own server fills the
+record (`k56flex_train_accept_mp`, which native HSF accepts). On the 7910,
+extra changes from call to call while our MP stays the same, so the card
+sets it from its own measurement of our upstream. The record that carries it
+arrives about 580 ms into our MP.
+
+**That accounts for both failures, though n is small:**
+
+1. The two x400 calls without a final record are the only two where the card
+   chose **N=3 (7200)**, below our MP's upstream code 4 (9600). Every accepted
+   MP had extra ≥ 5. If the card's rule is "accept MP only when its upstream
+   rate is within what I measured", our fixed proposal of 9600 fails whenever
+   the card measures less.
+2. On the accepted calls the card chose N=13 (31200) at most, and **we
+   transmit data at N=4** (`ME_K56FLEX_CLIENT_DATA_N` defaults to the MP's
+   code). If the card uses its own extra as the upstream rate rather than
+   min(ours, its own), as a V.34 MP exchange would, it is demodulating our
+   9600 data at 31200. That fits "the card never hears our upstream data",
+   which was already the case with the MP accepted, the scrambler right, and
+   E sent on time.
+
+Next, live on CT 117 (`--law alaw --ext 7910`, MP x400): an A/B of
+`ME_K56FLEX_CLIENT_MP_UP_CODE=13 ME_K56FLEX_CLIENT_DATA_N=13` against the
+current 4/4. On the extra = 13 calls the two readings of extra agree, so if
+upstream data then reaches the card, the rate was the fault. A proper fix
+then makes the client take N from the decoded record (it arrives about 2.2 s
+before our E) and propose an MP rate the card accepts.
