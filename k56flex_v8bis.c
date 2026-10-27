@@ -6,14 +6,27 @@
 #include <string.h>
 
 #define RATE 8000
-#define BLOCK 160                     /* 20 ms Goertzel block */
-#define DETECT_BLOCKS 6               /* 120 ms of a clean dual tone */
-static int detect_blocks(void)
+/* CRe/CRd detection: 10 ms Goertzel windows, one every 5 ms (two staggered
+   accumulators), and a tone is accepted once qualifying windows span the
+   required time, whatever its phase against our sample count.  Fixed 20 ms
+   blocks made acceptance depend on that phase: the 7910 path's gateway mutes
+   the card's CRe after 23-32 ms, and two blocks caught it on 24% of phases
+   (docs/k56flex_implementation.md, 27 October). */
+#define WIN 80
+#define HOP (WIN/2)
+#define DETECT_MS 120                 /* a clean dual tone, by default */
+static unsigned detect_samples(void)
 {
-    /* K56FLEX_DETECT_BLOCKS: shorter acceptance for a tone a gateway clips. */
-    const char *e = getenv("K56FLEX_DETECT_BLOCKS");
-    int n = e ? atoi(e) : 0;
-    return n > 0 && n <= DETECT_BLOCKS ? n : DETECT_BLOCKS;
+    /* K56FLEX_DETECT_MS: shorter acceptance for a tone a gateway clips.
+       K56FLEX_DETECT_BLOCKS=N, the earlier 20 ms-block form, accepted N-1
+       blocks plus a partial one: (N-1)*20 ms, at least 20. */
+    const char *e = getenv("K56FLEX_DETECT_MS"), *b = getenv("K56FLEX_DETECT_BLOCKS");
+    int ms = DETECT_MS;
+    if (e && atoi(e) > 0) ms = atoi(e);
+    else if (b && atoi(b) > 0) ms = atoi(b) > 1 ? (atoi(b) - 1)*20 : 20;
+    if (ms < WIN*1000/RATE) ms = WIN*1000/RATE;
+    if (ms > DETECT_MS) ms = DETECT_MS;
+    return (unsigned) ms*RATE/1000;
 }
 #define TONE_AMP 1800.0               /* per tone, linear peak */
 #define DEFAULT_LISTEN_MS 3000u
@@ -36,6 +49,12 @@ static const double CRD2 = 15564.0 * RATE / 65536;
 
 typedef struct { double coeff; double s1, s2; } goertzel_t;
 
+typedef struct {
+    goertzel_t g[2];
+    double sumsq;
+    int n;
+} det_win_t;
+
 struct k56flex_v8bis_s {
     k56flex_v8bis_cfg_t cfg;
     k56flex_v8bis_state_t state;
@@ -44,10 +63,9 @@ struct k56flex_v8bis_s {
     uint64_t state_t;                 /* t at last state entry */
     uint64_t last_change;
     /* tone detector */
-    goertzel_t g[2];
-    double sumsq;
-    int blk;
-    int hits;
+    double coeff[2];
+    det_win_t win[2];                 /* staggered by HOP */
+    int hits;                         /* consecutive qualifying windows */
     uint64_t detect_t;
     /* tone generator */
     int tone_pos, tone_total1, tone_total2;
@@ -83,6 +101,20 @@ static void fail(k56flex_v8bis_t *s, k56flex_v8bis_result_t r)
 {
     s->result = r;
     state_enter(s, K56V8B_FAILED);
+}
+
+/* Retune both windows to a tone pair and restart them, the second HOP
+   samples behind the first. */
+static void detector_tune(k56flex_v8bis_t *s, const double f[2])
+{
+    int i, j;
+    for (i = 0; i < 2; ++i) s->coeff[i] = 2.0 * cos(2.0 * M_PI * f[i] / RATE);
+    for (j = 0; j < 2; ++j) {
+        memset(&s->win[j], 0, sizeof(s->win[j]));
+        for (i = 0; i < 2; ++i) s->win[j].g[i].coeff = s->coeff[i];
+    }
+    s->win[1].n = HOP;
+    s->hits = 0;
 }
 
 static unsigned ms_since(const k56flex_v8bis_t *s, uint64_t from)
@@ -204,7 +236,7 @@ static void queue_message(k56flex_v8bis_t *s, k56flex_v8bis_msg_t type)
 k56flex_v8bis_t *k56flex_v8bis_new(const k56flex_v8bis_cfg_t *cfg)
 {
     k56flex_v8bis_t *s = calloc(1, sizeof(*s));
-    int tx_ch, rx_ch, i;
+    int tx_ch, rx_ch;
     static const double det_f[2][2] = {{1375.0, 2002.0}, {1529.0, 2225.0}};
     if (!s) return NULL;
     s->cfg = *cfg;
@@ -217,10 +249,7 @@ k56flex_v8bis_t *k56flex_v8bis_new(const k56flex_v8bis_cfg_t *cfg)
     if (!s->ftx || !s->frx || !s->hrx) { k56flex_v8bis_free(s); return NULL; }
     fsk_tx_power(s->ftx, -12.0f);
     /* The responder listens for CRe; the initiator, after its signal, for CRd. */
-    for (i = 0; i < 2; ++i) {
-        double f = det_f[cfg->role == K56FLEX_V8BIS_INITIATE ? 1 : 0][i];
-        s->g[i].coeff = 2.0 * cos(2.0 * M_PI * f / RATE);
-    }
+    detector_tune(s, det_f[cfg->role == K56FLEX_V8BIS_INITIATE ? 1 : 0]);
     if (cfg->role == K56FLEX_V8BIS_INITIATE) {
         s->tone_f1 = CRE1; s->tone_f2 = CRE2; s->tone_total1 = CRE_SEG1; s->tone_total2 = CRE_SEG2;
         state_enter(s, K56V8B_DELAY_TX);
@@ -244,17 +273,20 @@ static bool detector_active(const k56flex_v8bis_t *s)
     return s->state == K56V8B_IDLE_WAIT || s->state == K56V8B_WAIT_TONES;
 }
 
-static void detect_block(k56flex_v8bis_t *s)
+static void detect_window(k56flex_v8bis_t *s, det_win_t *w)
 {
-    double p[2], n = BLOCK, frac1, frac2;
+    double p[2], n = WIN, frac1, frac2;
     int i;
     for (i = 0; i < 2; ++i)
-        p[i] = s->g[i].s1 * s->g[i].s1 + s->g[i].s2 * s->g[i].s2 - s->g[i].coeff * s->g[i].s1 * s->g[i].s2;
-    frac1 = s->sumsq > 0 ? 2.0 * p[0] / (n * s->sumsq) : 0;
-    frac2 = s->sumsq > 0 ? 2.0 * p[1] / (n * s->sumsq) : 0;
-    if (s->sumsq / n > 60.0 * 60.0 && frac1 > 0.15 && frac2 > 0.15 && frac1 + frac2 > 0.6) {
-        if (++s->hits == detect_blocks()) {
-            s->detect_t = s->t - (uint64_t)detect_blocks() * BLOCK;
+        p[i] = w->g[i].s1 * w->g[i].s1 + w->g[i].s2 * w->g[i].s2 - w->g[i].coeff * w->g[i].s1 * w->g[i].s2;
+    frac1 = w->sumsq > 0 ? 2.0 * p[0] / (n * w->sumsq) : 0;
+    frac2 = w->sumsq > 0 ? 2.0 * p[1] / (n * w->sumsq) : 0;
+    if (w->sumsq / n > 60.0 * 60.0 && frac1 > 0.15 && frac2 > 0.15 && frac1 + frac2 > 0.6) {
+        uint64_t span = (uint64_t) s->hits * HOP + WIN;
+        ++s->hits;
+        if (span >= detect_samples()) {
+            s->hits = 0;
+            s->detect_t = s->t - span;
             if (s->cfg.role == K56FLEX_V8BIS_RESPOND && s->state == K56V8B_IDLE_WAIT) {
                 state_enter(s, K56V8B_DELAY_TX);
                 s->state_t = s->detect_t;     /* the wait runs from the tone onset */
@@ -267,9 +299,9 @@ static void detect_block(k56flex_v8bis_t *s)
     } else {
         s->hits = 0;
     }
-    for (i = 0; i < 2; ++i) s->g[i].s1 = s->g[i].s2 = 0;
-    s->sumsq = 0;
-    s->blk = 0;
+    for (i = 0; i < 2; ++i) w->g[i].s1 = w->g[i].s2 = 0;
+    w->sumsq = 0;
+    w->n = 0;
 }
 
 void k56flex_v8bis_rx(k56flex_v8bis_t *s, const int16_t *amp, int len)
@@ -278,18 +310,18 @@ void k56flex_v8bis_rx(k56flex_v8bis_t *s, const int16_t *amp, int len)
     if (s->state == K56V8B_WAIT_PEER_MSG || s->state == K56V8B_WAIT_ACK)
         fsk_rx(s->frx, amp, len);
     if (!detector_active(s)) return;
-    for (i = 0; i < len; ++i) {
-        int k;
+    for (i = 0; i < len && detector_active(s); ++i) {
         double x = amp[i];
-        for (k = 0; k < 2; ++k) {
-            double s0 = x + s->g[k].coeff * s->g[k].s1 - s->g[k].s2;
-            s->g[k].s2 = s->g[k].s1;
-            s->g[k].s1 = s0;
-        }
-        s->sumsq += x * x;
-        if (++s->blk == BLOCK) {
+        for (int j = 0; j < 2; ++j) {
+            det_win_t *w = &s->win[j];
+            for (int k = 0; k < 2; ++k) {
+                double s0 = x + w->g[k].coeff * w->g[k].s1 - w->g[k].s2;
+                w->g[k].s2 = w->g[k].s1;
+                w->g[k].s1 = s0;
+            }
+            w->sumsq += x * x;
             /* the clock for onset timing is tx-driven; approximate with it */
-            detect_block(s);
+            if (++w->n == WIN) detect_window(s, w);
         }
     }
 }
@@ -360,14 +392,9 @@ void k56flex_v8bis_tx(k56flex_v8bis_t *s, int16_t *amp, int len)
             done += chunk;
             if (s->tone_pos >= s->tone_total1 + s->tone_total2) {
                 if (s->cfg.role == K56FLEX_V8BIS_INITIATE) {
-                    s->hits = 0; s->blk = 0; s->sumsq = 0;
                     {
                         static const double crd[2] = {1529.0, 2225.0};
-                        int i;
-                        for (i = 0; i < 2; ++i) {
-                            s->g[i].coeff = 2.0 * cos(2.0 * M_PI * crd[i] / RATE);
-                            s->g[i].s1 = s->g[i].s2 = 0;
-                        }
+                        detector_tune(s, crd);
                     }
                     state_enter(s, K56V8B_WAIT_TONES);
                 } else {

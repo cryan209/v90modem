@@ -1,3 +1,5 @@
+#include <math.h>
+#include <stdlib.h>
 /* Loop an initiator against a responder through 8 kHz linear samples. */
 #include "k56flex_v8bis.h"
 
@@ -27,6 +29,30 @@ static void run(k56flex_v8bis_t *ini, k56flex_v8bis_t *rsp, unsigned seconds, in
     }
 }
 
+/* A CRe a gateway mutes early (the 7910 path: 23-32 ms of 1375+2002 Hz,
+ * then digital silence), at every 5-sample phase against the responder's
+ * block clock.  Returns how many phases detected it. */
+static int clipped_cre_phases(unsigned tone_samples)
+{
+    int hits = 0;
+    for (unsigned phase = 0; phase < 160; phase += 5) {
+        k56flex_v8bis_cfg_t c = {K56FLEX_V8BIS_RESPOND, 0, 0, 1, 0, 0};
+        k56flex_v8bis_t *s = k56flex_v8bis_new(&c);
+        int16_t tx[160], rx[160];
+        unsigned t = 0, on = 8000 + phase;
+        for (int blk = 0; blk < 150 && k56flex_v8bis_state(s) == K56V8B_IDLE_WAIT; ++blk) {
+            k56flex_v8bis_tx(s, tx, 160);
+            for (int k = 0; k < 160; ++k, ++t)
+                rx[k] = (t >= on && t < on + tone_samples)
+                      ? (int16_t) (1800.0*sin(2*M_PI*1375.0*t/8000) + 1800.0*sin(2*M_PI*2002.0*t/8000)) : 0;
+            k56flex_v8bis_rx(s, rx, 160);
+        }
+        hits += k56flex_v8bis_state(s) == K56V8B_DELAY_TX;
+        k56flex_v8bis_free(s);
+    }
+    return hits;
+}
+
 int main(void)
 {
     k56flex_v8bis_cfg_t ic = {K56FLEX_V8BIS_INITIATE, 1, 1, 1, 0, 0}, rc = {K56FLEX_V8BIS_RESPOND, 1, 1, 0, 0, 0};
@@ -34,6 +60,23 @@ int main(void)
     const uint8_t *p;
     size_t n;
     uint8_t cl[16], rcl[18];
+
+    /* Detection of a clipped CRe does not depend on its phase. */
+    {
+        int all = 160/5, h;
+        setenv("K56FLEX_DETECT_MS", "20", 1);
+        h = clipped_cre_phases(184);                 /* 23 ms */
+        CHECK(h == all, "23 ms CRe at 20 ms acceptance: %d/%d phases", h, all);
+        unsetenv("K56FLEX_DETECT_MS");
+        setenv("K56FLEX_DETECT_BLOCKS", "2", 1);     /* the earlier recipe's form: 20 ms */
+        h = clipped_cre_phases(184);
+        CHECK(h == all, "23 ms CRe with K56FLEX_DETECT_BLOCKS=2: %d/%d phases", h, all);
+        unsetenv("K56FLEX_DETECT_BLOCKS");
+        h = clipped_cre_phases(184);
+        CHECK(h == 0, "23 ms CRe at the default 120 ms acceptance: %d/%d phases", h, all);
+        h = clipped_cre_phases(1000);                /* 125 ms */
+        CHECK(h == all, "125 ms CRe at the default acceptance: %d/%d phases", h, all);
+    }
 
     /* Predicate on recovered messages, before any audio. */
     {
