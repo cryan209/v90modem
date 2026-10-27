@@ -3209,3 +3209,9 @@ The engine logs `K56flex client call: V.8bis as client, V.8 offer ...` and
 `ME_MODE=k56` and dialling: V.8bis with HSF's MS, MP up N=13 from INFO1a,
 shaping and the non-linear encoder from the record, DATA at 52000/31200.
 
+**Live (CT 117, `/root/k56mode.sh`, `/root/k56mode-runs`): `AT+MS=K56;+ES=3`
+only, PCMA, with every `ME_K56FLEX*`, `K56FLEX*`, `V34_*`, `ME_V34*` and
+`ME_JB*` variable unset (each call's log lists none): 6/6 V.8bis, MP up
+N=13 from INFO1a, DATA 52000/31200, CONNECT with LAPM and PPP, 0% ping
+loss; max RTP gaps normal.**
+
