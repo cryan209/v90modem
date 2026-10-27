@@ -155,8 +155,12 @@ static void training_block(k56flex_client_t *c, const uint8_t *o)
     }
     if (ph >= K56T_PT_A) {
         if (!c->cp_valid || ph < unknown_from) { c->cp = pre; c->cp_valid = 1; }
-        matches = k56flex_probe_invert(&c->cp, lv, &src);
-        if (matches == 0 && c->detect) {
+        /* Once PT_C has needed the magnitude-only inverse (the 7910), the
+           exact and flip-magnitude searches cannot succeed: skip them, as
+           they run in the engine's media path. */
+        int abs_only = c->detect && ph >= K56T_PT_C && c->abs_blocks;
+        matches = abs_only ? 0 : k56flex_probe_invert(&c->cp, lv, &src);
+        if (matches == 0 && c->detect && !abs_only) {
             /* Every second PT sample's sign is the server's running DC
                (k56flex_probe_block_src), not a source bit: match it by
                magnitude before concluding the block is foreign. */

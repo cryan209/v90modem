@@ -186,9 +186,81 @@ unsigned k56flex_probe_invert_magnitude(const k56flex_probe_t *p, const int16_t 
     return invert_by(p, samples, src, 2);
 }
 
+/* The magnitudes' index pattern -> source value, built once per stage
+   table from a zero sequence state.  It is a pure function of the constant
+   table; every hit is checked against a forward run from the caller's real
+   state, so a stage whose magnitudes do depend on that state just falls
+   back to the search.  The search, 4096 forward runs per six-sample block,
+   ran in the media path and delayed our RTP during the 7910's PT_C. */
+static struct {
+    const void *table;
+    unsigned mags[8], nmags, nbits;
+    uint16_t *map;               /* key -> source + 1, 0 = none or ambiguous */
+} abs_cache;
+
+static int abs_key(unsigned nmags, const unsigned *mags, const int16_t *v, unsigned n, uint32_t *key)
+{
+    uint32_t k = 0;
+    for (unsigned i = n; i-- > 0; ) {
+        unsigned a = (unsigned) abs(v[i]), j;
+        for (j = 0; j < nmags && mags[j] != a; ++j) {}
+        if (j == nmags) return -1;
+        k = k*nmags + j;
+    }
+    *key = k;
+    return 0;
+}
+
+static int abs_cache_build(const k56flex_probe_t *p)
+{
+    unsigned nbits = p->cfg[3], n = p->cfg[0], i, j, size = 1;
+    k56flex_probe_t z = *p;
+    if (abs_cache.table == p->table) return abs_cache.map ? 0 : -1;
+    free(abs_cache.map);
+    memset(&abs_cache, 0, sizeof(abs_cache));
+    abs_cache.table = p->table;
+    if (nbits > 15 || n > K56FLEX_PROBE_MAX_SAMPLES) return -1;
+    for (i = 0; i <= p->cfg[9] && i < 64; ++i) {
+        unsigned a = (unsigned) abs(p->levels[i]);
+        for (j = 0; j < abs_cache.nmags && abs_cache.mags[j] != a; ++j) {}
+        if (j == abs_cache.nmags) {
+            if (abs_cache.nmags == 8) return -1;
+            abs_cache.mags[abs_cache.nmags++] = a;
+        }
+    }
+    for (i = 0; i < n; ++i) size *= abs_cache.nmags;
+    if (size > (1u << 18) || !(abs_cache.map = calloc(size, sizeof(uint16_t)))) return -1;
+    abs_cache.nbits = nbits;
+    z.seq = 0;
+    z.dc = 0;
+    for (uint32_t cand = 0; cand < (1u << nbits); ++cand) {
+        k56flex_probe_t t = z;
+        int16_t out[K56FLEX_PROBE_MAX_SAMPLES];
+        uint32_t key;
+        unsigned m = k56flex_probe_block_src(&t, cand, out);
+        if (abs_key(abs_cache.nmags, abs_cache.mags, out, m, &key) < 0) continue;
+        abs_cache.map[key] = abs_cache.map[key] ? 0xffff : (uint16_t) (cand + 1);
+    }
+    return 0;
+}
+
 unsigned k56flex_probe_invert_abs(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
                                   uint32_t *src)
 {
+    uint32_t key;
+    if (abs_cache_build(p) == 0
+        && abs_key(abs_cache.nmags, abs_cache.mags, samples, p->cfg[0], &key) == 0
+        && abs_cache.map[key] && abs_cache.map[key] != 0xffff) {
+        k56flex_probe_t t = *p;
+        int16_t out[K56FLEX_PROBE_MAX_SAMPLES];
+        uint32_t cand = abs_cache.map[key] - 1u;
+        unsigned n = k56flex_probe_block_src(&t, cand, out), i;
+        for (i = 0; i < n && abs(out[i]) == abs(samples[i]); ++i) {}
+        if (i == n) {
+            if (src) *src = cand;
+            return 1;
+        }
+    }
     return invert_by(p, samples, src, 1);
 }
 
