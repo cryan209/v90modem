@@ -1,6 +1,7 @@
 #include "k56flex_probe.h"
 #include "k56flex_probe_tables.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -191,12 +192,16 @@ unsigned k56flex_probe_invert_magnitude(const k56flex_probe_t *p, const int16_t 
    table; every hit is checked against a forward run from the caller's real
    state, so a stage whose magnitudes do depend on that state just falls
    back to the search.  The search, 4096 forward runs per six-sample block,
-   ran in the media path and delayed our RTP during the 7910's PT_C. */
-static struct {
+   ran in the media path and delayed our RTP during the 7910's PT_C.  One
+   entry per table: the engine runs a mu-law and an A-law model side by side,
+   and a single shared entry was rebuilt on every block of the other. */
+typedef struct {
     const void *table;
-    unsigned mags[8], nmags, nbits;
+    unsigned mags[8], nmags;
     uint16_t *map;               /* key -> source + 1, 0 = none or ambiguous */
-} abs_cache;
+} abs_cache_t;
+
+static abs_cache_t abs_cache[K56FLEX_PROBE_TABLE_COUNT];
 
 static int abs_key(unsigned nmags, const unsigned *mags, const int16_t *v, unsigned n, uint32_t *key)
 {
@@ -211,26 +216,30 @@ static int abs_key(unsigned nmags, const unsigned *mags, const int16_t *v, unsig
     return 0;
 }
 
-static int abs_cache_build(const k56flex_probe_t *p)
+/* The entry for p's table, built on first use; NULL if this stage cannot
+   be tabulated. */
+static const abs_cache_t *abs_cache_get(const k56flex_probe_t *p)
 {
     unsigned nbits = p->cfg[3], n = p->cfg[0], i, j, size = 1;
     k56flex_probe_t z = *p;
-    if (abs_cache.table == p->table) return abs_cache.map ? 0 : -1;
-    free(abs_cache.map);
-    memset(&abs_cache, 0, sizeof(abs_cache));
-    abs_cache.table = p->table;
-    if (nbits > 15 || n > K56FLEX_PROBE_MAX_SAMPLES) return -1;
+    abs_cache_t *e;
+    ptrdiff_t slot = (const k56flex_probe_table_t *) p->table - k56flex_probe_tables;
+    if (slot < 0 || slot >= K56FLEX_PROBE_TABLE_COUNT) return NULL;
+    e = &abs_cache[slot];
+    if (e->table == p->table) return e->map ? e : NULL;
+    memset(e, 0, sizeof(*e));
+    e->table = p->table;
+    if (nbits > 15 || n > K56FLEX_PROBE_MAX_SAMPLES) return NULL;
     for (i = 0; i <= p->cfg[9] && i < 64; ++i) {
         unsigned a = (unsigned) abs(p->levels[i]);
-        for (j = 0; j < abs_cache.nmags && abs_cache.mags[j] != a; ++j) {}
-        if (j == abs_cache.nmags) {
-            if (abs_cache.nmags == 8) return -1;
-            abs_cache.mags[abs_cache.nmags++] = a;
+        for (j = 0; j < e->nmags && e->mags[j] != a; ++j) {}
+        if (j == e->nmags) {
+            if (e->nmags == 8) return NULL;
+            e->mags[e->nmags++] = a;
         }
     }
-    for (i = 0; i < n; ++i) size *= abs_cache.nmags;
-    if (size > (1u << 18) || !(abs_cache.map = calloc(size, sizeof(uint16_t)))) return -1;
-    abs_cache.nbits = nbits;
+    for (i = 0; i < n; ++i) size *= e->nmags;
+    if (size > (1u << 18) || !(e->map = calloc(size, sizeof(uint16_t)))) return NULL;
     z.seq = 0;
     z.dc = 0;
     for (uint32_t cand = 0; cand < (1u << nbits); ++cand) {
@@ -238,22 +247,22 @@ static int abs_cache_build(const k56flex_probe_t *p)
         int16_t out[K56FLEX_PROBE_MAX_SAMPLES];
         uint32_t key;
         unsigned m = k56flex_probe_block_src(&t, cand, out);
-        if (abs_key(abs_cache.nmags, abs_cache.mags, out, m, &key) < 0) continue;
-        abs_cache.map[key] = abs_cache.map[key] ? 0xffff : (uint16_t) (cand + 1);
+        if (abs_key(e->nmags, e->mags, out, m, &key) < 0) continue;
+        e->map[key] = e->map[key] ? 0xffff : (uint16_t) (cand + 1);
     }
-    return 0;
+    return e;
 }
 
 unsigned k56flex_probe_invert_abs(const k56flex_probe_t *p, const int16_t samples[K56FLEX_PROBE_MAX_SAMPLES],
                                   uint32_t *src)
 {
+    const abs_cache_t *e = abs_cache_get(p);
     uint32_t key;
-    if (abs_cache_build(p) == 0
-        && abs_key(abs_cache.nmags, abs_cache.mags, samples, p->cfg[0], &key) == 0
-        && abs_cache.map[key] && abs_cache.map[key] != 0xffff) {
+    if (e && abs_key(e->nmags, e->mags, samples, p->cfg[0], &key) == 0
+        && e->map[key] && e->map[key] != 0xffff) {
         k56flex_probe_t t = *p;
         int16_t out[K56FLEX_PROBE_MAX_SAMPLES];
-        uint32_t cand = abs_cache.map[key] - 1u;
+        uint32_t cand = e->map[key] - 1u;
         unsigned n = k56flex_probe_block_src(&t, cand, out), i;
         for (i = 0; i < n && abs(out[i]) == abs(samples[i]); ++i) {}
         if (i == n) {
