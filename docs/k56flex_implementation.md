@@ -3047,3 +3047,32 @@ New experiment knobs (default 0, the old behaviour):
 passed to `v34_v90_arm_tx_data`. Predictions for a live run at N=4:
 expanded=1 connects and nonlinear=1 alone does not. Free control: N=3
 (7200) should connect with neither, since M is 2 either way.
+
+### Live: expanded shaping is what the 7910 wanted; 9600 upstream connects (27 October)
+
+CT 117 against the 7910, PCMA, MP x400, recipe as above; `/root/k56shape.sh`,
+`/root/k56shape-runs`. The binary is the earlier runs' `/root/k56j16` with
+only the two knobs patched in. Four arms, alternated over three rounds:
+
+| arm | calls | result |
+|---|---|---|
+| N=4, `ME_K56FLEX_CLIENT_DATA_EXPANDED=1` | 3 | **3/3 CONNECT 52000, LAPM, PPP, pings 0% loss** |
+| N=4, `ME_K56FLEX_CLIENT_DATA_NONLINEAR=1` | 3 | 0/3, card retrains 4.7 s into data |
+| N=4, neither (baseline) | 2 | 0/2, the same (one more call never completed V.8bis: excluded) |
+| N=3 (7200), neither | 3 | **3/3 CONNECT 52000, LAPM, PPP, 0% loss** |
+
+All four predictions held. The 7910 expects **expanded constellation
+shaping** (V.34 9.3, Table 10) on the client's upstream. Rates where shaping
+does not change M (4800, 7200 at 3200 baud) worked without it, and from
+9600 up, where it does, nothing worked without it. The non-linear encoder
+alone changes nothing. Together with MICA (record u = v = 0, decodes our
+minimum shaping), this supports reading the record's u/v flags as the
+server's choice for the client's transmitter, the role MP bits 31/32 play
+in V.34. Which flag is shaping is not separated yet: both were 1 on every
+7910 call, and the non-linear arm says the card did not need Θ = 0.3125.
+
+Next: have the client take shaping (and, once separated, the non-linear
+encoder) from the decoded record instead of a knob, since the record
+arrives well before our E; then try the card's own extra (N=13, 31200) with
+expanded shaping.
+
