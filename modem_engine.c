@@ -5616,6 +5616,14 @@ static void me_k56_startup_progress_locked(void)
         trace_phase("K56flex startup failed (no data fallback)");
     } else {
         trace_phase("K56flex Phase 2 complete; starting PCM probes");
+        /* The startup ran V.8 itself, so make the framing decision the
+           ordinary V.8 path makes (me_log_v8_peer_summary): our CM/JM named
+           LAPM, and so did the client's, so V.42 detection, not V.14. */
+        g_peer_lapm_signalled = k56flex_startup_peer_lapm(g_k56_startup) != 0;
+        me_decide_data_framing();
+        ME_LOG("[ME] DTE framing from the K56flex V.8 protocol: %s\n",
+               g_data_framing != DS_FRAMING_V42 ? "V.14 8N1"
+                   : g_ec_alt_only ? "MNP only" : "V.42 LAPM");
         int baud_code = -1, high_carrier = 0;
         if (k56flex_startup_upstream_profile(g_k56_startup, &baud_code, &high_carrier) < 0
             || !(g_k56_upstream = k56flex_upstream_pcm_new(baud_code, high_carrier, 18))) {

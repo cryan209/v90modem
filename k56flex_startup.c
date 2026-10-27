@@ -14,6 +14,7 @@ struct k56flex_startup_s {
     v8_state_t *v8;
     v34_state_t *phase2;
     int state, v8_done, verbose;
+    int peer_lapm;               /* the peer's CM/JM named V.42 LAPM (V.8 Table 7) */
     int last_rx, last_tx;
     uint64_t samples;
     const char *failure;
@@ -37,6 +38,7 @@ static void v8_result(void *user, v8_parms_t *p)
     case V8_STATUS_V8_CALL:
         /* The original Flex-only HSF controller uses common V.8 mode 1
          * for K56 after its proprietary latch, not V.34 DATA fallback. */
+        s->peer_lapm = p->jm_cm.protocols == V8_PROTOCOL_LAPM_V42;
         if (p->jm_cm.modulations & V8_MOD_V34) s->v8_done = 1;
         else fail(s, "V.8 did not agree the K56flex common startup mode");
         break;
@@ -67,7 +69,7 @@ static void progress(k56flex_startup_t *s)
         s->v8 = NULL;
         /* Common Phase 2, answer-shaped A/INFO0, not V.90's 62-bit INFO0d.
          * A low initial rate is a research ceiling, not a selected data rate. */
-        s->phase2 = v34_init(NULL, 3200, 9600, false, true,
+        s->phase2 = v34_init(NULL, 3200, 31200, false, true,
                              idle_bit, s, unexpected_data, s);
         if (!s->phase2) { fail(s, "Phase-2 allocation failed"); return; }
         v34_set_k56_phase2(s->phase2, true);
@@ -159,6 +161,7 @@ void k56flex_startup_tx(k56flex_startup_t *s, int16_t *pcm, int count)
 }
 
 int k56flex_startup_state(const k56flex_startup_t *s) { return s->state; }
+int k56flex_startup_peer_lapm(const k56flex_startup_t *s) { return s && s->peer_lapm; }
 const char *k56flex_startup_failure(const k56flex_startup_t *s) { return s->failure; }
 
 int k56flex_startup_upstream_profile(const k56flex_startup_t *s, int *baud_code, int *high_carrier)

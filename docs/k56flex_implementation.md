@@ -3253,10 +3253,7 @@ DATA.
 
 Still open between the two:
 
-- **Error control.** Our server's K56flex data path is V.14 only. A client
-  left at the default `+ES` follows V.8's LAPM indication, spends 28 s in
-  V.42 detection, then falls back to V.14 (CONNECT at 58 s, and no payload
-  within the test's 90 s).
+- ~~Error control~~ and ~~upstream 9600~~: fixed (next sections).
 - ~~The server needs `ME_K56FLEX=probe ME_V8=1`.~~ Done: `AT+MS=K56` on a
   call we answer (next section).
 - **Upstream 9600.** That is what our server's INFO1a projects.
@@ -3279,6 +3276,27 @@ needed (it defaults to 1).
 Engine pairs, no K56flex environment: client `AT+MS=K56` vs server
 `AT+MS=K56`, both CONNECT 52000 with data both ways (`AT+ES=1`); a V.34
 caller vs the server falls back after the 4 s wait and connects at V.34; a
-V.32bis caller at 14400. The first two are in `tests/fast.list`. Our
-server's data path is still V.14 only (error control is open).
+V.32bis caller at 14400. The first two are in `tests/fast.list`.
+
+### Server to client: V.42 and 31200 upstream (27 October, night)
+
+**V.42.** Our server's K56flex startup runs V.8 itself (`k56flex_startup`),
+so it never made the framing decision the ordinary V.8 path makes
+(`me_log_v8_peer_summary`). It stayed on the power-on V.14 while its own CM/JM
+advertised LAPM. The client, following that LAPM, spent 28 s in V.42
+detection. The startup now records the peer's protocols octet
+(`k56flex_startup_peer_lapm`), and the engine calls
+`me_decide_data_framing()` with it. V.42 LAPM with V.42bis comes up at
+CONNECT (30 s, both sides) with the default `+ES`.
+
+**31200 up.** The server's Phase 2 was initialised at 9600 bit/s (a
+"research ceiling"), so its INFO1a projected N=4 and the client, which
+proposes what INFO1a projects, asked for 9600. At 31200 (the 3200-baud
+maximum) INFO1a projects N=13. The server accepts MP 31200, its upstream
+receiver acquires B1, and its record reports extra 13, control 1FFF, u = v =
+0 (the client keeps minimum shaping, which that receiver expects).
+
+Engine pairs, both ends `AT+MS=K56`, no environment: **52000 down / 31200
+up, V.42 LAPM + V.42bis**, 128 printable lines each way intact, over A-law
+and over µ-law; V.14 (`AT+ES=1`) the same. In `tests/fast.list`.
 
