@@ -4947,6 +4947,11 @@ static k56flex_client_tx_t g_k56c_up;
 static k56flex_jd_rx_t g_k56c_jd;
 static bool g_k56c_data_on;         /* ME_K56FLEX_CLIENT_DATA: E, B1 and data after MP' */
 static int g_k56c_data_law = -1;    /* the receiver model (0 mu, 1 A) whose PCM data we use */
+/* The upstream data handover as armed, so that the server's record can
+   re-arm it with the shaping it asks for before our E. */
+static int g_k56c_data_n, g_k56c_data_nonlinear;
+static int g_k56c_expanded_forced;  /* ME_K56FLEX_CLIENT_DATA_EXPANDED, -1 = follow the record */
+static bool g_k56c_shaping_from_record;
 static bool g_k56c_ds_started;
 
 static void me_data_rx_first_bit(void);
@@ -5041,6 +5046,8 @@ static void me_k56c_up_init_locked(void)
     cfg.mp_extra_fill = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_FILL", (int) cfg.mp_extra_fill);
     g_k56c_trn16_forced = parse_env_int("ME_K56FLEX_CLIENT_TRN16", -1);
     g_k56c_data_on = parse_env_int("ME_K56FLEX_CLIENT_DATA", 0) != 0;
+    g_k56c_expanded_forced = parse_env_int("ME_K56FLEX_CLIENT_DATA_EXPANDED", -1);
+    g_k56c_shaping_from_record = false;
     cfg.send_e = g_k56c_data_on;
     cfg.trn16 = g_k56c_trn16_forced > 0;
     k56flex_jd_rx_init(&g_k56c_jd);
@@ -5058,14 +5065,17 @@ static void me_k56c_up_init_locked(void)
            A K56flex client is a V.34 call modem: GPC (clause 7).  Shaping
            and the non-linear encoder are the RECEIVER's choice for this
            transmitter (V.34 Table 20 bits 31, 32), and the server sends no
-           MP: its record's u/v flags are 1 on the 7910 and 0 on MICA, which
-           decodes our minimum-shaping data.  Experiment knobs until that is
-           established (docs/k56flex_implementation.md). */
+           MP.  Its parameter record's u/v flags are 1 on the 7910, which
+           needs expanded shaping from 9600 up, and 0 on MICA, which decodes
+           minimum shaping: armed minimum here, re-armed from the record
+           when it arrives (me_k56c_shaping_from_record_locked), unless
+           ME_K56FLEX_CLIENT_DATA_EXPANDED forces it. */
+        g_k56c_data_n = parse_env_int("ME_K56FLEX_CLIENT_DATA_N", (int) cfg.mp_up_code);
+        g_k56c_data_nonlinear = parse_env_int("ME_K56FLEX_CLIENT_DATA_NONLINEAR", 0);
         v34_tx_set_data_scrambler_tap(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_TAP", 17));
         v34_tx_set_data_advance(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_ADVANCE", 0));
-        if (v34_v90_arm_tx_data(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_N", (int) cfg.mp_up_code), 0,
-                                parse_env_int("ME_K56FLEX_CLIENT_DATA_NONLINEAR", 0),
-                                parse_env_int("ME_K56FLEX_CLIENT_DATA_EXPANDED", 0),
+        if (v34_v90_arm_tx_data(g_v34, g_k56c_data_n, 0, g_k56c_data_nonlinear,
+                                g_k56c_expanded_forced > 0,
                                 NULL, k56flex_client_tx_done) != 0)
             ME_LOG("[K56C] could not arm the upstream B1/data handover\n");
     }
@@ -5074,6 +5084,30 @@ static void me_k56c_up_init_locked(void)
            "baud index %d, %s carrier\n", cfg.ext, cfg.report, cfg.md_symbols, cfg.trn_symbols, cfg.gap_symbols,
            g_k56c_trn2_on_eight ? " (held until the eight-level stage)" : "",
            v34_get_tx_baud_rate(g_v34), v34_get_tx_high_carrier(g_v34) ? "high" : "low");
+}
+
+/* Draft 0.23 4.12 record flags u (bit 14) and v (bit 13), read as the
+   server's shaping choice for our transmitter (docs/k56flex_implementation.md,
+   27 October).  Both are 1 or both 0 on every server seen so far, so either
+   one selects expanded shaping.  Our E follows the record by about 2 s, and
+   the handover can be re-armed until then. */
+static void me_k56c_shaping_from_record_locked(const k56flex_client_t *c)
+{
+    int expanded;
+
+    if (!g_k56c_data_on  ||  g_k56c_expanded_forced >= 0  ||  g_k56c_shaping_from_record  ||  !c->param_ok)
+        return;
+    g_k56c_shaping_from_record = true;
+    expanded = c->param.u  ||  c->param.v;
+    if (v34_v90_arm_tx_data(g_v34, g_k56c_data_n, 0, g_k56c_data_nonlinear, expanded,
+                            NULL, k56flex_client_tx_done) != 0) {
+        ME_LOG("[K56C] +%llu ms record asks for %s shaping, but the data handover has already happened\n",
+               (unsigned long long) (g_k56c_samples/8), expanded ? "expanded" : "minimum");
+        return;
+    }
+    ME_LOG("[K56C] +%llu ms upstream data: %s shaping from the record (u %u v %u), N=%d\n",
+           (unsigned long long) (g_k56c_samples/8), expanded ? "expanded" : "minimum",
+           c->param.u, c->param.v, g_k56c_data_n);
 }
 
 static void me_k56c_tx_load_locked(void)
@@ -5339,6 +5373,7 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
                 ME_LOG("[K56C] +%llu ms %s-law model: parameter record, mode %u, extra %u, rate field %u, u %u v %u, control %04x bit %u, final %u\n",
                        (unsigned long long) (g_k56c_samples/8), i ? "A" : "mu", c->param.mode, c->param.extra,
                        c->param.rate, c->param.u, c->param.v, c->param.control, c->param.bit, c->param.final);
+                me_k56c_shaping_from_record_locked(c);
             }
             if (c->final_param_seen  &&  !(g_k56c_logged[i] & 2)) {
                 g_k56c_logged[i] |= 2;

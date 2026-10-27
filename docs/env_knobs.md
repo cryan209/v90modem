@@ -69,7 +69,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_G711_CAPTURE` | modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 
-## Live-path switches (97, 9 with no test/script/doc reference)
+## Live-path switches (97, 7 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -80,9 +80,9 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_IO_SCHEDULE` | modem_engine.c |  | sdh | 0 unchecked, 1 open, -1 off |
 | `ME_K56FLEX_CLIENT_DATA` | modem_engine.c | 0 | d |  |
 | `ME_K56FLEX_CLIENT_DATA_ADVANCE` | modem_engine.c | 0 | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
-| `ME_K56FLEX_CLIENT_DATA_EXPANDED` | modem_engine.c | 0 | - | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
+| `ME_K56FLEX_CLIENT_DATA_EXPANDED` | modem_engine.c | -1 | d |  |
 | `ME_K56FLEX_CLIENT_DATA_N` | modem_engine.c | (int | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
-| `ME_K56FLEX_CLIENT_DATA_NONLINEAR` | modem_engine.c | 0 | - | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
+| `ME_K56FLEX_CLIENT_DATA_NONLINEAR` | modem_engine.c | 0 | d | V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the |
 | `ME_K56FLEX_CLIENT_GAP_SYMBOLS` | modem_engine.c | (int | - |  |
 | `ME_K56FLEX_CLIENT_JPRIME` | modem_engine.c |  | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
 | `ME_K56FLEX_CLIENT_JPRIME_RECORDS` | modem_engine.c | 0 | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
@@ -171,7 +171,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V92_CP_LAW_STRICT` | v92_cp_rx.c |  | ctd |  |
 | `VPCM_V90_PP_PHASE` | v34rx.c |  | c | vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. |
 
-## Kept on purpose (60, 28 with no test/script/doc reference)
+## Kept on purpose (60, 27 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -218,7 +218,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_CP_SEARCH_START` | v90_cp_live.c |  | - | offline CP search control (v90_cp_live.c) |
 | `ME_V90_CP_TIMING` | v90_cp_live.c |  | - | offline CP search control (v90_cp_live.c) |
 | `ME_V90_JA_FALLBACK_ANCHOR` | modem_engine.c |  | dh | open: anchor the 9.3.1.3 Sd allowance on the first Ja bit (real-loop work) |
-| `ME_V90_PHASE_SWEEP` | v34rx.c |  | h | diagnostic mode: holds one upstream frame-phase candidate for grading |
+| `ME_V90_PHASE_SWEEP` | v34rx.c |  | dh | diagnostic mode: holds one upstream frame-phase candidate for grading |
 | `ME_V90_SLIP_ROT_SWEEP` | v34rx.c |  | d | diagnostic: static-rotation sweep in the upstream slip search |
 | `ME_V90_SMARTLINK_DUMMY_CPT` | modem_engine.c | 0 | - | interop: the only way to enable v90_repair_smartlink_dummy_cpt() (tested in vpcm_loopback_test) |
 | `ME_V90_UPSTREAM_T2` | v34rx.c |  | t | pending experiment: the V.90 upstream through the ordinary V.34 receiver has never been compared |
@@ -696,9 +696,9 @@ the tools' command lines; listed here so nothing reads an environment silently.
 | `V8BIS_TEST_QUICK` | v8bis_test.c | th |
 | `V90_CP_SCAN_VERBOSE` | v90_analogue_rx_test.c | t |
 | `V90_REPLAY_BITS_OUT` | v90_upstream_replay.c | d |
-| `V90_REPLAY_HIGH_CARRIER` | v90_upstream_replay.c | - |
+| `V90_REPLAY_HIGH_CARRIER` | v90_upstream_replay.c | d |
 | `V90_REPLAY_QUIET` | v90_upstream_replay.c | tsd |
-| `V90_REPLAY_SCRAMBLER_TAP` | v90_upstream_replay.c | - |
+| `V90_REPLAY_SCRAMBLER_TAP` | v90_upstream_replay.c | d |
 | `V90_REPLAY_VERBOSE` | v90_upstream_replay.c | d |
 | `V90_SOUNDER_DUMP` | v90_analogue_rx_test.c | t |
 | `V92_MH_BASELINE` | v92_mh_retrain_test.c | t |
