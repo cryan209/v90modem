@@ -2788,7 +2788,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
 | gate C | **passed on about half the calls** with MP repeated 400 times before MP' (27 October, below). Before that: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
 | parameter record, priming, data | record: **decoded** (short form, read by magnitude; 27 October, last section). Priming and data: **decoded** by content (blind priming, below), error-free on a PCMA leg. |
-| E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware. |
+| E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware, and to the 7910 **at 4800 only** (`ME_K56FLEX_CLIENT_MP_UP_CODE=2`: LAPM and PPP, 3/3; last section). |
 
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
 gate C ends on "training complete" or "MP accepted"; the card gives neither.
@@ -2954,24 +2954,50 @@ extra changes from call to call while our MP stays the same, so the card
 sets it from its own measurement of our upstream. The record that carries it
 arrives about 580 ms into our MP.
 
-**That accounts for both failures, though n is small:**
+**What it accounts for.** The two MP x400 calls without a final record are
+the only two where the card chose **N=3 (7200)**, below our MP's upstream
+code 4 (9600); every accepted MP had extra ≥ 5. n is small. Extra is also
+the N that the card's INFO1a already projects for our direction (13 on the
+calls below), so it is the card's capability from line probing, not the
+rate it demodulates at. The next section refutes the idea that we send 4
+while the card expects its extra.
 
-1. The two x400 calls without a final record are the only two where the card
-   chose **N=3 (7200)**, below our MP's upstream code 4 (9600). Every accepted
-   MP had extra ≥ 5. If the card's rule is "accept MP only when its upstream
-   rate is within what I measured", our fixed proposal of 9600 fails whenever
-   the card measures less.
-2. On the accepted calls the card chose N=13 (31200) at most, and **we
-   transmit data at N=4** (`ME_K56FLEX_CLIENT_DATA_N` defaults to the MP's
-   code). If the card uses its own extra as the upstream rate rather than
-   min(ours, its own), as a V.34 MP exchange would, it is demodulating our
-   9600 data at 31200. That fits "the card never hears our upstream data",
-   which was already the case with the MP accepted, the scrambler right, and
-   E sent on time.
+### Live: the 7910 carries our upstream at 4800 only; 31200 fails like 9600 (27 October)
 
-Next, live on CT 117 (`--law alaw --ext 7910`, MP x400): an A/B of
-`ME_K56FLEX_CLIENT_MP_UP_CODE=13 ME_K56FLEX_CLIENT_DATA_N=13` against the
-current 4/4. On the extra = 13 calls the two readings of extra agree, so if
-upstream data then reaches the card, the rate was the fault. A proper fix
-then makes the client take N from the decoded record (it arrives about 2.2 s
-before our E) and propose an MP rate the card accepts.
+CT 117 against the 7910: PCMA (`--law alaw --ext 7910`), MP x400 / MP' x8,
+`+ES=3`, recipe as above. `ME_K56FLEX_CLIENT_MP_UP_CODE` and
+`ME_K56FLEX_CLIENT_DATA_N` set together (the MP proposes the rate we then
+send at). Two batches: `/root/k56up-runs` (10:45, arms 2/1/6 alternated,
+unrecorded until now) and `/root/k56up13-runs` (14:47, 13/4 alternated, then
+one 2 as control). Local copies: `artifacts/k56flex-7910-up{,13}-20261027/`.
+Calls where V.8bis did not complete (no K56flex attempt) are excluded.
+
+| upstream | calls | final record | result |
+|---|---|---|---|
+| N=1 (2400) | 2 | 2/2 | card stays in data for 124 s; LAPM never establishes |
+| **N=2 (4800)** | **3** | 3/3 | **CONNECT 52000, V.42 LAPM + V.42bis, PPP up (LCP, peer IP, pings)** |
+| N=4 (9600) | 2 | 2/2 | card retrains 4.7 s into data |
+| N=6 (14400) | 2 | 2/2 | card retrains 4.7 s into data |
+| N=13 (31200) | 2 | 2/2 | card retrains 4.7 s into data |
+
+Every record on these calls has extra 13 and control 1FFF, including the
+4800 calls that connect. So the card does not demodulate at its own extra,
+and it accepts an MP proposing any of these rates. **This is the first
+complete K56flex call between our client and the 7910**, data both ways at
+52000/4800, three times out of three.
+
+What separates 4800 from 9600 and above lies in our upstream data path at
+those rates. The MICA firmware decodes our 9600 upstream exactly
+(closed loop, above), so the question is what the 7910 does differently
+there. Neither shell mapping nor the mapping-frame size separates them: at
+3200 baud, b = 6 at 4800 and 12 at 9600, both K = 0 (V.34 9.3). Candidates
+in V.34 order: the constellation and the uncoded-bit count q above 4800, the
+precoder and non-linear encoder (our MP is type 0, with no coefficients; the
+card's MP to us has not been decoded), and the trellis. 2400 failing
+differently (no retrain, no LAPM) is a separate issue and may be a rate the
+card does not support. Next: decode our own N=2 and N=4 upstream taps
+(`live-tx.g711`) with SpanDSP's V.34 receiver at those rates, to check that
+both are valid V.34 data with what our MP announced. If both decode, the
+difference is in what the 7910 assumes above 4800 (precoding,
+constellation or trellis), and the parameter record is the only thing it
+tells us. Meanwhile 4800 is a working setting for the client.
