@@ -3113,3 +3113,30 @@ accepted us without it, and large at N=13. Next: N=13 with expanded shaping
 *and* `ME_K56FLEX_CLIENT_DATA_NONLINEAR=1`, and rates between 4 and 13 to
 find where minimum non-linear stops working.
 
+### Live: 31200 upstream needs the non-linear encoder too; the record's u/v ask for both (27 October, night)
+
+CT 117 against the 7910, PCMA, MP x400, shaping from the record, alternated
+over three rounds (`/root/k56nl.sh`, `/root/k56nl-runs`). Max RTP gap
+40 ms; extra 13 and a final record on every call that completed V.8bis.
+Four calls did not complete V.8bis (no K56flex attempt) and are excluded.
+
+| arm | calls | result |
+|---|---|---|
+| **N=13 (31200), `ME_K56FLEX_CLIENT_DATA_NONLINEAR=1`** | 2 | **2/2 CONNECT 52000, LAPM, PPP, 0% loss** |
+| N=13 | 3 | 0/3 |
+| N=10 (24000) | 2 | 2/2 CONNECT, PPP, 0% loss |
+| N=8 (19200) | 1 | 1/1 CONNECT, PPP, 0% loss |
+
+**Our client now runs 52000 down / 31200 up against the 7910**, the rate its
+INFO1a and record project. The non-linear encoder (V.34 9.7, Θ = 0.3125)
+is not needed up to 24000 and is needed at 31200: its warping is
+negligible on small constellations and matters on the largest. So the
+record's two flags carry both of the far transmitter's selections, as MP
+bits 31 and 32 do in V.34: expanded shaping and Θ = 0.3125 are both 1 on
+the 7910, and both 0 on MICA, which decodes neither. Which flag is which is
+still not separated: they have been equal on every call from every server.
+
+Next: take the non-linear encoder from the record as shaping already is
+(`me_k56c_shaping_from_record_locked`), and propose the card's extra as our
+MP upstream rate instead of the fixed code.
+
