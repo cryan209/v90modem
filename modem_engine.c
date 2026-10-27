@@ -3368,6 +3368,11 @@ static bool g_offer_v91 = false;
  * The client is the analogue end, the one that dials, as an asymmetric x2
  * client is.  It selects the defaults the 7910 needs (me_k56c_call()). */
 static bool g_k56c_call = false;
+/* This call is a K56flex server call: K56flex V.8bis on a call we answer
+ * (AT+MS=K56, or ME_K56FLEX=1), unless ME_K56FLEX_ROLE=client.  An agreed
+ * exchange runs the negotiated startup into K56flex DATA; anything else
+ * falls back to ordinary V.8 (me_k56s_call()). */
+static bool g_k56s_call = false;
 /* This client call has fallen back to initiating V.8bis itself. */
 static bool g_k56c_v8bis_initiated = false;
 /* V.8's calling role when it differs from the SIP direction, -1 otherwise.
@@ -3856,6 +3861,7 @@ static bool me_resolve_offer(const char *mode, bool automode)
 
         /* me_k56flex_mode() reads g_offer_k56, set above. */
         g_k56c_call = me_k56flex_mode() == 1 && g_state == ME_DIALING && !(kr && strcmp(kr, "server") == 0);
+        g_k56s_call = me_k56flex_mode() == 1 && g_state != ME_DIALING && !(kr && strcmp(kr, "client") == 0);
         g_v8_calling_override = -1;
         /* The client offers V.34 and below in V.8: the K56flex PCM direction
            is negotiated in V.8bis and run inside V.34 Phase 3/4, and a V.90
@@ -5010,6 +5016,7 @@ static int16_t g_k56c_win_vals[9];
 static unsigned g_k56c_win_distinct;
 
 static bool me_k56c_call(void) { return g_k56c_call; }
+static bool me_k56s_call(void) { return g_k56s_call; }
 /* In a K56flex client call the receiver runs until DATA or 40 s; elsewhere
    ME_K56FLEX_CLIENT_PROBE=<ms> arms it as an experiment. */
 static int me_k56c_hold_ms(void) { return parse_env_int("ME_K56FLEX_CLIENT_PROBE", me_k56c_call() ? 40000 : 0); }
@@ -5671,7 +5678,7 @@ static void me_k56_progress_locked(void)
         ME_LOG("[ME] K56flex client: V.8 %s (the %s sent MS), V.34 call modem\n",
                v8_calling ? "caller" : "answerer", v8_calling ? "client" : "server");
     }
-    if (me_k56flex_mode() == 2) {
+    if (me_k56flex_mode() == 2  ||  me_k56s_call()) {
         if (agreed) {
             /* Draft 0.23 4.1 / V.8bis 9.9: ACK precedes V.8, not the
              * PCM probes. Our CL received MS: V.8 answers regardless of
@@ -5693,9 +5700,10 @@ static void me_k56_progress_locked(void)
             g_state = ME_HANGUP;
             return;
         }
-        /* Preserve the explicit transmit-only diagnostic for a peer which
-         * did not negotiate K56flex. It is not a selected data mode. */
-        if (me_k56_probe_start_locked()) return;
+        /* ME_K56FLEX=probe keeps the transmit-only diagnostic for a peer
+         * which did not negotiate K56flex; a server call answers that peer
+         * with ordinary V.8 instead (V.90/V.34 and below). */
+        if (me_k56flex_mode() == 2  &&  me_k56_probe_start_locked()) return;
     }
     if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
         ME_LOG("[ME] v8_init failed after K56flex V.8bis\n");

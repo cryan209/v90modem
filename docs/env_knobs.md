@@ -46,7 +46,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_BPS` | modem_engine.c | V.34 start bit rate ceiling (0 = the symbol rate's maximum). |
 | `ME_V90_MAX_TX_DBM0_CODE` | v34tx.c, v90.c | INFO0d bits 33:37, the transmit power we can honour. |
 | `ME_V92_MH` | modem_engine.c | 1 arms V.92 modem-on-hold (9.10). |
-| `ME_K56FLEX` | modem_engine.c | 0 disables; 1 is AT+MS=K56's V.8bis exchange (a K56flex client call when we dial); probe adds the experimental server startup/PCM probes. Overrides AT+MS=K56. |
+| `ME_K56FLEX` | modem_engine.c | 0 disables; 1 is AT+MS=K56 (a K56flex client call when we dial, a server call when we answer); probe also runs the transmit-only probe when V.8bis fails. Overrides AT+MS=K56. |
 | `ME_CLEARMODE` | sip_modem.c | 1 offers RFC 4040 CLEARMODE for CLEAR/V.110/V.120. |
 | `ME_V110_SYNC` | modem_engine.c | 1 runs V.110 synchronous. |
 | `ME_V120_ACK` | modem_engine.c | 1 runs V.120 acknowledged mode. |
@@ -180,7 +180,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_K56FLEX_BLIND` | modem_engine.c |  | d | experimental V.8bis: nonempty/nonzero-prefix enables blind exchange; normally unset |
 | `ME_K56FLEX_GATE_MS` | modem_engine.c |  | sd | experimental probe gate wait, default 8000 ms, quantized to 12-sample pairs |
 | `ME_K56FLEX_RATE` | modem_engine.c |  | d | experimental PCM probe mapper rate, default 56000 bit/s; not an upstream rate |
-| `ME_K56FLEX_ROLE` | modem_engine.c |  | d | client: client-model V.8bis octets; server: keep the calling-server exchange instead of a K56flex client call |
+| `ME_K56FLEX_ROLE` | modem_engine.c |  | d | client: client-model V.8bis octets, and no server call when answering; server: keep the calling-server exchange instead of a client call |
 | `ME_SOUNDER` | modem_engine.c |  | d | measurement mode: transmit the channel sounder instead of a modem |
 | `ME_SOUNDER_RMS` | v90_sounder.c |  | - | measurement: level of the channel sounder (ME_SOUNDER) |
 | `ME_TRAINING_TIMEOUT_MS` | modem_engine.c |  | - | interop: lengthens the 60 s training cap for multi-retrain calls |

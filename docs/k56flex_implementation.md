@@ -50,7 +50,7 @@ configuration. Prefer `AT+MS` for normal modulation policy (V.250 6.4.1).
 
 | Control | Current behavior |
 |---|---|
-| `AT+MS=K56` | Enables the V.8bis exchange when `ME_K56FLEX` is unset/empty; does not by itself enable PCM probes. On a call we originate it is a K56flex client call (V.8bis as client, V.8 without V.90, K56flex PCM downstream and V.34 upstream); `ME_K56FLEX_ROLE=server` keeps the old calling-server exchange. |
+| `AT+MS=K56` | On a call we originate: a K56flex client call (V.8bis as client, V.8 without V.90, K56flex PCM downstream and V.34 upstream); `ME_K56FLEX_ROLE=server` keeps the old calling-server exchange. On a call we answer: a K56flex server call (V.8bis listening 4 s; agreed, the negotiated startup into K56flex DATA; otherwise ordinary V.8); `ME_K56FLEX_ROLE=client` opts out. |
 | `ME_K56FLEX=0` | Disables the K56flex path even if AT+MS offers it. |
 | `ME_K56FLEX=1` | Exchange only, then ordinary V.8. Any nonempty value other than `probe` or a value beginning with `0` also selects exchange-only. |
 | `ME_K56FLEX=probe` | Enables negotiated startup plus transmit probes when agreed; otherwise the legacy transmit-only probe followed by ordinary V.8. Exact lowercase spelling matters. |
@@ -3257,11 +3257,28 @@ Still open between the two:
   left at the default `+ES` follows V.8's LAPM indication, spends 28 s in
   V.42 detection, then falls back to V.14 (CONNECT at 58 s, and no payload
   within the test's 90 s).
-- **The server needs `ME_K56FLEX=probe ME_V8=1`.** Answering `AT+MS=K56`
-  is still exchange-only, then ordinary V.8.
+- ~~The server needs `ME_K56FLEX=probe ME_V8=1`.~~ Done: `AT+MS=K56` on a
+  call we answer (next section).
 - **Upstream 9600.** That is what our server's INFO1a projects.
 
 The 7910 path with these changes, live (`/root/k56mode-runs`, `AT+MS=K56`
 only): 6/6 at 52000/31200 with PPP and 0% loss. The card's CRe is heard on
 every call, so the fallback never fires, and the client stays V.8 caller.
+
+### K56flex server answer mode: `AT+MS=K56` on a call we answer (27 October, night)
+
+Answering, `AT+MS=K56` (or `ME_K56FLEX=1`) is now a **K56flex server call**
+(`g_k56s_call`; `ME_K56FLEX_ROLE=client` opts out). V.8bis listens 4 s for
+the client's CRe. An agreed exchange runs the negotiated startup
+(`k56flex_startup`, then the server training, MP/MP' from audio, DATA),
+which used to need `ME_K56FLEX=probe`. A caller that does not negotiate
+gets ordinary V.8 (V.90, V.34 and below), not the transmit-only probe;
+`ME_K56FLEX=probe` keeps the probe for diagnostics. `ME_V8` was never
+needed (it defaults to 1).
+
+Engine pairs, no K56flex environment: client `AT+MS=K56` vs server
+`AT+MS=K56`, both CONNECT 52000 with data both ways (`AT+ES=1`); a V.34
+caller vs the server falls back after the 4 s wait and connects at V.34; a
+V.32bis caller at 14400. The first two are in `tests/fast.list`. Our
+server's data path is still V.14 only (error control is open).
 
