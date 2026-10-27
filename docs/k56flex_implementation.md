@@ -3076,3 +3076,40 @@ encoder) from the decoded record instead of a knob, since the record
 arrives well before our E; then try the card's own extra (N=13, 31200) with
 expanded shaping.
 
+### Shaping from the record, live; 31200 is held in data but not decoded (27 October, evening)
+
+`d26e7a40`: the client arms the data handover with minimum shaping and
+re-arms it when a CRC-valid record arrives (+10.55 s, 2.2 s before our E):
+u or v set selects expanded shaping. `ME_K56FLEX_CLIENT_DATA_EXPANDED`
+still overrides it. Engine replay of up4-4 confirms that the re-arm changes
+the transmitted signal only from the E/B1 seam on.
+
+**Two failed batches, both our own RTP.** The magnitude-only PT_C inverse
+first ran as a 4096-candidate search per block (`766913ce` replaced it with
+a lookup). That lookup then cached only one stage table, and the µ-law and
+A-law models interleave sample by sample, so it rebuilt the table on every
+block (`fe0f943c` keeps one per table). Each time our RTP transmit had
+50–114 ms gaps from PT_C on, and the card measured our upstream at **extra 3**
+and rejected MP on every call. Our bytes were identical to a passing call.
+Extra 3 with no final record is the card's verdict on our *timing*, not on
+the signal; check RTP gaps (`rtp-tx.csv`) first when it appears. To profile
+the client, feed both models sample by sample as the engine does: per-packet
+batches hid the second stall.
+
+**Clean batch** (`/root/k56rec-runs`, max RTP gap 39 ms, extra 13 and a
+final record on every call, shaping from the record):
+
+| arm | calls | result |
+|---|---|---|
+| N=4 (9600) | 3 | **3/3 CONNECT 52000, LAPM, PPP, 0% loss** |
+| N=13 (31200) | 3 | 0/3: in data for the whole call, no retrain, LAPM never establishes |
+
+So the record-driven default works at 9600. At 31200 the card stays in data
+(unlike the minimum-shaping failures, which it retrains after 4.7 s) but does
+not decode us. The record sets both u and v and we apply only shaping. If
+the other flag asks for the non-linear encoder (V.34 9.7, Θ = 0.3125), its
+warping grows with constellation size: negligible at N=4, where the card
+accepted us without it, and large at N=13. Next: N=13 with expanded shaping
+*and* `ME_K56FLEX_CLIENT_DATA_NONLINEAR=1`, and rates between 4 and 13 to
+find where minimum non-linear stops working.
+
