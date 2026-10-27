@@ -2995,9 +2995,55 @@ in V.34 order: the constellation and the uncoded-bit count q above 4800, the
 precoder and non-linear encoder (our MP is type 0, with no coefficients),
 and the trellis. 2400 failing
 differently (no retrain, no LAPM) is a separate issue and may be a rate the
-card does not support. Next: decode our own N=2 and N=4 upstream taps
-(`live-tx.g711`) with SpanDSP's V.34 receiver at those rates, to check that
-both are valid V.34 data with what our MP announced. If both decode, the
-difference is in what the 7910 assumes above 4800 (precoding,
-constellation or trellis), and the parameter record is the only thing it
-tells us. Meanwhile 4800 is a working setting for the client.
+card does not support. ### Our 9600 upstream is valid V.34; the 7910 most likely wants expanded shaping (27 October, later)
+
+**Offline decode of our own TX taps.** `v90_upstream_replay` with
+`V90_REPLAY_HIGH_CARRIER=1 V90_REPLAY_SCRAMBLER_TAP=18` (our caller's
+carrier and GPC; new switches, V.90 defaults unchanged) and
+`ME_V90_PHASE_SWEEP=0`. The sweep must be held: it reads HDLC flags (75%
+ones) as a frame-phase error and keeps stepping. B1 acquires at 100% fit on
+every tap. At **4800** (up2-7) all 33 HDLC frames pass FCS. At **9600**
+(up4-4, up4-6) the points sit on the lattice (gain sweep distance 0.001 at
+1.00) and the stream is **error-free flags from 0.9 s to 4.8 s after B1**,
+with our XID intact. Everything after 4.8 s is our transmitter answering the
+card's retrain. The aggregate figures (decision error 1.33, "SNR 4.8 dB",
+1 of 54 frames) were measured over that tail, so check them against the
+time series before trusting them. Our 9600 upstream is therefore valid V.34
+data to SpanDSP's receiver (and the MICA firmware decodes it), and the 7910
+does not.
+
+**What changes at 4800/9600** (SpanDSP's `v34_set_working_parameters`,
+3200 baud, V.34 Tables 8 and 10):
+
+| N | rate | b | K | M minimum / expanded |
+|---|---|---|---|---|
+| 1 | 2400 | 0 | - | not a 3200-baud rate (Table 8 starts at 4800) |
+| 2 | 4800 | 12 | 0 | 1 / 1 |
+| 3 | 7200 | 18 | 6 | 2 / 2 |
+| 4 | 9600 | 24 | 12 | 3 / 4 |
+| 13 | 31200 | 78 | 26 | 10 / 12 |
+
+So the 2400 arm sent nothing decodable, and that explains its separate
+failure. 9600 is the first rate where the shaping choice changes the
+constellation.
+
+**Who chooses shaping.** V.34 Table 20 bits 29:32 (trellis, non-linear
+encoder, constellation shaping) are the *receiver's* selection for the
+remote transmitter. Our MP's bits tell the card how to transmit; what our
+upstream must use comes from the card. A K56flex server sends no MP, only
+the parameter record, and that record has two unexplained flags:
+**u (bit 14, DM 8FD0) and v (bit 13, 8FD1) are 1 on every 7910 call, and 0
+on MICA** (MicaEmu rate-selection trace: 8FD0 = 8FD1 = 0) and on the Gough
+Lui call (`03f1`). We transmit minimum shaping with no non-linear encoder.
+Reading u/v as "expanded shaping" and "non-linear encoder" for the client's
+transmitter accounts for every result so far: MICA (0/0) decodes our 9600;
+the 7910 (1/1) decodes 4800, where shaping changes nothing, and fails from
+9600. The non-linear encoder (V.34 9.7) warps every rate, so if it were the
+missing piece, 4800 should have failed as well; expanded shaping is the
+better candidate. This reading is unconfirmed.
+
+New experiment knobs (default 0, the old behaviour):
+`ME_K56FLEX_CLIENT_DATA_EXPANDED` and `ME_K56FLEX_CLIENT_DATA_NONLINEAR`,
+passed to `v34_v90_arm_tx_data`. Predictions for a live run at N=4:
+expanded=1 connects and nonlinear=1 alone does not. Free control: N=3
+(7200) should connect with neither, since M is 2 either way.

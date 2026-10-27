@@ -18,6 +18,11 @@
  *
  *   v90_upstream_replay <tap.g711> [ulaw|alaw] [baud] [bps]
  *
+ * V90_REPLAY_HIGH_CARRIER=1 and V90_REPLAY_SCRAMBLER_TAP=18 (GPC) point it
+ * at a V.34 call modem's data instead, such as our K56flex client's upstream
+ * (V.34 clause 7; INFO1a's carrier); the defaults are V.90's low carrier
+ * and GPA.
+ *
  * The E handover is not recorded in the tap, so it is searched for: the
  * receiver is prepared at a candidate instant, given the preceding history
  * that its B1 search reaches back over, and asked whether it acquired.  The
@@ -270,6 +275,13 @@ static v34_state_t *make_rx(int alaw, int baud_code, int high_carrier,
         return NULL;
     }
     /*endif*/
+    if (getenv("V90_REPLAY_SCRAMBLER_TAP")
+        && v34_set_rx_data_scrambler(rx, atoi(getenv("V90_REPLAY_SCRAMBLER_TAP"))) != 0)
+    {
+        v34_free(rx);
+        return NULL;
+    }
+    /*endif*/
     return rx;
 }
 /*- End of function --------------------------------------------------------*/
@@ -280,6 +292,7 @@ int main(int argc, char *argv[])
     int alaw;
     int baud_code;
     int bps;
+    int high_carrier;
     int found = -1;
     v34_state_t *rx = NULL;
 
@@ -295,6 +308,7 @@ int main(int argc, char *argv[])
     alaw = (argc > 2 && argv[2][0] == 'a');
     baud_code = (argc > 3 && atoi(argv[3]) == 3000) ? 3 : 4;
     bps = (argc > 4) ? atoi(argv[4]) : 9600;
+    high_carrier = getenv("V90_REPLAY_HIGH_CARRIER") && atoi(getenv("V90_REPLAY_HIGH_CARRIER"));
     if (load_tap(path, alaw) != 0)
         return 1;
     /*endif*/
@@ -323,7 +337,7 @@ int main(int argc, char *argv[])
             || history > INT_MAX/8000.0)
             return 2;
 
-        rx = make_rx(alaw, baud_code, 0, bps,
+        rx = make_rx(alaw, baud_code, high_carrier, bps,
                      getenv("V90_REPLAY_QUIET") == NULL);
         printf("replay: feeding %.2f s of history before the handover\n",
                history);
@@ -382,7 +396,7 @@ int main(int argc, char *argv[])
         /* The slip search, the gain sweep and the offset profiles are all
            logged at FLOW: without them the run says the symbols were lost
            and not what the receiver tried. */
-        rx = make_rx(alaw, baud_code, 0, bps,
+        rx = make_rx(alaw, baud_code, high_carrier, bps,
                      getenv("V90_REPLAY_VERBOSE") != NULL);
         if (!rx)
         {

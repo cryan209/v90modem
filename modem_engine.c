@@ -5054,13 +5054,19 @@ static void me_k56c_up_init_locked(void)
         return;
     if (g_k56c_data_on) {
         /* V.34 10.1.3.1, Phase 4: B1 straight after E, then data at the
-           upstream rate our MP proposed, 16-state trellis, no shaping or
-           precoding (MP bits 28:31 as k56flex_client_tx_mp_bits sends
-           them).  A K56flex client is a V.34 call modem: GPC (clause 7). */
+           upstream rate our MP proposed, 16-state trellis, no precoding.
+           A K56flex client is a V.34 call modem: GPC (clause 7).  Shaping
+           and the non-linear encoder are the RECEIVER's choice for this
+           transmitter (V.34 Table 20 bits 31, 32), and the server sends no
+           MP: its record's u/v flags are 1 on the 7910 and 0 on MICA, which
+           decodes our minimum-shaping data.  Experiment knobs until that is
+           established (docs/k56flex_implementation.md). */
         v34_tx_set_data_scrambler_tap(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_TAP", 17));
         v34_tx_set_data_advance(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_ADVANCE", 0));
-        if (v34_v90_arm_tx_data(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_N", (int) cfg.mp_up_code),
-                                0, 0, 0, NULL, k56flex_client_tx_done) != 0)
+        if (v34_v90_arm_tx_data(g_v34, parse_env_int("ME_K56FLEX_CLIENT_DATA_N", (int) cfg.mp_up_code), 0,
+                                parse_env_int("ME_K56FLEX_CLIENT_DATA_NONLINEAR", 0),
+                                parse_env_int("ME_K56FLEX_CLIENT_DATA_EXPANDED", 0),
+                                NULL, k56flex_client_tx_done) != 0)
             ME_LOG("[K56C] could not arm the upstream B1/data handover\n");
     }
     g_k56c_up_on = true;
