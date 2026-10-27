@@ -2992,8 +2992,8 @@ those rates. The MICA firmware decodes our 9600 upstream exactly
 there. Neither shell mapping nor the mapping-frame size separates them: at
 3200 baud, b = 6 at 4800 and 12 at 9600, both K = 0 (V.34 9.3). Candidates
 in V.34 order: the constellation and the uncoded-bit count q above 4800, the
-precoder and non-linear encoder (our MP is type 0, with no coefficients; the
-card's MP to us has not been decoded), and the trellis. 2400 failing
+precoder and non-linear encoder (our MP is type 0, with no coefficients),
+and the trellis. 2400 failing
 differently (no retrain, no LAPM) is a separate issue and may be a rate the
 card does not support. Next: decode our own N=2 and N=4 upstream taps
 (`live-tx.g711`) with SpanDSP's V.34 receiver at those rates, to check that
