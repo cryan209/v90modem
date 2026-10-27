@@ -2788,7 +2788,7 @@ ME_V34_PHASE3_TRAIN_TIMEOUT_MS=0 ME_K56FLEX_CLIENT_UPSTREAM=1`.
 | upstream S/PP/TRN/report/J'/TRN2/MP/MP' | ours (`k56flex_client_tx.c`), honouring INFO1a; **the card accepts the report** (only the J words `8990`/`89b0`); TRN2/MP on the constellation the card's Jd (`89b0`, sixteen-point) asks for. |
 | gate C | **passed on about half the calls** with MP repeated 400 times before MP' (27 October, below). Before that: the card's PT stage (four- or eight-level) always ends on its own 6.5 s timer and it retrains. It sees our J' (without one it quits at once, as MICA does) and honours an announced MD. The MICA firmware accepts our upstream end to end (report, training complete, MP, MP'); see the MICA sections above. |
 | parameter record, priming, data | record: **decoded** (short form, read by magnitude; 27 October, last section). Priming and data: **decoded** by content (blind priming, below), error-free on a PCMA leg. |
-| E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware, and to the 7910 **at 4800 only** (`ME_K56FLEX_CLIENT_MP_UP_CODE=2`: LAPM and PPP, 3/3; last section). |
+| E, B1, upstream data | implemented (`ME_K56FLEX_CLIENT_DATA=1`); carries data to the MICA firmware, and to the 7910 **at 52000/31200** with expanded shaping and the non-linear encoder taken from its record (LAPM and PPP, 4/4; last section). |
 
 What gate C is waiting for, most likely first. In the MICA server our own mirrors,
 gate C ends on "training complete" or "MP accepted"; the card gives neither.
@@ -3139,4 +3139,26 @@ still not separated: they have been equal on every call from every server.
 Next: take the non-linear encoder from the record as shaping already is
 (`me_k56c_shaping_from_record_locked`), and propose the card's extra as our
 MP upstream rate instead of the fixed code.
+
+### Live: 52000/31200 with no knobs; both data options follow the record (27 October, night)
+
+`f5afb3e6`: the non-linear encoder now follows the record the same way
+shaping does (`me_k56c_tx_options_from_record_locked`; u or v selects
+both, since the two flags have always been equal). Engine replay of the
+knob-driven live call n13-1 with no knobs: the record selects both at
++10.55 s, and our transmission is identical to the live one through B1 and
+1.3 s into 31200 data.
+
+Live on CT 117 (`/root/k56auto.sh`, `/root/k56auto-runs`): N=13, PCMA,
+MP x400, neither `ME_K56FLEX_CLIENT_DATA_EXPANDED` nor `_NONLINEAR` in the
+environment (each call's log lists what it saw). **4/4 CONNECT 52000 /
+31200, LAPM, PPP, 0% ping loss**; each logs "expanded shaping, non-linear
+encoder on" from the record. One more call did not complete V.8bis and is
+excluded. Max RTP gap 35 ms.
+
+What still needs a knob in this recipe: the client role itself and its
+V.8bis MS (`K56FLEX_CLIENT_MS_HEX`), `V34_INFO1C_FO`,
+`V34_INFO0_MAX_BAUD_DIFF`, MP x400 (`ME_K56FLEX_CLIENT_MP_REPEATS`) and the
+MP upstream rate (`ME_K56FLEX_CLIENT_MP_UP_CODE`, which the record's extra
+could supply). V.8bis completes on about two thirds of calls.
 
