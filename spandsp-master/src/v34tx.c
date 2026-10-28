@@ -4577,20 +4577,6 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
 
 static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
 {
-    /* V.34 12.2.1.4.1: acknowledge and repeat INFO0 when the source
-       restarts its capability exchange. Do not send INFOh into that exchange. */
-    if (s->rx.hdx_repeated_info0_pending)
-    {
-        s->rx.hdx_repeated_info0_pending = false;
-        s->tx.info0_acknowledgement = true;
-        s->rx.tone_b_present = false;
-        s->rx.hdx_tone_a_present = false;
-        s->rx.persistence1 = s->rx.persistence2 = 0;
-        s->rx.received_event = V34_EVENT_NONE;
-        s->tx.stage = V34_TX_STAGE_INITIAL_PREAMBLE;
-        info0_baud_init(s);
-        return s->tx.lastbit;
-    }
     /* Recipient's 12.2.1.2 / 12.2.2.1 sequence. The actual carrier
        remains B for a call modem and A for an answer modem. */
     switch (s->tx.stage)
@@ -12237,7 +12223,6 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->rx.hdx_primary_resync = false;
     s->rx.hdx_tone_a_present = false;
     s->rx.hdx_retrain_peer_tone = false;
-    s->rx.hdx_repeated_info0_pending = false;
     if (!duplex)
     {
         /* 12.2/12.3 fresh acquisition cannot inherit a previous page's
