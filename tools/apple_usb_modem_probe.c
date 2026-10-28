@@ -36,16 +36,17 @@
  * to draw current from -- which is why it first looked like a reset.  Read
  * register 0x1d before concluding anything (below).
  *
- * Register 0x1d is an analogue LINE SENSE, not a bit field: 0x00 with no pair
- * connected, ~217 (0xd8-0xda, +/-1 of measurement jitter) on-hook with a pair,
- * ~250 off-hook.  It is a far better instrument than a capture -- one control
- * request, no CoreAudio -- and 0x00 is the device telling you the pair is not
- * connected.  Check it first.
+ * Register 0x1d is raw analogue voltage sense, not cable detection. Historic
+ * VG224 readings were ~217 on-hook and ~250 off-hook, but the interpretation
+ * is uncalibrated and variant-dependent. A zero value cannot establish a
+ * disconnected cable. Correlate hook, isolation link, loop current, dropout
+ * and actual audio instead.
  *
- * bRequest 0x11 to interface 0 with wValue 0/1/2 and no data (the "wIndex = 0"
- * family) is simply another route to WRITE REGISTER 5: wValue 1 leaves reg 5 at
- * 0x01.  wValue 2 reads back as 0x00 (bit 1 is not implemented) and anything
- * >= 3 stalls, which is also what the driver's other-PID hook path uses.
+ * bRequest 0x11 to interface 0 with wValue 0/1/2 and no data is the native
+ * hook/monitor command, used by the original Apple hook path too. It changes
+ * register 5 but also runs a firmware OPE settling sequence: do NOT assume
+ * equivalence to a raw register write or race it with host-managed rearming.
+ * See the original-driver audit in docs/apple_usb_modem_sm56.md.
  *
  * Registers 0x10, 0x1a, 0x1f, 0x1e carry the per-country DAA configuration.
  * usm56.reg's HardwareInitBB is the one-byte profile KEY into the driver's own

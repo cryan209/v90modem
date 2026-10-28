@@ -395,14 +395,16 @@ One observation of a difference is not a measurement of a correlation.
 
 ### The `wIndex = 0` family is another route to register 5
 
-`bRequest 0x11` to interface 0, parameter in `wValue`, no data -- the family this
-project had never sent live -- **writes register 5**: `wValue 1` leaves it at
-0x01, `wValue 2` reads back 0x00 because bit 1 is not implemented, and anything
-from 3 up stalls.  That is also what the driver's `190D:*` hook path sends
-(`SendCmd(2)` / `SendCmd(0)` through IOCTL `0x22009c`), so the two branches reach
-the same register by different transports rather than being different schemes.
-It does reset the rest of register 5, so it and a read-modify-write of the
-register do not compose -- pick one.
+`bRequest 0x11` to interface 0, parameter in `wValue`, no data, changes
+hook/monitor state. Earlier tests observed `wValue 1` leaving register 5 at
+0x01 and `wValue 2` reading 0x00. **Do not model this as just a register-5
+write.** The 2026-10-28 original-driver audit below establishes that the native
+hook path uses this request for this Apple too, and live observation shows
+firmware-controlled OPE changes during settling. With monitoring already
+active it can leave register 5 at 0x09 rather than 0x01. Direct register writes
+and the native request therefore cannot be assumed equivalent merely because
+the OH bit reads back the same. Do not race the native request with a second
+host-managed protection sequence.
 
 ### What does nothing, so it need not be re-tried
 
@@ -4195,6 +4197,38 @@ retained binary also fails today, so a recent source change alone has not
 explained the regression. A state-dependent initialization defect remains
 possible; the exact cause is not established. Local reset source/output and
 post-reset readings: `artifacts/apple-6005-audit/{reset.c,reset.log,after-reset.json,reset-hook.log}`.
+
+### Original-driver bring-up audit (2026-10-28)
+
+Re-downloaded the documented Motorola package, verified its SHA-256 and
+re-decompiled the x86 drivers to check initialization rather than requiring
+another modem. `USmSerial.sys` `0x9d97b` calls `0x9c813` with hook state;
+IOCTL `0x22009c` becomes class-interface request `0x11`, `wValue=state`,
+`wIndex=0` in `utlamot.sys`. This is the actual Apple hook path, not just
+the other-PID monitor branch. Original startup `0x9d7b3` calls `0x9ca50(8)`
+(encapsulated bytes `10 08 00`); `0x9d4b9` clears BTE (register 17 bit 2),
+not OPE. Native-hook observation shows firmware-controlled OPE settling;
+do not combine it with a parallel host re-arm sequence.
+
+Both control-interface claims succeed. macOS has the expected `usbaudiod`
+ownership of audio interfaces 2–4, not control interfaces 0/1. Visible
+Chrome/ChatGPT device-user-client objects do not establish interference;
+no user application was killed.
+
+Bounded standalone tests tried native hook alone, native hook after the
+original startup command, and that startup plus the original NZ profile
+(`a0/c0/00/00`) and BTE disabled. Repeated the last case with native-9600 audio
+already running. All command/profile writes succeed, but current stays zero
+and dropout stays asserted, with no overload indication. The current-limit
+field was unchanged. All profile/BTE settings are restored and final probe
+readback confirms hook/monitor 0 and protection `0x0c`. No new native-hook or
+country-profile default was installed: these comparisons did not recover
+operation or identify the loop-closure cause.
+
+Local reproducer, decompilation and logs: `artifacts/apple-6005-audit/`
+(`driver_hook.c`, `driver-hook-{baseline,init,nz}.log`,
+`native-audio-first.log`, `usmserial-hook.c`, `utlamot.c`). The native-hook
+reproducer includes `hook_paths.c` from the same directory.
 
 ### Where the 1.1 s goes (2026-10-24)
 
