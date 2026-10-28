@@ -23,6 +23,16 @@ static inline int apple_line_overcurrent(const apple_modem_line_t *s)
     return apple_line_valid(s) && (s->hook & 1) &&
         ((s->status & 31) == 31 || (s->auxiliary >= 0 && (s->auxiliary & 1)));
 }
+/* USmSerial.sys 6.12.08 @0x9d15e requires a valid isolation link and
+ * nonzero loop current, rejecting overload code 31. Voltage sense (LVS,
+ * Si3056 §5.8/register 29) is variant-dependent and is NOT cable detection. */
+static inline int apple_line_seized(const apple_modem_line_t *s)
+{
+    return apple_line_valid(s) && (s->hook & 1) &&
+           (s->status & 31) > 0 && !apple_line_overcurrent(s) &&
+           s->auxiliary >= 0 && !(s->auxiliary & 2);
+}
+
 /* Final process teardown, not on-hook CID monitoring. Si3056 §5.22:
  * restore OPE after seizure failures as well as successful calls. Attempt
  * both writes even after an I/O error; only readback can confirm release.

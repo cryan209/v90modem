@@ -29,6 +29,12 @@ unchanged (V.90 §5 analogue role; V.34 §10.1 training). Ring burst counting an
 on-hook monitoring require live hardware validation; this integration makes
 no new CONNECT or interoperability claim.
 
+**Line-presence diagnostic correction (2026-10-28):** historical notes below
+that equate raw register `0x1d == 0` with a disconnected cable are too strong.
+LVS is uncalibrated and variant-dependent; it cannot establish physical cable
+presence. The coupler now verifies the hook, isolation link, loop-current code
+and dropout/overload status instead. See the seizure audit near the end.
+
 ## What the descriptors say
 
 One configuration, six interfaces, bus powered at 50 mA:
@@ -4056,6 +4062,38 @@ reads, failed writes and preservation of unrelated bits; all five
 `make gui-apple-test` checks pass. Local attempt logs/events are under
 `artifacts/apple-eicon-current/`; these are disposable preflight evidence,
 not retained interoperability fixtures.
+
+### Seizure audit: zero LVS is not cable detection (2026-10-28)
+
+The user confirms the Apple is connected to a telephone line. The previous
+preflight's `NO PAIR CONNECTED` label did not establish otherwise: it was a
+software interpretation of one raw register, not an independent measurement.
+The hard `sense <= 0` seizure gate was inconsistent with our own warning about
+variant-dependent LVS and has been removed.
+
+The replacement checks hook readback, valid isolation link and nonzero loop
+current below overload code 31 (the decisions recovered from
+`USmSerial.sys` at `0x9d15e`), plus readable dropout/OPD status. An on-hook
+transition succeeds on verified OH clearance regardless of sense. Probe
+output no longer labels zero/nonzero LVS as absent/present cable. Regression
+cases accept a powered loop with zero or unreadable LVS and reject invalid
+link, zero current, overload, dropout, missing auxiliary status and on-hook
+readback. All five Apple backend tests pass.
+
+An independent bounded check on USB `1:5` held the protected hook off while
+capturing four seconds of native-9600 audio, then released hook and monitor.
+Both before and after audio startup, hook was `0x09`, status `0x40` (valid
+isolation link but current code 0), auxiliary `0x02` (dropout), sense 0 and
+protection `0x0c`. All 38400 input samples were exactly -32768, with zero
+render errors and microphone permission authorized. Final independent
+readback confirmed hook 0 and protection `0x0c`. Thus the LVS-only gate really
+was wrong, but removing it alone does not establish an operating analogue
+path: independent current/dropout/audio checks still fail. This does not
+identify a cable, ATA, USB initialization or hardware fault. No additional
+calls were placed or remote endpoint negotiation scored. PBX contacts for
+6004/6005 and 6311–6314 were registered; the physical port mapping must be
+confirmed before attributing this to any of them. Disposable audit logs and
+raw capture: `artifacts/apple-eicon-sense-audit/`.
 
 ### Where the 1.1 s goes (2026-10-24)
 

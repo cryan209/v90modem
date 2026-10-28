@@ -12,8 +12,8 @@
  *   register 5 bit 0   off-hook (loop closure).  Verified by the dial tone it
  *                      draws: 350 + 440 Hz at equal level, -15.9 dBFS.
  *   register 5 bit 3   receive path / on-hook monitor.  Not the hook.
- *   register 0x1d      analogue line sense.  0x00 means NO PAIR CONNECTED,
- *                      which is the one reading worth interpreting.
+ *   register 0x1d      raw analogue voltage sense, variant-dependent;
+ *                      not a reliable cable-presence detector.
  *   80 <idx> 00        read a register (then GET_ENCAPSULATED_RESPONSE)
  *   00 <idx> <val>     write one
  *
@@ -340,11 +340,18 @@ static int line_hook(int off_hook)
     }
     sense = reg_read(REG_SENSE);
     gui_sense = sense; gui_hook = reg_read(REG_HOOK);
-    fprintf(stderr, "[APPLE] %s: register 5 = 0x%02x, line sense 0x%02x%s\n",
+    apple_modem_line_t check = {gui_hook,reg_read(0x0c),sense,-1,reg_read(0x13)};
+    int confirmed = off_hook ? apple_line_seized(&check) :
+        gui_hook >= 0 && !(gui_hook & REG_HOOK_BIT);
+    fprintf(stderr, "[APPLE] %s: hook=0x%02x, raw sense=%d, status=0x%02x, aux=0x%02x; %s\n",
             off_hook ? "off-hook" : "on-hook", gui_hook & 0xff,
-            sense & 0xff, sense == 0 ? "   <- NO PAIR CONNECTED" : "");
-    line_event("hook_readback",@{@"hook_register":@(gui_hook),@"sense_raw":@(sense)});
-    return sense <= 0 ? -1 : 0;
+            sense, check.status & 0xff, check.auxiliary & 0xff,
+            confirmed ? "confirmed" : "NOT CONFIRMED");
+    line_event("hook_readback",@{@"hook_register":@(gui_hook),@"sense_raw":@(sense),
+        @"status_register":@(check.status),@"aux_register":@(check.auxiliary),@"confirmed":@(confirmed)});
+    if (off_hook && !confirmed)
+        fprintf(stderr,"[APPLE] seizure failed: no verified operating loop (link/current/dropout); raw voltage sense alone does not establish cable presence\n");
+    return confirmed ? 0 : -1;
 }
 
 /* One-shot calls must not leave the on-hook monitor powered after exit.
@@ -2469,6 +2476,17 @@ static int gui_diagnostic_selftest(void)
         status.auxiliary = 1; if (!apple_line_overcurrent(&status)) return 1;
         status.auxiliary = 4; if (apple_line_overcurrent(&status)) return 1;
         status.auxiliary = -1; if (apple_line_overcurrent(&status)) return 1;
+        /* Zero/missing LVS must not reject a verified powered loop. */
+        status = (apple_modem_line_t){9,0x47,0,0x14,0};
+        if (!apple_line_seized(&status)) return 1;
+        status.sense = -1; if (!apple_line_seized(&status)) return 1;
+        status.status = 0x40; if (apple_line_seized(&status)) return 1;
+        status.status = 0x07; if (apple_line_seized(&status)) return 1;
+        status.status = 0x5f; if (apple_line_seized(&status)) return 1;
+        status.status = 0x47; status.auxiliary = 2; if (apple_line_seized(&status)) return 1;
+        status.auxiliary = 1; if (apple_line_seized(&status)) return 1;
+        status.auxiliary = -1; if (apple_line_seized(&status)) return 1;
+        status.auxiliary = 0; status.hook = 8; if (apple_line_seized(&status)) return 1;
         const unsigned char overload[] = {0xa1,0x29,9,0};
         line_notification(overload,2); if (line_overload_notice) return 1;
         line_notification(overload,4); if (!line_overload_notice) return 1;
@@ -2728,6 +2746,7 @@ int main(int argc, char **argv)
     if (hook_arg) {
         if (usb_open_line() < 0) return 1;
         rc = line_hook(!strcmp(hook_arg, "on")) < 0 ? 1 : 0;
+        if (rc) { line_close(); return rc; }
         libusb_close(usb);
         libusb_exit(NULL);
         return rc;
@@ -2808,7 +2827,7 @@ int main(int argc, char **argv)
     }
 
     if (g_stop) { gui_audio_stop(); close_dte(); me_destroy(); return line_close() < 0 ? 1 : 0; }
-    if (line_hook(1) < 0) {                  /* off-hook; refuses with no pair */
+    if (line_hook(1) < 0) {                  /* off-hook; verify operating loop */
         gui_audio_stop();
         close_dte();
         me_destroy();

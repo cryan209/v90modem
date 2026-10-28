@@ -424,15 +424,14 @@ static int cmd_hook_bit(const char *what, unsigned char bit, const char *name)
     if (reg_write(5, (unsigned char)v) < 0) { fprintf(stderr, "write rejected\n"); return 1; }
     usleep(500000);
     sense = reg_read(0x1d);
-    /* Only 0x00 is interpreted.  The register is an analogue reading and its
-     * off-hook value is NOT a stable code -- 0x06, 0x13, 0xfa and 0xfb have all
-     * been seen off-hook depending on what the line was doing -- so anything
-     * more specific than "not zero" would be overfitting two observations. */
+    /* LVS is a raw, variant-dependent voltage indication, not a connector
+     * detector. In particular zero cannot distinguish an attached unpowered
+     * line from an unplugged cable or an unavailable measurement. */
     printf("%s %s: register 5 = 0x%02x, line sense 0x1d = 0x%02x  (%s)\n",
            name, what, reg_read(5) & 0xff, sense & 0xff,
            sense < 0     ? "unreadable" :
-           sense == 0x00 ? "NO PAIR CONNECTED" :
-           sense >= 0xc0 && sense <= 0xdf ? "pair present, idle" : "pair present");
+           sense == 0x00 ? "zero sense; cable presence unknown" :
+           "uncalibrated voltage indication");
     printf("now capture: ./apple_usb_modem_audio capture 9600 3\n");
     return 0;
 }
