@@ -1051,6 +1051,8 @@ typedef struct
         and is transmitting Tone B, so FIRST_A must not wait for another
         INFO0c before sending the Tone A phase reversal. */
     bool phase2_reranging;
+    /* k56_repeated_info0c_reranging(): FIRST_A waits for Tone B afresh. */
+    bool k56_info0_rerange;
     /*! \brief True once this modem has transmitted the 11.2.1.2.5 L1/L2
         probe as the V.34 answer modem.  The 11.2.2.2.1 INFO0 recovery
         resumes differently either side of that point. */
@@ -2137,6 +2139,9 @@ typedef struct
 
     /*! \brief Set true once a valid INFO0 has been received (survives event overwrites). */
     bool info0_received;
+    /* K56flex startup, answer side: an INFO0c arrived after the first
+       (11.2.2.2.1); v34tx.c re-ranges from 11.2.1.2.3. */
+    bool repeated_info0c_pending;
     bool info1a_received;
     bool info1c_received;
     /*! K56flex Phase 2: accept actual INFO1c during the probe window. */

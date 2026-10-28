@@ -3474,6 +3474,36 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* 11.2.2.2.1: an answer modem that receives INFO0c again, with bit 28 set
+   (our INFO0a was received), completes its INFO0a, transmits Tone A and
+   proceeds from 11.2.1.2.3 -- Tone A for 50 ms, then the phase reversal.
+   The MT5634MU's K56flex startup sends that repeat ~100 ms into its Tone B,
+   which our receiver read as its Tone B reversal; the reversal we had already
+   sent fell inside its INFO0c, so it held Tone B waiting for one while we
+   waited for its answer, until the startup timed out
+   (mt5634mu-k56-20261027/server-d1, -d5, -d6).  Only on the K56flex
+   startup, and only before our probe has gone out. */
+static bool k56_repeated_info0c_reranging(v34_state_t *s)
+{
+    if (!s->rx.k56_phase2  ||  !s->rx.repeated_info0c_pending)
+        return false;
+    /*endif*/
+    s->rx.repeated_info0c_pending = false;
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - INFO0c repeated (11.2.2.2.1): Tone A again, then the 11.2.1.2.3 reversal\n");
+    /* The repeat is a sequence of INFO0c frames, and Tone B follows the
+       last; so the Tone B seen before it is stale and must be detected
+       again (the detector needs 20 steady bits). */
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.tone_b_present = false;
+    s->rx.persistence2 = 0;
+    s->tx.k56_info0_rerange = true;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_FIRST_A;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
 {
     /* Answering side */
@@ -3511,6 +3541,46 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
            V.90/9.2.2.1.3 -- identical wording: "After Tone B is detected and
            Tone A has been transmitted for at least 50 ms").  INITIAL_A served
            the 50 ms. */
+        if (k56_repeated_info0c_reranging(s))
+            break;
+        /*endif*/
+        if (s->tx.k56_info0_rerange)
+        {
+            /* 11.2.1.2.3 after the 11.2.2.2.1 repeat: Tone B detected and
+               held while we send 50 ms of Tone A.  The MT5634MU does either:
+               sometimes it still answers the reversal we sent before its
+               repeat (call x, ~330 ms after it), sometimes it waits for a new
+               one (calls d1/d5/d6).  So a reversal arriving here is that
+               answer, to be met 40 ms later as usual; only a Tone B steady
+               for the 50 ms with none gets a new reversal from us. */
+            if (s->rx.tone_b_present  &&  s->rx.received_event == V34_EVENT_REVERSAL_1)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - FIRST_A: Tone B reversal after the repeated INFO0c answers our earlier one\n");
+                s->tx.k56_info0_rerange = false;
+                s->rx.tone_b_ended = false;
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+            }
+            else if (!s->rx.tone_b_present)
+            {
+                s->tx.tone_duration = 0;
+            }
+            else if (++s->tx.tone_duration >= 30)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - FIRST_A: Tone B back after the repeated INFO0c, sending !A (11.2.1.2.3)\n");
+                s->tx.k56_info0_rerange = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.tone_b_ended = false;
+                s->tx.lastbit.re = -s->tx.lastbit.re;
+                s->tx.tone_duration = 1;
+                s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+            }
+            /*endif*/
+            break;
+        }
+        /*endif*/
         if (s->tx.v92_short_armed  &&  s->rx.info0_received  &&  v92_short_phase2_agreed(s))
         {
             /* V.92 9.4.2.1.2/.3: the digital modem reverses first.  Keep
@@ -3667,6 +3737,9 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_NOT_A:
+        if (k56_repeated_info0c_reranging(s))
+            break;
+        /*endif*/
         /* Send phase reversed pure tone until we see another phase reversal */
         if (s->rx.received_event == V34_EVENT_REVERSAL_1
             ||
@@ -3717,8 +3790,35 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN:
+        if (k56_repeated_info0c_reranging(s))
+            break;
+        /*endif*/
         /* Continue sending phase reversed pure tone for 40+-1ms */
-        if (++s->tx.tone_duration == 24)
+        if (++s->tx.tone_duration == 24
+            &&  s->rx.k56_phase2  &&  !s->rx.tone_b_ended
+            &&  s->rx.last_info_rx_power > s->rx.info_rx_carrier_ref/8)
+        {
+            /* 11.2.1.1.3: the call modem holds Tone B only 10 ms after its
+               reversal, then goes silent for our probe.  Tone B still up 40 ms
+               later -- received power still above 1/8 of Tone B's (signal_present
+               lags: after a real reversal it reads 0.5%, after these 70-95%)
+               -- means the phase step was not that reversal.  Against the
+               MT5634MU's K56flex startup such a step was seen 47-67 ms after
+               our reversal (a real answer needs a round trip, ~250 ms there);
+               we then sent L1/L2 into its Tone B, it measured nothing (INFO1c
+               all rates 0) and Phase 2 failed, on 7 of 7 such calls
+               (mt5634mu-k56-20261027/server-*).  Keep sending !A and wait for
+               the real one.  Only on the K56flex startup, where it was seen. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_NOT_A: Tone B still up 40 ms after the phase "
+                     "step; not 11.2.1.1.3's reversal, still waiting\n");
+            s->rx.received_event = V34_EVENT_NONE;
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+            break;
+        }
+        /*endif*/
+        if (s->tx.tone_duration == 24)
         {
             /* 40ms has passed - send another reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;

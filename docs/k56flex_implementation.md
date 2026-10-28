@@ -3404,3 +3404,42 @@ failed on 1 of 6 (b2), and b4 primed on the right grid but the client never
 left marks, with no transmit gap or echo move. The slow-callback line's
 `lec`, `v34_rx` and `ja` slots now cover the K56flex server's canceller,
 data receiver and upstream receiver.
+
+### Phase 2 against the MT5634MU: a repeated INFO0c and a reversal that was not one (28 October, evening)
+
+The remaining Phase 2 failures (b2 and earlier) were the MultiTech's INFO0
+recovery, and the data-start failure on b4 did not recur once Phase 2 was
+fixed. On every failing call the MultiTech's INFO1c reported all rates 0 (pre-emphasis
+index 10): it had not measured our L1/L2 probe. Each time, we had taken its
+first Tone B "reversal" 47-67 ms after our own Tone A reversal; on every call
+that worked it came 267-287 ms after (a round trip is ~250 ms here). The audio
+shows what it was: ~100 ms into its Tone B the MultiTech sends INFO0c again
+(V.34 11.2.2.1.1; bit 28 set, so it had our INFO0a), and the start of that
+DPSK burst read as a phase step. We then answered with L1/L2 while it was
+still sending. Sometimes it still answered our first reversal ~330 ms after
+it, sometimes it waited for a new one; then it held Tone B until the startup
+timed out.
+
+Two changes in `v34tx.c`, both only on the K56flex startup (`k56_phase2`):
+
+1. **A Tone B reversal must be followed by silence** (11.2.1.1.3: the call
+   modem holds Tone B 10 ms after it, then transmits silence). If the received
+   power is still above 1/8 of Tone B's 40 ms later (0.5% after a real
+   reversal, 70-95% after these), it was not the reversal: we keep sending !A.
+   `signal_present` lags too much to use here.
+2. **11.2.2.2.1 on a repeated INFO0c.** The receiver flags an INFO0c after the
+   first (`repeated_info0c_pending`). Before our probe, the transmitter
+   then waits for Tone B to be detected afresh. A reversal that follows is
+   the answer to our earlier one, met 40 ms later as usual. Tone B held
+   50 ms with none gets a new 11.2.1.2.3 reversal.
+
+The Tone B echo guard of the previous section stays. Live, eight calls on
+CT 117 with all of this: **8 of 8 CONNECT 44000/46000 V42bis**, five of them
+through the repeated-INFO0c path (`artifacts/mt5634mu-k56-20261027/server-e1..e8`).
+
+Two dead ends, for the record. Ending each gate only on the two-pair grid made it worse: in 3 of 3 calls
+the client decoded no downstream at all (NoEC, 0 frames each way), so it
+was reverted, and only the tail pair padding remains. The engine's "phase X (N pairs
+sent)" lines are logged once per 160-sample fill, not at the transition, so
+pair counts from them are approximate; priming's position in `live-tx.g711`
+(`k56flex_pcm_rx_frame` from the six all-ones frames) is exact.

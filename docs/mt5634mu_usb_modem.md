@@ -321,3 +321,5 @@ reads ATI11 with its pager advanced.
 Later the same day: three more causes of intermittent failures, all ours, are
 in `docs/k56flex_implementation.md` ("The MT5634MU's intermittent failures").
 With them, 4 of 5 calls that pass Phase 2 connect at 44000 V42bis.
+Evening: with the Phase 2 fixes (a repeated INFO0c, a false Tone B reversal) 8 of 8
+calls connect at 44000/46000 V42bis.

@@ -6004,6 +6004,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                  && (s->stage == V34_RX_STAGE_TONE_A
                                      || s->stage == V34_RX_STAGE_INFO0))
                             s->v90_repeated_info0d_pending = true;
+                        else if (s->k56_phase2  &&  !s->calling_party)
+                            s->repeated_info0c_pending = true;
                         s->info0_received = true;
                     }
                     break;
@@ -18939,6 +18941,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.info1a_received = false;
     s->rx.info1c_received = false;
     s->rx.k56_phase2 = false;
+    s->rx.repeated_info0c_pending = false;
     s->rx.info1a_raw_12_17 = 0;
     s->rx.info1a_raw_32_33 = 0;
     s->rx.info1a_raw_40_49 = 0;
