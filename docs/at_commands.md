@@ -21,12 +21,20 @@ command), [v54_diagnostics.md](v54_diagnostics.md) (`+T*`),
 [v92_quick_connect.md](v92_quick_connect.md) (`+PQC`, `+PSS`). `--mode` and the
 other start-up options are in the [top-level readme](../readme.md).
 
+For installation, terminal settings and a first-call walkthrough, start with
+the [user guide](usage.md). Examples below are sent to the AT console, not
+the shell. End ordinary command lines with Enter (CR); the guarded `+++`
+escape is the exception and takes no Enter. After `CONNECT`, a combined
+console carries payload until you escape back to command state.
+
 ## Common tasks
 
 | To | Send |
 |---|---|
 | See what the modem supports, live | `AT$`, then `AT+MS$`, `ATS$` and the other pages it names |
 | Dial an extension | `ATD6001` (the number goes to `--sip-server`) |
+| Hang up from command state | `ATH` (on a combined port, escape from payload mode first) |
+| Return to payload after an escape | `ATO` |
 | Answer by hand instead of after two rings | `ATS0=0`, then `ATA` on RING |
 | Offer V.34 at most on the next call | `AT+MS=V34` |
 | Offer V.92 with PCM upstream | `AT+MS=V92`, `AT+PIG=0` |
@@ -46,6 +54,13 @@ that always speaks AT (RING, CONNECT, NO CARRIER and mid-call commands) and a
 data console carrying payload only; `ATO` on the control console prints the
 data PTY's path. With `--lines N`, line *i* uses `<link>.i`
 ([multi_line.md](multi_line.md)).
+
+With the factory S12=50, leave at least one second of silence before `+++`,
+type the three plus signs without Enter, then leave at least one second of
+silence afterwards and wait for `OK`. Send `ATH` to hang up or `ATO` to resume.
+The split control console needs no escape. Use one reader per PTY; a terminal
+and an application on the same port compete for received bytes. See
+[application setup](usage.md#6-attach-an-application) for the split-port workflow.
 
 ## Basic commands (`AT$`)
 

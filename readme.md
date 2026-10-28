@@ -11,23 +11,49 @@ analogue role, V.91, clear channel (V.110/V.120), x2, K56flex, and fax (T.31
 class 1, T.32 class 2.0, V.34 half-duplex). DSP is native where the standards
 need it, with vendored SpanDSP and PJSIP for the rest.
 
-**Documentation:** [docs index](docs/README.md) ·
+**Documentation:** [user guide](docs/usage.md) · [docs index](docs/README.md) ·
 [AT command reference](docs/at_commands.md) · [tools and make targets](tools/README.md) ·
 [environment variables](docs/env_knobs.md)
 
 ## Quick start
 
+Install the [build dependencies](#building) first. From the repository root:
+
 ```bash
-make
-./sip_v90_modem --sip-server your-provider.com \
-                --username modem --password yourpassword \
+make sip_v90_modem
+# Terminal 1: keep the modem running
+./sip_v90_modem --sip-server pbx.example.net \
+                --username modem --password 'your-password' \
                 --pty-link /tmp/v90modem
-minicom -D /tmp/v90modem
 ```
 
-On the PTY, `ATD6001` dials extension 6001, and an incoming call is answered
-after two rings (`ATS0=0` to answer only on `ATA`). `AT$` lists the commands.
-`./sip_v90_modem --help` lists the options; unknown options are an error.
+In a second terminal, open the command/data port (picocom is optional):
+
+```bash
+picocom --baud 115200 --flow n /tmp/v90modem
+```
+
+Type `AT` then Enter; expect `OK`. `ATD6001` dials extension 6001 through your
+PBX. Incoming calls are answered after two rings (`ATS0=0` selects manual
+`ATA`). After `CONNECT`, the PTY carries data rather than commands. To hang up,
+wait one second, type `+++` **without Enter**, wait another second for `OK`,
+then send `ATH`. Exit picocom with Ctrl-A, Ctrl-X; stop the modem with Ctrl-C
+in terminal 1.
+
+The PTY is not a login or PPP server: an application must handle the payload.
+See the [user guide](docs/usage.md) for a full first-call walkthrough, split
+control/data ports, saving settings and troubleshooting. `AT$` lists AT help;
+`./sip_v90_modem --help` lists launch options. Password arguments may be visible
+in shell history and process listings; use a dedicated test account.
+
+To explore without a SIP account or hardware:
+
+```bash
+./sip_v90_modem --gui-loopback
+# Browser alternative: ./sip_v90_modem --gui-web --loopback
+```
+
+Local loopback demonstrates the modem but does not validate a real phone path.
 
 ## Status (26 October 2026)
 
@@ -73,7 +99,10 @@ converter unchanged. Everything between us and the FXS port must therefore:
 - use a minimal, fixed jitter buffer (ours defaults to 200 ms, `ME_JB_MS`);
 - end at an FXS port with a real D/A converter.
 
-`make g711-path-test` checks a PBX path for byte-exact G.711.
+`make g711-path-test` probes a PBX path for byte-exact G.711. It is a live
+network test, not a self-contained check: it needs an Answer()+Echo() extension
+and account details passed through `G711_TEST_ARGS`. See the
+[tool reference](tools/README.md#make-targets-outside-make-test).
 
 ## Configuration
 
@@ -85,7 +114,8 @@ Start-up options set the power-on state:
 
 | Option | Effect |
 |---|---|
-| `--sip-server`, `--username`, `--password` | Registrar and account; dialled numbers go to `sip:n@server` |
+| `--sip-server`, `--username`, `--password` | Registrar and account; dialled numbers go to `sip:n@server`. Omit the server for peer-to-peer listening |
+| `--no-register` | Keep outbound authentication without registering a new Contact; not the usual incoming-call setup |
 | `--local-port`, `--rtp-port`, `--bind-addr` | Local SIP port, RTP port, address |
 | `--pty-link path` | One console for commands and data (`+++` / `ATO`) |
 | `--control-link path --data-link path` | A command console that always speaks AT, and a data-only port |
@@ -130,17 +160,31 @@ the tree is on the live path: `SRCS` in the `makefile` is the list that is.
 copies are not substitutes. Both are rebuilt automatically when the host OS or
 architecture changes.
 
-- **macOS:** install the dependencies with Homebrew, then `make`; the makefile
-  finds Homebrew itself. If your pjproject build uses a different
-  architecture suffix, pass it, e.g. `make ARCH_SUFFIX=arm64-apple-darwin23.0.0`.
+- **macOS:** install Apple's command-line tools (`xcode-select --install`) and
+  Homebrew, then:
+
+  ```bash
+  brew install autoconf automake libtool pkg-config libtiff jpeg-turbo openssl@3 picocom
+  make
+  ```
+
+  The makefile finds Homebrew itself. The vendored PJSIP build selects its own
+  architecture suffix; no `ARCH_SUFFIX` override is needed.
 - **Debian/Ubuntu:**
 
   ```bash
   sudo apt install build-essential autoconf automake libtool pkg-config \
                    libasound2-dev libssl-dev libopus-dev libtiff-dev \
+                   libjpeg-dev uuid-dev python3 picocom \
                    libavformat-dev libavcodec-dev libswscale-dev \
                    libavutil-dev libv4l-dev
+  make
   ```
+
+`picocom` is only a terminal client; another serial terminal can be used.
+For just the application, use `make sip_v90_modem`. Python 3 runs the GUI
+launcher and test tools. See the [user guide](docs/usage.md#2-build) for build
+checks and first-use steps.
 
 Python analysis tools use a repo-local virtualenv:
 
@@ -154,7 +198,8 @@ python3 -m venv .venv
 | Command | What it runs |
 |---|---|
 | `make test-fast` | The quick tier ([tests/fast.list](tests/fast.list)), about 45 s |
-| `make test` | Both tiers, including the long matrices ([tests/slow.list](tests/slow.list)) |
+| `make test-slow` | Long matrices ([tests/slow.list](tests/slow.list)) |
+| `make test` | Both fast and slow tiers |
 | `make pcm-loopback-test`, `make pcm-matrix` | V.90/V.92 PCM datapump, startup and recovery checks; all-profile matrix ([notes](docs/pcm_loopback_testing.md)) |
 | `make v56-test`, `make v56-sweep` | V.34 modem pairs through synthetic noise, loss, delay and echo ([notes](docs/v56_loopback.md)) |
 | `make v34-tone-matrix` | Score recorded modem tones for INFO0a, INFO1a and Phase 3 |
