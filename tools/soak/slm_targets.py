@@ -51,14 +51,14 @@ def kill_ours():
        "sleep 1; true" % (OUR_PORT, PTY))
 
 
-def start_ours(cdir, env, capture=True):
+def start_ours(cdir, env, capture=True, tree='/root/v90modem'):
     kill_ours()
     ox('mkdir -p %s; rm -f %s' % (cdir, PTY))
-    ox('cd /root/v90modem && ( env SIP_FORCE_PCMU=1 ME_LAPM_XID_OPTION_OCTETS=auto '
+    ox('cd %s && ( env SIP_FORCE_PCMU=1 ME_LAPM_XID_OPTION_OCTETS=auto '
        'VPCM_G711_TAP_DIR=%s %s nohup timeout 400 ./sip_v90_modem --sip-server '
        'asterisk.net.cryan.nz --username %s --password %s --local-port %d --rtp-port %d '
        '--pty-link %s --verbose > %s/server.log 2>&1 < /dev/null & ); sleep 5'
-       % (cdir, env, OUR_ACCT, OUR_ACCT, OUR_PORT, OUR_RTP, PTY, cdir))
+       % (tree, cdir, env, OUR_ACCT, OUR_ACCT, OUR_PORT, OUR_RTP, PTY, cdir))
     if capture:
         ox("stty -F %s raw -echo; ( cat %s > %s/pty-rx.bin 2>/dev/null < /dev/null & ); true"
            % (PTY, PTY, cdir))
@@ -356,11 +356,11 @@ def one_call(out, name, target, args):
     if caller_ours:
         # Our modem dials as the V.90 analogue role towards the digital answerers.
         env = ('ME_V90_ROLE=analogue ' if target in ('7900', '7910') else '') + args.ours_env
-        start_ours(ocdir, env, capture=False)
+        start_ours(ocdir, env, capture=False, tree=args.ours_dir)
         init = ['AT', 'ATE0']
     else:
         if target == 'ours':
-            start_ours(ocdir, args.ours_env)
+            start_ours(ocdir, args.ours_env, tree=args.ours_dir)
         start_slm()
         init = ['AT', 'ATZ', 'ATX3', 'ATE0V1Q0', 'AT' + args.nparm]
     with (cdir / 'serial.bin').open('wb') as log:
@@ -445,6 +445,7 @@ def main():
     ap.add_argument('--hold', type=float, default=60, help='seconds held after CONNECT')
     ap.add_argument('--probe-seconds', type=float, default=30)
     ap.add_argument('--ours-env', default='', help='extra env for our server')
+    ap.add_argument('--ours-dir', default='/root/v90modem', help='CT 117 tree whose sip_v90_modem runs')
     ap.add_argument('--gap', type=float, default=20, help='seconds between calls')
     args = ap.parse_args()
     args.target_ms = dict(kv.split('=', 1) for kv in args.target_ms.split(',') if kv)
