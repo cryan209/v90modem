@@ -3443,3 +3443,44 @@ was reverted, and only the tail pair padding remains. The engine's "phase X (N p
 sent)" lines are logged once per 160-sample fill, not at the transition, so
 pair counts from them are approximate; priming's position in `live-tx.g711`
 (`k56flex_pcm_rx_frame` from the six all-ones frames) is exact.
+
+### Native HSF again: the post-L2 echo guard is one measured round trip (28 October, night)
+
+The native HSF pair (`tools/k56flex_hsf_pair.py`, in no test list until now)
+had stopped connecting: "no usable measured Phase-2 INFO1 selection" at
+10.7 s, against 120 s and 65536 exact bytes each way on 21 October. The
+cause was the MultiTech's post-L2 Tone B echo guard (above). It ignores
+Tone B for the round trip plus 50 ms, but nothing outside V.92's short
+Phase 2 measured a round trip, so it was always the 300 ms fallback. HSF on
+the direct socket raises Tone B 23 ms after our L2 (14 bauds). We ignored it
+until 194 bauds, then took HSF's L1 (7 dB above its Tone B) for Tone B,
+reversed into it, and measured every symbol rate at -35 dB SNR, so INFO1a
+projected 0 bps. HSF's own INFO1c was CRC-clean throughout.
+
+The guard now uses a K56-only round trip, measured as V.34 11.2.1.2.4 does:
+from our 11.2.1.2.3 Tone A reversal to the call modem's confirmed reversal,
+less the 40 ms it waits (11.2.1.1.3). The time of our reversal is taken on
+every entry into FIRST_NOT_A except refusing a false reversal, so the
+repeated-INFO0c path, where the MultiTech answers our earlier reversal,
+keeps the earlier time. The shared `round_trip_delay_estimate` is untouched,
+because ordinary V.34 timeouts read it.
+
+| Peer | Round trip | Guard | Tone B accepted |
+|---|---|---|---|
+| native HSF, direct socket | 221 samples (28 ms) | 47 bauds | 62 bauds |
+| MT5634MU live, CT 117 (r1-r8) | 1830-1990 samples (229-249 ms) | 172-181 bauds | 182-194 bauds |
+
+Results:
+- HSF: 40 s with 8192 exact bytes each way, and 120 s with 65536 each way
+  and no carrier interruptions.
+- Control (HEAD without the change, same harness): fails as before, Tone B
+  taken at 194 bauds.
+- MT5634MU: **8 of 8 CONNECT 44000/46000 V42bis** with LAPM
+  (`artifacts/mt5634mu-k56-20261027/server-r1..r8`), four of them through
+  the repeated-INFO0c path.
+
+The harness also now sends `AT+ES=1`. The native peer's host is raw 8N1,
+and since the K56 server's V.42 framing (`5baa5022`), our V.42 8.10 ODP
+(`11 91` repeated, 2260 bytes) reached it ahead of the payload. The 40 s pair
+is now in `tests/fast.list` (17 s; needs `../cruft`), and `audio_sock_modem`
+is a test target.

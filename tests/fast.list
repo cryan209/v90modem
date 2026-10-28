@@ -39,6 +39,9 @@ python3 tools/test_k56flex_probe_timeout.py
 ./mica_qam_test
 ./k56flex_probe_test
 python3 tools/k56flex_hsf_probe_check.py reference-data/k56flex-hsf/downstream-probes-ulaw.g711
+# Our K56flex server against cruft's native legacy HSF client (../cruft):
+# Phase 2 through data, 8192 exact bytes each way (17 s).
+sh -c 'python3 tools/k56flex_hsf_pair.py --seconds 40 --payload-bytes 8192 --require-payload --require-audio-gates --output "$TMPDIR/hsf" > "$TMPDIR/hsf.log" 2>&1 || { tail -40 "$TMPDIR/hsf.log"; tail -60 "$TMPDIR/hsf/server.log"; exit 1; }'
 ./k56flex_client_test
 ./k56flex_7910_p1_test
 ./k56flex_train_test

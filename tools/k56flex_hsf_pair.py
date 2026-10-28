@@ -201,6 +201,12 @@ def main():
                         time.sleep(0.02)
                     fd = os.open(pty_path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                     tty.setraw(fd)
+                    # The native peer's host is raw 8N1 with no V.42, so ask
+                    # for none (V.250 +ES=1, V.14 only). Otherwise our V.42
+                    # 8.10 detection pattern (ODP, DC1 even/odd parity)
+                    # reaches its host ahead of the payload.
+                    os.write(fd, b"AT+ES=1\r")
+                    time.sleep(0.1)
                     os.write(fd, b"ATD1\r")
                     # Let the DTE thread accept ATD before connecting. The
                     # socket log is checked below: incoming/answer role is

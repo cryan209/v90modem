@@ -1053,6 +1053,10 @@ typedef struct
     bool phase2_reranging;
     /* k56_repeated_info0c_reranging(): FIRST_A waits for Tone B afresh. */
     bool k56_info0_rerange;
+    /* K56flex: receive-clock time of our 11.2.1.2.3 Tone A reversal, and
+       the round trip 11.2.1.2.4 gives from it (-1 until measured). */
+    span_sample_timer_t k56_reversal_time;
+    int k56_rtd;
     /*! \brief True once this modem has transmitted the 11.2.1.2.5 L1/L2
         probe as the V.34 answer modem.  The 11.2.2.2.1 INFO0 recovery
         resumes differently either side of that point. */

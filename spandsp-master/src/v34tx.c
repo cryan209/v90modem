@@ -3506,6 +3506,8 @@ static bool k56_repeated_info0c_reranging(v34_state_t *s)
 
 static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
 {
+    const int entry_stage = s->tx.stage;
+
     /* Answering side */
     switch (s->tx.stage)
     {
@@ -3820,6 +3822,19 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         if (s->tx.tone_duration == 24)
         {
+            /* V.34 11.2.1.2.4: the round trip is the time from our reversal
+               to the call modem's, less the 40 ms it waits (11.2.1.1.3). */
+            if (s->rx.k56_phase2  &&  s->tx.k56_reversal_time > 0
+                &&  s->rx.tone_ab_hop_time > s->tx.k56_reversal_time)
+            {
+                int rtd = (int) (s->rx.tone_ab_hop_time - s->tx.k56_reversal_time)
+                        - 40*(SAMPLE_RATE/1000);
+
+                s->tx.k56_rtd = (rtd > 0)  ?  rtd  :  0;
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - 11.2.1.2.4: round trip %d samples\n", s->tx.k56_rtd);
+            }
+            /*endif*/
             /* 40ms has passed - send another reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 0;
@@ -3997,6 +4012,15 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         break;
     }
     /*endswitch*/
+    /* Every path into FIRST_NOT_A but the refusal of a false reversal
+       (from FIRST_NOT_A_REVERSAL_SEEN) has just reversed Tone A. */
+    if (s->rx.k56_phase2  &&  s->tx.stage == V34_TX_STAGE_FIRST_NOT_A
+        &&  entry_stage != V34_TX_STAGE_FIRST_NOT_A
+        &&  entry_stage != V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN)
+    {
+        s->tx.k56_reversal_time = s->rx.sample_time;
+    }
+    /*endif*/
     return s->tx.lastbit;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4553,6 +4577,20 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
 
 static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
 {
+    /* V.34 12.2.1.4.1: acknowledge and repeat INFO0 when the source
+       restarts its capability exchange. Do not send INFOh into that exchange. */
+    if (s->rx.hdx_repeated_info0_pending)
+    {
+        s->rx.hdx_repeated_info0_pending = false;
+        s->tx.info0_acknowledgement = true;
+        s->rx.tone_b_present = false;
+        s->rx.hdx_tone_a_present = false;
+        s->rx.persistence1 = s->rx.persistence2 = 0;
+        s->rx.received_event = V34_EVENT_NONE;
+        s->tx.stage = V34_TX_STAGE_INITIAL_PREAMBLE;
+        info0_baud_init(s);
+        return s->tx.lastbit;
+    }
     /* Recipient's 12.2.1.2 / 12.2.2.1 sequence. The actual carrier
        remains B for a call modem and A for an answer modem. */
     switch (s->tx.stage)
@@ -5357,6 +5395,14 @@ static int post_l2_tone_b_wait_bauds(v34_state_t *s)
    have seen on a SIP path is 250 ms), plus the detector's persistence. */
 static int post_l2_echo_guard_bauds(v34_state_t *s)
 {
+    /* The echo of our L2 returns one round trip after it ends, so the
+       guard is that round trip, as measured from the first reversal pair,
+       plus 50 ms.  A fixed 300 ms ignored native HSF's Tone B, raised
+       23 ms after our L2 on a direct connection, and we then measured its
+       L1 as our Tone B (k56flex-hsf-head-20261028b). */
+    if (s->tx.k56_rtd >= 0)
+        return (s->tx.k56_rtd*600 + 4000)/8000 + 30;
+    /*endif*/
     if (s->rx.round_trip_delay_estimate > 0)
         return (s->rx.round_trip_delay_estimate*600 + 4000)/8000 + 30;
     /*endif*/
@@ -12021,6 +12067,8 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.info0_retry_count = 0;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.k56_probe_cc_tail_samples = 0;
+    s->tx.k56_reversal_time = 0;
+    s->tx.k56_rtd = -1;
     s->tx.v90_info1a_total_retries = 0;
     s->tx.v90_phase2_info0_recovery_loops = 0;
     s->tx.phase3_call_wait_j = false;
@@ -12189,6 +12237,7 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->rx.hdx_primary_resync = false;
     s->rx.hdx_tone_a_present = false;
     s->rx.hdx_retrain_peer_tone = false;
+    s->rx.hdx_repeated_info0_pending = false;
     if (!duplex)
     {
         /* 12.2/12.3 fresh acquisition cannot inherit a previous page's
