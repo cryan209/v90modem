@@ -4095,6 +4095,33 @@ calls were placed or remote endpoint negotiation scored. PBX contacts for
 confirmed before attributing this to any of them. Disposable audit logs and
 raw capture: `artifacts/apple-eicon-sense-audit/`.
 
+### Confirmed 6005 mapping and ATA-side preflight (2026-10-28)
+
+The user identifies the Apple line as Grandstream FXS2 / extension 6005.
+Asterisk shows 6005 registered at `10.69.111.2:5062`, reachable, idle and
+allowing `clearmode|ulaw`; 6004 is also registered. This rules out the old
+missing-endpoint/unregistered-ATA incident, not an FXS feed or DAA fault.
+
+Starting native-9600 audio on-hook before the protected hook request still
+produces hook `0x09`, current code 0, auxiliary `0x02` and sense 0 at seizure.
+The attempt fails and verifies final hook/monitor off, protection enabled.
+Thus changing only audio/control startup order does not restore the loop.
+
+A bounded PBX-originated call to PJSIP/6005 (8-second answer timeout, no
+retries) overlaps a 14-second Apple `--answer` ring watch. Asterisk logs
+`Remote end Ringing` and expiration; the Apple recognizes no ring. This is
+SIP-side ringing, not proof of ringing voltage at the RJ11, and absence of a
+recognized ring does not independently validate our USB ring receiver.
+No modem negotiation or payload transfer occurs. Both processes finish and
+final Apple readback is hook 0 / protection `0x0c`.
+
+The ATA HTTP interface is reachable from the PBX, not directly from this Mac.
+Its status page requires authentication; a single default-admin login attempt
+is rejected and no further passwords are tried. No ATA configuration was
+changed. Need authorized web access or an FXS2 status readout to correlate
+actual ATA hook/feed state with the Apple command. Local evidence:
+`artifacts/apple-6005-audit/`.
+
 ### Where the 1.1 s goes (2026-10-24)
 
 v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run
