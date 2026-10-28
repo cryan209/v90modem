@@ -347,6 +347,18 @@ static int line_hook(int off_hook)
     return sense <= 0 ? -1 : 0;
 }
 
+/* One-shot calls must not leave the on-hook monitor powered after exit.
+ * Unlike line_hook(0), this is not a transition back to CID listening. */
+static int line_close(void)
+{
+    int result = apple_line_release(reg_read, reg_write);
+    line_event("line_released",@{@"confirmed":@(result == 0)});
+    fprintf(stderr,"[APPLE] final on-hook/monitor-off/protection-on: %s\n",
+            result == 0 ? "confirmed" : "NOT CONFIRMED");
+    libusb_close(usb); usb = NULL; libusb_exit(NULL);
+    return result;
+}
+
 /* ------------------------------------------------------------------ */
 /* Transmit script: DTMF, then hand the stream to the engine          */
 /* ------------------------------------------------------------------ */
@@ -2379,8 +2391,37 @@ static void usage(const char *a0)
         a0, a0, a0, a0, a0);
 }
 
+/* Fault-injected register I/O: cleanup must attempt both writes and must
+ * never report success on failed writes or missing final readbacks. */
+static int release_test_regs[32], release_test_step, release_test_fail;
+static int release_test_read(unsigned char reg)
+{
+    return release_test_step++ == release_test_fail ? -1 : release_test_regs[reg];
+}
+static int release_test_write(unsigned char reg, unsigned char value)
+{
+    if (release_test_step++ == release_test_fail) return -1;
+    release_test_regs[reg] = value;
+    return 0;
+}
+static int release_selftest(void)
+{
+    for (int fail = -1; fail < 6; fail++) {
+        release_test_regs[5] = 0xa9;
+        release_test_regs[17] = 0x24;
+        release_test_step = 0; release_test_fail = fail;
+        int rc = apple_line_release(release_test_read,release_test_write);
+        if (release_test_step != 6 || (rc == 0) != (fail < 2)) return 1;
+        if (fail == -1 && (release_test_regs[5] != 0xa0 || release_test_regs[17] != 0x2c)) return 1;
+        if (fail == 0 && release_test_regs[5] != 0) return 1;
+        if (fail == 1 && release_test_regs[17] != 12) return 1;
+    }
+    return 0;
+}
+
 static int gui_diagnostic_selftest(void)
 {
+    if (release_selftest()) return 1;
     @autoreleasepool {
         g_gui_control = 1;
         int16_t signal[4096], before[4096];
@@ -2753,7 +2794,7 @@ int main(int argc, char **argv)
      * A powered direct pair has no FXS device to generate that indication. */
     if (g_answer_mode && !answer_now && !(g_gui_control && gui_recent_ring())) {
         if (gui_onhook_start() < 0 || wait_for_ring(ring_wait) < 0) {
-            gui_onhook_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 1;
+            gui_onhook_stop(); close_dte(); me_destroy(); line_close(); return 1;
         }
         cid_deliver();
     }
@@ -2766,32 +2807,30 @@ int main(int argc, char **argv)
         me_dial(g_dial);
     }
 
-    if (g_stop) { gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
+    if (g_stop) { gui_audio_stop(); close_dte(); me_destroy(); return line_close() < 0 ? 1 : 0; }
     if (line_hook(1) < 0) {                  /* off-hook; refuses with no pair */
-        line_hook(0); gui_audio_stop();
+        gui_audio_stop();
         close_dte();
         me_destroy();
-        libusb_close(usb);
-        libusb_exit(NULL);
+        line_close();
         return 1;
     }
-    if (g_stop) { line_hook(0); gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
-    if (line_poll(1) < 0) { gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 1; }
+    if (g_stop) { gui_audio_stop(); close_dte(); me_destroy(); return line_close() < 0 ? 1 : 0; }
+    if (line_poll(1) < 0) { gui_audio_stop(); close_dte(); me_destroy(); line_close(); return 1; }
     if (gui_monitor_only) line_event("monitor_stopped",@{@"reason":@"Call active"});
     gui_monitor_only = 0;
     if (!gui_audio_active && audio_start() < 0) {
-        line_hook(0);
+        gui_audio_stop();
         close_dte();
         me_destroy();
-        libusb_close(usb);
-        libusb_exit(NULL);
+        line_close();
         return 1;
     }
     gui_audio_active = 1;
     if (physical_plan.pulses) {
         if (physical_dial_run() < 0) {
-            line_hook(0); gui_audio_stop(); close_dte(); me_destroy();
-            libusb_close(usb); libusb_exit(NULL); return 1;
+            gui_audio_stop(); close_dte(); me_destroy();
+            line_close(); return 1;
         }
         atomic_store(&dial_control_active,0);
         tx_dtmf_done = 1;
@@ -2840,8 +2879,6 @@ int main(int argc, char **argv)
             dev_in_frames, dev_out_frames, (long)dev_out_frames - (long)dev_in_frames);
     for (int b = 0; b < FILL_BINS; b++) if (fill_min[b] >= 0) fprintf(stderr, " %d", fill_min[b]);
     fprintf(stderr, "\n");
-    line_hook(0);                            /* always release the line */
-    libusb_close(usb);
-    libusb_exit(NULL);
-    return line_guard_tripped ? 1 : g_engine_running ? 0 : 1;
+    int released = line_close();
+    return released < 0 || line_guard_tripped ? 1 : g_engine_running ? 0 : 1;
 }

@@ -23,6 +23,22 @@ static inline int apple_line_overcurrent(const apple_modem_line_t *s)
     return apple_line_valid(s) && (s->hook & 1) &&
         ((s->status & 31) == 31 || (s->auxiliary >= 0 && (s->auxiliary & 1)));
 }
+/* Final process teardown, not on-hook CID monitoring. Si3056 §5.22:
+ * restore OPE after seizure failures as well as successful calls. Attempt
+ * both writes even after an I/O error; only readback can confirm release.
+ * Preserve unrelated bits, but use safe values when the initial read fails. */
+static inline int apple_line_release(int (*read_reg)(unsigned char),
+                                     int (*write_reg)(unsigned char, unsigned char))
+{
+    int hook = read_reg(5), protection = read_reg(17);
+    int hw = write_reg(5, (unsigned char)(hook < 0 ? 0 : hook & ~9));
+    int pw = write_reg(17, (unsigned char)(protection < 0 ? 12 : protection | 8));
+    hook = read_reg(5);
+    protection = read_reg(17);
+    return hw >= 0 && pw >= 0 && hook >= 0 && !(hook & 9) &&
+           protection >= 0 && (protection & 8) ? 0 : -1;
+}
+
 static inline int apple_line_signed_sense(int value)
 {
     return value >= 128 ? value-256 : value;

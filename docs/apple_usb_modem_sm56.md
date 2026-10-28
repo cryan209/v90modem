@@ -4023,6 +4023,40 @@ phase fits, alternating trial logs/raw taps/events, executable provenance,
 cleanup readbacks and test evidence:
 `reference-data/artifacts/apple-cx-clocking-20261018/`.
 
+### 7900/7910 preflight and one-shot cleanup (2026-10-28)
+
+The currently attached Apple is USB `1:5`, CoreAudio UID ending
+`000000:3,4`. It initially had configuration 0; setting configuration 1
+restored its audio endpoint and register access. Do not reuse older USB
+addresses/UIDs without enumerating again.
+
+Bounded attempts to 7910 and 7900 both stopped at local seizure: hook
+readback `0x09`, raw line sense `0x00`, no DTMF or engine audio started.
+These do not test either Eicon endpoint, V.8 negotiation or modem modes.
+Reconnect the RJ11 to a powered PBX/ATA line before running the mode matrix.
+The first launch mistakenly used uppercase `ME_MODE=V34`, which the engine
+rejects and defaults to V.90; the second used lowercase `v34`. Prefer
+`AT+MS` over environment mode selection for subsequent controlled trials.
+
+The failed call exposed a cleanup distinction: `line_hook(0)` intentionally
+keeps the receive-monitor bit set for on-hook capture/CID, but a terminating
+one-shot process has no listener. One-shot call teardown now clears both
+hook and monitor, restores OPE (Si3056 §5.22), and checks register readbacks.
+It attempts both safety writes even if an earlier operation failed; unknown
+initial registers use safe hook/protection values. Final cleanup failure
+also makes an otherwise successful call exit nonzero. Persistent GUI
+monitoring and the explicit `--hook` control semantics are unchanged.
+
+The post-change 7900 attempt exits 1 before dialling and logs
+`line_released` with `confirmed: 1`. Independent probe readback confirms
+hook register `0x00`, protection `0x0c` (enabled), no overload. No further
+mode attempts were made on the unpowered/disconnected line. Hardware-free
+fault injection covers every release I/O operation, missing initial/final
+reads, failed writes and preservation of unrelated bits; all five
+`make gui-apple-test` checks pass. Local attempt logs/events are under
+`artifacts/apple-eicon-current/`; these are disposable preflight evidence,
+not retained interoperability fixtures.
+
 ### Where the 1.1 s goes (2026-10-24)
 
 v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run
