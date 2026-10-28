@@ -1194,16 +1194,26 @@ away: 0.43 s of V.14 text from our client, and probably the Courier's "one
 line lost in the switch" of 10 October. Upstream is now also accepted in a
 change's DATA_STARTUP once B1 is acquired. Startup is unchanged.
 
-**What V.14 still loses.** With V.42 a change mid-payload is invisible:
-`tests/fast.list` runs 15 to 6 mid-payload, text intact both ways. Over
-V.14, measured across a change with full DTE dumps
-(`ENGINE_PAIR_DTE_DUMP`):
-- downstream is now exact;
-- upstream gains 65 bytes and loses 7 at the switch. The gain is our S and
-  MP decoded as data for the ~20 ms our server needs to recognise S; the
-  loss is the mapping frame cut off at the seam. Removing the gain would
-  mean delaying every x2 call's upstream by the S detector's latency, which
-  is not done.
+**V.14 across a change.** With V.42 a change mid-payload was invisible from
+the start. Over V.14, measured with full DTE dumps (`ENGINE_PAIR_DTE_DUMP`)
+and the server's received bits, it lost data in three places, all ours:
+- **Downstream DATA_STARTUP ones** broke a character. Fixed by dropping
+  them (above).
+- **Our S decoded as data upstream** for the ~80 ms before our server
+  recognised it: 65 junk octets. On V.14 the server now holds upstream bits
+  for 120 ms, and when a change begins it drops those decoded from the S's
+  onset on (`x2_session.c` records it, `s_onset`). Calls with V.42 are not
+  delayed: CRC rejects that junk anyway.
+- **The seam** cut 7 characters. The client now sends 40 ms of marks from
+  V.34 data before its S, taking nothing from the DTE, so the seam and the
+  server's decoder tail lose idle. The marks must start between characters
+  (`ds_tx_between_characters()`): bit-level marks first landed after the
+  first four bits of a character, and the server got that character's
+  start, 620 ones, then the rest.
+
+Now 15 of 15 changes mid-payload (2.5 to 3.5 s into data, to index 1, 6
+and 12) carry the 12672-octet text exactly in both directions. One V.14
+row is in `tests/fast.list`.
 
 **Tone A.** The client now recognises a server's Tone A in data (2400 Hz,
 the 1800 Hz guard counting toward purity but not in place of the tone;

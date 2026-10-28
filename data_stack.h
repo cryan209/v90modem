@@ -260,6 +260,9 @@ void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate);
 void ds_set_wire_observer(void (*observer)(data_stack_t *, int, int));
 int ds_tx_get_bit(data_stack_t *s);
 void ds_rx_put_bit(data_stack_t *s, int bit);
+/* V.14 framing with no character part-sent: marks from here on are idle
+ * (V.14 4.1), not a break inside a character. */
+bool ds_tx_between_characters(const data_stack_t *s);
 
 /* Line side, packed-byte oriented (V.90 codeword mapper input/output).
  * Bits are packed LSB-first, matching the datapump byte order. The TX fill

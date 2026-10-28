@@ -292,7 +292,7 @@ static void begin_renegotiation(x2_session_t *s)
 {
     if(s->stage!=X2_PAYLOAD || s->reneg || s->symmetric)return;
     s->reneg=1;s->reneg_ack=0;++s->renegotiations;
-    s->reneg_s_sample=s->rx_samples;
+    s->reneg_s_sample=s->rx_samples;s->reneg_s_onset=s->s_onset;
     s->reneg_config=s->data_config;
     s->mp_valid=0;
     x2_mp_rx_init(&s->mp_rx,mp_received,s);
@@ -345,7 +345,7 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
     }
     if(s->s_stable>=32 && reversed) {x2_session_upstream_s_bar(s);return;}
     if(!stable)s->s_stable=0;
-    ++s->s_stable;
+    if(++s->s_stable==1)s->s_onset=s->rx_samples+1-40;
     for(k=0;k<3;++k){s->s_reference_re[k]=re[k];s->s_reference_im[k]=im[k];}
 }
 /* V.34 10.1.2 and 11.2.1.2.3-.5. A 5 ms coherent window

@@ -3468,6 +3468,13 @@ static uint64_t g_x2_client_samples;
    has fired, and whether a change is open. */
 static uint64_t g_x2_client_data_sample;
 static bool g_x2_client_reneg_done, g_x2_client_rr_open;
+/* On V.14 a requested change first sends 40 ms of marks from V.34 data,
+   starting between characters and taking nothing from the DTE: whatever the
+   seam and the server's decoder tail lose is then idle, not data (V.14 lost
+   7 octets there, 28 Oct). 0 none; 1 waiting for a character to finish; 2
+   sending marks (g_x2_client_pad_bits left); 3 done, the change may open. */
+static int g_x2_client_pad, g_x2_client_pad_index;
+static unsigned g_x2_client_pad_bits;
 static x2_client_up_t g_x2_client_last_up;
 static x2_client_dn_t g_x2_client_last_dn;
 
@@ -9954,6 +9961,41 @@ static void me_v90_report_deferred_connect(void)
     }
 }
 
+/* x2 server, V.14 only: upstream bits are held 120 ms before the DTE. The
+ * peer's S that opens a rate change decodes as data until x2_session sees
+ * it (S and S-bar, ~80 ms); then the held bits decoded from its onset on
+ * are dropped. V.14 had taken 65 junk octets there (28 Oct). V.42 rejects
+ * them by CRC, so error-corrected calls are not delayed. */
+#define ME_X2_HOLD_SAMPLES 960
+#define ME_X2_HOLD_BITS    8192
+static uint8_t g_x2_hold_bit[ME_X2_HOLD_BITS];
+static uint64_t g_x2_hold_at[ME_X2_HOLD_BITS];
+static unsigned g_x2_hold_head, g_x2_hold_count;
+static void me_x2_hold_release(uint64_t before)
+{
+    while(g_x2_hold_count && g_x2_hold_at[g_x2_hold_head]<before) {
+        ds_rx_put_bit(&g_data_stack,g_x2_hold_bit[g_x2_hold_head]);
+        g_x2_hold_head=(g_x2_hold_head+1)%ME_X2_HOLD_BITS;--g_x2_hold_count;
+    }
+}
+static void me_x2_upstream_put(int bit)
+{
+    if(g_data_framing!=DS_FRAMING_V14) {ds_rx_put_bit(&g_data_stack,bit);return;}
+    uint64_t now=g_x2.rx_samples;
+    if(g_x2_hold_count==ME_X2_HOLD_BITS)me_x2_hold_release(g_x2_hold_at[g_x2_hold_head]+1);
+    unsigned tail=(g_x2_hold_head+g_x2_hold_count)%ME_X2_HOLD_BITS;
+    g_x2_hold_bit[tail]=(uint8_t)bit;g_x2_hold_at[tail]=now;++g_x2_hold_count;
+    if(now>ME_X2_HOLD_SAMPLES)me_x2_hold_release(now-ME_X2_HOLD_SAMPLES);
+}
+static unsigned me_x2_hold_drop_from(uint64_t onset)
+{
+    unsigned dropped=0;
+    while(g_x2_hold_count && g_x2_hold_at[(g_x2_hold_head+g_x2_hold_count-1)%ME_X2_HOLD_BITS]>=onset) {
+        --g_x2_hold_count;++dropped;
+    }
+    return dropped;
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -9974,7 +10016,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
            && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
             if(me_x2_upstream_squelched())return;
             me_data_rx_first_bit();
-            ds_rx_put_bit(&g_data_stack,bit);
+            me_x2_upstream_put(bit);
         }
         return;
     }
@@ -11571,6 +11613,13 @@ static void start_v34_training(void)
 static int me_x2_payload_bit(void *unused)
 {
     (void)unused;
+    if(g_x2.client && g_x2_client_pad) {
+        if(g_x2_client_pad==1 && ds_tx_between_characters(&g_data_stack))g_x2_client_pad=2;
+        if(g_x2_client_pad>=2) {
+            if(g_x2_client_pad==2 && !--g_x2_client_pad_bits)g_x2_client_pad=3;
+            return 1;
+        }
+    }
     int bit=ds_tx_get_bit(&g_data_stack);
     return bit==0 || bit==1 ? bit : 1;
 }
@@ -11687,8 +11736,14 @@ static void me_x2_client_progress_locked(void)
     if(g_state==ME_DATA && reneg_ms>0 && !g_x2_client_reneg_done
        && g_x2_client_samples-g_x2_client_data_sample>=(uint64_t)reneg_ms*8
        && x2_client_can_change_rate(c)) {
-        int index=parse_env_int("ME_X2_CLIENT_RENEG_INDEX",(int)c->selected_index-1);
         g_x2_client_reneg_done=true;
+        g_x2_client_pad_index=parse_env_int("ME_X2_CLIENT_RENEG_INDEX",(int)c->selected_index-1);
+        g_x2_client_pad_bits=c->upstream_n*2400u*40u/1000u;
+        g_x2_client_pad=(g_data_framing==DS_FRAMING_V14 && g_x2_client_pad_bits) ? 1 : 3;
+    }
+    if(g_x2_client_pad==3) {
+        int index=g_x2_client_pad_index;
+        g_x2_client_pad=0;
         if(index<1 || x2_client_start_rate_change(c,(unsigned)index)
            || v34_v90_resume_external_symbols(g_v34,x2_client_get_symbol,c)) {
             trace_phase("X2 client: rate change to index %d not started",index);
@@ -11868,10 +11923,12 @@ static void me_x2_start_locked(void)
     g_x2_client_tx_started=g_x2_client_armed=false;
     g_x2_client_samples=0;
     g_x2_client_data_sample=0;g_x2_client_reneg_done=g_x2_client_rr_open=false;
+    g_x2_client_pad=0;
     g_x2_client_last_up=X2C_UP_DATA;g_x2_client_last_dn=X2C_DN_FAILED;
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;
     g_x2_reneg_seen=false;
+    g_x2_hold_head=g_x2_hold_count=0;
     g_x2_upstream_prepared=g_x2_upstream_started=false;
     g_x2_last_stage = X2_FAILED;
     g_x2_last_reversals=g_x2_last_b_reversed=0;
@@ -11949,9 +12006,13 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
         g_x2_upstream_prepared=g_x2_upstream_started=false;
         v34_v90_upstream_rearm(g_v34);
         g_x2_squelch=false;g_x2_good_bits=0;
-        trace_phase("X2 peer rate change: S from the Courier, answering with the record (renegotiation %u)",
-                    g_x2.renegotiations);
+        unsigned dropped=me_x2_hold_drop_from(g_x2.reneg_s_onset);
+        trace_phase("X2 peer rate change: S from the Courier, answering with the record (renegotiation %u; %u held upstream bits after its S dropped)",
+                    g_x2.renegotiations,dropped);
     }
+    /* Held upstream drains on time even while nothing new is decoded. */
+    if (g_x2_hold_count && g_x2.rx_samples > ME_X2_HOLD_SAMPLES)
+        me_x2_hold_release(g_x2.rx_samples - ME_X2_HOLD_SAMPLES);
     if (!x2_session_renegotiating(&g_x2) && g_x2_reneg_seen && g_x2.stage==X2_PAYLOAD) {
         g_x2_reneg_seen=false;
         int downstream=(int)(x2_pcm_frame_bits(&g_x2.data_config)*8000/6);

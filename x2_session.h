@@ -76,6 +76,10 @@ typedef struct {
        windows of sustained Tone A in data (docs/x2_implementation.md,
        "Bounding an unanswered rate change", 19 Oct). */
     uint64_t reneg_s_sample;
+    /* rx_samples where the S now being tracked began (the first window of
+       its coherent run), and that of the S that opened this rate change:
+       upstream decoded after it is S, not the peer's data. */
+    uint64_t s_onset, reneg_s_onset;
     unsigned tone_a_windows;
     x2_session_failure_t failure;
     x2_session_stage_t failed_stage;

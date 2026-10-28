@@ -935,6 +935,11 @@ static int ds_tx_get_bit_impl(data_stack_t *s)
     return bit;
 }
 
+bool ds_tx_between_characters(const data_stack_t *s)
+{
+    return s->framing == DS_FRAMING_V14 && s->tx_bits == 0;
+}
+
 static void (*wire_observer)(data_stack_t *, int, int);
 void ds_set_wire_observer(void (*observer)(data_stack_t *, int, int))
 {
