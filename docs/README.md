@@ -131,6 +131,7 @@ Where to start:
 | Note | Topic |
 |---|---|
 | [eicon_soak_ppp.md](eicon_soak_ppp.md) | Eicon Diva sustained transfers, PPP and HTTP |
+| [v90_hardware_interop.md](v90_hardware_interop.md) | Physical-modem procedure, CX93001 interop and USB serial mode checks |
 | [eicon_downstream_comparison.md](eicon_downstream_comparison.md) | Our downstream against a working digital modem |
 | [eicon_v90_upstream_power.md](eicon_v90_upstream_power.md) | Upstream power probe |
 | `eicon_*_20261008.md`, `eicon_*_20261009.md` | Eicon session records (calls, ISDN, other modes, RTP causality, spec causality, V.34 fax, V90A) |

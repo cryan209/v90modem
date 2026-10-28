@@ -4230,6 +4230,21 @@ Local reproducer, decompilation and logs: `artifacts/apple-6005-audit/`
 `native-audio-first.log`, `usmserial-hook.c`, `utlamot.c`). The native-hook
 reproducer includes `hook_paths.c` from the same directory.
 
+### Independent USB serial modem on the other ATA port (2026-10-28)
+
+The attached Conexant CX93001 (`0572:1349`, `/dev/cu.usbmodem246802461`)
+works independently of the Apple code. PBX inspection of its real dialled
+calls identifies **6004 / Grandstream FXS1**, not the Apple's user-confirmed
+6005 / FXS2. It passes checked bidirectional data to both Eicon destinations
+in V.32bis (14400) and V.22bis (2400), and to 7910 in V.34 capped at 21600.
+Uncapped V.34 is inconsistent; a V.90 request falls back to V.34. Full rates,
+failures, cleanup caveats and reproduction are in
+[`v90_hardware_interop.md`](v90_hardware_interop.md), “CX93001 USB serial → Eicon”.
+This establishes a usable serial modem and another working ATA port; it does
+not establish that the Apple shares the same analogue conditions or repair
+its loop-closure failure. No PBX, gateway or Apple settings were changed by
+the serial mode checks.
+
 ### Where the 1.1 s goes (2026-10-24)
 
 v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run

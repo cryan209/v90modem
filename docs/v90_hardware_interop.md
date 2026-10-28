@@ -62,6 +62,66 @@ Do not promote a combination to interoperable until two consecutive fresh
 calls reach the same negotiated rate and transfer the deterministic payload
 without unexplained errors.
 
+## CX93001 USB serial → Eicon, 28 October 2026
+
+The currently attached `/dev/cu.usbmodem246802461` is USB `0572:1349`,
+serial `24680246`, firmware `CX93001-EIS_V0.2013-V92`. It responds normally to
+AT commands. Live PBX channel inspection identifies its source as **6004 /
+Grandstream FXS1**, whereas the Apple was identified by the user as **6005 /
+FXS2**. These are different analogue ports: serial-modem success does not
+validate the Apple's seizure path or establish identical line conditions.
+
+Sequential bounded calls produced these checked results (rates are carrier
+rates, **not** the leading DTE `CONNECT 115200`):
+
+| Requested mode | 7910 | 7900 |
+|---|---|---|
+| V.22bis, forced `V22B` | 2400; LAPM/V.42bis; 3 exact PPP LCP echoes | 2400; LAPM/V.42bis; 3 exact text echoes |
+| V.32bis, forced `V32B` | 14400; LAPM/V.42bis; 3 exact PPP LCP echoes | 14400; LAPM/V.42bis; 3 exact text echoes on checked repeat |
+| V.34, ceiling 21600 both ways | 21600 TX/RX; LAPM/V.42bis; 3 exact PPP LCP echoes | NO CARRIER |
+| V.34, uncapped | First call 28800 TX / 31200 RX with LAPM/V.42bis and 2 CRC-valid peer LCP frames; later call falls back to no EC and fails | 26400 TX / 31200 RX, LAPM/V.42bis, menu received, disconnect before echo proof |
+| V.90 requested | Negotiates **V.34**, 28800 TX / 31200 RX; 2 exact LCP echoes within the initial probe's window | Not attempted |
+
+These are short single-call data checks, **not two-fresh-call qualification,
+a soak, V.90/V.92 operation or full PPP/IP connectivity**. 7910 starts PPP
+immediately; 7900 presents the BRI test menu. The initial 7900 V.32bis call
+only observed that menu; the checked repeat selected text echo and validated
+three independent numbered blocks. Initial PPP probing incorrectly ACKed
+PAP without implementing authentication; it was corrected to Configure-Reject
+unsupported authentication, as `pppd noauth` would. The final checked PPP
+runs above use this correction and require matching, CRC-valid echo replies.
+No credentials or user data were sent to an authentication service. One early
+V.90-requested call needed a separate command-mode cleanup after escape failed;
+ATH0 and ATZ were subsequently confirmed. The runner now uses verified `&D2`
+DTR fallback before diagnostics/reset when escape fails.
+
+All captured SIP legs use `ulaw` and Asterisk reports no read/write
+transcoding. This does not establish byte-exact PCM through the Cisco/ISDN
+leg or rule out gateway law conversion for the historically A-law 7900
+controller. No gateway/PBX settings, stored modem profiles or DSP code were
+changed. The serial saved profile is restored after each final checked call
+(`ATZ`, then `AT+MS?` → `V92,1,300,48000,300,56000`).
+
+`tools/cx_eicon_test.py` preserves raw serial RX/attempted TX, timed AT events,
+last-call `AT&V1`/`AT#UD`, requested versus negotiated carrier information,
+checked payload counts and verified cleanup. It supports both services and
+returns nonzero for insufficient echoes or unconfirmed cleanup. Example:
+
+```sh
+.venv/bin/python tools/cx_eicon_test.py --number 7910 --mode V34 \
+  --max-rate 21600 --output artifacts/cx-7910-v34
+.venv/bin/python tools/cx_eicon_test.py --number 7900 --mode V32B \
+  --output artifacts/cx-7900-v32bis
+```
+
+Allow at least 65 seconds between calls to the same Eicon controller. The
+hardware-free fast-tier `tools/test_cx_eicon.py` covers fragmented PPP/FCS,
+exact reply matching, rejection of authentication, menu exchange, rate parsing,
+DTR recovery and failure to confirm cleanup. Serial writes have a timeout and
+do not use an unbounded `tcdrain()` with CTS held low. Local evidence and PBX
+codec snapshots: `artifacts/cx-eicon-current/`; no new retained waveform
+fixture is needed for these synthetic regression tests.
+
 ## Results matrix
 
 | Modem/chipset | Gateway | Law | V.8 | Phase 3 | CPt/CP | E/B1d | DATA | Rates | Evidence |
