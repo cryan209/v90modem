@@ -4230,6 +4230,53 @@ Local reproducer, decompilation and logs: `artifacts/apple-6005-audit/`
 `native-audio-first.log`, `usmserial-hook.c`, `utlamot.c`). The native-hook
 reproducer includes `hook_paths.c` from the same directory.
 
+### Verified line swap restores Apple seizure and checked data (2026-10-28)
+
+A second user-performed telephone-lead swap was verified electrically: an
+incoming call to 6005 produced serial-modem RING, with no Apple RDT event.
+The Apple on-hook raw sense changed from 0 to 50. The independent CX93001,
+now on verified 6005, returned **NO DIALTONE** attempting the previously
+passing forced-V.32bis call to 7910; no outbound PBX channel appeared. Its
+hangup and original profile restoration were confirmed.
+
+Conversely the Apple now seized the other lead: hook/status/aux =
+`09/49/00`, sense 7, current code 9 (~29.7 mA), protection `0c`, no dropout.
+Its subsequent dialled calls identify the working lead as **6004** in linked
+PBX channels. No production code, line profile or ATA configuration was
+changed between these comparisons. The seizure failure therefore follows
+the **6005 line path**, not the Apple unit. This does not distinguish an
+ATA feed/configuration problem from a cable/contact problem within that path;
+ring reception alone did not establish a usable DC loop.
+
+Actual Apple calls used the split control/data PTYs, `AT+MS=V32B,0` or
+`AT+MS=V22B,0`, `AT\\N3`, and `ATD7910#` / `ATD7900#`. DTMF used the
+previously working 0.35 amplitude, 150/150 ms cadence; modem audio gain and
+protection were unchanged.
+
+- **7910 / V.32bis:** trained at 14400, negotiated V.42bis and established
+  V.42 LAPM, then emitted `CONNECT 14400`. No bytes reached the data PTY in
+  the 25-second post-CONNECT observation; later renegotiated to 12000.
+  **Payload unverified**, not an established data pass. This first probe
+  waited for peer PPP before sending LCP and therefore transmitted none;
+  it does not rule out success with client-initiated LCP.
+- **7900 / V.22bis:** `CONNECT 2400`, no LAPM/MNP peer established, buffered
+  V.14 fallback. Received the test menu, selected text echo, and verified
+  **three distinct exact `ECHO: APPLE-V22B-...` replies**, each containing
+  digits, uppercase and lowercase letters. This is checked bidirectional
+  payload, not merely carrier. There was detection-procedure garbage before
+  the readable menu; do not claim a clean entire stream, error correction,
+  or sustained transfer. The scratch PPP decoder's bad-FCS counter on this
+  **non-PPP** stream is not a PPP error measurement.
+
+Both calls used PBX ulaw with no reported read/write transcoding (not an
+end-to-end byte-exact PCM guarantee), zero render errors, zero transmit ring
+under/overruns, and verified final hook/monitor off with protection enabled.
+The first headless probe rejected unsupported `ATW2` before dialling and is
+not a failed call. Local experiment logs, raw serial/PTY bytes, audio taps,
+linked PBX snapshots and the scratch driver are under
+`artifacts/cx-6005-swapped-r2/`; the real 7910 call is
+`apple-7910-v32bis-r2/`, and the checked data call `apple-7900-v22bis/`.
+
 ### Independent USB serial modem on the other ATA port (2026-10-28)
 
 The attached Conexant CX93001 (`0572:1349`, `/dev/cu.usbmodem246802461`)

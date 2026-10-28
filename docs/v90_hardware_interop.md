@@ -140,6 +140,28 @@ established, whatever physical change was intended. The directory name
 6005 source; it holds the serial summary, linked PBX snapshot and both-device
 ring observations. Require this mapping check after changing telephone leads.
 
+### Verified second swap: Apple now passes payload on 6004
+
+The next lead swap was verified by calling 6005: serial RING, no Apple ring.
+On that verified 6005 path the CX93001's forced-V.32bis 7910 attempt returned
+**NO DIALTONE**, without an outbound PBX channel, with hangup/profile restored.
+The Apple on the other lead now seized normally (current code 9, no dropout)
+and its dialled PBX source was **6004**. No production code or ATA settings
+changed. The earlier seizure failure follows the 6005 **line path**; the
+specific cable/contact/feed/configuration cause remains unisolated.
+
+| Apple on verified 6004 | Result |
+|---|---|
+| 7910, forced V.32bis | CONNECT 14400 and V.42 LAPM/V.42bis; zero data-PTY bytes during 25 s observation, later rate renegotiation to 12000; **payload unverified**. Probe waited for peer PPP, so no client LCP was sent. |
+| 7900, forced V.22bis | CONNECT 2400, buffered V.14 fallback without LAPM/MNP; test menu received, **three distinct exact text echoes**. Detection garbage preceded menu: not an error-free whole-stream or EC qualification. |
+
+Both calls had zero audio render errors and transmit ring under/overruns,
+ulaw/no PBX-reported transcoding, and confirmed hook/monitor off, protection
+on after cleanup. This is a short payload proof, not a soak test, V.34/V.90
+success or PPP/IP qualification. Full controls, caveats and local evidence
+paths: [`apple_usb_modem_sm56.md`](apple_usb_modem_sm56.md), “Verified line swap
+restores Apple seizure and checked data”.
+
 ## Results matrix
 
 | Modem/chipset | Gateway | Law | V.8 | Phase 3 | CPt/CP | E/B1d | DATA | Rates | Evidence |
