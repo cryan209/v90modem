@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--seconds", type=int, default=35)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--engine", type=Path, default=ROOT / "audio_sock_modem")
+    ap.add_argument("--max-upstream-rate", type=int, default=9600,
+                    help="native client's upstream ceiling (bit/s, multiple of 2400)")
     ap.add_argument("--dac-taps", type=int, default=129,
                     help="analogue peer reconstruction FIR length (DS0 remains unchanged)")
     ap.add_argument("--require-startup", action="store_true",
@@ -73,7 +75,7 @@ def main():
     executable = args.engine.resolve()
     env = dict(os.environ, ME_K56FLEX="probe", ME_MODE="k56", ME_V8="1",
                ME_MEDIA_CLOCK="1", VPCM_G711_TAP_DIR=str(out))
-    client = K56Client(modulation="flex", max_upstream_rate=9600, dac_taps=args.dac_taps)
+    client = K56Client(modulation="flex", max_upstream_rate=args.max_upstream_rate, dac_taps=args.dac_taps)
     phase2_events = []
     symbol_events = []
     probe_clock_events = []

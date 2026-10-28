@@ -3484,3 +3484,18 @@ and since the K56 server's V.42 framing (`5baa5022`), our V.42 8.10 ODP
 (`11 91` repeated, 2260 bytes) reached it ahead of the payload. The 40 s pair
 is now in `tests/fast.list` (17 s; needs `../cruft`), and `audio_sock_modem`
 is a test target.
+
+### Native HSF at 28800 and 31200 up (28 October, night)
+
+`k56flex_hsf_pair.py` had capped the native client at 9600 up, left over
+from our server's old 9600 Phase 2 ceiling. `--max-upstream-rate` now sets
+it. Against our server with INFO1a projecting 31200:
+- **28800 up / 52000 down:** 8192 exact bytes each way over 40 s. This is
+  now a fast-tier row.
+- **31200 up:** the payload is exact both ways, but 16 stray bytes arrive
+  upstream ahead of it, a burst of about 5 ms at data start. MICA's real
+  firmware receiving the same client at 31200 also gets leading junk
+  (cruft `native/hsf/RATE-QUALIFICATION.md`: 17 leading, 20 trailing), and
+  neither receiver sees any at 28800. Two independent receivers agreeing
+  points at the native client's 31200 transmitter, so this is not pursued
+  here.
