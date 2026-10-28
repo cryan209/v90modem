@@ -509,6 +509,10 @@ static void fax_set_tx_type(void *user_data, int type, int bit_rate, int short_t
         }
         else if (type == T30_MODEM_V21)
         {
+            /* T.30 F.3.2.2: a repeated DCS restarts CFR on control.
+               Cancel the earlier forty-ones wait until this CFR finishes. */
+            s->v34hdx_transition = 0;
+            s->v34hdx_ones = s->v34hdx_tx_ones = 0;
             s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
             hdlc_tx_flags(&t->hdlc_tx, 2);
         }

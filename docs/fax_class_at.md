@@ -1072,3 +1072,31 @@ existing line's Contact (RFC 3261 sections 10 and 22). Defaults are unchanged.
 `fax-work/deploy/test-live-receive.py` uses this mode and requires an explicit
 real destination and SIP credentials; passwords are not written into its
 reports. Its default is manual Class 2.0, with `--poll` for true polling.
+
+### MT9234ZBA-USB physical Super G3 test (28 October 2026)
+
+A physical Agere MT9234ZBA-USB (firmware 1.02e), attached to macOS through
+modem-dsp-emu's native IOKit TUSB3410 bridge, completed a Class 2.1 fax at
+33600 bit/s to the wired CT117 lab receiver. Both sides reported successful
+hangup (`+FHS:0` / `+FHS:00`); the receiver reported `+FPS:1,128,0,0,0`.
+The received 4745-byte MH stream and its 1728x128 checkerboard pixels match
+the generated source exactly. ECM retransmitted missing frames before MCF.
+Evidence is in fax-work `logs/mt9234-wired-15`, including verification.json,
+the received image, G.711 taps and the exact isolated receiver snapshot.
+
+This qualifies that hardware transfer, not the default receiver build: the
+successful lab receiver uses experimental PP/B1 acquisition/equalization
+and measured clock diagnostics retained in the evidence snapshot. Earlier
+independent PP decoding also recovered an exact 33600 image from wired-9.
+Pacing DTE writes at 64 bytes per 10 ms avoided the corruption seen when
+queueing the entire page through the USB bridge before XOFF took effect.
+
+The protocol fix is independent of those DSP experiments. A repeated DCS
+can restart CFR after the receiver has armed the previous forty-ones wait.
+If that wait survives, it switches the transport to primary while T.30 is
+still in F_CFR: even CRC-valid FCD/RCP are rejected. T.30 F.3.2.2 requires
+CFR on control before the primary handshake, so requesting V.21/control TX
+now cancels the stale transition and mark counters. The retained synthetic
+bit fixture reproduces the original failure with a silent primary
+recipient and passes with the fix. Continuing to clock control TX during
+primary hides this defect; the regression deliberately does not do so.

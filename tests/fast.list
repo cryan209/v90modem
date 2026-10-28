@@ -89,6 +89,8 @@ python3 tools/mt9234_v90_gradient_test.py
 ./fax_class_test
 ./fax_class2_test
 @group fax-v34-test
+# Recorded repeated-DCS handshake; synthetic checkerboard only.
+./fax_hdx_handoff_test
 
 # T.31/T.32 over V.34 half-duplex and through two whole engines (was fax-v34-test).
 ./fax_class_test --v34

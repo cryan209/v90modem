@@ -267,6 +267,8 @@ V92_B1U_LOCK_TEST_OBJS = v92_b1u_lock_test.o v92_upstream_rx.o v92_upstream_data
 PCM_BER_TEST_OBJS = pcm_ber_test.o $(filter-out vpcm_loopback_test.o,$(TEST_OBJS))
 V56_LOOPBACK_TEST_OBJS = v56_loopback_test.o v34_line_ec.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
+FAX_HDX_HANDOFF_TEST_OBJS = fax_hdx_handoff_test.o
+TEST_TARGETS += fax_hdx_handoff_test
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V32BIS_DUPLEX_TEST_OBJS = v32bis_duplex_test.o
 V34_PP_FIT_TEST_OBJS = v34_pp_fit_test.o v34_pp_fit.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -841,6 +843,11 @@ v92_p3_probe: $(V92_P3_PROBE_OBJS) spandsp
 v92_p3_probe.o: tools/v92_p3_probe.c v92_p3_rx.h v92_ja_decode.h v90.h
 	$(CC) $(CFLAGS) -c tools/v92_p3_probe.c -o $@
 
+fax_hdx_handoff_test: $(FAX_HDX_HANDOFF_TEST_OBJS) spandsp
+	$(CC) $(FAX_HDX_HANDOFF_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+fax_hdx_handoff_test.o: fax_hdx_handoff_test.c test_tmp.h
+
 v34_pp_fit_test: $(V34_PP_FIT_TEST_OBJS) spandsp
 	$(CC) $(V34_PP_FIT_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
@@ -1264,7 +1271,7 @@ x2-sym-test: x2_sym_test
 
 # T.31 Annex B / T.32 Annex C page transfers over byte-exact G.711.
 .PHONY: fax-v34-test
-fax-v34-test: fax_class_test fax_class2_test engine_pair_test v90_engine_peer
+fax-v34-test: fax_hdx_handoff_test fax_class_test fax_class2_test engine_pair_test v90_engine_peer
 	$(RUN_TESTS) --group fax-v34-test $(TEST_LISTS)
 
 # Full pages through two production engines and their PTYs; no injected
