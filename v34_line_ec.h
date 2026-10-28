@@ -22,6 +22,8 @@
 #define V34_LEC_MAX_LAG     6000    /* 750 ms of bulk delay */
 #define V34_LEC_SEARCH_LEN  1024    /* samples correlated in the lag search */
 #define V34_LEC_TAIL_MAX    2400    /* most samples a window may discard at its end */
+#define V34_LEC_FIT_LAG_BLOCK 16
+#define V34_LEC_FIT_LIN_LEN (V34_LEC_MAX_LAG + V34_LEC_TAPS + V34_LEC_FIT_LAG_BLOCK + V34_LEC_TRAIN_MAX)
 
 /* Bulk-delay tracking (v34_line_ec.c): how far either way a moved echo is
    looked for, the correlation sub-window and how many of them one decision
@@ -59,6 +61,17 @@ typedef struct
     float h[V34_LEC_TAPS];
     float erle_db;
     int fits;
+
+    /* V.90 8.3.4 / 9.3.1: DIL must stay on its sample grid. The digital
+       engine budgets the delay search across RX callbacks instead of doing
+       the whole fit at DIL start. Snapshot TX history once, retain the same
+       training samples, and commit the completed filter atomically. */
+    bool defer_fit;
+    bool fit_pending;
+    int fit_next_lag;
+    int fit_best_lag;
+    double fit_best_corr;
+    double fit_tx[V34_LEC_FIT_LIN_LEN];
 
     /* Bulk-delay tracking.  `track` is the caller's to set, and only while
        its transmission is aperiodic data (see track_rx()); the rest is the

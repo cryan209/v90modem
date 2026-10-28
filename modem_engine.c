@@ -11308,6 +11308,9 @@ static void start_v34_training(void)
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     v34_line_ec_reset(&g_lec);
+    /* V.90 8.3.4/9.3.1: the window ends at DIL start. Keep the bulk-delay
+       search off that single transmit deadline; CP reception follows DIL. */
+    g_lec.defer_fit = v90_upstream;
     g_training_fail_retrain_pending = false;
     g_training_fail_retrains = 0;
     g_lec_armed = v90_upstream ? true : me_line_ec_enabled();

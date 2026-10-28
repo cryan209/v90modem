@@ -58,6 +58,7 @@ void v34_line_ec_abort_window(v34_line_ec_t *ec)
 {
     ec->training = false;
     ec->train_total = 0;
+    ec->fit_pending = false;
 }
 
 void v34_line_ec_tx(v34_line_ec_t *ec, const int16_t *amp, int len)
@@ -126,66 +127,81 @@ static void track_reset(v34_line_ec_t *ec);
 /* Bulk-delay search block: how many lags one pass over the received samples
    correlates at once.  Each lag keeps its own accumulator, summed in the same
    order as one lag at a time, so the block only changes the speed. */
-#define LAG_BLOCK 16
-#define LIN_LEN (V34_LEC_MAX_LAG + V34_LEC_TAPS + LAG_BLOCK + V34_LEC_TRAIN_MAX)
+#define LAG_BLOCK V34_LEC_FIT_LAG_BLOCK
+#define LIN_LEN V34_LEC_FIT_LIN_LEN
 
-static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
+static void fit_begin(v34_line_ec_t *ec)
 {
-    static double r[V34_LEC_TAPS*V34_LEC_TAPS];
-    /* Our transmission over the window and the MAX_LAG + TAPS before it, as
-       one array (tx_at's zero for anything not held included), so the loops
-       below index it directly.  Scratch, rewritten in full by every fit. */
-    static double lin[LIN_LEN];
+    const int64_t lin0 = (int64_t) ec->train_start - V34_LEC_MAX_LAG
+                       - V34_LEC_TAPS - LAG_BLOCK;
+
+    ec->fits++;
+    for (int i = 0; i < LIN_LEN; i++)
+        ec->fit_tx[i] = tx_at(ec, lin0 + i);
+    ec->fit_best_corr = -1.0;
+    ec->fit_best_lag = -1;
+    ec->fit_next_lag = V34_LEC_TAPS/2;
+    ec->fit_pending = true;
+}
+
+/* Preserve each correlation's summation order and the original tie-break.
+   Only the number of lags evaluated in one callback changes. */
+static bool fit_search(v34_line_ec_t *ec)
+{
+    const int s0 = ec->train_len - V34_LEC_SEARCH_LEN;
+    const int64_t lin0 = (int64_t) ec->train_start - V34_LEC_MAX_LAG
+                       - V34_LEC_TAPS - LAG_BLOCK;
+    const int end = ec->defer_fit ? ec->fit_next_lag + 16*LAG_BLOCK
+                                : V34_LEC_MAX_LAG + 1;
+
+    for (; ec->fit_next_lag <= V34_LEC_MAX_LAG && ec->fit_next_lag < end;
+         ec->fit_next_lag += LAG_BLOCK)
+    {
+        const int d0 = ec->fit_next_lag;
+        double c[LAG_BLOCK] = {0.0};
+        const double *t = ec->fit_tx
+                       + ((int64_t) ec->train_start + s0 - d0 - lin0);
+
+        for (int n = 0; n < V34_LEC_SEARCH_LEN; n++)
+        {
+            const double y = ec->train_rx[s0 + n];
+
+            for (int j = 0; j < LAG_BLOCK; j++)
+                c[j] += y*t[n - j];
+        }
+        for (int j = 0; j < LAG_BLOCK && d0 + j <= V34_LEC_MAX_LAG; j++)
+        {
+            const double cj = fabs(c[j]);
+
+            if (cj > ec->fit_best_corr)
+            {
+                ec->fit_best_corr = cj;
+                ec->fit_best_lag = d0 + j;
+            }
+        }
+    }
+    return ec->fit_next_lag > V34_LEC_MAX_LAG;
+}
+
+static void fit_finish(v34_line_ec_t *ec, char *log, size_t log_len)
+{
+    double r[V34_LEC_TAPS*V34_LEC_TAPS];
+    const double *lin = ec->fit_tx;
     double p[V34_LEC_TAPS];
     double x[V34_LEC_TAPS];
     double trace;
     int first;
     const int n_train = ec->train_len;
     const int half = V34_LEC_TAPS/2;
-    const int s0 = n_train - V34_LEC_SEARCH_LEN;
-    const int64_t lin0 = (int64_t) ec->train_start - V34_LEC_MAX_LAG - V34_LEC_TAPS - LAG_BLOCK;
-    double best = -1.0;
-    int lag = -1;
+    const int64_t lin0 = (int64_t) ec->train_start - V34_LEC_MAX_LAG
+                       - V34_LEC_TAPS - LAG_BLOCK;
+    const int lag = ec->fit_best_lag;
     double rx_pow = 0.0;
     double res_pow = 0.0;
     int64_t base;
     int boff;
 
-    ec->fits++;
-    for (int i = 0;  i < LIN_LEN;  i++)
-        lin[i] = tx_at(ec, lin0 + i);
-    /* Bulk delay: the lag of the largest cross-correlation between the last
-       V34_LEC_SEARCH_LEN received samples and our transmission before them.
-       This runs inside the media callback, which also sends our RTP, at the
-       moment a V.90 digital modem starts DIL.  Done one lag at a time
-       through tx_at() it made that callback 23-28 ms on the wired rig host;
-       the RasFinder's AudioCodes re-centred its playout on the hole, the
-       analogue modem's DIL analysis (V.90 8.3.4, 9.3.1.x) came out wrong,
-       and it sent a CPt we could not use and retrained
-       (docs/v90_rasfinder_phase4.md, 2026-10-16). */
-    for (int d0 = half;  d0 <= V34_LEC_MAX_LAG;  d0 += LAG_BLOCK)
-    {
-        double c[LAG_BLOCK] = {0.0};
-        const double *t = lin + ((int64_t) ec->train_start + s0 - d0 - lin0);
-
-        for (int n = 0;  n < V34_LEC_SEARCH_LEN;  n++)
-        {
-            const double y = ec->train_rx[s0 + n];
-
-            for (int j = 0;  j < LAG_BLOCK;  j++)
-                c[j] += y*t[n - j];
-        }
-        for (int j = 0;  j < LAG_BLOCK  &&  d0 + j <= V34_LEC_MAX_LAG;  j++)
-        {
-            const double cj = fabs(c[j]);
-
-            if (cj > best)
-            {
-                best = cj;
-                lag = d0 + j;
-            }
-        }
-    }
+    ec->fit_pending = false;
     if (lag < 0)
         return;
     /* Least squares over the whole window, on the exact covariance matrix.
@@ -490,6 +506,7 @@ bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
         {
             ec->training = true;
             ec->train_total = 0;
+            ec->fit_pending = false;
         }
         /* Recorded before any cancellation below, so a retrain's refit sees
            the raw echo rather than what an older fit left of it. */
@@ -516,9 +533,13 @@ bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
                                              % TRAIN_RING];
         if (ec->train_len >= V34_LEC_TRAIN_MIN)
         {
-            fit(ec, log, log_len);
-            fitted_now = true;
+            fit_begin(ec);
         }
+    }
+    if (ec->fit_pending && fit_search(ec))
+    {
+        fit_finish(ec, log, log_len);
+        fitted_now = true;
     }
     if (ec->fitted)
     {
