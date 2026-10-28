@@ -1713,6 +1713,13 @@ static double         g_v92_data_levels[V92_P3_EQ_MAX_LEVELS];
 static double         g_v92_b1u_ref[V92_B1U_TRAIN_SYMBOLS];
 static double         g_v92_b1u_capture[V92_B1U_TRAIN_CAPTURE*(V92_P3_EQ_MAX_TAPS + 1)];
 static bool           g_v92_b1u_train_pending = false;
+/* The CPd as sent, precoder coefficients included (V.92 6.4.2).  The
+ * receiver's copy in g_v92_upstream_rx.cpd has them stripped: after the
+ * feed-forward equaliser a precoded upstream arrives as the points u(n), so
+ * it decodes as an unprecoded one.  Only B1u's reference needs the
+ * precoder, whose state picks each symbol's class member. */
+static v92_cpd_frame_t g_v92_cpd_sent;
+static bool           g_v92_cpd_sent_precoded = false;
 /* Data-mode refits from the trellis decoder: each decoded frame's survivor
  * points (what was transmitted, with no precoder or prefilter coefficients)
  * become least-squares rows against the equaliser inputs that produced them,
@@ -8195,6 +8202,24 @@ static void v92_upstream_live_byte(void *user_data, uint8_t byte)
     ds_rx_push_bytes(&g_data_stack, &byte, 1);
 }
 
+/* V.92 6.4.2: CPd carries precoder feedback coefficients (the TRN2u
+ * decision-feedback taps), and the upstream is designed on the feedback
+ * equaliser's noise.  Against slmodemd (docs/v92_quick_connect.md, 28
+ * October) that took the upstream from 28000 at 34 DS0 to 32000 at 22.7
+ * DS0, 0 frames rejected, 3 calls each way.  ME_V92_PRECODER=0 restores the
+ * unprecoded design. */
+static bool me_v92_precoder_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_PRECODER");
+
+        cached = (v && *v) ? (atoi(v) != 0) : 1;
+    }
+    return cached != 0;
+}
+
 /* Received TRN2u rms in DS0 linear units: LU as it arrives. */
 static double me_v92_lu_rx_locked(void)
 {
@@ -8249,19 +8274,43 @@ static void me_v92_data_slicer_locked(void)
      * The same TRN2u least-squares window solved feed-forward only reads
      * 0.050 LU on its data instead of 0.23, and lets the 2 s re-solves be
      * accepted. */
-    if (v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))
-        ME_LOG("[ME] V.92 data slicer: feed-forward-only taps from the TRN2u solve, decision feedback off\n");
+    /* Precoded (6.4.2), the analogue modem has the feedback taps: keep the
+     * feed-forward taps solved with them, which deliver u(n). */
+    if (g_v92_cpd_sent_precoded
+        ? v92_p3_eq_drop_feedback(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law])
+        : v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))
+        ME_LOG("[ME] V.92 data slicer: %s, decision feedback off\n",
+               g_v92_cpd_sent_precoded
+               ? "the TRN2u solve's feed-forward taps (the analogue modem precodes with its feedback)"
+               : "feed-forward-only taps from the TRN2u solve");
     {
         v92_upstream_wave_tx_t tx;
         uint8_t ones[V92_UPSTREAM_MAX_FRAME_BITS];
         int k = v92_upstream_bits_per_frame(cpd->selected_upstream_drn);
         bool ok = k > 0 && k <= V92_UPSTREAM_MAX_FRAME_BITS;
+        double tx_ms = 0.0;
 
         memset(ones, 1, sizeof(ones));
         v92_upstream_wave_tx_init(&tx);
-        for (int f = 0; ok && f < 48; f++)
-            ok = v92_upstream_wave_encode_frame(&tx, cpd, ones, k,
-                                                g_v92_b1u_ref + f*V92_UPSTREAM_INTERVALS);
+        for (int f = 0; ok && f < 48; f++) {
+            double *ref = g_v92_b1u_ref + f*V92_UPSTREAM_INTERVALS;
+
+            if (!g_v92_cpd_sent_precoded) {
+                ok = v92_upstream_wave_encode_frame(&tx, cpd, ones, k, ref);
+                continue;
+            }
+            /* What the equaliser delivers is G x u(n), the class member the
+             * precoder chose, not the transmitted G x v(n). */
+            ok = v92_upstream_wave_encode_frame(&tx, &g_v92_cpd_sent, ones, k, ref);
+            for (int i = 0; ok && i < V92_UPSTREAM_INTERVALS; i++) {
+                tx_ms += ref[i]*ref[i];
+                ref[i] = g*tx.u_history[V92_UPSTREAM_INTERVALS - 1 - i];
+            }
+        }
+        if (ok && g_v92_cpd_sent_precoded)
+            ME_LOG("[ME] V.92 B1u reference through the precoder: transmitted rms %.0f DS0 "
+                   "against LU_rx %.0f\n",
+                   sqrt(tx_ms/V92_B1U_TRAIN_SYMBOLS)*unit, lu);
         /* Encoder units are G x point; the equaliser's are the levels above. */
         for (int i = 0; ok && i < V92_B1U_TRAIN_SYMBOLS; i++)
             g_v92_b1u_ref[i] *= unit/lu;
@@ -8489,7 +8538,13 @@ static void v92_live_p4u_frame(void *user_data,
                  * codewords and the reference correlator are the fallback. */
                 bool eq_mode = g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0;
 
-                if (v90_build_v92_cpd_frame(g_v90, &cpd)
+                bool built = v90_build_v92_cpd_frame(g_v90, &cpd);
+
+                g_v92_cpd_sent = cpd;
+                g_v92_cpd_sent_precoded = built && eq_mode && cpd.coeffs_present;
+                if (g_v92_cpd_sent_precoded)
+                    cpd.coeffs_present = false;
+                if (built
                     && (eq_mode
                         ? v92_upstream_b1_rx_init_equalized(
                               &g_v92_upstream_rx, &cpd,
@@ -8497,6 +8552,16 @@ static void v92_live_p4u_frame(void *user_data,
                         : v92_upstream_b1_rx_init(
                               &g_v92_upstream_rx, &cpd,
                               v92_upstream_live_byte, NULL))) {
+                    if (g_v92_cpd_sent_precoded) {
+                        char pl[256];
+                        int at = 0;
+
+                        for (int j = 0; j < g_v92_cpd_sent.lp1 && at < (int)sizeof(pl) - 12; j++)
+                            at += snprintf(pl + at, sizeof(pl) - (size_t)at, " %+.4f",
+                                           g_v92_cpd_sent.precoder_fb[j]/16384.0);
+                        ME_LOG("[ME] V.92 CPd precoder (6.4.2): p1(1..%u) =%s; identity prefilter\n",
+                               (unsigned)g_v92_cpd_sent.lp1, pl);
+                    }
                     g_v92_upstream_rx_active = true;
                     g_v92_upstream_eq_mode = eq_mode;
                     g_v92_upstream_slicer_set = false;
@@ -8669,6 +8734,7 @@ static void cleanup_v34_v90_training_locked(void)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_cpd_sent_precoded = false;
     g_v92_aided_refits = false;
     g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
@@ -8815,6 +8881,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_cpd_sent_precoded = false;
     g_v92_aided_refits = false;
     g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
@@ -13531,6 +13598,7 @@ static void v92_call_state_reset_locked(void)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_cpd_sent_precoded = false;
     g_v92_aided_refits = false;
     g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
@@ -20486,6 +20554,20 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                      * of its upstream (docs/v92_quick_connect.md). */
                     g_v92_trn2u_sigma_dfe = sig[0];
                     sigma = fmax(sig[0], sig[1]);
+                    if (me_v92_precoder_enabled() && eq->cfg.nfb > 0 && !eq->ff_only) {
+                        /* 6.4.2: the analogue modem applies the feedback to
+                         * the true symbols, so data mode has the feedback
+                         * equaliser's noise.  y = w.r + sum fb[j] fb_scale
+                         * d(n-1-j) and y = d make w.r = d - sum ..., which
+                         * x(n) = u(n) + sum p1(k) x(n-k) cancels with
+                         * p1(k) = fb[k-1] fb_scale. */
+                        double p1[V92_P3_EQ_MAX_FB];
+
+                        for (int j = 0; j < eq->cfg.nfb; j++)
+                            p1[j] = eq->fb[j]*eq->fb_scale;
+                        if (v90_set_v92_upstream_precoder(g_v90, p1, eq->cfg.nfb))
+                            sigma = sig[0];
+                    }
                     /* v90_set_v92_upstream_noise() needs a positive figure. */
                     if (sigma < 0.01)
                         sigma = 0.01;

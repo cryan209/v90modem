@@ -709,6 +709,8 @@ struct v90_state_s {
     uint16_t         v92_gain_q0_16;
     double           v92_upstream_sigma;        /* TRN2u noise, DS0 linear rms */
     double           v92_upstream_lu_rx;        /* received TRN2u rms, DS0 linear */
+    int              v92_precoder_lp1;          /* Table 30 LP1; 0 = no coefficients */
+    int16_t          v92_precoder_p1[V92_CPD_MAX_TAPS];  /* p1(1..LP1), Q1.14 */
 
     /* Downstream PCM encoder state (data mode) */
     v90_scrambler_t  data_scrambler;
@@ -987,6 +989,11 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
  * what the feedback sigma admitted -- carried 14% of them.  4.0 on the
  * data-mode sigma designs 28000; 3.0 would design 30666, 2.5 34666. */
 #define V92_UPSTREAM_MARGIN 4.0
+/* With precoder coefficients in the CPd (6.4.2) the sigma is the feedback
+ * equaliser's, and data mode then measures it: 24.6 DS0 designed, 22-24
+ * in data.  4.0 on it designs 32000; forced against slmodemd (28 October,
+ * 120 s each) 33333, 34666, 36000 and 37333 all rejected no frame. */
+#define V92_UPSTREAM_MARGIN_PRECODED 3.0
 
 /* V.92 Table 30: "the digital modem shall design the modulation parameters
  * assuming that, when the prefilter output multiplied by G has a
@@ -1029,6 +1036,23 @@ bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
     /* Ask for the most the moduli carry; the back-off in
      * v90_build_v92_cpd_frame() takes drn down to what they allow. */
     s->v92_upstream_drn = 19;
+    return true;
+}
+
+bool v90_set_v92_upstream_precoder(v90_state_t *s, const double *p1, int lp1)
+{
+    if (!s || s->v92_cpd_designed || lp1 < 0 || lp1 > V92_CPD_MAX_TAPS
+        || (lp1 > 0 && !p1))
+        return false;
+    for (int k = 0; k < lp1; k++) {
+        /* Table 30: signed Q1.14, so |p1| < 2. */
+        long q = lround(p1[k]*16384.0);
+
+        if (q > 32767) q = 32767;
+        if (q < -32768) q = -32768;
+        s->v92_precoder_p1[k] = (int16_t)q;
+    }
+    s->v92_precoder_lp1 = lp1;
     return true;
 }
 
@@ -1187,7 +1211,9 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         scale = (4.0*65536.0) / out->gain_q0_16;
     }
     if (s->v92_upstream_sigma > 0.0)
-        spacing = 2.0*V92_UPSTREAM_MARGIN*s->v92_upstream_sigma;
+        spacing = 2.0*(s->v92_precoder_lp1 > 0 ? V92_UPSTREAM_MARGIN_PRECODED
+                                                : V92_UPSTREAM_MARGIN)
+                * s->v92_upstream_sigma;
     for (int attempt = 0; attempt < 32; attempt++) {
         int n = 0;
         int16_t prev = 0;
@@ -1251,6 +1277,29 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
      * honour the CPd. */
     for (int i = 0; i < 12; i++)
         out->moduli[i] = (uint8_t)((i%4 == 3) ? points/2 : points);
+    /* 6.4.2: precoder feedback only, the set every analogue modem supports
+     * (Table 18 bits 12:13 = 0: p1 and z2).  The prefilter is the identity
+     * as Q0.15 can carry it, z2(0) = 1 - 2^-15; LZ2 = 0 would make 6.4.2's
+     * v(n) a sum over no taps.  Every length is a multiple of 4, padded
+     * with zero taps: slmodemd's FloatFIR::setCoefficients rounds a length
+     * DOWN to a multiple of 4 (and $-4), and its history shift then runs a
+     * dec/jnz loop from length - 1, so LZ2 = 1 or 2 became a zero-length
+     * filter and segfaulted the peer at its first B1u frame (live, pc1-1,
+     * pc1-3).  A truncated LP1 would silently drop taps. */
+    if (s->v92_precoder_lp1 > 0) {
+        int lp1 = (s->v92_precoder_lp1 + 3) & ~3;
+
+        if (lp1 > V92_CPD_MAX_TAPS)
+            lp1 = V92_CPD_MAX_TAPS;
+        out->coeffs_present = true;
+        out->lz1 = 0;
+        out->lp1 = (uint16_t)lp1;
+        memcpy(out->precoder_fb, s->v92_precoder_p1,
+               (size_t)s->v92_precoder_lp1*sizeof(out->precoder_fb[0]));
+        out->lz2 = 4;
+        out->prefilter_ff[0] = 32767;
+        out->lp2 = 0;
+    }
     if (points > 0) {
         __uint128_t product = 1;
         int drn = out->selected_upstream_drn;
@@ -4832,6 +4881,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_remote_ack_received = false;
     s->v92_cpd_sent = false;
     s->v92_cpd_designed = false;
+    s->v92_precoder_lp1 = 0;
     s->v92_cpd_retry = false;
     s->v92_cpd_repeat = false;
     s->v92_symbol_clock = s->v92_cpd_end = 0;

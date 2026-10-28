@@ -845,3 +845,47 @@ Six unforced calls, default kernel and 65 taps alternated (`/root/ratechk.sh` on
   is in plain V.34 training when slmodemd's ~60 s connect timeout ends it (BYE at +65 s). The
   second PCM attempt cannot succeed when the first could not even design a constellation, so
   withdrawing the offer at the first unbuildable CPd would save one full retrain.
+
+#### The precoder: 28000 -> 32000 and beyond (2026-10-28)
+
+The decision feedback that data mode cannot run (previous sections) belongs in the analogue
+modem: V.92 6.4.2's precoder, x(n) = u(n) + sum p1(k) x(n-k), with p1 carried in CPd (Table
+30, Q1.14). With the TRN2u decision-feedback equaliser y = w.r + sum fb[j] fb_scale d(n-1-j),
+p1(k) = fb[k-1] x fb_scale makes the feed-forward output w.r equal u(n) itself, so data mode
+keeps its feed-forward-only slicer and has nothing to propagate, but sees the feedback
+equaliser's noise. Table 18 makes p1 plus z2 the set every analogue modem supports; the CPd
+sends LP1 = 8, LZ1 = 0 and an identity prefilter, LZ2 = 4 with z2(0) = 1 - 2^-15.
+
+The receiver changes nothing else: it decodes against the CPd with the coefficients stripped
+(both members of an equivalence class carry the same Ki), its trellis-aided refits target the
+survivor's u(n), which is now what arrives, and B1u's reference is the precoder's chosen u(n)
+from an encoder run with the coefficients. The design prices the rate on the feedback sigma.
+`ME_V92_PRECODER=0` restores the unprecoded design.
+
+slmodemd's precoder follows 6.4.2 (`V92Precoder::process`: cost (point + FIR_z1(u) +
+FIR_p1(x))^2, Q0.15/Q1.14 scaled by 2^-15/2^-14 in `V92setParamsInfoFromCPUnPck`, the CPd
+logged at -d9). **Its `FloatFIR::setCoefficients` rounds every length down to a multiple of 4
+(`and $-4`), and the history shift then runs a dec/jnz loop from length - 1**: LZ2 = 1 and
+LZ2 = 2 each became a zero-length prefilter and segfaulted slmodemd at its first B1u frame
+(pc1-1, pc1-3). All lengths are now multiples of 4, LP1 padded with zero taps.
+
+Live, default kernel, slmodemd dialling us, arms alternated, 170 s holds:
+
+| arm | calls | upstream | data-mode rms to nearest level | rejected frames | lines up / down |
+|---|---|---|---|---|---|
+| no coefficients | 3 | 28000 | 34.0 DS0, offset -10 | 0 | ~37500 / ~37600 |
+| precoder, margin 4 | 3 | 32000 | 22.7 DS0, offset -2 | 0 | ~37400 / ~37500 |
+| precoder, margin 3 (default) | 3 | **36000** | 24.0 DS0, offset -2 | 0 | ~37600 / ~37700 |
+
+Forced with the precoder (`ME_V92_UP_DRN`, one call each, 120 s of data): 33333 22.9 DS0,
+34666 23.6, 36000 24.1, 37333 22.1, every one with no rejected frame. The 4.0 margin was set
+for the feed-forward-only noise, where 32000 rejected 64-70 frames; the precoded design now
+uses 3.0 (`V92_UPSTREAM_MARGIN_PRECODED`), which designs 36000 here: above the 31200 V.34
+upstream a V.90 call gets from the same peer. (Lines delivered are the harness's paced
+payload, not a throughput measure.) slmodemd's ~55-63 downstream HDLC FCS errors per
+call are the same in both arms.
+
+Also learned: a harness killed mid-batch leaves `qc_slm_pve.sh`'s payload loop typing into the
+next call's PTY, and any keystroke before CONNECT aborts the answer (V.250 5.6.1); the 30 s
+"Asterisk hangups" at the start of this session were the same thing with PAY_DELAY 45 on a
+call that needs ~40 s to reach data. Use PAY_DELAY=80.

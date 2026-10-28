@@ -494,6 +494,14 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx);
 
+/* V.92 6.4.2 precoder feedback p1(1..lp1) for the CPd (Table 30, Q1.14 on
+ * the wire), with an identity prefilter; lp1 = 0 sends no coefficients.
+ * With x(n) = u(n) + sum p1(k) x(n-k), a channel whose equalised response is
+ * 1 - sum p1(k) z^-k delivers u(n) itself, so the receiver's feed-forward
+ * equaliser slices the points with the decision-feedback equaliser's noise
+ * and nothing to propagate.  Ignored once a CPd has been sent. */
+bool v90_set_v92_upstream_precoder(v90_state_t *s, const double *p1, int lp1);
+
 /* The received TRN2u rms, LU_rx, and its decision noise, keeping the
  * profile's drn (v90_set_v92_upstream_noise() asks for the most the moduli
  * carry instead).  V.92 Table 30 has the analogue modem transmit LU x G x v,

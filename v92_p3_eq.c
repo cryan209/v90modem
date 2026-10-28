@@ -684,6 +684,17 @@ bool v92_p3_eq_use_ff(v92_p3_eq_t *eq)
     return true;
 }
 
+bool v92_p3_eq_drop_feedback(v92_p3_eq_t *eq)
+{
+    if (!eq || !eq->seeded)
+        return false;
+    memset(eq->fb, 0, sizeof(eq->fb));
+    eq->have_ff = false;
+    eq->ff_only = true;
+    eq->refit_base = 0.0;
+    return true;
+}
+
 
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
 {

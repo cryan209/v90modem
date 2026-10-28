@@ -218,6 +218,13 @@ void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
  * exists. */
 bool v92_p3_eq_use_ff(v92_p3_eq_t *eq);
 
+/* Drop the decision feedback for good but keep the feed-forward taps it was
+ * solved with.  For a precoded upstream (V.92 6.4.2): the analogue modem
+ * applies the feedback taps as p1 to the true symbols, so the feed-forward
+ * part alone already delivers the points, with the feedback equaliser's
+ * noise.  Later refits solve feed-forward only. */
+bool v92_p3_eq_drop_feedback(v92_p3_eq_t *eq);
+
 /* Data-aided training on a known sequence (V.92 8.7.1 B1u, which starts from
  * zero scrambler, encoder, precoder and prefilter memories and so is fixed by
  * the CPd alone).  From now on keep each symbol's input window and output in
