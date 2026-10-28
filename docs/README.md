@@ -136,6 +136,7 @@ Where to start:
 | [eicon_v90_upstream_power.md](eicon_v90_upstream_power.md) | Upstream power probe |
 | `eicon_*_20261008.md`, `eicon_*_20261009.md` | Eicon session records (calls, ISDN, other modes, RTP causality, spec causality, V.34 fax, V90A) |
 | [rasfinder_modulation_tests_20261020.md](rasfinder_modulation_tests_20261020.md) | RasFinder modulation matrix on 6311-6313 |
+| [slmodemd_vs_hardware_20261029.md](slmodemd_vs_hardware_20261029.md) | slmodemd and our modem against 7900/7910/6311/6312, same probes |
 | [hsf_usb_daa.md](hsf_usb_daa.md), [hsf_analogue_v90_coupler.md](hsf_analogue_v90_coupler.md) | Conexant HSF USB modem as our analogue side |
 | [apple_usb_modem_sm56.md](apple_usb_modem_sm56.md) | Apple USB Modem (SM56) as our analogue side |
 | [mt5634mu_usb_modem.md](mt5634mu_usb_modem.md) | MultiTech MT5634MU USB bridge |
