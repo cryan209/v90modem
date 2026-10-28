@@ -4173,6 +4173,29 @@ new production hook path. No overload thresholds or protection defaults were
 relaxed, and no calls to 7900/7910 were scored. Local scripts/logs:
 `artifacts/apple-6005-audit/{hook_paths.c,hook_paths.log,known-build-hook.log,ring-fixed.log,rdt-answer.log,rdt-answer-events.jsonl}`.
 
+### Working-baseline comparison and standard USB reset (2026-10-28)
+
+The retained 6005 logs in `apple-pve-20261015` confirm that the same hook
+register value `0x09` previously reached a working analogue path: for example
+`v90-rr-4/call/log.txt` reads raw sense `0x06` after seizure and runs training;
+`v22-3/call/log.txt` reads `0x0b`. Those are actual PBX-line records, unlike
+the later direct-powered-pair payload tests. The current safe register subset
+matches the retained `apple-registers-20261016/0-14.txt` apart from raw voltage
+sense. The earlier working environment had different USB addresses, so
+addresses alone do not establish physical device identity.
+
+One standard `libusb_reset_device` was performed with no audio process active,
+hook/monitor off and protection verified. It returned success and the Apple
+re-enumerated from `1:5` to `1:7`; its audio UID remains `000000:3,4`, CoreAudio
+ID changed from 88 to 103. The next bounded protected hook test still shows
+hook `0x09`, current code 0, dropout asserted and raw sense 0. Cleanup again
+verifies hook/monitor off and protection `0x0c`. This particular USB reset did
+not restore operation; no automatic reset/retry policy was added. The older
+retained binary also fails today, so a recent source change alone has not
+explained the regression. A state-dependent initialization defect remains
+possible; the exact cause is not established. Local reset source/output and
+post-reset readings: `artifacts/apple-6005-audit/{reset.c,reset.log,after-reset.json,reset-hook.log}`.
+
 ### Where the 1.1 s goes (2026-10-24)
 
 v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run
