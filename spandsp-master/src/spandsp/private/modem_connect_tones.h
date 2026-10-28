@@ -74,6 +74,8 @@ struct modem_connect_tones_rx_state_s
     int32_t notch_level;
     /*! \brief The total channel power estimate */
     int32_t channel_level;
+    /*! \brief ANS/ANSam acceptance notch ratio (0: the default, 6). */
+    int notch_ratio;
     /*! \brief The 15Hz AM power estimate */
     int32_t am_level;
     /*! \brief Sample counter for the small chunks of samples, after which a test is conducted. */

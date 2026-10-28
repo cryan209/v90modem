@@ -175,6 +175,14 @@ SPAN_DECLARE(modem_connect_tones_rx_state_t *) modem_connect_tones_rx_init(modem
                                                                            span_tone_report_func_t tone_callback,
                                                                            void *user_data);
 
+/*! \brief Set how pure an ANS/ANSam must be: the energy outside the 2100Hz
+           notch must stay under 1/ratio of the channel's (default 6), and the
+           tone counts as broken above 1/(ratio - 1).
+    \param s The context.
+    \param ratio 2 to 6; anything else restores the default.
+           ME_ANS_NOTCH_RATIO, when set, overrides this for every detector. */
+SPAN_DECLARE(void) modem_connect_tones_rx_set_notch_ratio(modem_connect_tones_rx_state_t *s, int ratio);
+
 /*! \brief Release an instance of the modem connect tones detector.
     \param s The context.
     \return 0 for OK, else -1. */

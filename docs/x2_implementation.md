@@ -1114,7 +1114,28 @@ of an unanswered initial XID (V.42 8.10.2). A modern peer that only lost a
 frame still gets four on every other attempt. With the defaults, the I-modem
 answers the second command, after one T401. `v42_link_test` has a peer that
 drops four-octet commands; without the change that test fails.
-`ME_ANS_NOTCH_RATIO=3` is still needed (item 1 above).
+`ME_ANS_NOTCH_RATIO=3` is no longer needed (next paragraph).
+
+**ANSam without a knob (28 October 2026).** Measured on our receive tap, the
+I-modem's ANSam is 89-94% of the received power at 2100 Hz from 2.0 to
+4.0 s. The rest is spread across about 1050, 1670-1860, 2350-2480 and
+2900 Hz, and it is there in the gaps of our CI too. It clears (100%) only
+from about 4.5 s, and the I-modem gives up at 5.3 s. The detector compares
+mean absolute amplitudes, so 10% of the power off-tone puts the notch output
+at about a third of the channel; the default acceptance is a sixth. A ratio
+of 4 still missed it (no CONNECT) and 3 connects. courier-emu's hybrid model
+is on the Courier's analogue DSP only, so this is the firmware's own output.
+
+V.8's ANSam detector now has its own ratio of 3
+(`modem_connect_tones_rx_set_notch_ratio()`). Every other 2100 Hz detector,
+fax CED included, keeps 6. A calling DCE that takes ANSam sends CM and waits
+for JM (V.8 8.1), so a false ANSam costs a CM, while a missed one costs the
+call; on a clean line purity is ~1.0 and nothing changes.
+`ME_ANS_NOTCH_RATIO` still overrides every detector. With no environment:
+CONNECT 57333/x2/NONE against 56000 with `\N0`, and
+57333/ARQ/x2/LAPM/V42BIS against 56000/ARQ/X2/LAPM/V42BIS by default, both
+lines exact. The `\N0` probe is in `tests/slow.list` (141 s; needs
+`../courier-emu`).
 
 **Not done:**
 

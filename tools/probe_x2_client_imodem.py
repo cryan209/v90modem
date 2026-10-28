@@ -13,14 +13,14 @@ Ie030002.nac is not tracked; link it in), for example:
 
   EMU=$(mktemp -d); git -C ../courier-emu archive f1ccd92 | tar -x -C $EMU
   ln -s $PWD/../courier-emu/Ie030002.nac $EMU/
-  ME_ANS_NOTCH_RATIO=3 ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py \\
+  ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py \\
       --emu $EMU --output artifacts/x2-client-imodem --fast \\
       --engine-at 'AT\\N0' --engine-send 'OUR-X2-CLIENT-0123456789!' \\
       --answer-send 'IMODEM-X2-SERVER-0123456789'
 
-ME_ANS_NOTCH_RATIO=3 is needed: until its echo canceller settles, this
-I-modem's ANSam carries copies of our CI that SpanDSP's default purity test
-rejects (docs/x2_implementation.md, "The analogue client against Ie030002").
+Until its echo canceller settles, this I-modem's ANSam carries an impairment
+8-10 dB below the tone; V.8's ANSam detector accepts that (notch ratio 3, in
+v8.c), so no ME_ANS_NOTCH_RATIO is needed (docs/x2_implementation.md).
 """
 import argparse
 import hashlib

@@ -85,21 +85,31 @@
    less than 1/6 of the channel energy, and calls the tone broken when it passes 1/5.
    That is clean-line arithmetic: the I-modem's ANSam arrives with band noise 8 dB
    below the tone (notch ratio ~3.5), which never meets it, so a caller on such a
-   line sat sending CI for the whole call.  ME_ANS_NOTCH_RATIO=<n> (2..6) lowers the
-   acceptance ratio to n and the break ratio to n-1 (floor 1).  Default is unchanged. */
-static int ans_notch_ratio(int broken)
+   line sat sending CI for the whole call.  A detector's own ratio
+   (modem_connect_tones_rx_set_notch_ratio()) lowers the acceptance ratio to n and
+   the break ratio to n-1 (floor 1); ME_ANS_NOTCH_RATIO=<n> (2..6) does it for
+   every detector, overriding that.  Default is unchanged. */
+static int ans_notch_ratio(const modem_connect_tones_rx_state_t *s, int broken)
 {
-    static int accept = 0;
+    static int env = -1;
+    int accept;
 
-    if (accept == 0)
+    if (env < 0)
     {
         const char *v = getenv("ME_ANS_NOTCH_RATIO");
-        int n = (v  &&  *v)  ?  atoi(v)  :  6;
+        int n = (v  &&  *v)  ?  atoi(v)  :  0;
 
-        accept = (n >= 2  &&  n <= 6)  ?  n  :  6;
+        env = (n >= 2  &&  n <= 6)  ?  n  :  0;
     }
     /*endif*/
+    accept = (env)  ?  env  :  (s->notch_ratio)  ?  s->notch_ratio  :  6;
     return (broken)  ?  accept - 1  :  accept;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) modem_connect_tones_rx_set_notch_ratio(modem_connect_tones_rx_state_t *s, int ratio)
+{
+    s->notch_ratio = (ratio >= 2  &&  ratio <= 6)  ?  ratio  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -654,7 +664,7 @@ SPAN_DECLARE(int) modem_connect_tones_rx(modem_connect_tones_rx_state_t *s,
             /*endif*/
             /* There is adequate energy in the channel. Is it mostly at 2100Hz? */
             s->tone_cycle_duration++;
-            if (s->notch_level*ans_notch_ratio(0) < s->channel_level)
+            if (s->notch_level*ans_notch_ratio(s, 0) < s->channel_level)
             {
                 /* The notch test says yes, so we have the tone. */
                 /* We should get a kick from the notch filter every 450+-25ms, as the phase reverses, for an
@@ -698,7 +708,7 @@ SPAN_DECLARE(int) modem_connect_tones_rx(modem_connect_tones_rx_state_t *s,
                 /*endif*/
                 s->tone_on = true;
             }
-            else if (s->notch_level*ans_notch_ratio(1) > s->channel_level)
+            else if (s->notch_level*ans_notch_ratio(s, 1) > s->channel_level)
             {
                 if (s->tone_present == MODEM_CONNECT_TONES_ANS)
                 {
@@ -878,6 +888,7 @@ SPAN_DECLARE(modem_connect_tones_rx_state_t *) modem_connect_tones_rx_init(modem
     s->channel_level = 0;
     s->notch_level = 0;
     s->am_level = 0;
+    s->notch_ratio = 0;
     s->tone_present = MODEM_CONNECT_TONES_NONE;
     s->tone_cycle_duration = 0;
     s->good_cycles = 0;

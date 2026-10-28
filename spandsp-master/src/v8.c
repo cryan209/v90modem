@@ -1790,6 +1790,13 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
     s->ci_timer = 0;
     s->calling_party = calling_party;
     modem_connect_tones_rx_init(&s->ansam_rx, MODEM_CONNECT_TONES_ANS_PR, NULL, NULL);
+    /* A calling DCE that takes ANSam sends CM and waits for JM (V.8 8.1);
+       with no JM it never leaves V.8.  So a false ANSam costs little here,
+       and a real one with an impairment 8-10 dB below it must not be missed:
+       the original Ie030002 I-modem's ANSam carries that until its echo
+       canceller settles, and at the default purity (1/6) we heard it only
+       after the I-modem had given up (docs/x2_implementation.md). */
+    modem_connect_tones_rx_set_notch_ratio(&s->ansam_rx, 3);
     modem_connect_tones_rx_init(&s->calling_tone_rx, MODEM_CONNECT_TONES_CALLING_TONE, NULL, NULL);
     modem_connect_tones_rx_init(&s->cng_tone_rx, MODEM_CONNECT_TONES_FAX_CNG, NULL, NULL);
     v8_decode_init(s);
