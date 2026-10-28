@@ -3474,6 +3474,10 @@ static bool g_x2_client_reneg_done, g_x2_client_rr_open;
    7 octets there, 28 Oct). 0 none; 1 waiting for a character to finish; 2
    sending marks (g_x2_client_pad_bits left); 3 done, the change may open. */
 static int g_x2_client_pad, g_x2_client_pad_index;
+/* A server retrain being answered (x2_session_client_retrain), and the most
+   a call answers. */
+static bool g_x2_client_retraining;
+#define ME_X2_CLIENT_MAX_RETRAINS 2
 static unsigned g_x2_client_pad_bits;
 static x2_client_up_t g_x2_client_last_up;
 static x2_client_dn_t g_x2_client_last_dn;
@@ -11668,8 +11672,26 @@ static void me_x2_client_progress_locked(void)
     }
     if(g_x2.stage!=X2_CLIENT)return;
     if(c->tone_b) {
-        trace_phase("X2 client: Tone B from the server in data (a V.90 9.5.1.1 retrain, not answered); ending the call");
-        x2_session_fail(&g_x2,X2_FAILURE_PEER_RETRAIN);return;
+        /* V.90 9.5.2.2: answer it. The session sends the tones and marker;
+           after the marker the client's startup runs again, on a fresh V.34
+           modulator and decoder with the same masks. The data stack keeps
+           running: V.42 recovers what the retrain cost. */
+        uint16_t pcm=c->pcm_mask,up=c->mp.words[1];
+        unsigned md=c->md;
+        if(g_x2.retrains>=ME_X2_CLIENT_MAX_RETRAINS || x2_session_client_retrain(&g_x2)) {
+            trace_phase("X2 client: Tone B from the server in data (a V.90 9.5.1.1 retrain); not answered after %u, ending the call",
+                        g_x2.retrains);
+            x2_session_fail(&g_x2,X2_FAILURE_PEER_RETRAIN);return;
+        }
+        trace_phase("X2 client: Tone B from the server in data (V.90 9.5.1.1); answering the retrain (9.5.2.2), %u of %u",
+                    g_x2.retrains,ME_X2_CLIENT_MAX_RETRAINS);
+        if(g_v34){v34_free(g_v34);g_v34=NULL;}
+        g_x2_client_tx_started=g_x2_client_armed=false;g_x2_client_samples=0;
+        g_x2_client_pad=0;g_x2_client_rr_open=false;
+        x2_client_init(c,pcm,up,md);
+        x2_client_set_put_bit(c,me_x2_client_put_bit,NULL);
+        g_state=ME_TRAINING;g_x2_client_retraining=true;
+        return;
     }
     if(c->dn==X2C_DN_FAILED) {
         if(c->rr) {
@@ -11720,7 +11742,9 @@ static void me_x2_client_progress_locked(void)
         g_state=ME_DATA;g_phase_start_ms=0;
         g_report_tx_rate=upstream;g_report_rx_rate=downstream;
         g_x2_client_data_sample=g_x2_client_samples;
-        trace_phase("X2 client enter DATA: downstream=%d upstream=%d",downstream,upstream);
+        trace_phase("X2 client enter DATA: downstream=%d upstream=%d%s",downstream,upstream,
+                    g_x2_client_retraining?" (after the server's retrain)":"");
+        g_x2_client_retraining=false;
         if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
             g_data_connect_reported=true;di_on_connected(downstream);
         }
@@ -11839,7 +11863,9 @@ static bool me_x2_tx_locked(uint8_t *codewords, int count)
                    1000) from a ms into data, to see what a server does when
                    it loses us (does it retrain?). */
                 int quiet_at=parse_env_int("ME_X2_CLIENT_SILENCE_AFTER_MS",0);
-                if (quiet_at > 0 && g_state == ME_DATA) {
+                /* Once per call: from the first data mode, not again after
+                   a retrain this has provoked. */
+                if (quiet_at > 0 && g_state == ME_DATA && g_x2.retrains == 0) {
                     uint64_t t = g_x2_client_samples + (uint64_t)offset - g_x2_client_data_sample;
                     uint64_t from = (uint64_t)quiet_at*8;
                     uint64_t len = (uint64_t)parse_env_int("ME_X2_CLIENT_SILENCE_MS",1000)*8;
@@ -11923,7 +11949,7 @@ static void me_x2_start_locked(void)
     g_x2_client_tx_started=g_x2_client_armed=false;
     g_x2_client_samples=0;
     g_x2_client_data_sample=0;g_x2_client_reneg_done=g_x2_client_rr_open=false;
-    g_x2_client_pad=0;
+    g_x2_client_pad=0;g_x2_client_retraining=false;
     g_x2_client_last_up=X2C_UP_DATA;g_x2_client_last_dn=X2C_DN_FAILED;
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;

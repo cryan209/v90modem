@@ -259,6 +259,78 @@ static void tone_b(void)
     printf("  retrain in data: Tone B recognised, synthetic and Ie030002's own; Tone A, a quiet tone and 60 s of data not\n");
 }
 
+/* The client's answer to a server retrain (x2_session_client_retrain), as
+ * Ie030002 accepted it: against a scripted digital side (Tone B; its
+ * reversal 40 ms after our first; 10 ms more, then silence; its 160 ms
+ * probe), our side must send 70 ms of silence, Tone A at 2400 Hz, its first
+ * reversal no sooner than 50 ms into the tone, the second 40 ms after the
+ * peer's, then stay silent through the probe and send the marker 69 on
+ * 2400 Hz 60-100 ms after it, and come back to X2_CLIENT as the caller. */
+static double tone_power(const int16_t *x, unsigned n, double f)
+{
+    double re=0,im=0,e=0;
+    for(unsigned k=0;k<n;++k){re+=x[k]*cos(2*M_PI*f*k/8000);im-=x[k]*sin(2*M_PI*f*k/8000);e+=(double)x[k]*x[k];}
+    return e>0 ? (re*re+im*im)/(n/2.0)/e : 0;
+}
+static void retrain_answer(void)
+{
+    static x2_session_t s, probe_source;
+    CHECK(!x2_session_init_client(&s,0x7fff,0x1fff,5));
+    CHECK(!x2_session_init(&probe_source));
+    CHECK(x2_session_client_retrain(&s)==-1);   /* only from X2_CLIENT */
+    s.stage=X2_CLIENT;
+    CHECK(!x2_session_client_retrain(&s) && s.stage==X2_TONE_A && s.retrains==1);
+    uint8_t expect_marker[41]={0};
+    expect_marker[0]=expect_marker[1]=1;
+    CHECK(x2_info_encode(0x69,7,expect_marker+2)==39 && !memcmp(expect_marker,s.marker_bits,41));
+    int16_t tx[8000*4];
+    unsigned n, first_rev=0, second_rev=0, b_rev_at=0, tone_a_start=0, marker_start=0, marker_end=0, probe_end=0;
+    unsigned prev_rev=0;
+    double b_sign=1;
+    for(n=0;n<8000*4 && s.stage!=X2_CLIENT;++n) {
+        uint8_t code;
+        x2_session_stage_t before=s.stage;
+        CHECK(x2_session_tx(&s,&code,1)==1);
+        tx[n]=(int16_t)ulaw_to_linear(code);
+        if(!tone_a_start && tx[n])tone_a_start=n;
+        if(s.a_reversals!=prev_rev){
+            if(s.a_reversals==1)first_rev=n; else second_rev=n;
+            prev_rev=s.a_reversals;
+            if(s.a_reversals==1)b_rev_at=n+320;
+        }
+        if(before!=X2_CLIENT_MARKER && s.stage==X2_CLIENT_MARKER)marker_start=n;
+        /* The digital side: Tone B until 10 ms after its reversal, then
+           silence; its probe 20 ms after that. */
+        double x=0;
+        if(!b_rev_at || n<b_rev_at+80) {
+            if(b_rev_at && n==b_rev_at)b_sign=-1;
+            x=b_sign*3000*cos(2*M_PI*1200*n/8000);
+        }
+        else if(n>=b_rev_at+80+160 && n<b_rev_at+80+160+1280)x=probe_source.probe[(n-b_rev_at)%160];
+        if(b_rev_at && n==b_rev_at+80+160+1280)probe_end=n;
+        int16_t rx=(int16_t)ulaw_to_linear(linear_to_ulaw((int)lrint(x)));
+        x2_session_rx(&s,&rx,1);
+        CHECK(s.stage!=X2_FAILED);
+    }
+    marker_end=n;
+    CHECK(s.stage==X2_CLIENT && !s.answering);
+    for(unsigned k=0;k<560;++k)CHECK(tx[k]==0);
+    CHECK(tone_a_start>=560 && tone_power(tx+tone_a_start,160,2400)>0.9);
+    CHECK(first_rev>=tone_a_start+400);
+    CHECK(second_rev>=b_rev_at+300 && second_rev<=b_rev_at+360);
+    /* x2_session's quiet test: 60 ms after the smoothed level falls (as at
+       startup, where the I-modem takes it). */
+    CHECK(probe_end && marker_start>=probe_end+480 && marker_start<=probe_end+800);
+    /* DPSK at 600 bit/s spreads round its carrier: compare the bands. */
+    double hi=0,lo=0;
+    for(double f=2100;f<=2700;f+=50)hi+=tone_power(tx+marker_start+40,320,f);
+    for(double f=900;f<=1500;f+=50)lo+=tone_power(tx+marker_start+40,320,f);
+    CHECK(hi>20*lo);
+    printf("  server retrain answered: silence 70 ms, Tone A, reversals %u ms into it and %u ms after its, marker 69 on 2400 Hz %u ms after its probe\n",
+           (first_rev-tone_a_start)/8,(second_rev-b_rev_at)/8,(marker_start-probe_end)/8);
+    (void)marker_end;
+}
+
 int main(void)
 {
     downstream(0x0001,1,13,0);
@@ -272,6 +344,7 @@ int main(void)
     rate_change(0x7fff,15,1);
     rate_change(0x003f,6,6);
     tone_b();
+    retrain_answer();
     printf("x2 client: downstream record/final/payload at four ceilings, upstream MP/E and in-data rate changes passed\n");
     return 0;
 }

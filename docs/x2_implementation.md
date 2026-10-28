@@ -1140,9 +1140,7 @@ lines exact. The `\N0` probe is in `tests/slow.list` (141 s; needs
 **Not done:**
 
 - ~~**Fall forward and retrain.**~~ The client now opens in-data rate changes
-  and recognises a server's retrain, which is Tone B (next section). It does
-  not answer one yet; Ie030002 sends it after 500 ms without our upstream and
-  waits 60 s.
+  and answers a server's retrain, which is Tone B (next sections).
 - **Bearer.** There is no analogue front end, so the client needs a
   byte-exact bearer.
 - **Real hardware.** No real server has been tried.
@@ -1255,6 +1253,57 @@ tone and a quiet tone do not trip it) and ends the call as
 is kept in `reference-data/x2-imodem-retrain/` and checked in
 `x2_client_test`. Live, the client logs it 3.6 s into data.
 
-Answering it (9.5.2.2: after 50 ms of Tone B, 70 ms of silence, Tone A,
-then Phase 2 from 9.2.2.1.3 with the roles of our startup reversed) is
-not built yet.
+### Answering the server's retrain (28 October, later)
+
+The client now answers the retrain, and the call comes back to data. What
+Ie030002 does was found one step at a time, recording its downstream and
+its supervisor/DSP mailbox after each change:
+
+1. **A steady Tone A gets nothing.** It keeps sending Tone B. V.90 9.5.2.2
+   continues at 9.2.2.1.3: the analogue modem reverses Tone A once Tone B
+   has been present 50 ms.
+2. **With the reversal, it follows V.90 9.2.1.1.3.** It reverses Tone B
+   about 40 ms later, sends 10 ms more, goes silent, then sends its own
+   160 ms probe (period 160 samples, not ours echoed). No INFO0 is
+   exchanged: 9.5.1.1 continues at 9.2.1.1.3.
+3. **Then it gates, exactly as at startup.** It sends `006b:0021`, the
+   marker path, decided from the startup INFO0 words, and waits for the
+   x2 marker. V.90's next step (Tone A, reversal, INFO1) gets only
+   `0006:0000` after a fixed 2.16M instructions and a 60 s stall.
+4. **The marker on 1200 Hz is not heard either** (the same `0006` at the
+   same instruction). In this retrain the I-modem sends on 1200 Hz, so it
+   listens on 2400.
+5. **`4d` on 2400 Hz is heard and refused.** The supervisor clears the call
+   at once ("Normal call clearing"). `x2_marker_parse()` reads the second
+   index for 6 on the non-answering side, and in the retrain the I-modem is
+   that side.
+6. **`69` (indices 4 and 6) on 2400 Hz is accepted.** It sends `0034:0004`,
+   the retune, as after `4d` at startup, then digital zero, then x2 Phase 3
+   if our upstream training starts.
+
+So `x2_session_client_retrain()` does:
+- 70 ms of silence, then Tone A;
+- the answer side's reversals (x2_session's server branch of `TONE_A`,
+  with INFO0 not waited for);
+- silence through the server's probe;
+- the marker `69` on 2400 Hz 60 ms after the probe;
+- then `X2_CLIENT` again.
+
+The engine frees the V.34 modulator, starts a fresh decoder with the same
+masks, and keeps the data stack running. Up to two retrains are answered in
+a call.
+
+Against the original firmware, 500 ms of silence 6 s into data:
+- the I-modem retrains, the client answers, and data resumes 3.7 s later;
+- all ten of our lines reach its DTE;
+- its line, sent three times well after the retrain, reaches ours each
+  time;
+- it never hangs up.
+
+That run is in `tests/slow.list`. `x2_client_test` checks the timing
+against a scripted digital side: reversals 50 ms into Tone A and 40 ms
+after the server's, and the marker 87 ms after its probe.
+
+One trap: the silence hook measured from data entry, which a retrain
+resets, so every recovered call was silenced again and retrained again. It
+now fires once per call.

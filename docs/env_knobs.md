@@ -69,7 +69,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_G711_CAPTURE` | modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 
-## Live-path switches (101, 7 with no test/script/doc reference)
+## Live-path switches (101, 6 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -158,7 +158,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V92_JD_SKIP_REPS` | v90.c |  | d | reps (ME_V92_JD_EXTRA_REPS) with no shift in time. |
 | `ME_V92_UP_DRN` | v90.c |  | d | from it to force a higher one.  0/unset = the noise rule. |
 | `ME_X2_CLIENT_RENEG_INDEX` | modem_engine.c | (int | td | carrier and baud phase (V.90 9.6's seam). |
-| `ME_X2_CLIENT_SILENCE_MS` | modem_engine.c | 1000 | - | ME_X2_CLIENT_SILENCE_AFTER_MS=<a>, ME_X2_CLIENT_SILENCE_MS=<d>: |
+| `ME_X2_CLIENT_SILENCE_MS` | modem_engine.c | 1000 | t | Once per call: from the first data mode, not again after |
 | `ME_X2_CONTROL_LAW` | modem_engine.c |  | sd |  |
 | `P3_BYPASS_EQUALIZER` | p3_demod.c |  | c | RRC T/2 resampler and Godard timing loop |
 | `V34_INFO0_DBG` | v34rx.c |  | d |  |
@@ -349,7 +349,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V92_MH_AFTER_MS` | modem_engine.c | 20000 | h |  |
 | `ME_VOICE_TEST_TX_FILE` | modem_engine.c |  | s |  |
 | `ME_X2_CLIENT_RENEG_AFTER_MS` | modem_engine.c | 0 | td | carrier and baud phase (V.90 9.6's seam). |
-| `ME_X2_CLIENT_SILENCE_AFTER_MS` | modem_engine.c | 0 | d | ME_X2_CLIENT_SILENCE_AFTER_MS=<a>, ME_X2_CLIENT_SILENCE_MS=<d>: |
+| `ME_X2_CLIENT_SILENCE_AFTER_MS` | modem_engine.c | 0 | td | ME_X2_CLIENT_SILENCE_AFTER_MS=<a>, ME_X2_CLIENT_SILENCE_MS=<d>: |
 | `SIP_FORCE_PCMA` | sip_modem.c |  | s | by AT+MS after the codecs were first configured. |
 | `V32BIS_CARRIER_HOLD` | v32bis.c |  | d | V.17 latches the AGC as it leaves its own training stages.  The |
 | `V32BIS_TIMING_HOLD` | v32bis.c |  | d | V.17 latches the AGC as it leaves its own training stages.  The |

@@ -185,6 +185,9 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
     }
     if(next==X2_TRAIN_C)x2_mp_rx_init(&s->mp_rx,mp_received,s);
     if(next==X2_CLIENT_MARKER)s->info_clock=s->info_position=0;
+    /* A client retrain's tone exchange is the answer side's; from the probe
+       on it is the client again. */
+    if(next==X2_CLIENT_PROBE && s->client)s->answering=0;
     if(next==X2_DATA_STARTUP) {
         /* Ie030002 A8F1/C940 (039F bit 7 clear): six final training
          * samples, CFF4 bank selection, 0FF0 mapped samples, then CC02.
@@ -467,6 +470,31 @@ void x2_session_upstream_s_bar(x2_session_t *s)
     if(s && s->stage==X2_J)s->s_bar_seen=1;
     if(s && s->stage==X2_PAYLOAD)begin_renegotiation(s);
 }
+int x2_session_client_retrain(x2_session_t *s)
+{
+    if(!s || !s->client || s->stage!=X2_CLIENT)return -1;
+    ++s->retrains;
+    /* 9.2.2.1.3-.5: the Tone A side, whose first reversal waits for Tone B
+     * (the answering branch of x2_session_tx's TONE_A). A retrain sends no
+     * INFO0 (9.5.1.1 continues at 9.2.1.1.3), so it is not waited for. */
+    s->answering=1;s->peer_info_valid=1;
+    s->a_reversals=s->b_reversed=s->b_present=s->b_stable=0;
+    s->b_samples=s->b_position=s->b_crossing_valid=0;
+    s->b_reference_re=s->b_reference_im=0;
+    s->second_a_tx_sample=0;s->sign=0;
+    s->probe_loud=s->probe_quiet=s->probe_ended=0;s->probe_energy=0;
+    /* The marker as the other role reads it: x2_marker_parse() checks the
+     * second index for 6 on the non-answering side, the first on the
+     * answering one. 4d (6, 4) is refused in a retrain and the I-modem clears
+     * the call; 69 (4, 6) gets its 0034:0004 retune, as 4d does at startup.
+     * On 1200 Hz it is not heard at all. */
+    s->marker_bits[0]=s->marker_bits[1]=1;
+    x2_info_encode(0x69,7,s->marker_bits+2);
+    s->marker_carrier=2400;
+    s->rt_silence=560;
+    stage(s,X2_TONE_A);
+    return 0;
+}
 unsigned x2_session_renegotiating(const x2_session_t *s)
 {
     return s ? s->reneg : 0;
@@ -487,6 +515,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
     size_t k;
     if(!s||!octets)return 0;
     for(k=0;k<count;++k,++s->tx_samples) {
+        if(s->rt_silence){--s->rt_silence;octets[k]=linear_code(s,0);continue;}
         unsigned n=s->stage_samples;uint8_t code=0x7f;
         x2_session_stage_t old_stage=s->stage;
         if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD && !(s->stage==X2_SYMMETRIC && s->sym.tx_data && s->sym.rx_data)){fail(s,X2_FAILURE_STAGE_TIMEOUT);old_stage=s->stage;n=0;}
@@ -537,7 +566,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             /* Clause 5.1: the marker is framed like INFO0 and sent the same
              * way, 600 bit/s DPSK on our 1200 Hz carrier (V.34 10.1.2.2). */
             if(s->info_clock<600 && s->marker_bits[s->info_position])s->sign^=1;
-            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*1200*(double)(s->tx_samples%20)/8000)));
+            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->marker_carrier?s->marker_carrier:1200)*(double)(s->tx_samples%20)/8000)));
             s->info_clock+=600;
             if(s->info_clock>=8000) {
                 s->info_clock-=8000;

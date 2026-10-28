@@ -80,6 +80,10 @@ typedef struct {
        its coherent run), and that of the S that opened this rate change:
        upstream decoded after it is S, not the peer's data. */
     uint64_t s_onset, reneg_s_onset;
+    /* Client marker carrier in Hz (0: 1200, the caller's); the retrains
+       answered (x2_session_client_retrain) and the silence still to send
+       before its Tone A. */
+    unsigned marker_carrier, retrains, rt_silence;
     unsigned tone_a_windows;
     x2_session_failure_t failure;
     x2_session_stage_t failed_stage;
@@ -112,4 +116,12 @@ void x2_session_fail(x2_session_t *session, x2_session_failure_t why);
 size_t x2_session_tx(x2_session_t *session, uint8_t *octets, size_t count);
 const char *x2_session_stage_name(x2_session_stage_t stage);
 const char *x2_session_failure_name(x2_session_failure_t failure);
+/* Client in data: the server has retrained (V.90 9.5.1.1, 70 ms of silence
+ * then Tone B; x2_client.c tone_b). Answer as Ie030002 runs it (V.90
+ * 9.5.2.2, traced 28 Oct, docs/x2_implementation.md): 70 ms of silence,
+ * Tone A, the 9.2.2.1.3-.5 reversals against its Tone B, silence through
+ * its probe, then the marker with the indices the other way round (69) on
+ * our Tone A carrier, 2400 Hz, and the client's startup from X2_CLIENT
+ * again. Returns -1 unless the session is a client in X2_CLIENT. */
+int x2_session_client_retrain(x2_session_t *s);
 #endif
