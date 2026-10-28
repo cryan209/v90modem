@@ -1376,7 +1376,7 @@ static void gui_publish(void)
 static void print_usage(FILE *f, const char *argv0)
 {
     fprintf(f,
-        "Usage: %s [--sip-server host] [--username u] [--password p]\n"
+        "Usage: %s [--sip-server host] [--username u] [--password p] [--no-register]\n"
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--gui | --gui-web | --gui-loopback] (native macOS / browser signal monitor)\n"
         "          [--local-port port] [--rtp-port port]\n"
@@ -1401,6 +1401,8 @@ static void print_usage(FILE *f, const char *argv0)
         "RTP port rtp-port+100*i, console <link>.i, profile <file>.i, and the i-th\n"
         "of a comma-separated --username/--password (docs/multi_line.md).\n"
         "--recycle gives every call a fresh worker process.\n"
+        "--no-register retains outbound SIP authentication without registering a\n"
+        "new Contact (useful for diagnostics alongside an existing registered line).\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
         "PTY changes it for later calls and ATZ/AT&F restore it.\n"
@@ -1436,6 +1438,7 @@ int main(int argc, char *argv[])
     const char *sip_server  = NULL;
     const char *username    = NULL;
     const char *password    = NULL;
+    bool        no_register = false;
     const char *pty_link    = "/tmp/modem0";
     const char *control_link = NULL;
     const char *data_link    = NULL;
@@ -1484,6 +1487,8 @@ int main(int argc, char *argv[])
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
             print_usage(stdout, argv[0]);
             return 0;
+        } else if (!strcmp(a, "--no-register")) {
+            no_register = true;
         } else if (!strcmp(a, "--ata-server")) {
             ata_server = 1;
         } else if (!strcmp(a, "--sip-server") && has_val) {
@@ -1763,7 +1768,10 @@ int main(int argc, char *argv[])
         snprintf(reg_buf, sizeof(reg_buf), "sip:%s",     sip_server);
 
         acc_cfg.id            = pj_str(id_buf);
-        acc_cfg.reg_uri       = pj_str(reg_buf);
+        /* RFC 3261 sections 10 and 22: registration and request
+         * authentication are independent. A diagnostic call must not
+         * replace another running line's registered Contact. */
+        acc_cfg.reg_uri       = pj_str(no_register ? "" : reg_buf);
         if (bind_addr)
             acc_cfg.rtp_cfg.bound_addr = pj_str((char *)bind_addr);
         acc_cfg.cred_count    = 1;
