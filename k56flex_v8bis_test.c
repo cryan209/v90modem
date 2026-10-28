@@ -123,6 +123,16 @@ int main(void)
         cl[13] = 0x21;
         CHECK(k56flex_v8bis_peer_acceptable(cl, 16), "MICA-layout 0x21 still accepted");
     }
+    /* The MultiTech MT5634MU's MS to our server (live, 27 October): a 7-octet
+       NS block with the version octet 0x82 last, 13 octets in all. */
+    {
+        static const uint8_t lucent[13] = {0x11, 0xc9, 0x80, 0x80, 0x80, 0x07, 0xb5, 0x02, 0x00, 0x94, 0x01, 0x83, 0x82};
+        CHECK(k56flex_v8bis_flex_version(lucent, sizeof(lucent)) == 0x82, "Lucent MS version %d",
+              k56flex_v8bis_flex_version(lucent, sizeof(lucent)));
+        CHECK(k56flex_v8bis_peer_acceptable(lucent, sizeof(lucent)), "Lucent client MS accepted");
+        for (n = 0; n < sizeof(lucent); ++n)
+            CHECK(!k56flex_v8bis_peer_acceptable(lucent, n), "Lucent MS truncated at %zu rejected", n);
+    }
 
     /* Full exchange: the initiator stands in for a Rockwell client (CL offer 0x03). */
     ini = k56flex_v8bis_new(&ic);

@@ -236,6 +236,14 @@ static int ensure_rx(k56flex_client_t *c)
     for (i = 0; i < 23 && i < c->nbits; ++i) hist |= (unsigned)c->y[c->nbits - 1 - i] << i;
     c->rx.descrambler = hist;
     c->rx.m.dc = c->cp.dc;                       /* the server carries training DC into the mapper */
+    /* Derived signs carry no bits and follow the server's running DC from
+     * the first training sample (Draft 0.23 4.12). Our model of that DC is
+     * exact only while the server's stages last as long as MICA's: a
+     * server that repeats its final record until the client's E has been
+     * heard (the 7910, and ours since it waits for that) leaves the model
+     * short by those records, and the first DC sign change then fails a
+     * valid frame. The magnitudes, ranks and sign bits still check it. */
+    c->rx.ignore_derived_sign = 1;
     c->rx_ready = 1;
     return 1;
 }

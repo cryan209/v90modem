@@ -28,6 +28,14 @@ SPANDSP_HOST_STAMP := $(SPANDSP_ROOT)/.build-host
 # the regions it marks itself (see the comment at the top of v34rx.c).  Its
 # unoptimised B1 acquisition made 20-26 ms media callbacks after B1.
 SPANDSP_V34RX_OPT_CFLAGS = -O2
+# gcc has no region pragmas here, so it builds the whole of v34rx.c
+# optimised; on x86-64 that emits no FMA (no -march), and -ffp-contract=off
+# keeps it so, so the float results are the unoptimised ones.  Without it the
+# slowest live host (CT 117, gcc) spent 11-21 ms of every 20 ms packet in the
+# 31200 upstream receiver and held our K56flex downstream back 25-39 ms
+# (artifacts/mt5634mu-k56-20261027/server-l).  Checked there with
+# v90_upstream_replay: identical bits.
+SPANDSP_V34RX_GCC_CFLAGS = -O2 -ffp-contract=off
 
 # Shared defaults
 PJ_CFLAGS   ?=
@@ -214,7 +222,7 @@ AT_MS_TEST_OBJS = at_ms_test.o $(filter-out sip_modem.o,$(OBJS))
 # itself through the PTY.
 CLEAR_CHANNEL_TEST_OBJS = clear_channel_test.o $(filter-out sip_modem.o,$(OBJS))
 FAX_CLASS2_TEST_OBJS = fax_class2_test.o fax_class2.o
-V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
+V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o v34_line_ec.o
 V90_B1_STATE_TEST_OBJS = v90_b1_state_test.o
 HSF_FXO_PROBE_OBJS = hsf_fxo_probe.o hsf_fxo.o
 APPLE_USB_MODEM_PROBE_OBJS = tools/apple_usb_modem_probe.o
@@ -900,6 +908,10 @@ $(SPANDSP_LIB): FORCE
 	fi; \
 	if $(CC) --version 2>/dev/null | grep -q clang; then \
 		opt="$(SPANDSP_V34RX_OPT_CFLAGS)"; \
+	else \
+		opt="$(SPANDSP_V34RX_GCC_CFLAGS)"; \
+	fi; \
+	if [ -n "$$opt" ]; then \
 		stamp="$(SPANDSP_ROOT)/src/.v34-opt-cflags"; \
 		if [ "$$(cat "$$stamp" 2>/dev/null)" != "$$opt" ]; then \
 			rm -f "$(SPANDSP_ROOT)"/src/v34rx.lo "$(SPANDSP_ROOT)"/src/v34rx.o "$(SPANDSP_ROOT)"/src/.libs/v34rx.o; \

@@ -140,7 +140,11 @@ bool k56flex_v8bis_peer_acceptable(const uint8_t *p, size_t len)
 {
     unsigned type;
     int flex;
-    if (!p || len < 14) return false;
+    /* Header (5), NS length, and the shortest NS block (7, checked by
+     * k56flex_v8bis_ns_offset): 13.  The MultiTech MT5634MU (Lucent) sends
+     * exactly that, its version octet last: 11 c9 80 80 80 07 b5 02 00 94
+     * 01 83 82. */
+    if (!p || len < 13) return false;
     type = p[0] >> 4;
     if (type != 1) return false;                 /* revision-1 MS/CL octets are 11/12 */
     if ((p[0] & 0x0f) != 1 && (p[0] & 0x0f) != 2) return false;

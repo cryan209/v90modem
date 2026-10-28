@@ -116,6 +116,17 @@ static void boundaries(void)
         CHECK(!tx.ends, "corrupt terminator accepted");
         source_word(&tx, &rx, 0x899f, 15);
         CHECK(!tx.ends, "short terminator accepted");
+        if (offset == 0) {
+            /* One symbol (two bits) off the boundary, as the MT5634MU
+             * sends it: accepted, since it breaks the report's period. */
+            k56flex_upstream_t sym = rx;
+            source_t stx = tx;
+            /* Pad so the marker's last bit lands two bits past a boundary. */
+            unsigned pad = (2u + 48u + sym.end_phase - 16u - (sym.end_bits + stx.bits)%24u) % 24u;
+            source_word(&stx, &sym, 0, pad);
+            source_word(&stx, &sym, 0x899f, 16);
+            CHECK(stx.ends == 1, "terminator one symbol off the boundary");
+        }
         source_bit(&tx, &rx, 1); /* bit 15 of 899F */
         if (tx.bits) source_bit(&tx, &rx, 0);
         CHECK(tx.reports == 1 && tx.ends == 1, "complete terminator at offset %u", offset);

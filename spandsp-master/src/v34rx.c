@@ -14003,6 +14003,16 @@ search:
         s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_first,
                                                           s->v90_t3_srch_blind_coeff);
         s->v90_t3_srch_blind_stage = 2;
+        if (s->v90_t3_4point_final  &&  s->v90_t3_srch_blind_first >= 0)
+        {
+            /* Skip the six template steps (one media packet each, ~12 ms
+               apiece unoptimised on the slowest host): they cannot fit a
+               peer that does not reset its scrambler, and on a K56flex
+               server call they held our downstream back 25-50 ms just
+               after priming, which the MT5634MU answered with a retrain
+               (mt5634mu-k56-20261027/server-i, -j). */
+            s->v90_t3_srch_step = 1000;     /* past every template and state step */
+        }
         return;
     }
     /*endif*/
@@ -18485,6 +18495,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     v90_t3_cma_abandon(rx);
     rx->v90_t3_freq_seed = 0.0f;
     rx->v90_t3_blind_tried = false;
+    rx->v90_t3_4point_final = false;
     rx->v90_t3_srch_running = false;
     rx->v90_t3_acq_abandoned = false;
     rx->v90_t3_acq_best_valid = false;
@@ -18692,6 +18703,30 @@ SPAN_DECLARE(int) v34_v90_begin_b1_search(v34_state_t *s)
     }
     return result;
 }
+
+SPAN_DECLARE(int) v34_begin_b1_search_after_mp_ack(v34_state_t *s)
+{
+    /* V.34 11.4.1.1.4/11.4.1.2.4: E, then B1, follow MP' directly.  This is
+       for a caller that has itself decoded a CRC-valid MP' from the audio,
+       as the K56flex server does (k56flex_upstream_pcm.c), so unlike
+       v34_v90_begin_b1_search() E is known to be on the line now, not up to
+       half a second ago: the anchor is not moved back.  The 4-point
+       fallback (v90_t3_blind_acquire()) stays available, because what came
+       just before E is MP'/E, a 4-point signal on this carrier and clock.
+       It is the only way some peers' B1 is acquired at all: the MT5634MU
+       (Lucent) starts B1 from a scrambler state no 10.1.3.1 reset reaches,
+       so no template fits it (coarse 5-9% in V.90 and in K56flex alike;
+       artifacts/mt5634mu-k56-20261027).  The complete fit or 4-point
+       training, and the held-out DATA checks, still gate acquisition. */
+    if (!s || !s->rx.v90_mode || !s->rx.v90_t3_prepared
+        || !s->rx.v90_t3_active || s->rx.stage != V34_RX_STAGE_V90_CP)
+        return -1;
+    if (begin_rx_data(s, false))
+        return -1;
+    s->rx.v90_t3_4point_final = true;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
                                                int16_t bits[16])

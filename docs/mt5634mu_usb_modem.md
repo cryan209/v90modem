@@ -306,3 +306,14 @@ vendored encoder/decoder helper sources, local raster verification, PBX
 metadata and final bridge counters, with a SHA-256 manifest. Copy the scripts
 and page to a fresh `artifacts/` directory before repeating a trial; do not
 overwrite the retained evidence. No production fax implementation was changed.
+
+## K56flex against our server, 28 October 2026
+
+`AT+MS=K56` on our answering server (2904, CT 117): the MT5634MU connects in
+K56flex, `CONNECT 44000 V42bis` / `CONNECT 46000 V42bis` at 31200 up, ATI11
+"Last Connection 56K", held 60 s with no retrains (2 of 3 calls). Against
+the 7910 it still negotiates V.34 only (its CRe is clipped on that path). The
+fixes, all on our side, are in `docs/k56flex_implementation.md` ("A real K56flex
+client on our server"). Drive it with the bridge running and
+`python3 call.py <pty> 2904 <outdir> <hold-s>`, which dials, holds, hangs up and
+reads ATI11 with its pager advanced.

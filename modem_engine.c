@@ -3373,8 +3373,9 @@ static bool g_k56c_call = false;
  * exchange runs the negotiated startup into K56flex DATA; anything else
  * falls back to ordinary V.8 (me_k56s_call()). */
 static bool g_k56s_call = false;
-/* This client call has fallen back to initiating V.8bis itself. */
-static bool g_k56c_v8bis_initiated = false;
+/* This K56flex client or server call heard no CRe and has fallen back to
+ * initiating V.8bis itself. */
+static bool g_k56_v8bis_initiated = false;
 /* V.8's calling role when it differs from the SIP direction, -1 otherwise.
  * After a K56flex V.8bis exchange the MS sender is the V.8 caller (V.8bis
  * 9.9, as our server reads it): a client call that receives the server's MS
@@ -4890,6 +4891,35 @@ static k56flex_startup_t *g_k56_startup = NULL;
 static k56flex_upstream_pcm_t *g_k56_upstream = NULL;
 static int g_k56_baud_code, g_k56_high_carrier, g_k56_upstream_bps;
 static bool g_k56_b1_started;
+/* The server's line echo canceller (g_lec, v34_line_ec.c).  Our downstream
+ * comes back off the client's hybrid: the MT5634MU through the AudioCodes
+ * FXS returned it 230 ms late at rms 220 against a ~4000 upstream, which
+ * held the upstream at 26 dB, too little for its 31200 data (white at every
+ * rate); cancelled, 32 dB and B1 descrambles to ones.  The client is silent
+ * from the end of Phase 2 until its S in gate A (Draft 0.23 4.10), so P1-P3
+ * are echo-only, the same window V.90 9.3.2.7 gives the digital modem. */
+static bool g_k56_lec;
+/* g_rx_audio_samples at which to post PARAM_DONE (start priming), 0 = none
+ * pending.  See me_k56_prime_delay_samples(). */
+static uint64_t g_k56_prime_at;
+/* g_rx_audio_samples when the upstream error first went over the limit in
+ * me_k56_data_bit(), 0 while it is under. */
+static uint64_t g_k56_bad_since;
+
+/* MICA primes as soon as it accepts MP' (resident 15FF/160A).  A Lucent
+ * server does not: the 7910 repeats its final record until ~120 ms after
+ * our client's E (docs/k56flex_implementation.md, 27 October), and V.34
+ * 11.4.1.1.5 has a call modem condition its receiver for the far end's B1
+ * only after it has received E -- so a Lucent client, still sending its
+ * MP'/E/B1, need not be listening when MICA-timed priming goes out.
+ * ME_K56FLEX_PRIME_DELAY_MS (default 120, 0 = MICA timing). */
+static uint64_t me_k56_prime_delay_samples(void)
+{
+    const char *e = getenv("ME_K56FLEX_PRIME_DELAY_MS");
+    int ms = e ? atoi(e) : 120;
+    if (ms < 0 || ms > 2000) ms = 120;
+    return (uint64_t)ms*8;
+}
 static bool g_k56_negotiated = false;
 /* This call's V.8bis offered K56flex as the client (ME_K56FLEX_ROLE=client). */
 static bool g_k56_client_role = false;
@@ -5476,17 +5506,17 @@ static void me_k56c_rx_locked(const int16_t *amp, int len)
         me_k56c_stop_locked("hold window elapsed");
 }
 
-static void me_k56_v8bis_new_locked(bool client_initiates);
+static void me_k56_v8bis_new_locked(bool initiate);
 
 static void me_k56_start_locked(void)
 {
-    g_k56c_v8bis_initiated = false;
+    g_k56_v8bis_initiated = false;
     me_k56_v8bis_new_locked(false);
 }
 
-/* client_initiates: a K56flex client call heard no server CRe and now sends
-   its own (below). */
-static void me_k56_v8bis_new_locked(bool client_initiates)
+/* initiate: a K56flex client or server call heard no CRe and now sends its
+   own (below). */
+static void me_k56_v8bis_new_locked(bool initiate)
 {
     k56flex_v8bis_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -5495,7 +5525,7 @@ static void me_k56_v8bis_new_locked(bool client_initiates)
        instead of sending its own (experiment: a K56flex RAS may initiate). */
     if (g_calling_party && getenv("ME_K56FLEX_LISTEN") && *getenv("ME_K56FLEX_LISTEN") != '0')
         cfg.role = K56FLEX_V8BIS_RESPOND;
-    if (me_k56c_call() && client_initiates) {
+    if (me_k56c_call() && initiate) {
         /* Servers differ in who starts V.8bis.  MICA's line (and so ours)
            waits for the client's CRe and CL and answers CRd and MS; the
            7910 sends CRe and CL itself.  A client that heard no server CRe
@@ -5510,9 +5540,20 @@ static void me_k56_v8bis_new_locked(bool client_initiates)
         cfg.detect_ms = 20;
         cfg.hsf_client_ms = 1;
         cfg.listen_ms = 2500;
+    } else if (me_k56s_call() && initiate) {
+        /* The Lucent way, the 7910's: the server sends CRe (500 ms after
+           this, so ~2 s into the call) and its CL.  A Lucent client (the
+           MultiTech MT5634MU) never sends CRe; our own client listens 2.5 s
+           for this.  Wait 1.5 s for CRd, then ordinary V.8. */
+        cfg.role = K56FLEX_V8BIS_INITIATE;
+        cfg.listen_ms = 1500;
+    } else if (me_k56s_call()) {
+        /* First listen briefly for a client that starts V.8bis itself
+           (MICA's way, and a Rockwell client's). */
+        cfg.listen_ms = 1500;
     } else if (!g_calling_party) {
-        /* Answering: allow for a client that listens 2.5 s for our CRe
-           before sending its own 500 ms later (above). */
+        /* Answering with ME_K56FLEX=probe: allow for a client that listens
+           2.5 s for our CRe before sending its own 500 ms later (above). */
         cfg.listen_ms = 4000;
     }
     cfg.mu_law = g_law == ME_LAW_ULAW;
@@ -5527,6 +5568,9 @@ static void me_k56_v8bis_new_locked(bool client_initiates)
         k56flex_v8bis_free(g_k56);
     k56flex_upstream_pcm_free(g_k56_upstream);
     g_k56_upstream = NULL;
+    g_k56_lec = false;
+    g_k56_prime_at = 0;
+    g_k56_bad_since = 0;
     g_k56_upstream_bps = 0;
     g_k56_b1_started = false;
     g_k56_negotiated = false;
@@ -5567,10 +5611,20 @@ static void me_k56_data_bit(void *user, int bit)
          * 11.6 requires reacquisition after loss; until K56 renegotiation
          * exists, end the call rather than forwarding unframed noise. */
         float limit = fmaxf(0.08f, 4.0f*settled);
+        /* The error is a 16-symbol average (V34_V90_T3_ERR_FAST_SHIFT), so
+         * one 5 ms burst on an analogue line crosses the limit: the
+         * MT5634MU's call (mt5634mu-k56-20261027/server-h) ended so after
+         * 15 s of clean V.42 at 0.18. Only a loss held for 0.5 s ends it. */
         if (settled > 0 && error > limit) {
-            trace_phase("K56flex upstream quality lost: %.3f > %.3f; ending call", error, limit);
-            g_state = ME_HANGUP;
-            return;
+            if (!g_k56_bad_since) g_k56_bad_since = g_rx_audio_samples;
+            else if (g_rx_audio_samples - g_k56_bad_since >= 4000) {
+                trace_phase("K56flex upstream quality lost for 0.5 s: %.3f > %.3f; ending call",
+                            error, limit);
+                g_state = ME_HANGUP;
+                return;
+            }
+        } else {
+            g_k56_bad_since = 0;
         }
         ds_rx_put_bit(&g_data_stack, bit);
     }
@@ -5629,6 +5683,9 @@ static void me_k56_startup_progress_locked(void)
             || !(g_k56_upstream = k56flex_upstream_pcm_new(baud_code, high_carrier, 18))) {
             ME_LOG("[ME] K56flex: cannot initialize negotiated upstream audio receiver\n");
             st = K56S_FAILED;
+        } else {
+            v34_line_ec_reset(&g_lec);
+            g_k56_lec = me_line_ec_enabled();
         }
         g_k56_baud_code = baud_code;
         g_k56_high_carrier = high_carrier;
@@ -5666,9 +5723,9 @@ static void me_k56_progress_locked(void)
         trace_phase("K56flex V.8bis %s: %s", st == K56V8B_DONE ? "done" : "failed",
                     k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)));
     }
-    if (me_k56c_call()  &&  !g_k56c_v8bis_initiated  &&  st == K56V8B_FAILED
+    if ((me_k56c_call()  ||  me_k56s_call())  &&  !g_k56_v8bis_initiated  &&  st == K56V8B_FAILED
         &&  k56flex_v8bis_result(g_k56) == K56V8B_NO_CRE) {
-        g_k56c_v8bis_initiated = true;
+        g_k56_v8bis_initiated = true;
         me_k56_v8bis_new_locked(true);
         return;
     }
@@ -5729,6 +5786,19 @@ static void me_k56_train_fill_locked(uint8_t *codewords, int count)
     }
     for (size_t i = got; i < (size_t)count; i++)
         codewords[i] = pcm_idle();
+    if (g_k56_lec) {
+        /* What went out, for the line echo canceller (g_k56_lec). */
+        for (int offset = 0; offset < count; ) {
+            int16_t linear[320];
+            int chunk = count - offset;
+            if (chunk > (int)(sizeof(linear)/sizeof(linear[0])))
+                chunk = (int)(sizeof(linear)/sizeof(linear[0]));
+            for (int i = 0; i < chunk; i++)
+                linear[i] = pcm_to_linear(codewords[offset + i]);
+            v34_line_ec_tx(&g_lec, linear, chunk);
+            offset += chunk;
+        }
+    }
     if (ph == K56T_FAILED) {
         ME_LOG("[ME] K56flex probe: no peer progress signal; %s\n",
                g_k56_negotiated ? "ending negotiated call (no data fallback)" : "continuing with V.8");
@@ -13128,6 +13198,9 @@ void me_destroy(void)
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
     k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
     k56flex_upstream_pcm_free(g_k56_upstream); g_k56_upstream = NULL;
+    g_k56_lec = false;
+    g_k56_prime_at = 0;
+    g_k56_bad_since = 0;
     v21_release();
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
@@ -13699,6 +13772,9 @@ void me_on_sip_disconnected_status(int sip_status)
     if (g_k56_train) { free(g_k56_train); g_k56_train = NULL; }
     k56flex_startup_free(g_k56_startup); g_k56_startup = NULL;
     k56flex_upstream_pcm_free(g_k56_upstream); g_k56_upstream = NULL;
+    g_k56_lec = false;
+    g_k56_prime_at = 0;
+    g_k56_bad_since = 0;
     g_k56_negotiated = false;
     g_k56_client_role = false;
     g_k56_last_phase = K56T_FAILED;
@@ -14897,7 +14973,24 @@ void me_rx_audio(const int16_t *amp, int len)
     }
     if (g_k56_train && g_k56_upstream) {
         k56flex_upstream_pcm_result_t result;
-        int events = k56flex_upstream_pcm_rx(g_k56_upstream, amp, len, &result);
+        int16_t cancelled[320];
+        if (g_k56_lec && len <= (int)(sizeof(cancelled)/sizeof(cancelled[0]))) {
+            /* g_k56_lec: fitted over P1-P3, while the client is silent. */
+            k56flex_train_phase_t ph = k56flex_train_phase(g_k56_train);
+            char lec_msg[256] = "";
+            memcpy(cancelled, amp, (size_t)len*sizeof(cancelled[0]));
+            bool lec_ret;
+            ME_CB_PROF(0, lec_ret = v34_line_ec_rx(&g_lec, cancelled, len,
+                                                   ph >= K56T_P1 && ph <= K56T_P3,
+                                                   lec_msg, sizeof(lec_msg)));
+            if (lec_ret && lec_msg[0])
+                ME_LOG("[ME] K56flex %s\n", lec_msg);
+            amp = cancelled;
+        }
+        int events;
+        /* Slot 2 ("ja" in the slow-callback line) is this receiver on a
+         * K56flex server call. */
+        ME_CB_PROF(2, events = k56flex_upstream_pcm_rx(g_k56_upstream, amp, len, &result));
         /* Draft 0.23 4.10/11, resident MICA 1258/126C -> 0FFE:
          * S/S-bar releases DBA8 (bit 11); the accepted report releases
          * DB22 (bit 10). 899F belongs to the subsequent exchange, not DB22.
@@ -14954,18 +15047,26 @@ void me_rx_audio(const int16_t *amp, int len)
             if (events & K56U_MP_ACK) {
                 /* V.34 10.1.3.9: MP' is MP with acknowledgement set.
                  * Resident 15FF/160A posts 4000 after that acceptance. */
-                k56flex_train_status(g_k56_train, K56FLEX_STATUS_PARAM_DONE);
+                g_k56_prime_at = g_rx_audio_samples + me_k56_prime_delay_samples();
+                if (g_k56_prime_at == g_rx_audio_samples) g_k56_prime_at = 1;
                 trace_phase("K56flex upstream MP' from audio at sample %d", result.mp_ack_sample);
                 if (g_v34 && !g_k56_b1_started) {
-                    /* V.34 10.1.3.1: known B1 gates user bits. As at the
-                     * V.90 CP' seam, search without inventing an E event. */
-                    if (v34_v90_begin_b1_search(g_v34)) g_state = ME_HANGUP;
+                    /* V.34 10.1.3.1: known B1 gates user bits. E and B1
+                     * follow this MP' (11.4.1.1.4): search from now, with
+                     * the 4-point MP'/E fallback, without inventing an E. */
+                    if (v34_begin_b1_search_after_mp_ack(g_v34)) g_state = ME_HANGUP;
                     else g_k56_b1_started = true;
                 }
             }
         }
+        if (g_k56_prime_at && g_rx_audio_samples >= g_k56_prime_at) {
+            /* me_k56_prime_delay_samples(): now the client is listening. */
+            g_k56_prime_at = 0;
+            k56flex_train_status(g_k56_train, K56FLEX_STATUS_PARAM_DONE);
+            trace_phase("K56flex parameters done: priming");
+        }
         if (g_v34 && g_k56_upstream_bps && g_state != ME_HANGUP) {
-            v34_rx(g_v34, amp, len);
+            ME_CB_PROF(1, v34_rx(g_v34, amp, len));
             if (v34_v90_upstream_carrier_lost(g_v34)) {
                 /* V.34 11.6: a lost upstream needs another training
                  * exchange, not delivery of unframed noise to the DTE.

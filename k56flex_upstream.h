@@ -17,6 +17,7 @@ typedef struct {
     unsigned previous_raw;
     uint64_t symbols;
     uint64_t end_window;
+    uint64_t end_history;   /* descrambled bits since the report, newest in bit 0 */
     unsigned end_bits;
     unsigned end_phase;
     int ended;

@@ -53,8 +53,19 @@ int k56flex_upstream_symbol(k56flex_upstream_t *rx, float real, float imag)
          * resets for TRN. Keep continuous descrambler/differential history
          * through that word; require its recovered packet boundary. */
         rx->end_window = (rx->end_window >> 1) | ((uint64_t)x << 15);
+        rx->end_history = (rx->end_history << 1) | x;
         ++rx->end_bits;
-        if (rx->end_bits >= 16 && rx->end_bits%24 == rx->end_phase
+        /* The packet boundary is where HSF puts 899F. The MT5634MU
+         * (Lucent) put it one symbol off that boundary
+         * (artifacts/mt5634mu-k56-20261027/server-f), so also accept it
+         * on any other symbol boundary where its 16 bits break the
+         * 24-bit repetition of the report: there it cannot be part of
+         * the report. An odd bit offset is not a symbol boundary. */
+        int aligned = rx->end_bits%24 == rx->end_phase;
+        int symbol_boundary = (rx->end_bits + 24 - rx->end_phase)%2 == 0;
+        int breaks_report = rx->end_bits >= 40
+            && ((rx->end_history ^ (rx->end_history >> 24)) & 0xffff) != 0;
+        if (rx->end_bits >= 16 && (aligned || (symbol_boundary && breaks_report))
             && rx->end_window == UINT64_C(0x899f)) {
             rx->ended = 1;
             events |= K56U_REPORT_END;

@@ -3300,3 +3300,65 @@ Engine pairs, both ends `AT+MS=K56`, no environment: **52000 down / 31200
 up, V.42 LAPM + V.42bis**, 128 printable lines each way intact, over A-law
 and over µ-law; V.14 (`AT+ES=1`) the same. In `tests/fast.list`.
 
+
+### A real K56flex client on our server: the MT5634MU connects (28 October)
+
+The MultiTech MT5634MU (Lucent, firmware 8.18j) dialling our server on 2904
+(CT 117, `AT+MS=K56`, PCMU through the AudioCodes FXS) now connects
+in K56flex: **`CONNECT 44000 V42bis` and `CONNECT 46000 V42bis`, 31200 up**,
+held for the full 60 s with no retrains (ATI11 "Last Connection 56K", runs
+`artifacts/mt5634mu-k56-20261027/server-{m,o}`). Two of three calls on the
+final build; the third lost the upstream 0.6 s into data. Each step below was
+ours, found on the server's own taps:
+
+1. **V.8bis.** A Lucent client waits for the server's CRe, as the 7910 does
+   for ours. A server call listens 1.5 s, then initiates. `k56flex_v8bis.c`
+   accepts the client's 13-octet MS (it had required 14).
+2. **Gate B: S/S-bar phase.** The MultiTech's S ends one symbol out of
+   phase with MICA's and the 7910's, so `validate_training()`
+   (`k56flex_upstream_pcm.c`) scored it at sqrt(2) (1.44, every point
+   against its alternation neighbour) with TRN and PP at 0.06. It now
+   scores both phases; V.34 10.1.3.7 does not fix which point S ends on.
+3. **The 899F marker** ending the report came one symbol off the report's
+   24-bit packet boundary on some calls (`k56flex_upstream.c`). It is now
+   accepted on any symbol boundary where its 16 bits break the report's
+   repetition (so it cannot be part of the report); an odd bit offset is
+   still refused (`k56flex_upstream_test`).
+4. **Our downstream's echo.** It comes back off the client's hybrid 230-250 ms
+   late at rms ~220 against a ~4000 upstream, which held the upstream at 26
+   dB: 31200 data decoded white at every rate. The server now runs the line
+   echo canceller (`g_k56_lec`), fitted over P1-P3, when the client is silent
+   (Draft 0.23 4.10): 28 dB of echo removed, 36 dB upstream.
+5. **B1 acquisition.** This peer does not reset its scrambler before B1 (as
+   the RasFinder's MT5634SMI in V.90), so no B1 template fits it (coarse 5-9%,
+   in V.90 too). V.90's CP' entry, which the server used, turns the 4-point
+   fallback off and backdates the E anchor 0.5 s, past the end of the
+   4-point signal. New `v34_begin_b1_search_after_mp_ack()`: the anchor is
+   now, the 4-point MP'/E training stays on, and once it places B1 the six
+   template steps are skipped. They cannot fit this peer and cost ~12 ms
+   each on CT 117.
+6. **Priming timing.** MICA primes as soon as it accepts MP'. A Lucent
+   server repeats its final record until ~120 ms after the client's E, and
+   V.34 11.4.1.1.5 has the call modem condition its receiver for the far
+   B1 only after E. Primed at once, the MultiTech sent marks for 5 s and
+   gave up. `ME_K56FLEX_PRIME_DELAY_MS` (default 120) holds PARAM_2 that
+   long after MP'; then V.42 detection, XID and LAPM complete. Our client
+   then failed on derived signs (its model of the server's DC assumes
+   MICA's stage lengths), so it no longer checks them (they carry no bits).
+   That also fixed our client at 44000: the server's downstream at other
+   rates had never been tested, and is now in `tests/fast.list`.
+7. **Our transmit stalls.** On CT 117 (gcc) none of `v34rx.c`'s optimised
+   regions applied, and the B1 search and 31200 receiver held our downstream
+   back 25-50 ms just after priming. The MultiTech answered each such call with
+   a retrain ~1 s into data. gcc now builds `v34rx.c` at `-O2
+   -ffp-contract=off` (no FMA on x86-64): identical decoded bits on two taps
+   (`v90_upstream_replay`), worst block 8.8 -> 2.6 ms.
+8. **Quality monitor.** The K56 data-bit check compared a 16-symbol error
+   against 4x settled per bit, and one 5 ms burst ended a clean call 15 s in.
+   It now needs the error over the limit for 0.5 s.
+
+`v90_upstream_replay` gained `mp-ack` (this handover) and
+`V90_REPLAY_ECHO_TX`/`V90_REPLAY_ECHO_WINDOW` (the server's echo canceller
+on the linear samples). Still open: one call in three loses the upstream
+within a second of data (call n). The client's MP asks 44000-46000, below
+V.90's 50666 on the same line.

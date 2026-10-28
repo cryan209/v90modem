@@ -1632,6 +1632,9 @@ typedef struct
     /*! Whether the 4-point-trained acquisition (no B1 template) has been
         tried on this call. */
     bool v90_t3_blind_tried;
+    /* v34_begin_b1_search_after_mp_ack(): a B1 that the 4-point MP'/E
+       training has placed is final; the templates are not tried. */
+    bool v90_t3_4point_final;
     int64_t v90_t3_acq_retry_at;
     /*! Window of the current fast retry (-1 when none): see
         V34_V90_T3_ACQ_FAST_GAP.  fast_start..fast_end replaces the

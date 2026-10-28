@@ -114,15 +114,21 @@ static int validate_training(const p3_result_t *r, int start,
         e += error(equalize(r, start - 2*288 + 2*n, w), pp);
     }
     out->pp_rms = sqrt(e/256);
-    e = 0;
-    for (int n = -64; n < 16; ++n) {
-        /* S alternates (++,-+); S-bar alternates (--,+-). */
-        point_t s = {(n&1) ? -0.7071067811865475 : 0.7071067811865475,
-                     0.7071067811865475};
-        if (n >= 0) { s.re = -s.re; s.im = -s.im; }
-        e += error(equalize(r, start - 2*(288+16) + 2*n, w), s);
+    /* S alternates (++,-+); S-bar alternates (--,+-). V.34 10.1.3.7 does
+     * not fix which point S ends on: the MultiTech MT5634MU (Lucent) ends
+     * one symbol out of phase with MICA and the 7910, so score both. */
+    double best = INFINITY;
+    for (int phase = 0; phase < 2; ++phase) {
+        e = 0;
+        for (int n = -64; n < 16; ++n) {
+            point_t s = {((n+phase)&1) ? -0.7071067811865475 : 0.7071067811865475,
+                         0.7071067811865475};
+            if (n >= 0) { s.re = -s.re; s.im = -s.im; }
+            e += error(equalize(r, start - 2*(288+16) + 2*n, w), s);
+        }
+        best = fmin(best, e);
     }
-    out->s_rms = sqrt(e/80);
+    out->s_rms = sqrt(best/80);
     if (out->pp_rms > 0.3 || out->s_rms > 0.3) return 0;
     return 1;
 }

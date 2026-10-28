@@ -18,6 +18,9 @@
  *
  *   v90_upstream_replay <tap.g711> [ulaw|alaw] [baud] [bps]
  *
+ * V90_REPLAY_ECHO_TX/V90_REPLAY_ECHO_WINDOW cancel our own downstream's echo
+ * first (cancel_echo()).
+ *
  * V90_REPLAY_HIGH_CARRIER=1 and V90_REPLAY_SCRAMBLER_TAP=18 (GPC) point it
  * at a V.34 call modem's data instead, such as our K56flex client's upstream
  * (V.34 clause 7; INFO1a's carrier); the defaults are V.90's low carrier
@@ -43,6 +46,8 @@
 #include "spandsp/private/power_meter.h"
 #include "spandsp/private/logging.h"
 #include "spandsp/private/v34.h"
+
+#include "v34_line_ec.h"
 
 #define BLOCK           160
 /* How far back the receiver's own B1 search reaches, plus margin. */
@@ -212,6 +217,68 @@ static int load_tap(const char *path, int alaw)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V90_REPLAY_ECHO_TX=<live-tx.g711> and V90_REPLAY_ECHO_WINDOW=<from>,<to>
+   (seconds): run the engine's line echo canceller (v34_line_ec.c) over the
+   receive tap first, fitted on that echo-only window, as a server that
+   cancels its own downstream does live (the K56flex server over P1-P3).
+   Done on the linear samples: re-encoding cancelled audio to G.711 for the
+   replay would add its own quantisation noise. */
+static int cancel_echo(int alaw)
+{
+    const char *path = getenv("V90_REPLAY_ECHO_TX");
+    const char *window = getenv("V90_REPLAY_ECHO_WINDOW");
+    static v34_line_ec_t ec;
+    double from_s = 0.0, to_s = 0.0;
+    FILE *f;
+    uint8_t *raw;
+    long len;
+
+    if (!path)
+        return 0;
+    if (!window || sscanf(window, "%lf,%lf", &from_s, &to_s) != 2 || to_s <= from_s)
+    {
+        fprintf(stderr, "V90_REPLAY_ECHO_WINDOW=<from>,<to> seconds is needed\n");
+        return -1;
+    }
+    if (!(f = fopen(path, "rb")))
+    {
+        fprintf(stderr, "cannot open %s\n", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    raw = malloc(len > 0 ? len : 1);
+    if (!raw || fread(raw, 1, len, f) != (size_t) len)
+    {
+        fprintf(stderr, "cannot read %s\n", path);
+        fclose(f);
+        free(raw);
+        return -1;
+    }
+    fclose(f);
+    if (len > sample_count)
+        len = sample_count;
+    v34_line_ec_reset(&ec);
+    for (long i = 0;  i + 160 <= len;  i += 160)
+    {
+        int16_t tx[160];
+        char msg[256] = "";
+
+        for (int k = 0;  k < 160;  k++)
+            tx[k] = alaw ? alaw_to_linear(raw[i + k]) : ulaw_to_linear(raw[i + k]);
+        v34_line_ec_tx(&ec, tx, 160);
+        if (v34_line_ec_rx(&ec, samples + i, 160,
+                           i >= (long) (from_s*8000.0) && i < (long) (to_s*8000.0),
+                           msg, sizeof(msg))
+            && msg[0])
+            printf("replay: %s\n", msg);
+    }
+    free(raw);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Feed every sample in [from, to), including a partial block at handover.
    V.90 9.4.2.4-.5: E/B1 are contiguous on the wire; block alignment must
    not remove samples from that boundary (or from the capture tail). */
@@ -299,7 +366,7 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps] [handover-sec [history-sec [cp-prime [max-first-bit-ms]]]]\n",
+                "usage: %s <tap.g711> [ulaw|alaw] [3000|3200] [bps] [handover-sec [history-sec [cp-prime|mp-ack [max-first-bit-ms]]]]\n",
                 argv[0]);
         return 2;
     }
@@ -309,7 +376,7 @@ int main(int argc, char *argv[])
     baud_code = (argc > 3 && atoi(argv[3]) == 3000) ? 3 : 4;
     bps = (argc > 4) ? atoi(argv[4]) : 9600;
     high_carrier = getenv("V90_REPLAY_HIGH_CARRIER") && atoi(getenv("V90_REPLAY_HIGH_CARRIER"));
-    if (load_tap(path, alaw) != 0)
+    if (load_tap(path, alaw) != 0  ||  cancel_echo(alaw) != 0)
         return 1;
     /*endif*/
     printf("replay: %s, %s, %d baud, %d bps, %.1f s\n",
@@ -344,9 +411,13 @@ int main(int argc, char *argv[])
         if (feed(rx, t - (int) (history*8000.0), t) != 0)
             return 1;
         printf("replay: handover forced at %.1f s\n", t/8000.0);
-        bool cp_prime = argc > 7 && strcmp(argv[7], "cp-prime") == 0;
+        /* mp-ack is the K56flex server's handover: E straight after a
+           CRC-valid MP' it decoded itself (v34_begin_b1_search_after_mp_ack). */
+        bool mp_ack = argc > 7 && strcmp(argv[7], "mp-ack") == 0;
+        bool cp_prime = mp_ack || (argc > 7 && strcmp(argv[7], "cp-prime") == 0);
         int event_before = v34_get_rx_event(rx);
-        int started = cp_prime ? v34_v90_begin_b1_search(rx) : v34_begin_rx_data(rx);
+        int started = mp_ack ? v34_begin_b1_search_after_mp_ack(rx)
+                    : cp_prime ? v34_v90_begin_b1_search(rx) : v34_begin_rx_data(rx);
         if (started != 0 || (cp_prime && v34_get_rx_event(rx) != event_before))
         {
             fprintf(stderr, "replay: handover refused or CP' fabricated E\n");
