@@ -42,6 +42,9 @@ def main():
     p.add_argument('--engine', type=Path, default=ROOT / 'v90_engine_peer')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--instructions', type=int, default=1_200_000_000)
+    p.add_argument('--imodem-arg', action='append', default=[],
+                   help="extra courier-emu probe_imodem_pair worker argument "
+                        "(--post-call-diagnostics, --trace-digital-path, ...)")
     p.add_argument('--imodem-settings', default='S54=0S58=48&A3&B1Q0',
                    help='I-modem AT settings: S58=48 keeps x2, server and symmetric enabled, V.90 off')
     p.add_argument('--engine-at', default='', help='AT command sent to our PTY before the call')
@@ -114,6 +117,7 @@ def main():
                 '--trace-negotiation']
     if a.answer_send:
         sys.argv += ['--answer-send', a.answer_send]
+    sys.argv += a.imodem_arg
     try:
         pair.run_side(pair.arguments())
     finally:

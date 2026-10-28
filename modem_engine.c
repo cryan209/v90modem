@@ -11667,8 +11667,8 @@ static void me_x2_client_progress_locked(void)
         g_x2_client_last_up=c->up;g_x2_client_last_dn=c->dn;
     }
     if(g_x2.stage!=X2_CLIENT)return;
-    if(c->tone_a) {
-        trace_phase("X2 client: Tone A from the server in data (a retrain); ending the call");
+    if(c->tone_b) {
+        trace_phase("X2 client: Tone B from the server in data (a V.90 9.5.1.1 retrain, not answered); ending the call");
         x2_session_fail(&g_x2,X2_FAILURE_PEER_RETRAIN);return;
     }
     if(c->dn==X2C_DN_FAILED) {
@@ -11782,7 +11782,7 @@ static void me_x2_progress_locked(void)
     }
     if (g_x2.stage == X2_FAILED && g_state != ME_HANGUP) {
         if (g_x2.failure == X2_FAILURE_PEER_RETRAIN)
-            g_hangup_cause = "Remote (x2: peer retrain, Tone A in data)";
+            g_hangup_cause = g_x2.client ? "Remote (x2: peer retrain, Tone B in data)" : "Remote (x2: peer retrain, Tone A in data)";
         else if (g_x2.failure == X2_FAILURE_RENEG_TIMEOUT)
             g_hangup_cause = "Modem (x2: rate change not completed)";
         else if (g_x2.failure == X2_FAILURE_CLIENT)

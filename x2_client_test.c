@@ -214,40 +214,49 @@ static void rate_change(uint16_t pcm_mask, unsigned start_index, unsigned new_in
     v34_free(v34);free(source.bits);free(sink.bits);
 }
 
-/* V.90 9.5.2.1: the server's Tone A (2400 Hz, 1800 Hz guard 6 dB down)
- * in data is recognised within 40 ms; x2 data, the 1800 Hz guard alone and
- * a quiet tone are not. */
-static void tone_a(void)
+/* V.90 9.5.1.1: the server's retrain (70 ms of silence, then Tone B) is
+ * recognised within 40 ms of the tone -- synthetic, and the original
+ * Ie030002's own (reference-data/x2-imodem-retrain) -- while x2 data,
+ * Tone A (2400 Hz, the analogue side's) and a quiet tone are not. */
+static void feed_tone(x2_client_t *client, double f, double a, unsigned max, unsigned *n)
+{
+    CHECK(!x2_client_init(client,0x7fff,0x1ffe,5));
+    x2_short_profile(15,5,&client->data);client->dn=X2C_DN_DATA;
+    for(*n=0;*n<max && !client->tone_b;++*n) {
+        uint8_t code=linear_to_ulaw((int)lrint(a*cos(2*M_PI*f*(*n)/8000)));
+        x2_client_rx_codewords(client,&code,1);
+    }
+}
+static void tone_b(void)
 {
     static x2_client_t client;
-    static const struct { double a2400, a1800; unsigned expect; const char *name; } cases[]={
-        {3000,1500,1,"Tone A with guard"},{3000,0,1,"Tone A alone"},
-        {0,3000,0,"guard alone"},{150,75,0,"quiet Tone A"}};
-    for(unsigned k=0;k<sizeof(cases)/sizeof(cases[0]);++k) {
-        CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
-        x2_short_profile(15,5,&client.data);client.dn=X2C_DN_DATA;
-        unsigned n;
-        for(n=0;n<800 && !client.tone_a;++n) {
-            double x=cases[k].a2400*cos(2*M_PI*2400*n/8000)+cases[k].a1800*cos(2*M_PI*1800*n/8000);
-            uint8_t code=linear_to_ulaw((int)lrint(x));
-            x2_client_rx_codewords(&client,&code,1);
-        }
-        CHECK(client.tone_a==cases[k].expect);
-        if(cases[k].expect)CHECK(n<=400);
-    }
+    unsigned n;
+    feed_tone(&client,1200,3000,800,&n);CHECK(client.tone_b && n<=400);
+    feed_tone(&client,2400,3000,800,&n);CHECK(!client.tone_b);
+    feed_tone(&client,1200,150,800,&n);CHECK(!client.tone_b);
+    /* The I-modem's: 71 ms of silence from sample 88, then Tone B. */
+    FILE *f=fopen("reference-data/x2-imodem-retrain/silence-tone-b-ulaw.g711","rb");
+    CHECK(f);
+    uint8_t buf[4000];
+    CHECK(fread(buf,1,sizeof(buf),f)==sizeof(buf));
+    fclose(f);
+    CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
+    x2_short_profile(15,5,&client.data);client.dn=X2C_DN_DATA;
+    for(n=0;n<sizeof(buf) && !client.tone_b;++n)x2_client_rx_codewords(&client,&buf[n],1);
+    CHECK(client.tone_b && n>=88+568 && n<=88+568+400);
     /* A minute's worth of data codewords from the index-15 banks. */
     CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
     x2_short_profile(15,5,&client.data);client.dn=X2C_DN_DATA;
     uint32_t lfsr=0xace1;
-    for(unsigned n=0;n<480000;++n) {
+    for(unsigned k=0;k<480000;++k) {
         lfsr=lfsr*1103515245u+12345u;
-        unsigned p=n%6,size=client.data.sizes[p];
+        unsigned p=k%6,size=client.data.sizes[p];
         uint8_t code=(uint8_t)(client.data.banks[p][(lfsr>>16)%size]&0xff);
         if((lfsr>>8)&1)code^=0x80;
         x2_client_rx_codewords(&client,&code,1);
     }
-    CHECK(!client.tone_a);
-    printf("  Tone A in data: recognised with and without the guard; guard alone, quiet tone and 60 s of data not\n");
+    CHECK(!client.tone_b);
+    printf("  retrain in data: Tone B recognised, synthetic and Ie030002's own; Tone A, a quiet tone and 60 s of data not\n");
 }
 
 int main(void)
@@ -262,7 +271,7 @@ int main(void)
     rate_change(0x7fff,15,6);
     rate_change(0x7fff,15,1);
     rate_change(0x003f,6,6);
-    tone_a();
+    tone_b();
     printf("x2 client: downstream record/final/payload at four ceilings, upstream MP/E and in-data rate changes passed\n");
     return 0;
 }

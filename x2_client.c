@@ -482,40 +482,34 @@ static int ulaw_linear(uint8_t code)
     int v=(int)((((c&15)<<3)+132)<<((c>>4)&7))-132;
     return (c&0x80) ? -v : v;
 }
-/* Tone A in data: the server has gone to a retrain (V.90 9.5.2.1, the
- * Courier's and our server's detector in x2_session.c). Eight 40-sample
- * blocks, 40 ms, with 0.6 of the power at 2400 Hz and 1800 Hz together,
- * at least as much at 2400 as at 1800, and an RMS of at least 250; x2
- * data is white over codewords. */
-static void tone_a_sample(x2_client_t *c, uint8_t code)
+/* Tone B in data: the server has gone to a retrain. V.90 9.5.1.1 has a
+ * digital modem initiate one with 70 ms of silence and then Tone B
+ * (1200 Hz), waiting for the analogue modem's Tone A -- what Ie030002 does
+ * after 500 ms without our upstream (reference-data/x2-imodem-retrain;
+ * the Courier's own retrain is the analogue side's Tone A, 9.5.2.1). Eight
+ * 40-sample blocks, 40 ms, with 0.6 of the power at 1200 Hz and an RMS of
+ * at least 250; x2 data is white over codewords. */
+static void tone_b_sample(x2_client_t *c, uint8_t code)
 {
     c->tone_window[c->tone_pos++]=(int16_t)ulaw_linear(code);
     if(c->tone_pos<40)return;
     c->tone_pos=0;
-    double energy=0,power[2];
-    static const unsigned f[2]={2400,1800};
-    for(unsigned k=0;k<2;++k) {
-        double re=0,im=0;
-        for(unsigned n=0;n<40;++n) {
-            double x=c->tone_window[n],ph=2*3.14159265358979323846*f[k]*n/8000;
-            re+=x*cos(ph);im-=x*sin(ph);
-            if(!k)energy+=x*x;
-        }
-        power[k]=re*re+im*im;
+    double energy=0,re=0,im=0;
+    for(unsigned n=0;n<40;++n) {
+        double x=c->tone_window[n],ph=2*3.14159265358979323846*1200*n/8000;
+        re+=x*cos(ph);im-=x*sin(ph);energy+=x*x;
     }
-    /* The guard is 6 dB below Tone A (V.34 10.1.2.1): it counts toward the
-     * purity but cannot stand in for the tone. */
-    if(energy>=40*250.0*250.0 && power[0]+power[1]>=0.6*20*energy && power[0]>=power[1]) {
-        if(++c->tone_a_blocks>=8)c->tone_a=1;
+    if(energy>=40*250.0*250.0 && re*re+im*im>=0.6*20*energy) {
+        if(++c->tone_b_blocks>=8)c->tone_b=1;
     }
-    else c->tone_a_blocks=0;
+    else c->tone_b_blocks=0;
 }
 void x2_client_rx_codewords(x2_client_t *c, const uint8_t *codewords, size_t count)
 {
     if(!c||!codewords)return;
     for(size_t k=0;k<count;++k,++c->dn_samples) {
         uint8_t code=codewords[k];
-        if(c->dn==X2C_DN_DATA || c->dn==X2C_DN_RR_RECORD)tone_a_sample(c,code);
+        if(c->dn==X2C_DN_DATA || c->dn==X2C_DN_RR_RECORD)tone_b_sample(c,code);
         if(c->rr && c->dn!=X2C_DN_FAILED
            && (++c->rr_samples>RR_DEADLINE || (c->dn==X2C_DN_DATA && c->rr_samples>RR_ALIGN_DEADLINE)))
             c->dn=X2C_DN_FAILED;

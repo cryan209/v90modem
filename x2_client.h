@@ -97,10 +97,10 @@ typedef struct {
     x2_client_decoder_t rr_dec[2];
     uint8_t hold_bits[9][64];
     unsigned hold_count[9], hold_first, hold_frames;
-    /* V.90 9.5.2.1 / V.34 11.5 retrain from the server: 2400 Hz Tone A
-       with the 1800 Hz guard in place of data, 40-sample blocks. */
+    /* V.90 9.5.1.1: a digital modem retrains with 70 ms of silence then
+       Tone B (1200 Hz) in place of data; 40-sample blocks. */
     int16_t tone_window[40];
-    unsigned tone_pos, tone_a_blocks, tone_a;
+    unsigned tone_pos, tone_b_blocks, tone_b;
     /* Results. */
     unsigned j_seen, record_valid, final_seen, e_sent;
     unsigned selected_index, upstream_n;

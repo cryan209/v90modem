@@ -1140,8 +1140,9 @@ lines exact. The `\N0` probe is in `tests/slow.list` (141 s; needs
 **Not done:**
 
 - ~~**Fall forward and retrain.**~~ The client now opens in-data rate changes
-  and recognises a server's Tone A (next section). It still does not answer a
-  retrain, and no server has been seen to send one.
+  and recognises a server's retrain, which is Tone B (next section). It does
+  not answer one yet; Ie030002 sends it after 500 ms without our upstream and
+  waits 60 s.
 - **Bearer.** There is no analogue front end, so the client needs a
   byte-exact bearer.
 - **Real hardware.** No real server has been tried.
@@ -1215,12 +1216,45 @@ Now 15 of 15 changes mid-payload (2.5 to 3.5 s into data, to index 1, 6
 and 12) carry the 12672-octet text exactly in both directions. One V.14
 row is in `tests/fast.list`.
 
-**Tone A.** The client now recognises a server's Tone A in data (2400 Hz,
-the 1800 Hz guard counting toward purity but not in place of the tone;
-40 ms) and ends the call as `X2_FAILURE_PEER_RETRAIN`. It does not answer
-it. Probed with `ME_X2_CLIENT_SILENCE_AFTER_MS`/`_MS`, which silence our
-upstream mid-call, Ie030002 never retrains: after 3 s or 500 ms without our
-upstream it stops acknowledging V.42 and hangs up. A same-index rate change
-1 s after a 500 ms loss got no alignment word, because the I-modem had
-already given up. With no server seen to retrain, answering one (a full
-Phase 2 restart) has nothing to check it against.
+**The server's retrain is Tone B (traced 28 October).** The first version
+of the client listened for a server Tone A (2400 Hz) and concluded that
+Ie030002 never retrains. That was wrong. With our upstream silenced for
+500 ms (`ME_X2_CLIENT_SILENCE_AFTER_MS`/`_MS`), the I-modem's own `ATI6`
+afterwards reads `Retrains Granted 1` and `Disconnect Reason is Unable to
+Retrain`.
+
+Its downstream, our receive tap:
+- data until our silence;
+- 71 ms of silence (19.711 s);
+- a pure 1200 Hz tone (200-Hz-periodic codewords, RMS 2435) for 60.1 s;
+- then it clears down.
+
+That is V.90 9.5.1.1, a digital modem initiating a retrain: 70 ± 5 ms of
+silence, then Tone B, then wait for the analogue modem's Tone A. V.90
+assigns the retrain tones by digital/analogue role, not caller/answerer.
+The Courier's own fallback is Tone A, the analogue side's 9.5.2.1, which
+is why x2_session's server detector is right to look for Tone A.
+
+The supervisor/DSP mailbox (every command and reply recorded, a scratch
+change to courier-emu's pair worker; the repository is untouched):
+- during data the DSP reports `0020=000d` every 4M supervisor
+  instructions (the rate check);
+- at the loss it reports `000e=0000`, `0004=0000` and `0006=0000`, and
+  starts the tone on its own;
+- the supervisor then issues nothing for 300M instructions (the 60 s on
+  the tap);
+- it then sends `0057=003f`, `0001=003f` and DSP reset words, and prints
+  NO CARRIER, with the ISDN stack logging `l4_DISCONN : modem primitive`.
+
+The I-modem therefore does retrain, and waits a minute for an answer we
+never sent.
+
+The client now recognises that Tone B (1200 Hz, 40 ms; data, a 2400 Hz
+tone and a quiet tone do not trip it) and ends the call as
+`X2_FAILURE_PEER_RETRAIN`. The I-modem's own 0.5 s of silence and Tone B
+is kept in `reference-data/x2-imodem-retrain/` and checked in
+`x2_client_test`. Live, the client logs it 3.6 s into data.
+
+Answering it (9.5.2.2: after 50 ms of Tone B, 70 ms of silence, Tone A,
+then Phase 2 from 9.2.2.1.3 with the roles of our startup reversed) is
+not built yet.

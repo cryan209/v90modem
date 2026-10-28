@@ -638,6 +638,6 @@ const char *x2_session_stage_name(x2_session_stage_t s)
 }
 const char *x2_session_failure_name(x2_session_failure_t f)
 {
-    static const char *names[]={"unspecified","stage timeout","peer retrain (Tone A)","rate change timeout (no E)","client startup"};
+    static const char *names[]={"unspecified","stage timeout","peer retrain (Tone A or B)","rate change timeout (no E)","client startup"};
     return (unsigned)f<sizeof(names)/sizeof(names[0])?names[f]:"INVALID";
 }

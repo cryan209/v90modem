@@ -1,0 +1,8 @@
+{
+ "source": "artifacts/x2-imodem-quiet500-mbox-20261028/engine-rx.g711 (our x2 client's receive tap; original Ie030002 in courier-emu f1ccd92)",
+ "offset_samples": 157600,
+ "samples": 4000,
+ "law": "ulaw",
+ "content": "the I-modem's V.90 9.5.1.1 retrain after 500 ms without our upstream: 71 ms of silence from sample 88 (0.011 s), then 1200 Hz Tone B (it continued for 60.1 s)",
+ "provoked_with": "ME_X2_CLIENT_SILENCE_AFTER_MS=6000 ME_X2_CLIENT_SILENCE_MS=500"
+}

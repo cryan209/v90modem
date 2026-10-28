@@ -468,7 +468,7 @@ static void reneg_bound_test(void)
         x2_session_tx(&s,tx,1600);x2_session_rx(&s,rx,1600);
         assert(s.stage==X2_PAYLOAD && s.failure==X2_FAILURE_NONE);
     }
-    assert(!strcmp(x2_session_failure_name(X2_FAILURE_PEER_RETRAIN),"peer retrain (Tone A)"));
+    assert(!strcmp(x2_session_failure_name(X2_FAILURE_PEER_RETRAIN),"peer retrain (Tone A or B)"));
 }
 int main(int argc,char **argv)
 {
