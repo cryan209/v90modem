@@ -1,0 +1,7 @@
+# Opt-in Apple A1082 caller preset for the verified working 6004 line.
+# Short checked data calls to Eicon 7900/7910; not a general peer default.
+# V.250 Table 20: initiate LAPM without detection, require LAPM (both roles).
+# V.42 8.10 permits protocol establishment without the detection phase.
+# No dial/answer command, gain change, protection change, or timer override.
+AT+MS=V32B,0,300,9600,300,9600
+AT+ES=2,3,5

@@ -4230,6 +4230,69 @@ Local reproducer, decompilation and logs: `artifacts/apple-6005-audit/`
 `native-audio-first.log`, `usmserial-hook.c`, `utlamot.c`). The native-hook
 reproducer includes `hook_paths.c` from the same directory.
 
+### Eicon reliability profiles: direct LAPM and a checked 9600 ceiling (2026-10-28)
+
+After the verified swap, tested the unchanged pre-existing coupler executable
+on 6004. No production DSP, gain, echo-cancellation or timing constant was
+changed or rebuilt. The original optional-detection V.32bis/14400 repeat
+failed physical training; it did not reach the client-initiated LCP probe.
+V.34 with a 21600 ceiling established LAPM/V.42bis and returned one exact
+7900 text echo, then stopped advancing the peer's acknowledgement of our
+next I-frame and retrained. A 9600 V.34 ceiling returned one echo in V.14,
+not LAPM. Native 9000 Hz and clock-correction-off each failed the full
+three-echo criterion. These are failed candidate settings, not improvements
+or isolated diagnoses of the DSP fault.
+
+A narrower V.42 detection comparison was productive. At V.22bis/2400,
+`ME_V42_T400_MS=3000` established LAPM/V.42bis and passed three exact text
+echoes on 7900. The next default-timer call again passed three echoes only
+in buffered V.14, with leading detection garbage. In the successful call the
+first XID is at V.42 clock t=1.115 s, including the 384-bit (160 ms) flag
+preamble before XID: detection therefore ended around 0.955 s on that clock,
+after the default 750 ms window. This is not a calibrated network-delay
+measurement. **V.42 §9.1.1 says the default shall be 750 ms**, with a note
+allowing a user mechanism to select another value: the experiment is not
+justification for silently changing that default.
+
+Instead used the existing standard command **`AT+ES=2,3,5`** (V.250 Table 20):
+originate LAPM without ODP/ADP detection, require LAPM (no raw fallback), and
+require LAPM when answering. V.42 §8.10 permits protocol establishment
+without detection. Only originating calls are qualified by these trials.
+At V.22bis this profile passed three exact 7900 text echoes with LAPM/V.42bis.
+Then capped V.32bis at 9600 with the same EC policy:
+
+| Destination | Completed fresh attempts | Actual checked data |
+|---|---|---|
+| 7910 | 2/2 pass | 9600, LAPM/V.42bis; three exact PPP LCP echoes each, eight valid PPP frames and zero bad FCS each |
+| 7900 | 2/3 pass | 9600, LAPM/V.42bis; three exact text echoes on each passing call; one physical-training failure |
+
+The failed 7900 repeat overlapped five seconds of the hardware-free Apple
+checks; the subsequent quiet repeat passed. Do not attribute the failure to
+that load without a controlled test, discard it from the count, or claim
+general reliability from these short calls. They are not a throughput/soak
+qualification or authenticated PPP/IP service. The carrier rate is 4x the
+prior verified 2400 rate; application throughput was not benchmarked.
+
+All calls were bounded, separated from the previous Eicon attempt by at least
+65 seconds, and ended with verified hook/monitor off and protection enabled.
+No render errors or TX ring under/overruns were observed. The final preset
+uses native 9600 Hz and normal automatic clock correction; the 3000-ms T400,
+native 9000 and clock-off diagnostic overrides are **not** part of it.
+
+Opt-in presets and exact GUI/AT instructions are in
+[`profiles/README.md`](../profiles/README.md). The two shipped `.at` files are
+loaded, queried, altered/restored with `ATZ0`, and factory-reset-tested by
+`tools/apple_eicon_profile_check.py`, using impossible USB address 0:0 and
+without dial/answer commands. Added it to the Apple tier; all six checks pass.
+No existing GUI user profile was overwritten and no universal default changed.
+
+Local retained evidence is under
+`reference-data/artifacts/apple-eicon-improve-20261028/`: raw RX/TX taps,
+PTY bytes, AT transactions, line events, V.42 frame logs, summaries, scratch
+call driver, the tested executable and provenance. Trial directories name
+the ceiling, not an assertion of an unchanged negotiated rate after retrain.
+The non-PPP 7900 service is no longer fed to the scratch PPP decoder.
+
 ### Verified line swap restores Apple seizure and checked data (2026-10-28)
 
 A second user-performed telephone-lead swap was verified electrically: an

@@ -138,7 +138,7 @@ Where to start:
 | [rasfinder_modulation_tests_20261020.md](rasfinder_modulation_tests_20261020.md) | RasFinder modulation matrix on 6311-6313 |
 | [slmodemd_vs_hardware_20261029.md](slmodemd_vs_hardware_20261029.md) | slmodemd and our modem against 7900/7910/6311/6312, same probes |
 | [hsf_usb_daa.md](hsf_usb_daa.md), [hsf_analogue_v90_coupler.md](hsf_analogue_v90_coupler.md) | Conexant HSF USB modem as our analogue side |
-| [apple_usb_modem_sm56.md](apple_usb_modem_sm56.md) | Apple USB Modem (SM56) as our analogue side |
+| [apple_usb_modem_sm56.md](apple_usb_modem_sm56.md) | Apple USB Modem (SM56), line mapping and checked Eicon caller presets ([profiles](../profiles/README.md)) |
 | [mt5634mu_usb_modem.md](mt5634mu_usb_modem.md) | MultiTech MT5634MU USB bridge |
 
 ## Reference material

@@ -1,0 +1,7 @@
+# Opt-in Apple A1082 caller preset for Eicon on the verified working line.
+# V.22bis inherently limits the carrier to 2400 bit/s.
+# V.250 Table 20 / V.42 8.10: start LAPM directly and require LAPM.
+# Unknown/non-LAPM peers may fail rather than falling back to raw data.
+# No dial/answer command, gain change, protection change, or timer override.
+AT+MS=V22B,0
+AT+ES=2,3,5

@@ -162,6 +162,27 @@ success or PPP/IP qualification. Full controls, caveats and local evidence
 paths: [`apple_usb_modem_sm56.md`](apple_usb_modem_sm56.md), “Verified line swap
 restores Apple seizure and checked data”.
 
+### Apple improvement: checked 9600 with direct/required LAPM
+
+On the unchanged Apple executable and the verified 6004 line, the opt-in
+profile `AT+MS=V32B,0,300,9600,300,9600` followed by `AT+ES=2,3,5` passes
+**2/2 fresh 7910 calls** (three exact LCP echoes, eight valid PPP frames,
+zero bad FCS per call) and **2/3 7900 attempts** (three exact text echoes per
+pass; one physical-training failure). All passing calls establish LAPM and
+V.42bis. The failed 7900 attempt overlapped hardware-free regression checks;
+a following quiet repeat passes, but that does not prove the cause or erase
+the failure. These are short data checks, not measured bulk throughput or
+PPP/IP qualification.
+
+A preceding longer-T400 experiment restores LAPM at V.22bis, while a rotated
+default-timer call falls back to V.14. Rather than change V.42 §9.1.1's
+mandatory default, the profile uses V.250 Table 20's existing direct-LAPM
+policy (+ES originator request 2, LAPM required). It is peer-specific and
+opt-in. V.34 still stalls/retrains after a single exact echo; native 9000 Hz
+and clock-off do not qualify as improvements. No DSP or audio-path default
+was changed. See [`../profiles/README.md`](../profiles/README.md) for the
+shipped presets, commands, caveats and the six-check Apple regression tier.
+
 ## Results matrix
 
 | Modem/chipset | Gateway | Law | V.8 | Phase 3 | CPt/CP | E/B1d | DATA | Rates | Evidence |
