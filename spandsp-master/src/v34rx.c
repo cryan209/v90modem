@@ -11919,6 +11919,33 @@ static float v90_t3_coarse_score(v34_rx_state_t *s, int64_t first,
                    /(input_power*target_power));
 }
 
+/* Score both spectral orientations from one read of each sample. This is
+   the same correlation as v90_t3_coarse_score(), including accumulation
+   order; V.34 10.1.3.1 B1 templates and acceptance criteria are unchanged. */
+static void v90_t3_coarse_scores(v34_rx_state_t *s, int64_t first, float score[2])
+{
+    double cross_re[2] = {0.0, 0.0};
+    double cross_im[2] = {0.0, 0.0};
+    double input_power = 0.0;
+    double target_power = 0.0;
+
+    for (int n = 0; n < s->v90_t3_b1_symbols; n++)
+    {
+        complexf_t x = v90_t3_matched_get(s, first + 3*n);
+        complexf_t y = s->v90_t3_b1[n];
+        cross_re[0] += y.re*x.re + y.im*x.im;
+        cross_im[0] += y.im*x.re - y.re*x.im;
+        cross_re[1] += y.re*x.re + y.im*(-x.im);
+        cross_im[1] += y.im*x.re - y.re*(-x.im);
+        input_power += x.re*x.re + x.im*x.im;
+        target_power += y.re*y.re + y.im*y.im;
+    }
+    for (int c = 0; c < 2; c++)
+        score[c] = (input_power < 1e-12 || target_power < 1e-12) ? 0.0f
+            : (float)((cross_re[c]*cross_re[c] + cross_im[c]*cross_im[c])
+                       /(input_power*target_power));
+}
+
 static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
                         complexf_t coeff[V34_V90_T3_FSE_TAPS])
 {
@@ -11955,13 +11982,19 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
         {
             rhs[row] += fr[row]*s->v90_t3_b1[n].re
                       + fi[row]*s->v90_t3_b1[n].im;
-            for (column = 0;  column < N;  column++)
+            /* Each product is symmetric; accumulate it once, preserving
+               the per-entry sample order of the full normal equations. */
+            for (column = row;  column < N;  column++)
                 matrix[row*N + column] += fr[row]*fr[column]
                                         + fi[row]*fi[column];
         }
     }
     for (row = 0;  row < N;  row++)
+    {
+        for (column = 0; column < row; column++)
+            matrix[row*N + column] = matrix[column*N + row];
         trace += matrix[row*N + row];
+    }
     for (row = 0;  row < N;  row++)
         matrix[row*N + row] += trace*1e-6;
     if (!v90_t3_solve(matrix, rhs, solution, N))
@@ -13192,9 +13225,11 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
        a time first and refine only around what that finds. */
     for (int64_t f = search_start;  f <= search_end;  f += 3)
     {
+        float orientation_score[2];
+        v90_t3_coarse_scores(s, f, orientation_score);
         for (int c = 0;  c < 2;  c++)
         {
-            float q = v90_t3_coarse_score(s, f, c != 0);
+            float q = orientation_score[c];
             for (int k = 0;  k < KEEP;  k++)
             {
                 if (q > score[k])
