@@ -4122,6 +4122,57 @@ changed. Need authorized web access or an FXS2 status readout to correlate
 actual ATA hook/feed state with the Apple command. Local evidence:
 `artifacts/apple-6005-audit/`.
 
+### USB ring delivery audit and live register fallback (2026-10-28)
+
+Further code-side checks found two real defects in our incoming-call test:
+
+* `reg_read()` consumes interrupt EP `0x81` while waiting for its reply.
+  `line_notification()` recorded rings only when GUI watching was active,
+  so CLI `--answer` discarded rings consumed by a register read. The explicit
+  wait inspected only its own last interrupt transfer. CLI waiting now enables
+  the shared durable burst counter, including rings consumed by register I/O.
+* The DAA can assert register 5 bit 2 (RDT) without a USB ring notification.
+  The current interrupt-mask register 3 reads zero. Si3056 §5.14 and register
+  5 document RDT as the validated ring indication. On-hook polling now feeds
+  valid RDT into the same burst counter as USB notifications; it does not
+  change any interrupt mask, ring threshold, country or gain register. USB
+  and register observations within a burst count once. Events identify their
+  source; the USB notification counter does not count register observations.
+
+`di_on_ring()` is also guarded by an open DTE, allowing ring monitoring and
+CLI answering without a PTY. Hardware-free regression checks exercise a CLI
+ring delivered through the register-read callback, unrelated intervening
+notifications, USB/register deduplication, GUI delivery, disabled watching,
+short notifications and invalid/off-hook RDT snapshots. All five Apple
+backend checks pass. The register fallback polls at the existing one-second
+line-status cadence, so very short bursts can still be missed without USB
+notification delivery; no general ring-cadence coverage is claimed.
+
+Live: after the notification-only fix the listener still missed the call,
+but its logs showed transient nonzero voltage sense and final hook readback
+`0x04` (RDT). With the register fallback, a fresh bounded incoming 6005 call
+now reports `RING 1/1` at +7350 ms with `source: register`, `notifications: 0`,
+and actually attempts to answer. The hook request then reads `0x09`, current
+code 0, dropout asserted and sense 0 after settling. It aborts and verifies
+hook/monitor off and protection enabled. This proves live ring detection was
+broken in our code and is now working in this trial; it does not establish
+successful seizure, answer supervision, training or payload transfer.
+Earlier "no ring recognized" results must not be used as evidence that the
+ATA failed to apply ringing.
+
+Independent bounded hook-path comparison outside the coupler tried register
+5 = 9, register 5 = 1, and the previously verified class-interface request
+`bRequest=0x11, wValue=1, wIndex=0`, with the protected settling sequence and
+verified cleanup. All show the hook bit set but current code 0 / dropout.
+The retained `coupler-tested` binary from `apple-direct-review-20261018`
+reproduces the same seizure failure; the safe on-hook register subset matches
+`apple-registers-20261016/0-14.txt` except voltage sense. These comparisons
+have not identified a code fix for loop closure. The alternate class request
+also shows delayed protection-register changes, so it is not installed as a
+new production hook path. No overload thresholds or protection defaults were
+relaxed, and no calls to 7900/7910 were scored. Local scripts/logs:
+`artifacts/apple-6005-audit/{hook_paths.c,hook_paths.log,known-build-hook.log,ring-fixed.log,rdt-answer.log,rdt-answer-events.jsonl}`.
+
 ### Where the 1.1 s goes (2026-10-24)
 
 v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run

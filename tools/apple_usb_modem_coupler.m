@@ -139,10 +139,13 @@
 
 static libusb_device_handle *usb;
 static int g_gui_control, gui_watch;
-static void gui_ring_notice(void);
+static void gui_ring_notice(int from_usb);
 static int gui_sense = -1, gui_hook = -1;
 static apple_modem_line_t line_status = {-1,-1,-1,-1,-1};
 static int line_overload_notice, line_guard_tripped;
+/* Register reads share EP 0x81 with the explicit ring wait. Notifications
+ * consumed by either reader must update the same durable burst state. */
+static int line_waiting_ring;
 static int line_protection_register = -1;
 static uint64_t line_checked_ms;
 static uint64_t apple_now_ms(void);
@@ -203,8 +206,9 @@ static void line_notification(const unsigned char *b, int n)
      * the on-hook routine and reports 0x8002 (LINE OVERLOAD DETECTED). */
     if (n >= 4 && b[0] == 0xa1 && b[1] == 0x29 && b[2] == 9 && b[3] == 0)
         { line_overload_notice = 1; line_event("overload_notification",@{}); }
-    if (g_gui_control && gui_watch && n >= 2 && b[0] == 0xa1 && b[1] == 0x09)
-        gui_ring_notice();
+    if (((g_gui_control && gui_watch) || line_waiting_ring) &&
+        n >= 2 && b[0] == 0xa1 && b[1] == 0x09)
+        gui_ring_notice(1);
 }
 
 static int reg_read(unsigned char idx)
@@ -601,7 +605,7 @@ static int gui_rings;
 static uint64_t gui_last_ring;
 static void gui_commands(void);
 static void gui_ring_poll(void);
-static void gui_ring_notice(void);
+static void gui_ring_notice(int from_usb);
 static NSString *gui_raw_json(void);
 static void gui_raw_feed(int dir, const int16_t *samples, unsigned n);
 static void gui_audio_stop(void);
@@ -740,6 +744,11 @@ static int line_poll(int force)
     gui_hook = line_status.hook; gui_sense = line_status.sense;
     line_checked_ms = apple_now_ms();
     line_observe();
+    /* Si3056 §5.14 / reg 5 RDT remains observable even when the USB
+     * firmware does not emit a ring notification (e.g. reset mask = 0).
+     * Use the same burst state as USB, so the two routes cannot double-ring. */
+    if (((g_gui_control && gui_watch) || line_waiting_ring) && apple_line_ringing(&line_status))
+        gui_ring_notice(0);
     if (apple_line_overcurrent(&line_status) || line_overload_notice) {
         line_guard_tripped = 1;
         line_event("overload_trip",@{@"status_register":@(line_status.status),@"aux_register":@(line_status.auxiliary)});
@@ -2045,9 +2054,9 @@ static int gui_recent_ring(void)
     uint64_t now = (uint64_t)ts.tv_sec*1000+ts.tv_nsec/1000000;
     return gui_last_ring && now-gui_last_ring < 8000;
 }
-static void gui_ring_notice(void)
+static void gui_ring_notice(int from_usb)
 {
-    ring_notifications++;
+    if (from_usb) ring_notifications++;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     uint64_t now = (uint64_t)ts.tv_sec*1000+ts.tv_nsec/1000000;
     // One ring burst, rather than one USB notification. Notifications within
@@ -2060,7 +2069,12 @@ static void gui_ring_notice(void)
             di_clear_caller_id();
         }
     }
-    if (gui_ring_burst(now,&gui_last_ring)) { gui_rings++; line_event("ring",@{@"burst":@(gui_rings),@"notifications":@(ring_notifications)}); di_on_ring(); }
+    if (gui_ring_burst(now,&gui_last_ring)) {
+        gui_rings++;
+        line_event("ring",@{@"burst":@(gui_rings),@"notifications":@(ring_notifications),
+            @"source":from_usb ? @"usb" : @"register"});
+        if (g_di_open) di_on_ring();
+    }
 }
 static void gui_ring_poll(void)
 {
@@ -2318,30 +2332,33 @@ static int selftest(void)
 static int wait_for_ring(double secs)
 {
     unsigned char b[16];
-    int n, rings = 0;
-    uint64_t last_ring = 0, deadline = apple_now_ms()+(uint64_t)(secs*1000);
+    int n, reported = 0, result = -1;
+    uint64_t deadline = apple_now_ms()+(uint64_t)(secs*1000);
 
     libusb_claim_interface(usb, 0);
+    gui_rings = 0; gui_last_ring = 0;
+    line_waiting_ring = 1;
     fprintf(stderr, "[APPLE] waiting up to %.0f s for a ring\n", secs);
     while (apple_now_ms() < deadline && !g_stop) {
         if (line_poll(0) < 0) break;
         gui_publish();
-        if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) != 0)
-            continue;
-        line_notification(b,n);
-        if (line_overload_notice) { line_poll(1); break; }
-        if (n >= 2 && b[0] == 0xa1 && b[1] == 0x09) {
-            if (gui_ring_burst(apple_now_ms(),&last_ring)) {
-                rings++;
-                line_event("ring",@{@"burst":@(rings),@"notifications":@(ring_notifications)});
-                if (!g_gui_control) di_on_ring();
-                fprintf(stderr,"[APPLE] RING %d/%u\n",rings,answer_rings);
-            }
-            if ((unsigned)rings >= answer_rings) return 0;
+        /* line_poll's register reads may already have consumed the ring.
+         * Never require that the last explicit interrupt read was a ring. */
+        if ((unsigned)gui_rings < answer_rings) {
+            n = 0;
+            if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) == 0)
+                line_notification(b,n);
         }
+        if (line_overload_notice) { line_poll(1); break; }
+        if (gui_rings != reported) {
+            reported = gui_rings;
+            fprintf(stderr,"[APPLE] RING %d/%u\n",reported,answer_rings);
+        }
+        if ((unsigned)gui_rings >= answer_rings) { result = 0; break; }
     }
-    fprintf(stderr, "[APPLE] no ring within %.0f s\n", secs);
-    return -1;
+    line_waiting_ring = 0;
+    if (result < 0) fprintf(stderr, "[APPLE] no ring within %.0f s\n", secs);
+    return result;
 }
 
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
@@ -2494,6 +2511,35 @@ static int gui_diagnostic_selftest(void)
         uint64_t last = 0;
         if (!gui_ring_burst(100,&last) || gui_ring_burst(1000,&last) ||
             gui_ring_burst(2000,&last) || !gui_ring_burst(4000,&last)) return 1;
+
+        /* Simulate a ring consumed by reg_read rather than the explicit
+         * interrupt wait: CLI must retain it across unrelated replies. */
+        status = (apple_modem_line_t){12,0x40,0,0x14,2};
+        if (!apple_line_ringing(&status)) return 1;
+        status.hook = 13; if (apple_line_ringing(&status)) return 1;
+        status.hook = 8; if (apple_line_ringing(&status)) return 1;
+        status.hook = 12; status.status = -1; if (apple_line_ringing(&status)) return 1;
+        status.status = 0; if (apple_line_ringing(&status)) return 1;
+        const unsigned char ring_notice[] = {0xa1,0x09,0,0};
+        g_gui_control = 0; gui_watch = 0; line_waiting_ring = 1;
+        gui_rings = 0; gui_last_ring = 0; ring_notifications = 0;
+        line_notification(ring_notice,1);
+        if (gui_rings || ring_notifications) return 1;
+        line_notification(ring_notice,sizeof ring_notice);
+        if (gui_rings != 1 || ring_notifications != 1) return 1;
+        line_notification(ring_notice,sizeof ring_notice);
+        const unsigned char response_available[] = {0xa1,0x01,0,0};
+        line_notification(response_available,sizeof response_available);
+        if (gui_rings != 1 || ring_notifications != 2) return 1;
+        gui_ring_notice(0); /* A polled RDT must not double-count a USB burst. */
+        if (gui_rings != 1 || ring_notifications != 2) return 1;
+        line_waiting_ring = 0;
+        line_notification(ring_notice,sizeof ring_notice);
+        if (gui_rings != 1 || ring_notifications != 2) return 1;
+        g_gui_control = 1; gui_watch = 1; gui_last_ring = 0;
+        line_notification(ring_notice,sizeof ring_notice);
+        if (gui_rings != 2 || ring_notifications != 3) return 1;
+        gui_watch = 0; gui_rings = 0; gui_last_ring = 0; ring_notifications = 0;
 
         /* Independent transport faults must not pass the PRBS comparison. */
         struct apple_dial_plan dial;

@@ -23,6 +23,13 @@ static inline int apple_line_overcurrent(const apple_modem_line_t *s)
     return apple_line_valid(s) && (s->hook & 1) &&
         ((s->status & 31) == 31 || (s->auxiliary >= 0 && (s->auxiliary & 1)));
 }
+/* Si3056 §5.14 / register 5 bit 2: validated ring indication. Unlike
+ * interrupt delivery, this does not depend on the interrupt-mask setup. */
+static inline int apple_line_ringing(const apple_modem_line_t *s)
+{
+    return apple_line_valid(s) && !(s->hook & 1) && (s->hook & 4);
+}
+
 /* USmSerial.sys 6.12.08 @0x9d15e requires a valid isolation link and
  * nonzero loop current, rejecting overload code 31. Voltage sense (LVS,
  * Si3056 §5.8/register 29) is variant-dependent and is NOT cable detection. */
