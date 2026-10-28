@@ -67,7 +67,9 @@ def main():
             env['ME_MODE'] = 'x2'
             self.environment = {k: v for k, v in env.items() if k.startswith('ME_')}
             self.engine_sha256 = hashlib.sha256(self.engine.read_bytes()).hexdigest()
-            pty = '/private/tmp/' + self.output.name + '-pty'
+            # Unique per process: two probes (tests/slow.list runs them in
+            # parallel) with the same output name crossed DTEs.
+            pty = '/private/tmp/%s-%d-pty' % (self.output.name, os.getpid())
             self.process = subprocess.Popen([str(self.engine), pty, '--call'],
                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=self.log, env=env)

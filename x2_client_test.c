@@ -131,6 +131,125 @@ static void upstream(void)
     v34_free(v34);
 }
 
+/* An in-data rate change opened by the client (x2_client_start_rate_change),
+ * against our server session in lockstep: our upstream through SpanDSP's
+ * modulator and the G.711 bearer into x2_session_rx (its S detector, the
+ * 4-point MP receiver and E), its octets into the client. Both sides must
+ * land on the new index, the alignment word must not reach the DTE, and
+ * the payload must be exact across the change apart from the server's
+ * DATA_STARTUP ones. */
+static void rate_change(uint16_t pcm_mask, unsigned start_index, unsigned new_index)
+{
+    static x2_session_t server;
+    static x2_client_t client;
+    source_t source={0x1d0f,malloc(1<<21),0,1<<21};
+    sink_t sink={malloc(1<<21),0,1<<21};
+    CHECK(!x2_session_init(&server));
+    CHECK(!x2_client_init(&client,pcm_mask,0x1ffe,5));
+    x2_client_set_put_bit(&client,sink_bit,&sink);
+    x2_session_set_payload_source(&server,source_bit,&source);
+    server.stage=X2_UPSTREAM_WAIT;server.marker_valid=1;
+    x2_session_upstream_j(&server);
+    v34_state_t *v34=v34_init(NULL,3200,31200,true,true,ones_bit,NULL,NULL,NULL);
+    CHECK(v34);
+    v34_tx_power(v34,-10.0f);
+    client.up=X2C_UP_DATA;
+    CHECK(!v34_tx_start_external_symbols(v34,4,1,x2_client_get_symbol,&client));
+    unsigned mp_given=0,payload_blocks=0,changed=0,armed=0,after=0;
+    for(unsigned block=0;block<4000 && after<200;++block) {
+        uint8_t codes[160];int16_t audio[160];
+        CHECK(x2_session_tx(&server,codes,160)==160);
+        x2_client_rx_codewords(&client,codes,160);
+        if(client.j_seen && server.stage==X2_J)x2_session_upstream_s_bar(&server);
+        if(!mp_given && server.stage==X2_TRAIN_C){x2_session_receive_mp(&server,&client.mp);mp_given=1;}
+        if(!changed && client.record_valid && !client.e_sent){client.e_sent=1;server.mp_rx.e_detected=1;}
+        int n=v34_tx(v34,audio,160);
+        for(int i=n<0?0:n;i<160;++i)audio[i]=0;
+        for(int i=0;i<160;++i)audio[i]=ulaw_to_linear(linear_to_ulaw(audio[i]));
+        x2_session_rx(&server,audio,160);
+        if(server.stage==X2_PAYLOAD && !changed && ++payload_blocks==100) {
+            CHECK(client.dn==X2C_DN_DATA && client.selected_index==start_index);
+            CHECK(!x2_client_start_rate_change(&client,new_index));
+            CHECK(!v34_v90_resume_external_symbols(v34,x2_client_get_symbol,&client));
+            changed=1;
+        }
+        if(changed && client.record_valid && !armed) {
+            CHECK(!v34_v90_arm_tx_data(v34,(int)client.upstream_n,0,0,0,NULL,x2_client_data_due));
+            armed=1;
+        }
+        if(changed && !client.rr && server.stage==X2_PAYLOAD && !x2_session_renegotiating(&server))++after;
+        CHECK(server.stage!=X2_FAILED && client.dn!=X2C_DN_FAILED);
+    }
+    CHECK(changed && after>=200);
+    CHECK(client.rate_changes==1 && client.final_seen && client.dn==X2C_DN_DATA);
+    CHECK(client.selected_index==new_index && server.selected_index==new_index);
+    CHECK(client.upstream_n==server.upstream_rate_n);
+    CHECK(server.renegotiations==1 && v34_get_tx_data_mode(v34));
+    while(server.training_mapper.output_position!=6) {
+        uint8_t code;
+        CHECK(x2_session_tx(&server,&code,1)==1);
+        x2_client_rx_codewords(&client,&code,1);
+    }
+    /* sink = ones, the payload up to the change, ones (DATA_STARTUP), the rest. */
+    CHECK(sink.count>=source.count);
+    size_t lead=sink.count-source.count,i=0;
+    size_t run=0;
+    while(run<lead && sink.bits[run]==1)++run;
+    /* The leading ones and the inserted ones are both all ones: find the
+     * split by matching the payload from the front. */
+    size_t extra=lead;
+    size_t start=0;
+    for(start=0;start<=lead;++start) {
+        for(i=0;i<source.count && sink.bits[start+i]==source.bits[i];++i);
+        if(i>=64)break;
+    }
+    CHECK(start<=lead);
+    extra=lead-start;
+    for(size_t j=0;j<extra;++j)CHECK(sink.bits[start+i+j]==1);
+    for(size_t j=i;j<source.count;++j)CHECK(sink.bits[start+extra+j]==source.bits[j]);
+    /* The DATA_STARTUP ones are dropped: nothing is inserted. */
+    CHECK(extra==0);
+    printf("  rate change %u -> %u (%u bit/s down, upstream N=%u): %zu payload bits exact, %zu before the change, %zu ones inserted\n",
+           start_index,new_index,x2_client_downstream_rate(&client),client.upstream_n,source.count,i,extra);
+    v34_free(v34);free(source.bits);free(sink.bits);
+}
+
+/* V.90 9.5.2.1: the server's Tone A (2400 Hz, 1800 Hz guard 6 dB down)
+ * in data is recognised within 40 ms; x2 data, the 1800 Hz guard alone and
+ * a quiet tone are not. */
+static void tone_a(void)
+{
+    static x2_client_t client;
+    static const struct { double a2400, a1800; unsigned expect; const char *name; } cases[]={
+        {3000,1500,1,"Tone A with guard"},{3000,0,1,"Tone A alone"},
+        {0,3000,0,"guard alone"},{150,75,0,"quiet Tone A"}};
+    for(unsigned k=0;k<sizeof(cases)/sizeof(cases[0]);++k) {
+        CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
+        x2_short_profile(15,5,&client.data);client.dn=X2C_DN_DATA;
+        unsigned n;
+        for(n=0;n<800 && !client.tone_a;++n) {
+            double x=cases[k].a2400*cos(2*M_PI*2400*n/8000)+cases[k].a1800*cos(2*M_PI*1800*n/8000);
+            uint8_t code=linear_to_ulaw((int)lrint(x));
+            x2_client_rx_codewords(&client,&code,1);
+        }
+        CHECK(client.tone_a==cases[k].expect);
+        if(cases[k].expect)CHECK(n<=400);
+    }
+    /* A minute's worth of data codewords from the index-15 banks. */
+    CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
+    x2_short_profile(15,5,&client.data);client.dn=X2C_DN_DATA;
+    uint32_t lfsr=0xace1;
+    for(unsigned n=0;n<480000;++n) {
+        lfsr=lfsr*1103515245u+12345u;
+        unsigned p=n%6,size=client.data.sizes[p];
+        uint8_t code=(uint8_t)(client.data.banks[p][(lfsr>>16)%size]&0xff);
+        if((lfsr>>8)&1)code^=0x80;
+        x2_client_rx_codewords(&client,&code,1);
+    }
+    CHECK(!client.tone_a);
+    printf("  Tone A in data: recognised with and without the guard; guard alone, quiet tone and 60 s of data not\n");
+}
+
 int main(void)
 {
     downstream(0x0001,1,13,0);
@@ -140,6 +259,10 @@ int main(void)
     downstream(0x0001,1,13,1);
     downstream(0x7fff,15,13,1);
     upstream();
-    printf("x2 client: downstream record/final/payload at four ceilings and upstream MP/E passed\n");
+    rate_change(0x7fff,15,6);
+    rate_change(0x7fff,15,1);
+    rate_change(0x003f,6,6);
+    tone_a();
+    printf("x2 client: downstream record/final/payload at four ceilings, upstream MP/E and in-data rate changes passed\n");
     return 0;
 }

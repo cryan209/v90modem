@@ -3464,6 +3464,10 @@ static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
    received codewords. */
 static bool g_x2_client_tx_started, g_x2_client_armed;
 static uint64_t g_x2_client_samples;
+/* Our client's in-data rate change: when data began, whether the test hook
+   has fired, and whether a change is open. */
+static uint64_t g_x2_client_data_sample;
+static bool g_x2_client_reneg_done, g_x2_client_rr_open;
 static x2_client_up_t g_x2_client_last_up;
 static x2_client_dn_t g_x2_client_last_dn;
 
@@ -9958,8 +9962,15 @@ static void v34_put_bit_cb(void *user_data, int bit)
         /* x2 owns MP/E (Draft 0.33 sections 20..21); the V.34 receiver
          * suppresses B1 internally and supplies descrambled payload bits.
          * Keep them behind the accepted-record/E/acquisition boundary. */
+        /* After an in-data rate change the peer's data follows its E and
+         * B1 at once, while our DATA_STARTUP (0.5 s) still runs: taking
+         * upstream only in PAYLOAD threw that half second away (0.43 s of
+         * V.14 text from our client, 28 Oct; the Courier's "one line lost
+         * in the switch", 10 Oct). */
         if(bit>=0 && !g_x2.symmetric && g_x2_data_stack_started
-           && g_x2_upstream_started && g_x2.stage==X2_PAYLOAD
+           && g_x2_upstream_started
+           && (g_x2.stage==X2_PAYLOAD
+               || (g_x2.stage==X2_DATA_STARTUP && x2_session_renegotiating(&g_x2)))
            && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
             if(me_x2_upstream_squelched())return;
             me_data_rx_first_bit();
@@ -11607,7 +11618,17 @@ static void me_x2_client_progress_locked(void)
         g_x2_client_last_up=c->up;g_x2_client_last_dn=c->dn;
     }
     if(g_x2.stage!=X2_CLIENT)return;
+    if(c->tone_a) {
+        trace_phase("X2 client: Tone A from the server in data (a retrain); ending the call");
+        x2_session_fail(&g_x2,X2_FAILURE_PEER_RETRAIN);return;
+    }
     if(c->dn==X2C_DN_FAILED) {
+        if(c->rr) {
+            trace_phase("X2 client: rate change %u not completed (%llu codewords after our S, record %s, E %s)",
+                        c->rate_changes,(unsigned long long)c->rr_samples,
+                        c->record_valid?"acknowledged":"none",c->e_sent?"sent":"not sent");
+            x2_session_fail(&g_x2,X2_FAILURE_RENEG_TIMEOUT);return;
+        }
         trace_phase("X2 client: record %04x/%04x/%04x not usable (local PCM mask %04x, MP %04x/%04x)",
                     c->record[0],c->record[1],c->record[2],c->pcm_mask,c->mp.words[0],c->mp.words[1]);
         x2_session_fail(&g_x2,X2_FAILURE_CLIENT);return;
@@ -11649,10 +11670,39 @@ static void me_x2_client_progress_locked(void)
         int downstream=(int)x2_client_downstream_rate(c),upstream=(int)c->upstream_n*2400;
         g_state=ME_DATA;g_phase_start_ms=0;
         g_report_tx_rate=upstream;g_report_rx_rate=downstream;
+        g_x2_client_data_sample=g_x2_client_samples;
         trace_phase("X2 client enter DATA: downstream=%d upstream=%d",downstream,upstream);
         if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
             g_data_connect_reported=true;di_on_connected(downstream);
         }
+    }
+    /* ME_X2_CLIENT_RENEG_AFTER_MS=<n>: a TEST HOOK, the x2 client's sibling
+     * of ME_V90_RENEG_AFTER_MS. It opens one in-data rate change n ms into
+     * data, asking for PCM index ME_X2_CLIENT_RENEG_INDEX (default one below
+     * the current). Nothing else opens one: the client asks for its ceiling
+     * at startup, and on a byte-exact bearer its downstream never degrades.
+     * V.34 data hands the modulator back at the current symbol, keeping
+     * carrier and baud phase (V.90 9.6's seam). */
+    int reneg_ms=parse_env_int("ME_X2_CLIENT_RENEG_AFTER_MS",0);
+    if(g_state==ME_DATA && reneg_ms>0 && !g_x2_client_reneg_done
+       && g_x2_client_samples-g_x2_client_data_sample>=(uint64_t)reneg_ms*8
+       && x2_client_can_change_rate(c)) {
+        int index=parse_env_int("ME_X2_CLIENT_RENEG_INDEX",(int)c->selected_index-1);
+        g_x2_client_reneg_done=true;
+        if(index<1 || x2_client_start_rate_change(c,(unsigned)index)
+           || v34_v90_resume_external_symbols(g_v34,x2_client_get_symbol,c)) {
+            trace_phase("X2 client: rate change to index %d not started",index);
+        } else {
+            g_x2_client_armed=false;g_x2_client_rr_open=true;
+            trace_phase("X2 client opens a rate change: index %d asked, now %u",index,c->selected_index);
+        }
+    }
+    if(g_x2_client_rr_open && !c->rr && c->dn==X2C_DN_DATA) {
+        int downstream=(int)x2_client_downstream_rate(c),upstream=(int)c->upstream_n*2400;
+        g_x2_client_rr_open=false;
+        g_report_tx_rate=upstream;g_report_rx_rate=downstream;
+        trace_phase("X2 client rate change complete: index=%u downstream=%d upstream=%d",
+                    c->selected_index,downstream,upstream);
     }
     /* The Courier reaches data about 7 s after its marker. */
     if(g_state==ME_TRAINING && g_x2_client_samples>30*8000) {
@@ -11729,6 +11779,17 @@ static bool me_x2_tx_locked(uint8_t *codewords, int count)
                 if (chunk > 320) chunk = 320;
                 n = v34_tx(g_v34, linear, chunk);
                 for (int i = n < 0 ? 0 : n; i < chunk; i++) linear[i] = 0;
+                /* ME_X2_CLIENT_SILENCE_AFTER_MS=<a>, ME_X2_CLIENT_SILENCE_MS=<d>:
+                   a TEST HOOK that silences our upstream for d ms (default
+                   1000) from a ms into data, to see what a server does when
+                   it loses us (does it retrain?). */
+                int quiet_at=parse_env_int("ME_X2_CLIENT_SILENCE_AFTER_MS",0);
+                if (quiet_at > 0 && g_state == ME_DATA) {
+                    uint64_t t = g_x2_client_samples + (uint64_t)offset - g_x2_client_data_sample;
+                    uint64_t from = (uint64_t)quiet_at*8;
+                    uint64_t len = (uint64_t)parse_env_int("ME_X2_CLIENT_SILENCE_MS",1000)*8;
+                    if (t >= from && t < from + len) memset(linear, 0, sizeof(linear[0])*(size_t)chunk);
+                }
                 for (int i = 0; i < chunk; i++) codewords[offset + i] = linear_to_pcm(linear[i]);
                 offset += chunk;
             }
@@ -11806,6 +11867,7 @@ static void me_x2_start_locked(void)
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
     g_x2_client_tx_started=g_x2_client_armed=false;
     g_x2_client_samples=0;
+    g_x2_client_data_sample=0;g_x2_client_reneg_done=g_x2_client_rr_open=false;
     g_x2_client_last_up=X2C_UP_DATA;g_x2_client_last_dn=X2C_DN_FAILED;
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;

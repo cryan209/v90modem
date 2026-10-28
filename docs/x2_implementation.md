@@ -1139,9 +1139,78 @@ lines exact. The `\N0` probe is in `tests/slow.list` (141 s; needs
 
 **Not done:**
 
-- **Fall forward and retrain.** The client never starts the in-data fall
-  forward. It doesn't need to, because it asks for its ceiling at startup. It
-  also does not answer a server Tone A retrain.
+- ~~**Fall forward and retrain.**~~ The client now opens in-data rate changes
+  and recognises a server's Tone A (next section). It still does not answer a
+  retrain, and no server has been seen to send one.
 - **Bearer.** There is no analogue front end, so the client needs a
   byte-exact bearer.
 - **Real hardware.** No real server has been tried.
+
+## The client's in-data rate change, and Tone A (28 October 2026)
+
+`x2_client_start_rate_change()` opens a rate change the way the Courier
+falls forward ("In-data fall forward" above), with V.90 9.6.2.1's shape:
+- **Upstream:** V.34 data hands the modulator back at the current symbol
+  (`v34_v90_resume_external_symbols()`, which keeps carrier and baud
+  phase). Then S 128T, S-bar 16T, and the 4-point MP with the new N1,
+  repeated. Once the server's record carries bit 15, two acknowledged MPs
+  follow, then E, and V.34 B1 and data at the record's upstream N.
+- **Downstream:** while the change is open, the newest nine data frames
+  are held back. The server's 54-octet alignment word starts on a frame
+  boundary, so when it is recognised it is exactly those frames, and none
+  of it reaches the DTE. The record is decoded on a fresh mapper in both
+  candidate allocations: index 1 at the current MD (our server) and the
+  current banks. Then come one frame of ones on a record boundary and the
+  new banks. The server's 680 DATA_STARTUP frames are dropped, not
+  delivered: it stopped taking source bits mid-character, and the ones
+  would break a V.14 character.
+- **Guards:** a change can open only 4080 codewords after the final frame
+  (`x2_client_can_change_rate()`). The server listens for S only in
+  PAYLOAD, and an S sent during its DATA_STARTUP was simply ignored. The
+  change fails after 1.5 s without the alignment word, or 3 s without the
+  final frame, as `X2_FAILURE_RENEG_TIMEOUT`.
+- **Test hook:** `ME_X2_CLIENT_RENEG_AFTER_MS` with
+  `ME_X2_CLIENT_RENEG_INDEX`. Nothing else opens one: the client asks for
+  its ceiling at startup, and on a byte-exact bearer its downstream never
+  degrades.
+
+**Ie030002 does not wait for our E.** It ends its record about 45 ms after
+acknowledging, on our acknowledged MP, so the final frame arrived before
+our E was out and the first try timed out (`x2-client-imodem-rr8`). An
+all-ones frame on a record boundary can only be the final frame, because a
+record starts with 17 ones and a zero, so the client no longer requires its
+own E for it. With that, against the original firmware:
+- a change to index 8 before LAPM gave `CONNECT 48000/ARQ/x2/LAPM/V42BIS`
+  at the I-modem and 46666/31200 here;
+- a change 9 s into data, with LAPM up and our line flowing, completed in
+  79 ms, and all ten copies reached its DTE.
+
+The latter is in `tests/slow.list`.
+
+**A server-side loss it exposed.** Our server passed upstream bits only in
+PAYLOAD, but after a change the peer's data follows its E and B1 at once,
+while our 0.5 s DATA_STARTUP is still running. That half second was thrown
+away: 0.43 s of V.14 text from our client, and probably the Courier's "one
+line lost in the switch" of 10 October. Upstream is now also accepted in a
+change's DATA_STARTUP once B1 is acquired. Startup is unchanged.
+
+**What V.14 still loses.** With V.42 a change mid-payload is invisible:
+`tests/fast.list` runs 15 to 6 mid-payload, text intact both ways. Over
+V.14, measured across a change with full DTE dumps
+(`ENGINE_PAIR_DTE_DUMP`):
+- downstream is now exact;
+- upstream gains 65 bytes and loses 7 at the switch. The gain is our S and
+  MP decoded as data for the ~20 ms our server needs to recognise S; the
+  loss is the mapping frame cut off at the seam. Removing the gain would
+  mean delaying every x2 call's upstream by the S detector's latency, which
+  is not done.
+
+**Tone A.** The client now recognises a server's Tone A in data (2400 Hz,
+the 1800 Hz guard counting toward purity but not in place of the tone;
+40 ms) and ends the call as `X2_FAILURE_PEER_RETRAIN`. It does not answer
+it. Probed with `ME_X2_CLIENT_SILENCE_AFTER_MS`/`_MS`, which silence our
+upstream mid-call, Ie030002 never retrains: after 3 s or 500 ms without our
+upstream it stops acknowledging V.42 and hangs up. A same-index rate change
+1 s after a 500 ms loss got no alignment word, because the I-modem had
+already given up. With no server seen to retrain, answering one (a full
+Phase 2 restart) has nothing to check it against.

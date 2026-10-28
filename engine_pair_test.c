@@ -907,6 +907,17 @@ int main(int argc, char **argv)
             failed = 1;
         }
     }
+    /* ENGINE_PAIR_DTE_DUMP=PREFIX writes each side's whole DTE stream to
+       PREFIX.call and PREFIX.answer, for grading more than the head and tail
+       printed below. */
+    if (getenv("ENGINE_PAIR_DTE_DUMP")) {
+        for (int k = 0; k < 2; k++) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s.%s", getenv("ENGINE_PAIR_DTE_DUMP"), side[k].name);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(side[k].dte, 1, side[k].dte_len, f); fclose(f); }
+        }
+    }
     if (failed) {
         for (int k = 0; k < 2; k++) {
             printf("  %s DTE received %zu bytes:\n", side[k].name, side[k].dte_len);
