@@ -2,7 +2,8 @@
 """Read-only native V.FC signature capture, launched by probe_vfc_firmware.py.
 
 Only observes a firmware PC and RAM. No carrier, decoder result, sample or
-guest state is supplied by this hook. The native capture retains 64 rows.
+guest state is supplied by this hook. The standard native capture retains 64
+rows; diagnostic libraries may retain more, identified by their library hash.
 """
 import json
 import os
@@ -34,7 +35,9 @@ if mode != 'worker':
 from courier_emu.dsp import NativeC5x
 addresses = [0x320, *range(0x330, 0x334), 0x326, 0x3a6, 0x3af,
              0x379, 0x3d0, 0x3d4, 0x3da, 0x3e2, 0x3c8, 0x3ca,
-             0x6f, 0x3d8, 0x3d9, 0x3d1, 0x3d2]
+             0x6f, 0x3d8, 0x3d9, 0x3d1, 0x3d2,
+             0x321, 0x322, 0x32f, 0x6d, 0x6e, 0x3cd,
+             *range(0x340, 0x348), 0x870, 0x871]
 pc = int(os.environ['VFC_CAPTURE_PC'], 16)
 prefix = Path(sys.argv[sys.argv.index('--line-record') + 1])
 destination = prefix.with_name(prefix.name + '-signature.json')
@@ -59,7 +62,7 @@ def close(self):
         destination.write_text(json.dumps({
             'pc': pc, 'addresses': addresses,
             'prefix': ['instructions', 'cycles', 'acc', 'dp', 'carry'],
-            'capacity_per_core': 64, 'cores': records,
+            'capacity_per_core': 'native library dependent', 'cores': records,
             'scope': 'read-only native firmware PC/RAM capture',
         }, indent=2) + '\n')
     original_close(self)

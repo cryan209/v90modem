@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--rate', type=int, choices=range(14400, 28801, 2400),
                         default=28800)
+    parser.add_argument('--baud-index', type=int, choices=range(6),
+                        help='restrict the native symbol-rate offer to one S54 bit')
     parser.add_argument('--instructions', type=int, default=300000000)
     v8_options = parser.add_mutually_exclusive_group()
     v8_options.add_argument('--enable-v8', action='store_true',
@@ -40,7 +42,13 @@ def main():
                         help='observe firmware V.FC eligibility and overlay-request paths')
     parser.add_argument('--capture-signature', choices=('rx', 'tx'),
                         help='read-only native capture of signature dibits and decoder state')
+    parser.add_argument('--capture-pc', type=lambda value: int(value, 16),
+                        help='read-only native capture at another DSP PC (hex)')
     args = parser.parse_args()
+    if args.capture_pc is not None and not 0 <= args.capture_pc <= 65535:
+        parser.error('--capture-pc must be a 16-bit program address')
+    if args.baud_index is not None and args.inherit_v8:
+        parser.error('--baud-index requires explicit V.8 settings')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     emulator = args.emulator.resolve(strict=True)
@@ -52,6 +60,9 @@ def main():
     # V.8 takes priority over the proprietary ROCK exchange, even when V.34
     # itself is disabled. Default to genuine V.FC startup, not V.32 fallback.
     v8 = '' if args.inherit_v8 else 'S54=0' if args.enable_v8 else 'S54=192'
+    if args.baud_index is not None:
+        s54 = (0 if args.enable_v8 else 192) | (63 ^ (1 << args.baud_index))
+        v8 = f'S54={s54}'
     speed = 0 if args.automode else 8 + (args.rate-14400)//2400
     setting = f'ATX1S27=1S39=8{v8}S56=64S58=33&N{speed}&M0&B0&A3'
     with tempfile.TemporaryDirectory(prefix='vfc-peer-') as temporary:
@@ -77,10 +88,11 @@ def main():
             command.extend(('--dsp-trace-range', 'a300:a440'))
         env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1',
                'COURIER_C5X_LIBRARY': str(library), 'COURIER_LINE_FRAME_MS': '20'}
-        if args.capture_signature:
+        if args.capture_signature or args.capture_pc is not None:
             command[1:3] = [str(Path(__file__).with_name('vfc_courier_capture.py').resolve()), 'cli']
             env['VFC_CAPTURE_EMULATOR'] = str(emulator)
-            env['VFC_CAPTURE_PC'] = 'aa44' if args.capture_signature == 'rx' else 'a719'
+            env['VFC_CAPTURE_PC'] = (f'{args.capture_pc:x}' if args.capture_pc is not None
+                                     else 'aa44' if args.capture_signature == 'rx' else 'a719')
         manifest = {'command': command, 'rom_sha256': hashlib.sha256(rom.read_bytes()).hexdigest(),
                     'library_sha256': hashlib.sha256(library.read_bytes()).hexdigest(),
                     'settings': setting, 'capture_signature': args.capture_signature,
