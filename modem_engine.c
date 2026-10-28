@@ -4920,6 +4920,49 @@ static uint64_t me_k56_prime_delay_samples(void)
     if (ms < 0 || ms > 2000) ms = 120;
     return (uint64_t)ms*8;
 }
+
+/* g_v34 as last prepared for the K56flex upstream, and at what rate. */
+static v34_state_t *g_k56_prepared_v34;
+static int g_k56_prepared_bps;
+static int me_k56_idle_bit(void *user);
+static void me_k56_phase4_bit(void *user, int bit);
+static void me_k56_data_bit(void *user, int bit);
+
+/* The server's V.34 upstream data receiver, created and prepared for `bps`.
+ * Creating and preparing it takes ~15 ms of one media callback on CT 117.
+ * Done at MP, that callback held our downstream back 29-40 ms on every
+ * call, and on one in three the AudioCodes re-centred its playout: our
+ * echo arrived 40 ms earlier, so the line echo canceller (fitted before)
+ * subtracted it at the wrong delay and the upstream fell from 36 to 24 dB
+ * (mt5634mu-k56-20261027/server-n).  So it is done at probe start, before
+ * that fit, at the baud rate's highest rate; MP re-prepares only if the
+ * client chose another.  Its input starts at MP either way. */
+static bool me_k56_upstream_v34_locked(int bps)
+{
+    if (!g_v34) {
+        g_v34 = v34_init(NULL, 3200, bps, false, true,
+                         me_k56_idle_bit, NULL, me_k56_data_bit, NULL);
+        if (!g_v34)
+            return false;
+        /* Borrow only the local primary-channel receiver.
+         * K56 owns every transmitted PCM codeword and MP.
+         * Clause 7/V.34 GPC was validated in received TRN;
+         * preserve V.90's separate GPA default elsewhere. */
+        v34_set_v90_mode(g_v34, g_law == ME_LAW_ALAW);
+        v34_set_put_phase4_bit(g_v34, me_k56_phase4_bit, NULL);
+        v34_force_v90_phase4_cp_rx(g_v34);
+        if (v34_set_rx_data_scrambler(g_v34, 18))
+            return false;
+        g_k56_prepared_v34 = NULL;
+    }
+    if (g_k56_prepared_v34 == g_v34 && g_k56_prepared_bps == bps)
+        return true;
+    if (v34_v90_prepare_upstream_data(g_v34, g_k56_baud_code, g_k56_high_carrier, bps, 0))
+        return false;
+    g_k56_prepared_v34 = g_v34;
+    g_k56_prepared_bps = bps;
+    return true;
+}
 static bool g_k56_negotiated = false;
 /* This call's V.8bis offered K56flex as the client (ME_K56FLEX_ROLE=client). */
 static bool g_k56_client_role = false;
@@ -5689,6 +5732,13 @@ static void me_k56_startup_progress_locked(void)
         }
         g_k56_baud_code = baud_code;
         g_k56_high_carrier = high_carrier;
+        /* me_k56_upstream_v34_locked(): before the echo canceller's fit
+         * (baud code 3 is 3000, whose highest rate is 28800). */
+        if (st != K56S_FAILED
+            && !me_k56_upstream_v34_locked(baud_code == 3 ? 28800 : 31200)) {
+            ME_LOG("[ME] K56flex: cannot prepare the upstream data receiver\n");
+            st = K56S_FAILED;
+        }
     }
     k56flex_startup_free(g_k56_startup);
     g_k56_startup = NULL;
@@ -15020,22 +15070,9 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_state = ME_HANGUP;
                 } else {
                     g_k56_upstream_bps = upstream;
-                    g_v34 = v34_init(NULL, 3200, upstream, false, true,
-                                    me_k56_idle_bit, NULL, me_k56_data_bit, NULL);
-                    if (!g_v34) { g_state = ME_HANGUP; }
-                    else {
-                        /* Borrow only the local primary-channel receiver.
-                         * K56 owns every transmitted PCM codeword and MP.
-                         * Clause 7/V.34 GPC was validated in received TRN;
-                         * preserve V.90's separate GPA default elsewhere. */
-                        v34_set_v90_mode(g_v34, g_law == ME_LAW_ALAW);
-                        v34_set_put_phase4_bit(g_v34, me_k56_phase4_bit, NULL);
-                        v34_force_v90_phase4_cp_rx(g_v34);
-                        if (v34_set_rx_data_scrambler(g_v34, 18)
-                            || v34_v90_prepare_upstream_data(g_v34, g_k56_baud_code,
-                                                            g_k56_high_carrier, upstream, 0))
-                            g_state = ME_HANGUP;
-                    }
+                    /* Normally prepared at probe start already. */
+                    if (!me_k56_upstream_v34_locked(upstream))
+                        g_state = ME_HANGUP;
                     /* Draft 0.23 4.11; resident 15BB/15EE -> 0FFE:
                      * completed training and accepted MP post 1000/2000.
                      * CRC-valid repeated audio records, never peer callbacks. */

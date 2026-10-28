@@ -61,6 +61,7 @@ typedef struct {
     unsigned blocks_in_pair;     /* block index within the current pair */
     unsigned status;
     unsigned pairs_total;
+    unsigned id_a_pair;          /* pairs_total when ID_A began */
     int param_second;
     k56flex_pcm_tx_t data;
     int data_ready;

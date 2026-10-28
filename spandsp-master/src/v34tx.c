@@ -5252,6 +5252,18 @@ static int post_l2_tone_b_wait_bauds(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* How long after our L2 a Tone B can only be our own probe's echo: the
+   round trip when Phase 2 measured one, else 300 ms (the longest echo we
+   have seen on a SIP path is 250 ms), plus the detector's persistence. */
+static int post_l2_echo_guard_bauds(v34_state_t *s)
+{
+    if (s->rx.round_trip_delay_estimate > 0)
+        return (s->rx.round_trip_delay_estimate*600 + 4000)/8000 + 30;
+    /*endif*/
+    return (300*600 + 500)/1000;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_second_a_baud(v34_state_t *s)
 {
     switch (s->tx.stage)
@@ -5272,6 +5284,25 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
            On timeout this falls through to the old unconditional behaviour
            rather than 11.2.2.2.3's return to 11.2.1.2.3, so the change can
            only add the wait -- never remove a path that used to work. */
+        /* 11.2.1.1.3/11.2.1.1.5: the call modem is silent until it has
+           received all of L1 and L2, so no Tone B of its can reach us
+           before a round trip after our L2 ends -- but the echo of our own
+           probe, which has 1200 Hz in it, does.  On the MT5634MU's line it
+           came back 230-250 ms late, was taken for Tone B 240 ms into our L1,
+           and we reversed Tone A the moment L2 ended; the peer's L1/L2 then
+           missed our measurement window and Phase 2 failed on 6 of 10 calls
+           (mt5634mu-k56-20261027/server-q..z).  So nothing seen before then
+           counts: a Tone B must be detected afresh after the guard.  Only on
+           the K56flex server's startup, where it was measured: on a plain
+           V.34 answer it delays a real Tone B by the guard, which moves the
+           caller's probe and so its measured rate (v34_duplex_test 3429
+           alaw: 28800 -> 31200 caller-to-answer). */
+        if (s->rx.k56_phase2  &&  s->tx.tone_duration < post_l2_echo_guard_bauds(s))
+        {
+            s->rx.tone_b_present = false;
+            s->rx.persistence2 = 0;
+        }
+        /*endif*/
         if (s->rx.tone_b_present
             ||
             ++s->tx.tone_duration >= post_l2_tone_b_wait_bauds(s))

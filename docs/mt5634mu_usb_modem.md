@@ -317,3 +317,7 @@ fixes, all on our side, are in `docs/k56flex_implementation.md` ("A real K56flex
 client on our server"). Drive it with the bridge running and
 `python3 call.py <pty> 2904 <outdir> <hold-s>`, which dials, holds, hangs up and
 reads ATI11 with its pager advanced.
+
+Later the same day: three more causes of intermittent failures, all ours, are
+in `docs/k56flex_implementation.md` ("The MT5634MU's intermittent failures").
+With them, 4 of 5 calls that pass Phase 2 connect at 44000 V42bis.

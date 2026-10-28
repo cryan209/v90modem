@@ -3362,3 +3362,45 @@ ours, found on the server's own taps:
 on the linear samples). Still open: one call in three loses the upstream
 within a second of data (call n). The client's MP asks 44000-46000, below
 V.90's 50666 on the same line.
+
+### The MT5634MU's intermittent failures: three of ours (28 October, later)
+
+After the fixes above, one call in two or three still failed. 26 more calls on
+CT 117 (`artifacts/mt5634mu-k56-20261027/server-{q..z,a1..a5,b1..b6}`) split
+the failures into three causes, all ours:
+
+1. **Data starts off the client's frame grid (most failures).** The pair
+   count when priming starts was odd on every call that reached V.42 (4 of 4)
+   and even on every call where the client sent only marks and gave up 5 s
+   into data (7 of 7). A pair is 12 samples, so the good calls start priming
+   a multiple of 24 samples (three 8-sample data frames) after ID_A. The
+   gates before it run until the client's audio events, so the parity was
+   chance. `k56flex_train.c` now adds one FFFF tail pair when needed. Timing
+   was not the cause: priming came 117-124 ms after the client's 4-point
+   signal on good and bad calls alike.
+2. **Our echo moved under the fixed canceller.** Creating and preparing the
+   V.34 upstream receiver at MP took ~15 ms of one media callback on CT 117
+   and held our downstream back 29-40 ms on every call. On call n the
+   AudioCodes re-centred its playout: the echo came back 40 ms earlier (230
+   -> 191 ms), the canceller subtracted it at the old delay, and the upstream
+   fell from 36 to 24 dB, below no canceller at all (25.9 dB). The receiver
+   is now created and prepared at probe start, before the canceller's fit
+   (`me_k56_upstream_v34_locked()`); MP re-prepares only for a different
+   rate. No transmit gap at MP since.
+3. **Our own probe's echo taken for Tone B (Phase 2 failures).** The L1/L2
+   probe contains 1200 Hz, and its echo (230-250 ms, no canceller in Phase 2)
+   was detected as the client's Tone B 240 ms into our L1. We then reversed
+   Tone A as soon as L2 ended, the client's L1/L2 missed our measurement
+   window, and Phase 2 failed with "no usable measured Phase-2 INFO1
+   selection" (SNR -2.6 dB). V.34 11.2.1.1.3/11.2.1.1.5 keep the call modem
+   silent until it has received all of L2, so on the K56flex startup a
+   Tone B now counts only if detected afresh 300 ms (or the measured round
+   trip) after our L2 (`v34tx.c`). Plain V.34 is unchanged: there the guard
+   delayed a real Tone B and moved v34_duplex_test's caller rate.
+
+Result on the last batch, all three in: **4 of 5 calls that passed Phase 2
+reached CONNECT 44000 V42bis**, against 4 of 11 before. Still open: Phase 2
+failed on 1 of 6 (b2), and b4 primed on the right grid but the client never
+left marks, with no transmit gap or echo move. The slow-callback line's
+`lec`, `v34_rx` and `ja` slots now cover the K56flex server's canceller,
+data receiver and upstream receiver.
