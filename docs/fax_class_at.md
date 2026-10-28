@@ -1001,3 +1001,74 @@ and DTE raster comparisons, and an asymmetric D/B offer negotiating 28800.
 The fax-work harness can require the actual rate with `--expected-rate-code D`.
 This establishes local waveform and production-path behavior; hardware
 interoperability at 33600 remains unverified.
+
+## T.42 colour declared before image input (2026-10-26)
+
+The adjacent fax-work GUI now supplies actual T.42/T.81 CIELAB JPEG pages,
+not ordinary sRGB JPEG files, using SpanDSP's T.42 codec. A production SIP/RTP
+pair initially negotiated MH despite both DTEs requesting
+`AT+FIS=1,3,0,2,0,2,0,0,3`. The image supplied after CONNECT cannot determine
+the initial DCS: `session_start()` declared DF's bilevel format and R8/fine
+resolution, and `t30_set_tx_image_format()` hard-coded a bilevel image type.
+
+T.32 8.3.3/Table 21 JP and T.30 Annex E require the declared multilevel
+format to reflect the offer before phase B. JP now declares T.42 with the
+appropriate colour/grayscale flag and 200x200 resolution. The declaration
+API separates those flags from the compression and preserves the component
+type, as the file-backed T.4 API does.
+
+A second production-path issue appeared at teardown. SIP could disconnect
+during the final DCN/flush pause; freeing T.30 without `t30_terminate()` lost
+phase E, so the DTE never received final +FHS. Disconnect now lets T.30
+classify orderly completion versus a genuine drop before freeing it. On the
+DTE side the sender waits for the session report before ATH. RX must not use
+termios IXON: it silently removes legitimate JPEG octets 0x11/0x13. The GUI
+also excludes ECM padding after the actual JPEG EOI when decoding, while
+retaining the raw received stream.
+
+Validation: fax-work `deploy/test-colour-pair.py --pages 2` passes through
+two production localhost SIP/RTP modems in Class 2.0 at a 9600-bit/s ceiling.
+Both distinct 1728x128 RGB pages negotiate JP=3/EC=2, produce RGB TX/RX
+previews and PNG exports, and end with +FHS:00 on both DTEs. The maximum
+channel error at six in-gamut colour patch centers is 7/255 (JPEG is lossy).
+The full `fax_class2_test` regression passes with zero failures. These are
+short-page local checks, not colour hardware interoperability. A Class 2.1
+pair did not establish phase B in the current development checkout; V.34
+colour is not validated by this work. Use Class 2.0 for the tested colour path.
+
+## Outgoing manual reception / Asterisk SendFAX (2026-10-26)
+
+Telephone origination and facsimile procedure role are separate. T.30 3.2 says
+manual receiving terminals enter Node R by announcing capabilities; manual
+transmitters enter Node T by detecting capabilities. Asterisk's
+`res_fax_spandsp.c` initializes SendFAX with `caller_mode=1` even on an answered
+SIP call. Configuring the calling DCE for polling (`+FSP=1`, T.32 8.5.1.8 and
+8.3.4.2) leaves both terminals in Node T waiting for identification. Live calls
+connected and exchanged PCMU but produced no +FCO, ending with +FHS:04 at 60 s.
+
+`AT+FROLE=0|1` is an explicitly **vendor-specific extension**, not a T.32
+parameter. Class 2.0 supports query/test forms; 0 retains the normal physical
+calling role, 1 initializes T.30 as a manual receiver (Node R), independently
+of SIP origination. Set it with `+FCR=1`, `+FSP=0`, `+FLP=0` before ATD. It
+resets to 0 on class initialization and disconnect. It is rejected in Class
+2.1: no V.8/V.34 manual-role interoperability is claimed. Ordinary polling
+remains unchanged and uses +FSP=1 with the default role.
+
+The paired native regression now tests a calling receiver against a peer
+initialized with `fax_init(..., true)` and a TX document, matching Asterisk's
+role choice. It checks normal completion, no +FPO requirement, TSI reporting,
+exact decoded raster rows, and role reset. Full `fax_class2_test` passes with
+zero failures; existing polling remains covered.
+
+A real SIP call to Asterisk extension 3099 received a 1728x2249 MH page at
+9600 bit/s without ECM, zero modem/preview bad rows, and +FHS:00. The decoded
+cover sheet was opened and checked. Artifacts are in the adjacent fax-work
+repository under `logs/asterisk-3099-manual-live/`. This establishes that PBX's
+SendFAX path, not hardware or V.34 manual-receive interoperability.
+
+For isolated diagnostics, `sip_v90_modem --no-register` keeps account digest
+credentials for outbound calls without sending REGISTER or replacing an
+existing line's Contact (RFC 3261 sections 10 and 22). Defaults are unchanged.
+`fax-work/deploy/test-live-receive.py` uses this mode and requires an explicit
+real destination and SIP credentials; passwords are not written into its
+reports. Its default is manual Class 2.0, with `--poll` for true polling.

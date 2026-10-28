@@ -109,6 +109,7 @@ static int              p_cr;              /* +FCR, willing to receive */
 static int              p_ie;              /* +FIE, procedure interrupts */
 static int              p_lp;              /* +FLP, a document is pollable */
 static int              p_sp;              /* +FSP, we want to poll */
+static int              p_receive_role;    /* +FROLE, explicit manual receive role */
 static int              p_ap[3];           /* +FAP: sub-address, SEP, PWD reporting */
 static char             sub_address[21];   /* +FSA */
 static char             sel_poll_address[21]; /* +FPA */
@@ -991,7 +992,11 @@ static void session_start(void)
     if (fax || !call_up)
         return;
 
-    fax = fax_init(NULL, calling_party ? true : false);
+    /* T.30 3.2: manual receiving terminals enter Node R regardless of who
+     * established the telephone call. Asterisk SendFAX enters Node T even
+     * when answering SIP. +FROLE=1 is a v90modem extension selecting Node R;
+     * ordinary originating/polling calls retain the physical calling role. */
+    fax = fax_init(NULL, calling_party && !p_receive_role ? true : false);
     if (!fax)
         return;
     fax_set_transmit_on_idle(fax, true);
@@ -1043,12 +1048,18 @@ static void session_start(void)
      * image to take it from yet.  Harmless when a document does exist: the
      * file wins.
      */
-    t30_set_tx_image_format(t30, df_to_compression(p_is.df), 1728, 0,
-                            T4_X_RESOLUTION_R8,
-                            (p_is.vr & 1) ? T4_Y_RESOLUTION_FINE
-                                          : T4_Y_RESOLUTION_STANDARD,
-                            (p_is.vr & 1) ? T4_RESOLUTION_R8_FINE
-                                          : T4_RESOLUTION_R8_STANDARD);
+    /* T.32 8.3.3/Table 21 and T.30 Annex E: declare JP's multilevel
+     * image before phase B, not MH merely because DF=0 accompanies JP.
+     * T.42 colour/grayscale uses 200x200 rather than the bilevel R8 grid. */
+    int declared_format = p_is.jp ? T4_COMPRESSION_T42_T81 | T4_COMPRESSION_GRAYSCALE
+                                   | ((p_is.jp & 2) ? T4_COMPRESSION_COLOUR : 0)
+                                 : df_to_compression(p_is.df);
+    t30_set_tx_image_format(t30, declared_format, 1728, 0,
+                            p_is.jp ? T4_X_RESOLUTION_200 : T4_X_RESOLUTION_R8,
+                            p_is.jp ? T4_Y_RESOLUTION_200
+                                    : (p_is.vr & 1) ? T4_Y_RESOLUTION_FINE : T4_Y_RESOLUTION_STANDARD,
+                            p_is.jp ? T4_RESOLUTION_200_200
+                                    : (p_is.vr & 1) ? T4_RESOLUTION_R8_FINE : T4_RESOLUTION_R8_STANDARD);
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);
@@ -1781,6 +1792,7 @@ static void params_reset(void)
     p_cr = 1;
     p_lp = 0;
     p_sp = 0;
+    p_receive_role = 0;
     p_ap[0] = p_ap[1] = p_ap[2] = 0;
     sub_address[0] = sel_poll_address[0] = password[0] = '\0';
     nsf_fif_len = 0;
@@ -1880,6 +1892,9 @@ int fc2_at_line(const char *line)
     /* T.32 8.5.1.7/8.5.1.8: polling, offered and requested. */
     else if (match(&t, "+FLP"))  ok = num_param(t, &p_lp, 0, 1, "(0,1)");
     else if (match(&t, "+FSP"))  ok = num_param(t, &p_sp, 0, 1, "(0,1)");
+    /* Vendor extension, not a T.32 parameter. Legacy Class 2.0 only: do not
+     * claim V.8/V.34 manual-role interoperability without a transport test. */
+    else if (match(&t, "+FROLE")) ok = selected == 1 && num_param(t, &p_receive_role, 0, 1, "(0,1)");
     /* T.32 8.5.1.13: the addressing a polled or polling session carries. */
     else if (match(&t, "+FSA"))  ok = str_param(t, sub_address, sizeof(sub_address));
     else if (match(&t, "+FPA"))  ok = str_param(t, sel_poll_address, sizeof(sel_poll_address));
@@ -2101,6 +2116,7 @@ static void call_state_reset(void)
     doc_complete = 0;
     page_ppm = T32_PPM_EOP;
     calling_party = 0;
+    p_receive_role = 0;
     fdr_pending = 0;
     fdt_await_page = 0;
     dte_saw_dle = 0;
@@ -2195,6 +2211,12 @@ void fc2_on_disconnected(void)
 {
     pthread_mutex_lock(&fc2_mtx);
     call_up = 0;
+    /* T.32 8.5.2.7 / Table 17: finish the outstanding session report even
+     * when SIP disconnects during T.30's final DCN/flush pause. T.30 knows
+     * whether this was orderly or a real call drop; freeing it first loses
+     * phase E and leaves the DTE's final +FDR waiting forever. */
+    if (fax)
+        t30_terminate(fax_get_t30_state(fax));
     if (hangup_code < 0)
         hangup_code = 0x03;             /* T.32 8.5.2.7: call dropped */
     session_stop();

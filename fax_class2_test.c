@@ -3393,7 +3393,7 @@ static void test_fbu(void)
  * transfer that reports +FPO and then delivers nothing would pass a
  * result-code check, so both compare the page.
  */
-static void test_poll_remote(void)
+static void test_poll_remote(int manual)
 {
     fax_state_t *peer;
     t4_rx_state_t *decode;
@@ -3403,7 +3403,8 @@ static void test_poll_remote(void)
     int saw_dle = 0;
     int start;
 
-    printf("+FSP: this DCE polls the far end (T.32 8.5.1.8)\n");
+    printf("%s\n", manual ? "+FROLE: calling receiver against an Asterisk-style originating sender (T.30 3.2)"
+                            : "+FSP: this DCE polls the far end (T.32 8.5.1.8)");
 
     unlink(DTE_RX);
     fc2_select(0);
@@ -3412,12 +3413,14 @@ static void test_poll_remote(void)
     at("AT+FLI=\"poller\"");
     at("AT+FCR=1");
     at("AT+FNR=1,1,1,1");
-    at("AT+FSP=1");
+    at(manual ? "AT+FROLE=1" : "AT+FSP=1");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
     at("ATD5551234");            /* the poller places the call */
 
-    /* The far end answers with a document available, which sets DIS bit 9. */
-    peer = peer_start(0, PEER_TX, NULL);
+    /* Polling answers in Node R with a document on offer. Asterisk SendFAX
+     * instead initializes SpanDSP with calling_party=true (Node T), even
+     * though it answered SIP. The receiver must identify its capabilities. */
+    peer = peer_start(manual ? 1 : 0, PEER_TX, NULL);
     check(peer != NULL, "the far-end fax terminal starts");
     if (!peer)
         return;
@@ -3429,19 +3432,19 @@ static void test_poll_remote(void)
     release_post_page(peer);
 
     check(peer_done && peer_status == T30_ERR_OK,
-          "the far end reports a good polled session");
-    check(dte_saw("+FPO"), "the remote's offer to be polled is reported");
-    /*
-     * We called, so the far end's identification arrives in a CSI and is
-     * 8.4.2.3's +FCI:.  Written as an either/or this assertion passed while
-     * every TSI was being misreported as a CSI, so it is exact now.
-     */
-    check(dte_saw("+FCI:\"peer\""), "the remote's CSI is reported as +FCI:");
+          "the far end reports a good receive session");
+    check(manual ? !dte_saw("+FPO") : dte_saw("+FPO"),
+          manual ? "manual reception needs no polling offer" : "the remote's offer to be polled is reported");
+    /* T.32 8.4.2.3: the polling answerer's CSI is +FCI; the manual
+     * originating sender's TSI is +FTI, independently of who dialed SIP.
+     * Do not accept either ID: that hid a prior TSI/CSI misclassification. */
+    check(dte_saw(manual ? "+FTI:\"peer\"" : "+FCI:\"peer\""),
+          manual ? "the originating sender's TSI is reported as +FTI:" : "the remote's CSI is reported as +FCI:");
 
     /* The page itself, checked before any query -- a query resets the
      * capture the page is in. */
     body = dte_find("CONNECT\r\n");
-    check(body != NULL, "the polled page follows CONNECT");
+    check(body != NULL, "the received page follows CONNECT");
     if (!body)
         goto done;
     start = (int) (body - dte_buf);
@@ -3473,18 +3476,23 @@ static void test_poll_remote(void)
         t4_rx_free(decode);
         bad = compare_page(DTE_RX, 0, &rows);
         check(bad == 0 && rows == IMAGE_ROWS,
-              "the polled page is the page the far end offered");
+              "the received page is the page the far end sent");
         if (bad != 0 || rows != IMAGE_ROWS)
             printf("       (%d rows, %d differing)\n", rows, bad);
     }
 
     dte_reset();
     at("AT+FSP?");
-    check(dte_saw("0"), "the DCE resets +FSP after a polled document arrives");
+    check(dte_saw("0"), "polling is disabled after document reception");
 
 done:
     fax_free(peer);
     fc2_on_disconnected();
+    if (manual) {
+        dte_reset();
+        at("AT+FROLE?");
+        check(dte_saw("\r\n0\r\n"), "manual receive role resets on disconnect");
+    }
 }
 
 static void test_be_polled(int flp)
@@ -3743,7 +3751,8 @@ int main(int argc, char **argv)
     test_procedure_interrupt();
     test_fns();
     test_fbu();
-    test_poll_remote();
+    test_poll_remote(0);
+    test_poll_remote(1);
     test_be_polled(1);
     test_be_polled(0);
 

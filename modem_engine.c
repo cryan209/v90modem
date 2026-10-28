@@ -12621,13 +12621,17 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     if (di_fax_active()
         && (result->status == V8_STATUS_NON_V8_CALL
             || result->status == V8_STATUS_FAX_CNG_TONE_RECEIVED
+            || (!g_calling_party && result->status == V8_STATUS_FAILED
+                && result->modem_connect_tone == MODEM_CONNECT_TONES_FAX_CNG
+                && result->jm_cm.peer_modulations == 0)
             || (g_calling_party && result->status == V8_STATUS_FAILED
                 && result->modem_connect_tone == MODEM_CONNECT_TONES_FAX_CED
                 && result->jm_cm.peer_modulations == 0)
             || (result->status == V8_STATUS_V8_CALL
                 && !(result->jm_cm.modulations & V8_MOD_V34HDX)))) {
         /* T.30 F.2: retain ordinary Group 3 operation with a legacy peer.
-         * CNG identifies an ordinary fax caller. A calling fax may also hear
+         * T.30 F.2: CNG alone does not exclude V.34; an answering V.34
+         * terminal waits for CM before falling back on timeout. A caller may hear
          * CED (plain ANS), try V.8 for compatibility, then receive no JM.
          * Neither outcome belongs in the V.25/V.22bis data-modem fallback.
          * Keep ECM configured: it is also supported by legacy T.30 Annex A.

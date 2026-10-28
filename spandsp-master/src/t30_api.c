@@ -810,8 +810,13 @@ SPAN_DECLARE(void) t30_set_tx_image_format(t30_state_t *s,
                                            int y_resolution,
                                            int resolution)
 {
-    s->line_compression = compression;
-    s->line_image_type = T4_IMAGE_TYPE_BILEVEL;
+    /* T.30 Annex E / T.32 phase-B-before-data: a declared JPEG image
+       needs its component type before a TIFF exists. Accept the same colour
+       flags as t4_tx_set_tx_image_format(), keeping the coding separate. */
+    s->line_compression = compression & ~(T4_COMPRESSION_COLOUR | T4_COMPRESSION_GRAYSCALE);
+    s->line_image_type = (compression & T4_COMPRESSION_COLOUR) ? T4_IMAGE_TYPE_COLOUR_8BIT
+                      : (compression & T4_COMPRESSION_GRAYSCALE) ? T4_IMAGE_TYPE_GRAY_8BIT
+                      : T4_IMAGE_TYPE_BILEVEL;
     s->image_width = image_width;
     s->line_width_code = width_code;
     s->x_resolution = x_resolution;

@@ -1286,6 +1286,13 @@ static void handle_answering_modem_connect_tone(v8_state_t *s, int tone)
     }
     else if (tone == MODEM_CONNECT_TONES_FAX_CNG)
     {
+        /* T.30 Annex F.2: a V.34 fax source may send CNG before ANSam.
+           A recipient offering V.34 half-duplex must still wait for CM;
+           absence of CM is decided by the existing negotiation timeout. */
+        if ((s->parms.jm_cm.modulations & V8_MOD_V34HDX)
+            && (s->parms.jm_cm.call_function == V8_CALL_T30_RX
+                || s->parms.jm_cm.call_function == V8_CALL_T30_TX))
+            return;
         s->state = V8_PARKED;
         s->result.status = V8_STATUS_FAX_CNG_TONE_RECEIVED;
         report_event(s);
