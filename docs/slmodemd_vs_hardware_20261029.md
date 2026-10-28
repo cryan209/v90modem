@@ -61,6 +61,33 @@ call, so 55/56 with one bad FCS is a pass.
    transmit timing/phase step at the restart).  V.90 calls are unaffected:
    our V.90 downstream is PCM.
 
+   **Resolved the same day: we started Phase 4 S too early.**  §11.3.1.2.6
+   lets the answer modem wait up to 500 ms after receiving J; ours started S
+   the moment J decoded, ~360 ms into slmodemd's J.  slmodemd freezes its echo
+   canceller a fixed ~220-300 ms into its own J ("on JTXMIT - time to freeze
+   echo"), and on every call to us that line was missing: it switched to J'
+   before the freeze, kept adapting the canceller through Phase 4 on our
+   signal, and its equalizer floored at ~4000.  The Diva and RasFinder leave
+   200-400 ms more.  With a 250 ms wait (`ANSWER_PHASE4_S_DELAY_MS`, plain
+   V.34 answerer only) the freeze line returns, its Phase 4 error is 30-43,
+   and slmodemd takes us at 31200 (our 3200-baud cap) instead of 9600, lines
+   intact both ways.  Two hypotheses were tested and ruled out on the way:
+   - our Phase 4 S is off-spec -- 0/90 degrees instead of 10.1.3.7's point 0
+     (45 degrees) and its 90-degree rotation, so it sits 45 degrees from the
+     TRN that follows with no PP between.  Correcting it alone left slmodemd
+     at 9600 (equalizer trace identical).  It is still a spec defect, but our
+     own caller's Phase 4 S detector (front end reset at J', timing
+     re-acquired on 128T of S) finds the S-to-S-bar junction largely by
+     chance (baud 69 or 593 of a 128T S), and the correction moves
+     single-delay loopback rows; it needs that receiver fixed first;
+   - a Phase 4 transmit symbol-clock reset (`phase4_wait_init()` zeroes
+     `baud_phase`): it runs inside the baud callback, so it moves less than a
+     sample, and the taps were identical with it removed.
+   Loopback: pass rates over `V34_DUPLEX_DELAY` are unchanged within noise
+   (64/80 HEAD, 61/80 with the wait, eight rows by ten delays); our own
+   caller now measures the answerer's transmit at 33600 where it measured
+   31200 at 40 dB.
+
 2. **Early §9.6 renegotiation costs RasFinder calls.**  On 2/4 V.90 calls to
    the RasFinder the upstream receiver reported an abrupt discontinuity
    (0.67-0.69 from the constellation, three failed local timing searches)

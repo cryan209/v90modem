@@ -8299,6 +8299,9 @@ static complex_sig_t phase4_training_point(const v34_state_t *s, int index)
    - TRN for >=512T, then MP
    Keep wait at 0 so S starts immediately after J handling. */
 #define PHASE4_WAIT_BAUDS 0
+/* The plain V.34 answerer's wait between receiving J and starting S
+   (11.3.1.2.6 allows up to 500 ms); see get_v34_answer_phase3_wait_j_baud(). */
+#define ANSWER_PHASE4_S_DELAY_MS 250
 #define PHASE4_S_BAUDS 128
 #define PHASE4_TRN_BAUDS 512
 static int phase4_trn_max_bauds(const v34_state_t *s)
@@ -8922,16 +8925,40 @@ SPAN_DECLARE(void) v34_set_mp_rate_limits(v34_state_t *s, int min_tx, int max_tx
 
 static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s)
 {
-    /* V.34 11.3.1.2.6 permits up to 500 ms after J; start immediately once
-       the waveform receiver has made J authoritative. */
+    /* V.34 11.3.1.2.6: "After receiving J, the answer modem may wait for up to
+       500 ms and shall then begin transmitting signal S."  Use that wait.
+       Starting S the moment J was decoded put it on the wire ~360 ms into
+       the caller's J; slmodemd freezes its echo canceller a fixed ~220-300 ms
+       into its own J and only if J is still going, so it went straight to J'
+       with the canceller still adapting, which then adapted on our Phase 4
+       signal: its equalizer error floored near 4000 (against ~45 on our
+       Phase 3 TRN) and it took us at 9600 bps answer-to-call.  The hardware
+       answerers it reaches 28800-33600 against all leave this gap. */
+    /* tone_duration counts the wait down.  phase4_wait_init() also arms the
+       receiver for J' (11.4.1.2.1 ties that to sending S), so it runs at the
+       end of the wait, not while the caller is still sending J. */
+    if (s->tx.tone_duration > 0)
+    {
+        if (--s->tx.tone_duration == 0)
+            phase4_wait_init(s);
+        /*endif*/
+        return zero;
+    }
+    /*endif*/
     if (s->rx.received_event == V34_EVENT_J
         || s->rx.received_event == V34_EVENT_J_DASHED)
     {
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.34 answerer: caller J received, starting Phase 4 S\n");
+                 "Tx - V.34 answerer: caller J received, starting Phase 4 S after %d ms\n",
+                 ANSWER_PHASE4_S_DELAY_MS);
         s->rx.received_event = V34_EVENT_NONE;
-        phase4_wait_init(s);
+        s->tx.tone_duration =
+            (baud_rate_parameters[s->tx.baud_rate].baud_rate*ANSWER_PHASE4_S_DELAY_MS)/1000;
+        if (s->tx.tone_duration <= 0)
+            phase4_wait_init(s);
+        /*endif*/
     }
+    /*endif*/
     return zero;
 }
 /*- End of function --------------------------------------------------------*/
