@@ -122,6 +122,24 @@ do not use an unbounded `tcdrain()` with CTS held low. Local evidence and PBX
 codec snapshots: `artifacts/cx-eicon-current/`; no new retained waveform
 fixture is needed for these synthetic regression tests.
 
+### Intended same-line swap: mapping did not change
+
+After the user reported swapping the connections, a fresh serial V.32bis
+call to 7910 again passed three exact LCP echoes at 14400, with verified
+hangup/profile restoration. Its linked PBX source channel was still
+`PJSIP/6004-0000114c`, unique/linked ID `1793220667.6694`, not 6005.
+
+Two independent bounded incoming calls then monitored both devices without
+answering (Apple threshold 9 bursts, serial saved S0=0). Calling 6005 asserted
+the Apple's validated RDT and produced no serial RING. Calling 6004 produced
+three serial RING indications and no Apple ring. Both calls expired normally;
+the Apple finished hook/monitor off and protection enabled. Thus the observed
+mapping remains 6004→serial, 6005→Apple. No same-6005 serial data comparison is
+established, whatever physical change was intended. The directory name
+`artifacts/cx-6005-swapped/` records the intended experiment, not a verified
+6005 source; it holds the serial summary, linked PBX snapshot and both-device
+ring observations. Require this mapping check after changing telephone leads.
+
 ## Results matrix
 
 | Modem/chipset | Gateway | Law | V.8 | Phase 3 | CPt/CP | E/B1d | DATA | Rates | Evidence |
