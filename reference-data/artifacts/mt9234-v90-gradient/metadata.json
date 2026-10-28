@@ -1,0 +1,11 @@
+{
+  "sample_rate": 8000,
+  "encoding": "PCMU",
+  "duration_seconds": 31,
+  "source": "CT117:/root/mt9234-20261028-v90-264/",
+  "purpose": "pre-resynchronization upstream adaptation regression",
+  "sha256": {
+    "rx.ulaw": "0b2fb38d2a2afcef8d2af54442b22421b9c566d040dd28e732a46c106ff491d3",
+    "tx.ulaw": "f069287bf1e7dfb9e51366f8c7cd0db7ad3213d5cbf01870646453c31416bafe"
+  }
+}

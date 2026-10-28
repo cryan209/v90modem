@@ -1666,6 +1666,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
                                  float frac,
                                  float energy)
 {
+    complexf_t input_y = *y;
     float p2;
     float e;
     float mu;
@@ -1801,6 +1802,11 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
     if (!isfinite(e)  ||  !isfinite(p2)  ||  fabsf(e) > 64.0f)
         return;
     /*endif*/
+    /* CMA's radial cost is rotation invariant; its tap gradient still
+       multiplies raw input, so return y to the same coordinates as x. */
+    if (s->v90_t3_carrier_enabled)
+        v34_carrier_error_to_input(s->v90_t3_dump_phase,
+                                    y->re, y->im, &input_y.re, &input_y.im);
     mu = V34_V90_T3_CMA_MU/energy;
     for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
     {
@@ -1812,8 +1818,8 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
         if (s->v90_t3_fse_conjugate)
             x.im = -x.im;
         /*endif*/
-        g_re = e*(y->re*x.re + y->im*x.im);
-        g_im = e*(y->im*x.re - y->re*x.im);
+        g_re = e*(input_y.re*x.re + input_y.im*x.im);
+        g_im = e*(input_y.im*x.re - input_y.re*x.im);
         s->v90_t3_fse[tap].re -= mu*g_re;
         s->v90_t3_fse[tap].im -= mu*g_im;
     }
@@ -12722,6 +12728,14 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                   &&
                   s->v90_t3_sym_err_fast < V34_V90_T3_SLIP_ACCEPT_ERR)))
             {
+                /* V.90 8.5.2/9.4.2.5: slicing follows carrier derotation,
+                   but the FSE taps multiply unrotated input. Return the
+                   error to that frame using the phase of this symbol,
+                   before carrier_update advanced it. Applies to both the
+                   float and fixed-point NLMS updates below. */
+                if (s->v90_t3_carrier_enabled)
+                    v34_carrier_error_to_input(s->v90_t3_dump_phase,
+                                                e_re, e_im, &e_re, &e_im);
 #if defined(V34_FIXED_POINT)
                 /* Integer NLMS into the wide accumulator.  energy is passed as
                    the plain real-units value the float path already computed;

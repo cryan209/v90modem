@@ -198,6 +198,8 @@ V34_PHASE2_DECODE_TEST_OBJS = v34_phase2_decode_test.o v34_phase2_decode.o
 V34_MP_TEST_OBJS = v34_mp_test.o
 V34_DATA_TEST_OBJS = v34_data_test.o
 V34_GARDNER_TEST_OBJS = v34_gardner_test.o
+V34_CARRIER_GRADIENT_TEST_OBJS = v34_carrier_gradient_test.o
+TEST_TARGETS += v34_carrier_gradient_test
 FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 VFC_MAPPER_TEST_OBJS = vfc_mapper_test.o vfc_mapper.o
 VFC_SIGNATURE_TEST_OBJS = vfc_signature_test.o vfc_signature.o
@@ -1268,3 +1270,10 @@ gui-ata: $(TARGET) modem_gui_native
 	python3 tools/modem_gui.py ./$(TARGET) --ata-server
 gui-ata-test: $(TARGET)
 	python3 tools/gui_ata_test.py
+
+# Carrier recovery precedes slicing; validate both adaptation gradients against
+# independent finite differences over a full turn of carrier phase.
+v34_carrier_gradient_test: $(V34_CARRIER_GRADIENT_TEST_OBJS)
+	$(CC) $(V34_CARRIER_GRADIENT_TEST_OBJS) -o $@ -lm
+
+v34_carrier_gradient_test.o: v34_carrier_gradient_test.c $(SPANDSP_DIR)/v34_carrier.h

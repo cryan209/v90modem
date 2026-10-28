@@ -123,6 +123,19 @@ static __inline__ void v34_carrier_derotate(const v34_carrier_state_t *c,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Return a sliced-symbol error to the FSE input coordinates. Use the
+ * phase that derotated this symbol, before v34_carrier_update advances it.
+ * This is the adjoint of carrier derotation in the complex LMS gradient. */
+static __inline__ void v34_carrier_error_to_input(float phase,
+                                                  float er, float ei,
+                                                  float *out_re, float *out_im)
+{
+    float cs = cosf(phase);
+    float sn = sinf(phase);
+    *out_re = er*cs - ei*sn;
+    *out_im = er*sn + ei*cs;
+}
+
 /*! Advance the loop by one symbol.
     \param locked Non-zero when the symbols are close enough to the
            constellation for their nearest neighbours to mean something.  The
