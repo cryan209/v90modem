@@ -42,6 +42,10 @@ python3 tools/mt5634mu_diag_test.py
 # ME_X2_RETRAIN_ON_LOSS) and the client answers it; the V.42 payload must
 # arrive intact both ways across the retrain.
 ./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_SILENCE_AFTER_MS=1000 --call-env ME_X2_CLIENT_SILENCE_MS=1500 --answer-env ME_X2_RETRAIN_ON_LOSS=1 --answer-log 'upstream=31200 (after a retrain)' --call-log '(after the server' --payload-printable RR --payload-reps 400 --expect X2 --seconds 60
+# x2 over V.14 with each DTE sending on its own CONNECT: the client is in
+# data before our server's DATA_STARTUP ends, and its first text must still
+# reach the server's DTE (it was all dropped, 30 Oct).
+./engine_pair_test --both-at 'AT+MS=X2' --both-at 'AT\N0' --payload-on-connect --expect X2 --seconds 30
 # Our x2 client loses its downstream for 1 s and retrains (V.90 9.5.2.1,
 # Tone A); our server answers it (9.5.1.2) and the V.42 payload arrives
 # intact both ways across it.

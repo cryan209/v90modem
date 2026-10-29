@@ -55,6 +55,10 @@
  * stream a V.90 analogue receiver equalises), as the HSF coupler feeds the
  * engine; only the answering side sees an exchange codec.
  *
+ * --payload-on-connect starts each DTE's payload on its own CONNECT, as a
+ * real terminal does, not half a second after both ends report one: data
+ * the far end is not yet taking is then lost (on V.14) or retransmitted.
+ *
  * --hold-seconds N keeps the call in data mode N seconds longer after the
  * payload, before any --X-after command.
  *
@@ -427,6 +431,7 @@ int main(int argc, char **argv)
     int alaw = 0;
     double seconds = 40.0;
     double hold_seconds = 0.0;
+    int payload_on_connect = 0;
     double dte_stall_seconds = 0.0;
     int stall_until = -1;
     const char *expect = NULL;
@@ -459,6 +464,8 @@ int main(int argc, char **argv)
             alaw = 1;
         } else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
             seconds = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--payload-on-connect")) {
+            payload_on_connect = 1;
         } else if (!strcmp(argv[i], "--hold-seconds") && i + 1 < argc) {
             hold_seconds = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--expect") && i + 1 < argc) {
@@ -680,9 +687,11 @@ int main(int argc, char **argv)
 
             if (k == 0 || f >= stall_until)
                 poll_dte(s, f);
-            /* Half a second after both ends report CONNECT, each DTE sends. */
-            if (!s->sent && side[0].connect_frame >= 0 && side[1].connect_frame >= 0
-                && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25) {
+            /* Half a second after both ends report CONNECT, each DTE sends;
+               with --payload-on-connect, as soon as its own end does. */
+            if (!s->sent && (payload_on_connect ? s->connect_frame >= 0
+                             : (side[0].connect_frame >= 0 && side[1].connect_frame >= 0
+                                && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25))) {
                 if (stall_until < 0)
                     stall_until = f + (int) (dte_stall_seconds*8000.0/FRAME);
                 if (gap_ms > 0.0 && gap_start < 0) {

@@ -10190,15 +10190,16 @@ static void v34_put_bit_cb(void *user_data, int bit)
         /* x2 owns MP/E (Draft 0.33 sections 20..21); the V.34 receiver
          * suppresses B1 internally and supplies descrambled payload bits.
          * Keep them behind the accepted-record/E/acquisition boundary. */
-        /* After an in-data rate change the peer's data follows its E and
-         * B1 at once, while our DATA_STARTUP (0.5 s) still runs: taking
-         * upstream only in PAYLOAD threw that half second away (0.43 s of
-         * V.14 text from our client, 28 Oct; the Courier's "one line lost
-         * in the switch", 10 Oct). */
+        /* The peer's data follows its E and B1 at once, while our
+         * DATA_STARTUP (0.5 s) still runs: taking upstream only in PAYLOAD
+         * threw that half second away, after a rate change (0.43 s of V.14
+         * text from our client, 28 Oct; the Courier's "one line lost in the
+         * switch", 10 Oct) and at startup too (a client DTE that sends on
+         * its own CONNECT lost its first line on a live V.14 call, 30 Oct;
+         * engine_pair_test --payload-on-connect lost all of it). */
         if(bit>=0 && !g_x2.symmetric && g_x2_data_stack_started
            && g_x2_upstream_started
-           && (g_x2.stage==X2_PAYLOAD
-               || (g_x2.stage==X2_DATA_STARTUP && x2_session_renegotiating(&g_x2)))
+           && (g_x2.stage==X2_PAYLOAD || g_x2.stage==X2_DATA_STARTUP)
            && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
             if(me_x2_upstream_squelched())return;
             me_data_rx_first_bit();

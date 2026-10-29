@@ -1192,7 +1192,9 @@ PAYLOAD, but after a change the peer's data follows its E and B1 at once,
 while our 0.5 s DATA_STARTUP is still running. That half second was thrown
 away: 0.43 s of V.14 text from our client, and probably the Courier's "one
 line lost in the switch" of 10 October. Upstream is now also accepted in a
-change's DATA_STARTUP once B1 is acquired. Startup is unchanged.
+change's DATA_STARTUP once B1 is acquired. Startup was left alone then;
+the same loss at startup turned up live on 30 October and is fixed the same
+way (see "Long and A-law live calls").
 
 **V.14 across a change.** With V.42 a change mid-payload was invisible from
 the start. Over V.14, measured with full DTE dumps (`ENGINE_PAIR_DTE_DUMP`)
@@ -1487,10 +1489,53 @@ ends, meets x2's assumption.
 333 frames, and our server answered its Tone A (9.5.1.2). Both were in data
 again 9.8 s after the loss. The lines, sent over 20 s, crossed it intact.
 
-Still not tried live: a real x2 server or Courier hardware, A-law, and long
-soaks. To rerun from the repository root on a rig host:
+Still not tried live: a real x2 server or Courier hardware (A-law and long
+soaks follow below). To rerun from the repository root on a rig host:
 
 ```
 tools/soak/x2_live_pair.sh live/run1 90
 CLI_ENV="ME_X2_CLIENT_DEAF_AFTER_MS=5000 ME_X2_CLIENT_DEAF_MS=1000" tools/soak/x2_live_pair.sh live/run3 110
 ```
+
+## Long and A-law live calls, and the startup line loss (30 October 2026)
+
+**A-law.** Asymmetric x2 is PCMU only by construction: the engine refuses
+it on A-law ("asymmetric x2 requires PCMU"), because the server's mapper and
+banks are µ-law. Symmetric x2 (`AT+MS=X2S`, 64000 each way) is the x2 mode
+that runs on A-law. `x2_live_pair.sh` now takes `MODE=x2-symm LAW=alaw`, which
+uses the A-law accounts 2906/2907. Live, both ends logged `PCMA (A-law
+passthrough)`. A 90 s call gave `CONNECT 64000/ARQ/X2/LAPM/V42BIS`, 40/40 lines
+each way, and 0 of 716320 bytes changed in each direction.
+
+**Ten-minute calls** (vmhost CT 117, through Asterisk, 2000 lines each way at
+four a second):
+
+| call | mode | CONNECT | lines (server got / client got) | bytes changed down / up |
+|---|---|---|---|---|
+| L1 | x2, µ-law, LAPM | 56000/ARQ/X2/LAPM/V42BIS | 2000 / 2000 | 0 of 4793760 / 0 of 4793920 |
+| L2 | x2-symm, A-law, LAPM | 64000/ARQ/X2/LAPM/V42BIS | 2000 / 2000 | 0 of 4794080 / 0 of 4793920 |
+| L3 | x2, µ-law, `\N0` (V.14) | 56000 | **1999** / 2000 | 0 of 4792000 / 0 of 4792000 |
+
+The delay stayed constant, 180 or 200 ms, for all ten minutes in every
+direction: no slips and no retrains.
+
+**L3's missing line was ours.** It was `cli 00000`, our client's first line,
+sent as soon as its own CONNECT appeared. The client reports CONNECT once both
+of its directions are in data. Our server takes upstream bits only in PAYLOAD,
+which it reaches at the end of its 0.5 s DATA_STARTUP, 0.31 s later in L3.
+Upstream that arrived in that window was discarded. The bearer delivered every
+byte (0 changed), so the loss was in our server.
+
+The 28 October fix accepted upstream in a rate change's DATA_STARTUP once B1
+was acquired, but left startup as it was. The engine pair hid this because its
+payloads start 0.5 s after both ends report CONNECT.
+`engine_pair_test --payload-on-connect` starts each DTE on its own CONNECT, as
+a real terminal does. Over V.14 our server then lost the client's entire
+payload, 3 runs of 3.
+
+The fix: upstream is accepted in startup's DATA_STARTUP too, once E has been
+seen and B1 acquired. By then the peer is sending data. Results:
+- `--payload-on-connect` over V.14: 3 of 3 pass (a fast-tier row);
+- all five x2 slow rows still pass against the original Courier and Ie030002;
+- live, three V.14 calls with the client's first line 0.1 s after its CONNECT
+  delivered 300/300 lines each way.
