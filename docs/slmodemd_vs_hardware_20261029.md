@@ -218,7 +218,9 @@ targets: the worst send gap within 0.5 s of DATA entry is 26-45 ms (9/20 over
 lost RasFinder probe (on a call that re-entered DATA after a 39 ms gap) before;
 20/20 CONNECT with every probe, numbered line and Diva echo intact after.
 
-**Open: our MP under-asks the 7910 (26400 where it carries 31200).**  Every
+**Fixed 30 October: our MP under-asked the 7910 (26400 where it carries 31200).**  The cause was the 127-tap TRN LMS equaliser's tap noise, not the line; the 3429 ask now comes from a B1-style refit of the TRN tail, and live calls train 31200 (3 of 4, one 28800).  See [v34_data_mode_rates.md](v34_data_mode_rates.md), "The 3429 TRN ask under-read".  The original notes follow.
+
+**Was open: our MP under-asks the 7910.**  Every
 call from our V.34 caller to the 7910 trains a2c 26400 (20/20 on 30 October)
 while slmodemd trains 31200 on the same bearer.  The limit is our MP: the
 Phase 4 TRN SNR reads 27.1-27.7 dB (`v34_phase4_trn_measured_rate_n()`,

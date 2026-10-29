@@ -852,6 +852,9 @@ static complexf_t equalizer_get(v34_rx_state_t *s);
 static bool v90_upstream_t2_enabled(void);
 bool v34_rx_t2_data_path(const v34_rx_state_t *s);
 void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
+bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s);
+double v34_rx_phase4_trn_refit(const v34_rx_state_t *s, complexf_t *coeff);
+int v34_rx_refit_training_rate(float snr_db);
 static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
 static int set_tx_trellis_mode(v34_state_t *s, int trellis_size);
 static int set_rx_trellis_mode(v34_state_t *s, int trellis_size);
@@ -3155,6 +3158,57 @@ static int mp_highest_enabled_rate(int maximum, int mask)
    noise/timing PRBS calibration for that receiver only; preserve the old
    policy for other bauds and V.90. These are empirical thresholds, NOT ITU
    DSP coefficients. Qualification and failing rows: docs/v34_data_mode_rates.md. */
+/* V.34 Table 16 rate for the B1-style refit SNR at 3429 baud in full duplex
+   (v34_rx_phase4_trn_refit()), 0 below the rates conditioned on B1.  Forced
+   rates in v34_duplex_test, one million PRBS bits each way, u-law, delays
+   0/7/23, injected noise 26-42 dB; each threshold is the lowest refit reading
+   at which every run was error free:
+     26400: 35-766 bit errors at 28.7-28.9 dB, clean from 29.4
+     28800: 2.7k-7.5k at 29.5, 180 once at 30.8, clean from 31.3
+     31200: 34-1181 at 32.6-34.1, 262 once at 34.9, clean from 34.3
+     33600: 18-162 at 35.3-36.0, 130 once at 36.1, clean from 36.3
+   The MultiTech 7910 reads 34.6-34.9 dB and carried 31200 live with no bad
+   PPP frame on 3 of 3 calls (docs/slmodemd_vs_hardware_20261029.md). */
+int v34_rx_refit_training_rate(float snr_db)
+{
+    if (!isfinite(snr_db))
+        return 0;
+    if (snr_db >= 36.3f) return 33600;
+    if (snr_db >= 34.5f) return 31200;
+    if (snr_db >= 31.5f) return 28800;
+    if (snr_db >= 29.5f) return 26400;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The rate a B1 SNR reading supports.  B1 reads on whichever taps TRN left:
+   the refit's (v34_rx_phase4_trn_install_refit()), whose table is
+   v34_rx_refit_training_rate(), or the LMS solution, which the live TRN table
+   was calibrated on.  On the refit taps B1's single 120-symbol correlation
+   reads below the refit by +0.2 to -4.3 dB (mean about -1): six 7910
+   replays -0.1 to -1.3, the engine pair 0 to -1.9 in u-law and -4.3 on one
+   A-law side that then carried 33600 with B1's retrain suppressed.  The B1
+   check is there for gross deficits (the RasFinder's 23 dB at 31200), so
+   allow V34_B1_REFIT_SLACK_DB for that scatter before the refit table.
+   Below 26400 the refit table has no rows and the live one is used, which
+   only makes the check more lenient. */
+#define V34_B1_REFIT_SLACK_DB           3.5f
+SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
+{
+    int rate;
+
+    if (s  &&  s->rx.phase4_trn_refit_installed)
+    {
+        rate = v34_rx_refit_training_rate(snr_db + V34_B1_REFIT_SLACK_DB);
+        if (rate > 0)
+            return rate;
+        /*endif*/
+    }
+    /*endif*/
+    return v34_rx_training_rate(s, snr_db);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
 {
     int n;
@@ -3318,6 +3372,25 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
        engine's B1 check, so the two training stages cannot disagree merely
        because one still uses the historical single-channel formula. */
     rate_n = v34_rx_training_rate(st, (float) snr)/2400;
+    if (v34_rx_phase4_trn_refit_enabled(s))
+    {
+        /* Where DATA will run on the B1 fit, ask for what that fit gets
+           (v34_rx_phase4_trn_refit()): the live reading carries the TRN
+           taps' noise, which DATA at 26400 and up never sees.  Only ever
+           raise the ask, and only into the rates conditioned on B1 -- below
+           26400 DATA keeps the TRN taps, so the live reading is the right one
+           there. */
+        double refit = v34_rx_phase4_trn_refit(s, NULL);
+        int refit_n = (refit > 0.0)  ?  v34_rx_refit_training_rate((float) refit)/2400  :  0;
+
+        V34_RX_LOG(&st->logging, SPAN_LOG_WARNING,
+                 "Rx - Phase 4 TRN SNR: live %.1f dB (%d bps), B1-style refit %.1f dB (%d bps)\n",
+                 snr, rate_n*2400, refit, refit_n*2400);
+        if (refit_n > rate_n  &&  refit_n >= 11)
+            rate_n = refit_n;
+        /*endif*/
+    }
+    /*endif*/
     if (rate_n < 1)
         rate_n = 1;
     /*endif*/
@@ -11310,7 +11383,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     /* Retain both T/2 phases for supervised B1 conditioning and replay:
        12.5.2 in HDX and 11.4 in the dense full-duplex path. */
     if ((!s->duplex && s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
-        || v34_rx_b1_batch_eq_enabled(s))
+        || v34_rx_b1_batch_eq_enabled(s)
+        || (s->stage == V34_RX_STAGE_PHASE4_TRN
+            &&  v34_rx_phase4_trn_refit_enabled(s)))
     {
         s->v90_t3_raw[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = *sample;
         s->v90_t3_raw_count++;
@@ -11717,6 +11792,152 @@ void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
             complex_setf(solution[2*k], solution[2*k + 1]);
     memcpy(s->eq_coeff, coeff, sizeof(coeff));
 }
+
+bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s)
+{
+    /* The receivers whose DATA mode replaces the taps with the B1 fit
+       (v34_rx_b1_batch_eq_enabled() at 26400 and up). */
+    return s->duplex  &&  !s->v90_mode  &&  s->baud_rate == V34_BAUD_RATE_3429;
+}
+
+/* V.34 11.4: refit the TRN tail the way B1 conditioning will refit B1.
+
+   The equalizer TRN hands to MP is the 127-tap T/2 LMS solution, and its
+   outer taps are not converged: against the MultiTech 7910 at 3429 baud they
+   sit at 0.002-0.005 each across the whole span, which sums to about -28 dB
+   of tap noise against a main tap of 0.79.  The step size does not move it
+   (a quarter of the DD-LMS step gives the same plateau).  That tap noise was
+   the "floor" that made TRN read 27.7 dB on a line DATA then measured at
+   34.3 dB, because DATA at 26400 and up replaces the taps with a 21-tap
+   least-squares fit over B1 (v34_rx_condition_b1_equalizer()).  This solves
+   the same T-tap problem against TRN's own 4-point decisions (error-free at
+   any SNR the table uses) over the raw T/2 samples behind the ring, and
+   measures the fitted outputs the way v34_phase4_trn_measured_rate_n()
+   measures the live ones.  On the 7910 recordings: live 27.6/28.2 dB,
+   refit 34.9/34.6 dB, DATA 34.3-34.7 dB.
+
+   coeff, if not NULL, receives the fitted taps in eq_coeff's layout.
+   Returns the refit SNR in dB, or a negative value when the raw samples are
+   not available. */
+double v34_rx_phase4_trn_refit(const v34_rx_state_t *s, complexf_t *coeff)
+{
+    enum { T = V34_V90_T3_FSE_TAPS, N = 2*T };
+    double matrix[N*N] = {0}, rhs[N] = {0}, solution[N];
+    double sig = 0.0, noise = 0.0, trace = 0.0;
+    int pre = T/2, fill = s->phase4_trn_snr_fill;
+    int first = (fill < 512) ? 0 : s->phase4_trn_snr_pos;
+    int used = 0;
+
+    if (fill < 128)
+        return -1.0;
+    for (int pass = 0;  pass < 2;  pass++)
+    {
+        double ax = 0.0, ay = 0.0, axx = 0.0, ayy = 0.0;
+
+        for (int m = 0;  m < fill;  m++)
+        {
+            int i = (first + m) & 511;
+            int64_t a = s->phase4_trn_snr_anchor[i];
+            complexf_t z = s->phase4_trn_snr_ring[i];
+            double fr[N], fi[N];
+            double yr = (z.re >= 0.0f) ? 0.7071068 : -0.7071068;
+            double yi = (z.im >= 0.0f) ? 0.7071068 : -0.7071068;
+
+            if (a + pre - (T - 1) < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
+                ||  a + pre >= s->v90_t3_raw_count  ||  a + pre - (T - 1) < 0)
+                continue;
+            for (int k = 0;  k < T;  k++)
+            {
+                complexf_t o = s->v90_t3_raw[(a + pre - k) & V34_V90_T3_RAW_MASK];
+
+                fr[2*k] = o.re;
+                fr[2*k + 1] = -o.im;
+                fi[2*k] = o.im;
+                fi[2*k + 1] = o.re;
+            }
+            if (pass == 0)
+            {
+                used++;
+                for (int r = 0;  r < N;  r++)
+                {
+                    rhs[r] += fr[r]*yr + fi[r]*yi;
+                    for (int c = 0;  c < N;  c++)
+                        matrix[r*N + c] += fr[r]*fr[c] + fi[r]*fi[c];
+                }
+            }
+            else
+            {
+                double ore = 0.0, oim = 0.0;
+
+                for (int r = 0;  r < N;  r++)
+                {
+                    ore += fr[r]*solution[r];
+                    oim += fi[r]*solution[r];
+                }
+                /* The fit targets (+/-a, +/-a) directly, so no rotation. */
+                ax += fabs(ore);
+                ay += fabs(oim);
+                axx += ore*ore;
+                ayy += oim*oim;
+                if (++used % 64 == 0)
+                {
+                    ax /= 64.0;  ay /= 64.0;  axx /= 64.0;  ayy /= 64.0;
+                    sig += ax*ax + ay*ay;
+                    noise += (axx - ax*ax) + (ayy - ay*ay);
+                    ax = ay = axx = ayy = 0.0;
+                }
+            }
+        }
+        if (pass == 0)
+        {
+            if (used < 128)
+                return -1.0;
+            for (int k = 0;  k < N;  k++)
+                trace += matrix[k*N + k];
+            for (int k = 0;  k < N;  k++)
+                matrix[k*N + k] += trace*1e-6;
+            if (!v90_t3_solve(matrix, rhs, solution, N))
+                return -1.0;
+            used = 0;
+        }
+    }
+    if (sig <= 0.0  ||  noise <= 0.0)
+        return -1.0;
+    if (coeff)
+    {
+        memset(coeff, 0, sizeof(complexf_t)*(V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN));
+        for (int k = 0;  k < T;  k++)
+            coeff[V34_EQUALIZER_PRE_LEN + k - pre] =
+                complex_setf((float) solution[2*k], (float) solution[2*k + 1]);
+    }
+    return 10.0*log10(sig/noise);
+}
+
+/* V.34 11.4.1.1.2/11.4.1.2.2: TRN is sent until the receiver is trained.
+   Where the refit justifies a rate conditioned on B1, start MP and B1 on the
+   refit taps rather than the TRN LMS solution: the main tap and delay are the
+   same (the fit is centred where B1's is), and B1 then measures the line the
+   way DATA will see it instead of re-reading the TRN taps' noise -- which
+   against the 7910 read 29.1 dB and retrained a clean 31200 call to 28800. */
+void v34_rx_phase4_trn_install_refit(v34_rx_state_t *s)
+{
+    complexf_t coeff[V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN];
+    double refit;
+
+    s->phase4_trn_refit_installed = false;
+    if (!v34_rx_phase4_trn_refit_enabled(s))
+        return;
+    /*endif*/
+    refit = v34_rx_phase4_trn_refit(s, coeff);
+    if (refit <= 0.0  ||  v34_rx_refit_training_rate((float) refit) == 0)
+        return;
+    /*endif*/
+    memcpy(s->eq_coeff, coeff, sizeof(coeff));
+    s->phase4_trn_refit_installed = true;
+    span_log(s->logging, SPAN_LOG_WARNING,
+             "Rx - Phase 4 TRN: refit taps installed for MP and B1 (%.1f dB)\n", refit);
+}
+/*- End of function --------------------------------------------------------*/
 
 complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol)
 {

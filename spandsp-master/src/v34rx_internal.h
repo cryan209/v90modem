@@ -132,6 +132,7 @@ void  v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym);
 
 /* 11.4/12.5.2 B1 conditioning and replay from received T/2 samples. */
 void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase);
+void v34_rx_phase4_trn_install_refit(v34_rx_state_t *s);
 complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol);
 
 /* V.34 11.4 B1 conditioning for dense full-duplex constellations. */

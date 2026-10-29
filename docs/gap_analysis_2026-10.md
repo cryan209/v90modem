@@ -90,9 +90,11 @@ both taps and grade only completed runs.
   measurement on the T/2 path, and the B1 search seeds its model once; worst
   gap 26-45 ms -> 22-27 ms live, 19/20 -> 20/20
   ([slmodemd comparison](slmodemd_vs_hardware_20261029.md)).
-- Open: our V.34 MP asks the 7910 for 26400 where it carries 31200 cleanly
-  (Phase 4 TRN under-reads that peer by ~6 dB against DATA; it does not answer
-  our §11.6, so no fall forward) -- same document.
+- Fixed 2026-10-30: our V.34 MP asked the 7910 for 26400 where it carries
+  31200.  The TRN reading carried the 127-tap LMS equaliser's tap noise, which
+  DATA's B1 fit never sees; the 3429 ask and B1 now read a B1-style refit of
+  the TRN tail, live 31200 on 3 of 4 calls
+  ([rates](v34_data_mode_rates.md)).  The 7910 still answers no §11.6.
 
 ## Historical assessment — 5 October 2026 (with original appended updates)
 

@@ -2360,6 +2360,12 @@ typedef struct
        carries the DFT's coherent processing gain, and it does not excite
        whatever signal-proportional distortion the far transmitter adds. */
     complexf_t phase4_trn_snr_ring[512];
+    /* v90_t3_raw index of each ring symbol's equalizer anchor, so the
+       measurement can refit the taps the way B1 conditioning will. */
+    int64_t phase4_trn_snr_anchor[512];
+    /* The refit taps replaced the TRN LMS solution at the end of TRN, so B1
+       reads on them and takes v34_rx_b1_training_rate()'s refit table. */
+    bool phase4_trn_refit_installed;
     int phase4_trn_snr_fill;
     int phase4_trn_snr_pos;
     float phase4_trn_snr_db;

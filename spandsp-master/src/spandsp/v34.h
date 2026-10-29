@@ -300,6 +300,10 @@ SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db);
     \return Supported rate in bit/s, or 0 for an invalid measurement. */
 SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db);
 
+/*! The rate a B1 SNR reading supports, on the table that matches the taps B1
+    was measured on (V.34 11.4). */
+SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db);
+
 /*! Let the Phase-4 TRN SNR cap the receive rate this modem asks for in MP.
     \param s The modem context.
     \param enable True to apply it. */

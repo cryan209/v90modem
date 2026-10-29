@@ -986,3 +986,70 @@ times out. 1b9a6361 fixed it as a side effect, and a0f2450b's coherence gate
 in principle. At 11c20378 the row passes at `V34_DUPLEX_DELAY` 0-7, with
 the gate on or off (`ME_V34_P4_TRN_COH=0`), so it does not depend on the gate.
 A report of this signature means an old checkout, not a current regression.
+
+## The 3429 TRN ask under-read by the LMS taps' noise, not the line (2026-10-30)
+
+Against the MultiTech 7910 our V.34 caller asked 26400 on every call
+(TRN 27.1-28.4 dB) while the same receiver read 34.0-34.9 dB in DATA and a
+forced ask carried 31200 cleanly ([hardware notes](slmodemd_vs_hardware_20261029.md)).
+The TRN error at the equalizer output is white: regressed on the
+neighbouring decisions it shows no ISI above 0.3% of a symbol, smoothing the
+angle removes under 1 dB, and no symbol-spaced post-filter on the TRN
+outputs gains anything (27.8 dB at every length to 17 taps).  What differs
+is the equalizer.  TRN hands MP the 127-tap T/2 LMS solution; its main tap
+is 0.79 and the other ~120 sit at 0.002-0.005 each, about -28 dB of tap noise
+in all, which no step size removes.  DATA at 26400 and up never uses it:
+`v34_rx_condition_b1_equalizer()` replaces it with a 21-tap least-squares fit
+over B1.
+
+`v34_rx_phase4_trn_refit()` solves that same 21-tap problem over the TRN
+tail (raw T/2 samples are now kept through Phase 4 TRN at 3429 duplex,
+each ring symbol records its raw anchor) against TRN's own 4-point decisions,
+and measures the fitted outputs as the live measurement does.  On the 7910
+recordings live reads 27.6-28.4, the refit 34.6-34.9, DATA 34.2-34.7.  On
+our own loopback the refit runs 2.6-5.3 dB above live, more as noise falls
+(clean 32.1 -> 37.3), so the earlier "fixed 33.7 dB floor" model was only an
+approximation of this.
+
+Where the receiver is the duplex non-V.90 3429 one, the MP ask is now the
+larger of the live table and `v34_rx_refit_training_rate()` on the refit,
+the latter only from 26400 up (below that DATA keeps the TRN taps).  The refit
+table comes from forced rates, one million PRBS bits each way, u-law, delays
+0/7/23, 26-42 dB injected noise; each threshold is the lowest refit reading
+at which every run was clean:
+
+| Refit SNR at least | Receive offer | Errors seen below it |
+|---:|---:|---|
+| 29.5 dB | 26400 | 35-766 bits at 28.7-28.9 |
+| 31.5 dB | 28800 | 2.7k-7.5k at 29.5, 180 once at 30.8 |
+| 34.5 dB | 31200 | 34-1181 at 32.6-34.1, 262 once at 34.9 |
+| 36.3 dB | 33600 | 18-162 at 35.3-36.0, 130 once at 36.1 |
+
+Automatic selection then picks 33600 at 42 dB, 31200 at 38, 28800 at 33 and
+26400 at 30, in both laws and at delays 0 and 7, every one error free; the
+clean rows at delays 7 and 23 now pick 33600 both ways (they were held to
+31200 one way by the live reading).  The fast-tier rows follow these levels.
+
+When the refit supports 26400 or more, `v34_rx_phase4_trn_install_refit()`
+also puts its taps in place as the receiver leaves TRN for MP (same main tap
+and delay), so B1 reads the equalizer DATA will use.  On the old taps B1 read
+the 7910 at 29.1-30.6 dB and would have retrained a clean 31200 call to
+28800; on the refit taps it reads 33.4-34.7.  B1 is one 120-symbol
+correlation and still reads below the refit by +0.2 to -4.3 dB (one A-law
+engine-pair side read 33.8 against a refit of 38.1 and then carried 33600
+with the retrain suppressed), so `v34_rx_b1_training_rate()` allows 3.5 dB
+for that scatter on the refit table; the check is for gross deficits.  On
+the LMS taps it keeps the live table.
+
+Other symbol rates, V.90 and HDX keep the live measurement: the same tap
+noise is presumably there, but their DATA keeps the TRN taps.
+
+Live, our V.34 caller in CT 117 (HEAD + this change, `slm_targets_ab.py
+--caller ours --ms V34`, `/root/slmx/refit*`): to the 7910, 31200 on 3 of 4
+calls and 28800 on one whose refit read 34.45 dB, just under the 31200 row
+(before: 26400 on 20 of 20); refit 34.5-34.7, B1 33.6-34.5, DATA 34.3-34.8,
+PPP up on all four with no bad FCS on three and one on the fourth.  The 7910
+sits on the 31200 threshold, so expect the odd 28800.  To the RasFinder
+(6311), 33600 on 2 of 2 with every login probe echoed: its live reading
+(33.6-34.2) already asks 33600, and the larger-of rule keeps that although
+its refit alone (35.4-35.5) would ask 31200.

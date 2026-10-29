@@ -7044,7 +7044,7 @@ static bool v34_b1_rate_check_locked(void)
         const char *m = getenv("ME_V34_B1_RATE_MARGIN_DB");
         float margin = (m && *m) ? (float) atof(m) : 1.0f;
 
-        supported = v34_rx_training_rate(g_v34, snr + margin)/2400;
+        supported = v34_rx_b1_training_rate(g_v34, snr + margin)/2400;
     }
     /* B1 only measures the line when it decodes.  At a rate the line cannot
        carry it does not correlate at all and reads far below any real

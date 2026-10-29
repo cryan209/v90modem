@@ -437,6 +437,7 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 {
                     s->phase4_j_seen = 1;
                     s->phase4_trn_after_j = 0;
+                    s->phase4_trn_refit_installed = false;
                     v34_rx_phase4_trn_hyp_reset(s);
                     s->phase4_j_lock_hyp = best_h;
                     /* Use role-based tap, not TRN auto-detected tap (see §7) */
@@ -478,6 +479,8 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             {
                 s->phase4_trn_snr_ring[s->phase4_trn_snr_pos].re = sym->re;
                 s->phase4_trn_snr_ring[s->phase4_trn_snr_pos].im = sym->im;
+                s->phase4_trn_snr_anchor[s->phase4_trn_snr_pos] =
+                    s->v90_t3_raw_count - 2 - V34_EQUALIZER_PRE_LEN;
                 if (++s->phase4_trn_snr_pos >= 512)
                     s->phase4_trn_snr_pos = 0;
                 /*endif*/
@@ -879,6 +882,7 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds, best_ones=%d%%), scanning for MP (decoder=hyp24-v2, gated=900)\n",
                      s->phase4_trn_after_j, s->phase4_trn_lock_score);
+            v34_rx_phase4_trn_install_refit(s);
             s->stage = V34_RX_STAGE_PHASE4_MP;
             s->duration = 0;
             s->bitstream = 0;
