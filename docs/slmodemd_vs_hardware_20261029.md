@@ -183,4 +183,15 @@ calls (us 21600 up, it 16800-33600).  Regression, same day: RasFinder
 33600.  Loopback pass rates over `V34_DUPLEX_DELAY` unchanged (65/80 HEAD,
 63/80); five knife-edge rows and the FDM row re-pinned, and the MT5634SMI
 replay fixture runs with `V34_CALL_P3_S_DELAY_MS=0` (the call it recorded had
-no wait).  V.8 still needs `ME_V8_NO_CI=1` against slmodemd answering.
+no wait).
+
+**Fixed: our CI ran into slmodemd's ANSam (V.25 4.3).**  SpanDSP's caller
+sends CI 1.0-1.4 s and again 1.9-2.3 s after V.8 starts, and our engine starts
+V.8 at the SIP answer, so the second burst sits exactly where V.25 4.3 has the
+answerer end its 1.8-2.5 s silence and start its answer tone.  slmodemd's
+ANSam began under it and it never decoded our CM.  The caller now holds CI off
+from 1.8 to 3.0 s and resumes after (a call still in ringback keeps getting
+CI).  Live A/B, our V.34 caller, three alternated rounds per arm, five targets:
+slmodemd answering 0/3 -> 3/3 (33600, every numbered line both ways; 0/9
+across the day without it), all targets 10/15 -> 14/15 CONNECT; RasFinder,
+7900 and 7910 unchanged.  `ME_V8_NO_CI=1` is no longer needed.

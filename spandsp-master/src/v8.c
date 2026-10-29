@@ -117,6 +117,14 @@ enum
 };
 
 #define Te_TIMEOUT      500
+/* V.25 4.3: the answering DCE "maintains silence on the line for a period
+   between 1.8 and 2.5 s, then transmits the answering tone".  A CI burst
+   (four CI sequences of 30 bits at 300 bit/s, 400 ms) is kept out of that
+   onset window, measured from the start of V.8 with margin for the path
+   delay, so the answerer's ANSam never starts under our CI. */
+#define CI_BURST_MS             400
+#define CI_HOLD_FROM_MS         1800
+#define CI_HOLD_UNTIL_MS        3000
 
 SPAN_DECLARE(const char *) v8_status_to_str(int status)
 {
@@ -1356,6 +1364,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
         {
         case V8_WAIT_1S:
             residual_samples = modem_connect_tones_rx(&s->ansam_rx, amp, len);
+            s->ci_elapsed_samples += len;
             /* Wait 1 second before sending the first CI packet */
             if ((s->negotiation_timer -= len) > 0)
                 break;
@@ -1367,6 +1376,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             break;
         case V8_CI_ON:
             residual_samples = modem_connect_tones_rx(&s->ansam_rx, amp, len);
+            s->ci_elapsed_samples += len;
             /* Check if an ANSam or ANSam/ tone has been detected */
             if ((tone = modem_connect_tones_rx_get(&s->ansam_rx)) != MODEM_CONNECT_TONES_NONE)
             {
@@ -1385,6 +1395,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             break;
         case V8_CI_OFF:
             residual_samples = modem_connect_tones_rx(&s->ansam_rx, amp, len);
+            s->ci_elapsed_samples += len;
             /* Check if an ANSam or ANSam/ tone has been detected */
             if ((tone = modem_connect_tones_rx_get(&s->ansam_rx)) != MODEM_CONNECT_TONES_NONE)
             {
@@ -1392,7 +1403,25 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 break;
             }
             /*endif*/
-            if ((s->ci_timer -= len) <= 0)
+            if ((s->ci_timer -= len) <= 0
+                &&
+                s->ci_elapsed_samples/(SAMPLE_RATE/1000) + CI_BURST_MS > CI_HOLD_FROM_MS
+                &&
+                s->ci_elapsed_samples/(SAMPLE_RATE/1000) < CI_HOLD_UNTIL_MS)
+            {
+                /* The next burst would run into the V.25 4.3 answer-tone
+                   onset window.  slmodemd answering us had its ANSam start
+                   at 2.20 s under our second CI burst (1.85-2.30 s), and then
+                   never decoded our CM ("Time Out Waiting For CM", 6 of 6
+                   live calls); without that burst it answers.  Stay silent
+                   through the window and carry on repeating CI after it, for
+                   a call whose answer is still to come (ringback). */
+                s->ci_timer = milliseconds_to_samples(CI_HOLD_UNTIL_MS)
+                            - s->ci_elapsed_samples;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "CI held through the V.25 4.3 answer-tone window\n");
+            }
+            else if (s->ci_timer <= 0)
             {
                 /* V.8 has the calling DCE repeat CI until it detects ANSam;
                    the overall limit belongs to the modem's carrier-wait
@@ -1810,6 +1839,7 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
             s->state = V8_WAIT_1S;
             s->negotiation_timer = milliseconds_to_samples(1000);
             s->ci_repetition_count = 0;
+            s->ci_elapsed_samples = 0;
         }
         else
         {

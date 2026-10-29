@@ -50,6 +50,9 @@ struct v8_state_s
     span_sample_timer_t negotiation_timer;
     span_sample_timer_t ci_timer;
     int ci_repetition_count;
+    /* Calling role: samples since V.8 started, while CI is in use, for
+       keeping CI out of the V.25 4.3 answer-tone onset window. */
+    int ci_elapsed_samples;
     /* Calling role: samples since CM (re)started, and the silent gap before
        a CM restart (see V8_CM_ON). */
     int cm_on_samples;

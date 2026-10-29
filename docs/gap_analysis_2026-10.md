@@ -79,7 +79,7 @@ both taps and grade only completed runs.
   started inside its echo-canceller freeze window; the caller now waits
   250 ms after J (V.34 §11.3.1.1.3), 4/4 calls clean both ways
   ([slmodemd comparison](slmodemd_vs_hardware_20261029.md#slmodemd-as-the-answerer-us-dialling-it)).
-  slmodemd answering still needs `ME_V8_NO_CI=1`.
+  slmodemd answering now completes V.8 without `ME_V8_NO_CI=1` (CI held out of the V.25 4.3 answer-tone window).
 - V.34 answer-side J-to-S wait (V.34 §11.3.1.2.6): slmodemd's former 9600
   limitation is fixed by the 250 ms delay.
 - V.34 fixed-3200 ceiling: symbol rate is negotiated through 3429; the
