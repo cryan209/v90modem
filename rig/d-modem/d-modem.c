@@ -890,6 +890,25 @@ static void on_call_media_state(pjsua_call_id call_id) {
 }
 
 
+/* Listen mode (empty dial string, i.e. slmodemd's ATA): answer the first
+   INVITE.  Sample flow starts in on_call_media_state(), once media is up, so
+   the answer datapump waits in its read until the call connects. */
+static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
+			     pjsip_rx_data *rdata) {
+	static bool answered = false;
+
+	PJ_UNUSED_ARG(acc_id);
+	PJ_UNUSED_ARG(rdata);
+	PJ_LOG(3,(__FILE__, "Incoming call %d%s", call_id,
+		  answered ? ", busy" : ", answering"));
+	if (answered) {
+		pjsua_call_answer(call_id, 486, NULL, NULL);
+		return;
+	}
+	answered = true;
+	pjsua_call_answer(call_id, 200, NULL, NULL);
+}
+
 int main(int argc, char *argv[]) {
 	pjsua_acc_id acc_id;
 	pj_status_t status;
@@ -929,6 +948,7 @@ int main(int argc, char *argv[]) {
 		pjsua_config_default(&cfg);
 		cfg.cb.on_call_media_state = &on_call_media_state;
 		cfg.cb.on_call_state = &on_call_state;
+		cfg.cb.on_incoming_call = &on_incoming_call;
 
 		pjsua_logging_config_default(&log_cfg);
 		log_cfg.console_level = 4;
@@ -1011,7 +1031,9 @@ int main(int argc, char *argv[]) {
 		pj_strdup2(pool,&cfg.id,buf);
 		snprintf(buf,sizeof(buf),"sip:%s",sip_domain);
 		pj_strdup2(pool,&cfg.reg_uri,buf);
-		cfg.register_on_acc_add = false;
+		/* Register only to be called: an outbound call authenticates on
+		   the INVITE itself. */
+		cfg.register_on_acc_add = (dialstr[0] == '\0');
 		cfg.cred_count = 1;
 		cfg.cred_info[0].realm = pj_str("*");
 		cfg.cred_info[0].scheme = pj_str("digest");
@@ -1023,13 +1045,17 @@ int main(int argc, char *argv[]) {
 		if (status != PJ_SUCCESS) error_exit("Error adding account", status);
 	}
 
-	snprintf(buf,sizeof(buf),"sip:%s@%s",dialstr,sip_domain);
-	printf("calling %s\n",buf);
-	pj_str_t uri = pj_str(buf);
-	
-	pjsua_call_id callid;
-	status = pjsua_call_make_call(acc_id, &uri, 0, NULL, NULL, &callid);
-	if (status != PJ_SUCCESS) error_exit("Error making call", status);
+	if (dialstr[0] == '\0') {
+		printf("listening as %s@%s\n", sip_user, sip_domain);
+	} else {
+		snprintf(buf,sizeof(buf),"sip:%s@%s",dialstr,sip_domain);
+		printf("calling %s\n",buf);
+		pj_str_t uri = pj_str(buf);
+
+		pjsua_call_id callid;
+		status = pjsua_call_make_call(acc_id, &uri, 0, NULL, NULL, &callid);
+		if (status != PJ_SUCCESS) error_exit("Error making call", status);
+	}
 
 	struct timespec ts = {100, 0};
 	while(1) {

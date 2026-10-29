@@ -136,3 +136,34 @@ call, so 55/56 with one bad FCS is a pass.
   (`bri-test-answerer`), which gives the card's view of each 7900 call.
 - slmodemd always sends a QC before CM (`V8_ORG_SEND_QC`); the 7910's V.8
   failures happened with it, but so did its successes.
+
+## slmodemd as the answerer (us dialling it)
+
+`rig/d-modem/d-modem.c` now answers when slmodemd's dial string is empty
+(`ATA`): `on_incoming_call` answers 200 and the account registers only in
+that mode.  Built on CT 100 as `/root/D-Modem-rig/d-modem-inbound` beside the
+original (link line in `rig/slmodemd/README.md`).  Driver:
+`slm_targets.py --caller ours --targets slm --slm-dmodem d-modem-inbound`
+(numbered lines both ways).
+
+First calls (our `/root/p4f` build, plain mu-law, V.34 because slmodemd's
+answer-mode JM offers no PCM):
+
+- **V.8 fails unless `ME_V8_NO_CI=1`.**  On the tap our second CI burst runs
+  1.85-2.30 s and slmodemd's ANSam starts at 2.20 s; we stop CI on detecting
+  it and send CM after Te (3.6 s), exactly as V.8 8.1.1 asks, and slmodemd
+  never decodes the CM (`Time Out Waiting For CM`).  Without CI the same CM
+  timing gets JM at 4.75 s.  V.8 7.1 makes CI optional and says an answerer
+  "should not malfunction if CI is received", so this is the peer.
+- **With `ME_V8_NO_CI=1` V.8 and V.34 complete** (Phase 2/3/4, 3429 first)
+  and both ends CONNECT; slmodemd's data to us arrives intact (1223 lines),
+  ours to it never does.  slmodemd's receiver of OUR caller-to-answer
+  direction diverges ~2 s into data every time (equalizer error 37 -> 1141)
+  and it retrains until it hangs up.  On the first training it requested
+  precoding (MP1 h = (-4917,428), (-1015,-805), (222,-219)); our transmitter
+  had never precoded live, and a loopback with those coefficients forced into
+  both MPs trains but delivers no data (B1 0.73-0.80) -- though that test hook
+  may not hold the receiver's h, so it does not yet say which side is wrong.
+  The 3200 retrain asked for no precoding and still diverged, so there is a
+  second defect in our caller-direction data mode.  Our answer-direction
+  transmitter (slmodemd calling us) runs 60 s clean at 33600.

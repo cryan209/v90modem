@@ -64,13 +64,13 @@ def start_ours(cdir, env, capture=True, tree='/root/v90modem'):
            % (PTY, PTY, cdir))
 
 
-def start_slm():
+def start_slm(dmodem='d-modem'):
     sx("pkill '[s]lmodemd'; pkill '[d]-modem'; sleep 1; rm -f /dev/ttySL0")
     sx("cd /root/D-Modem-rig; rm -f /tmp/slm.log; ( env SLMODEMD_V8_OPEN_STUB=0 "
        "DM_RESAMPLER=sinc DM_UP_RESAMPLER=sinc DM_RS_HEADROOM=0.25 DM_SLM_FRAME_TRAILER=4 "
        "SLM_FREEZE_TX_TIMING=0 SIP_FORCE_PCMU=1 SIP_LOGIN=%s:%s@asterisk.net.cryan.nz "
-       "nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem-rig/d-modem > /tmp/slm.log 2>&1 < /dev/null & ); "
-       "sleep 8; chmod 666 $(readlink -f /dev/ttySL0)" % (SLM_ACCT, SLM_ACCT))
+       "nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem-rig/%s > /tmp/slm.log 2>&1 < /dev/null & ); "
+       "sleep 8; chmod 666 $(readlink -f /dev/ttySL0)" % (SLM_ACCT, SLM_ACCT, dmodem))
 
 
 PTY_RELAY = r'''
@@ -344,6 +344,90 @@ SLM_PAT = re.compile(r'Modulations -|Phase2Info: (rtd|pcmType)|drop to|RETRAIN|C
                      r'Error Energy|Final|Line rate|upstream|downstream', re.I)
 
 
+def one_call_slm_answers(out, name, args):
+    """Our modem dials slmodemd, which answers (ATA) through d-modem's
+    listen mode (rig/d-modem/d-modem.c, built as d-modem-inbound)."""
+    cdir = out / name
+    cdir.mkdir(parents=True)
+    ocdir = '/root/slmx/%s/%s' % (out.name, name)
+    r = dict(name=name, target='slm', ext=SLM_ACCT, caller='ours',
+             started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+    start_ours(ocdir, args.ours_env, capture=False, tree=args.ours_dir)
+    start_slm(args.slm_dmodem)
+    with (cdir / 'serial.bin').open('wb') as slog, (cdir / 'ours-dte.bin').open('wb') as olog:
+        peer = Dte(slog)
+        ours = Dte(olog, CT_OURS, PTY)
+        try:
+            ms = args.target_ms.get('slm', args.ms)
+            r['ms'] = ms
+            for c in ['AT', 'ATZ', 'ATX3', 'ATE0V1Q0', 'AT' + args.nparm]:
+                peer.send(c + '\r')
+                peer.wait([b'OK', b'ERROR'], 5)
+            for c in ['AT', 'ATE0'] + (['AT+MS=' + ms] if ms else []) + \
+                    [c for c in args.ours_init.split(';') if c]:
+                ours.send(c + '\r')
+                if ours.wait([b'OK', b'ERROR'], 5) != b'OK':
+                    r['at_error'] = c
+            peer.send('ATA\r')
+            for _ in range(25):
+                time.sleep(1)
+                if sx("grep -ac 'registration success' /tmp/slm.log").strip() not in ('', '0'):
+                    break
+            mark_o, mark_p = len(ours.rx), len(peer.rx)
+            t_dial = time.monotonic()
+            ours.send('ATD%s\r' % SLM_ACCT)
+            stop = [b'CONNECT', b'NO CARRIER', b'BUSY', b'NO DIAL', b'NO ANSWER']
+            got = ours.wait(stop, 100, mark_o)
+            r['result'] = got.decode() if got else 'timeout'
+            peer.wait([b'CONNECT', b'NO CARRIER'], 5, mark_p)
+            m = re.search(rb'CONNECT[^\r\n]*', ours.rx[mark_o:])
+            pm = re.search(rb'CONNECT[^\r\n]*', peer.rx[mark_p:])
+            r['incoming'] = sx("grep -ac 'Incoming call' /tmp/slm.log").strip()
+            if got == b'CONNECT' and m:
+                r['connect'] = m.group(0).decode()
+                r['peer_connect'] = pm.group(0).decode() if pm else None
+                r['t_connect'] = round(time.monotonic() - t_dial, 1)
+                so, sp = mark_o + m.end(), mark_p + (pm.end() if pm else 0)
+                state = dict(i=0, next=0)
+
+                def tx():
+                    if time.monotonic() >= state['next']:
+                        state['next'] = time.monotonic() + 0.1
+                        nums = range(state['i'], state['i'] + 20)
+                        ours.send(b''.join(b'D%07d\r\n' % n for n in nums))
+                        peer.send(b''.join(b'U%07d\r\n' % n for n in nums))
+                        state['i'] += 20
+                end = time.monotonic() + args.probe_seconds
+                while time.monotonic() < end:
+                    tx()
+                    ours.pump(0.02)
+                    peer.pump(0.02)
+                for _ in range(100):
+                    ours.pump(0.02)
+                    peer.pump(0.02)
+                r['data'] = dict(sent=state['i'], down=count_lines(peer.rx[sp:], b'D'),
+                                 up=count_lines(ours.rx[so:], b'U'))
+                r['dropped'] = b'NO CARRIER' in ours.rx[so:] or b'NO CARRIER' in peer.rx[sp:]
+                time.sleep(1.2)
+                ours.send('+++')
+                time.sleep(1.5)
+                ours.send('ATH\r')
+                ours.run_for(2)
+        finally:
+            ours.close()
+            peer.close()
+    slm_log = sx('cat /tmp/slm.log')
+    (cdir / 'slm.log').write_text(slm_log)
+    r['slm_lines'] = [l[:200] for l in slm_log.splitlines() if SLM_PAT.search(l)][-40:]
+    sx("pkill '[s]lmodemd'; true")
+    time.sleep(2)
+    kill_ours()
+    r['ours_log'] = ox("grep -aE 'CONNECT|enter DATA|negotiated|retrain|V.8 result|peer offer' %s/server.log "
+                       "| grep -v 'ME trace' | tail -25 | cut -c1-200" % ocdir).splitlines()
+    (cdir / 'summary.json').write_text(json.dumps(r, indent=2) + '\n')
+    return r
+
+
 def one_call(out, name, target, args):
     cdir = out / name
     cdir.mkdir(parents=True)
@@ -446,6 +530,9 @@ def main():
     ap.add_argument('--probe-seconds', type=float, default=30)
     ap.add_argument('--ours-env', default='', help='extra env for our server')
     ap.add_argument('--ours-dir', default='/root/v90modem', help='CT 117 tree whose sip_v90_modem runs')
+    ap.add_argument('--ours-init', default='', help="extra AT commands for our DTE, ';'-separated")
+    ap.add_argument('--slm-dmodem', default='d-modem',
+                    help="d-modem binary in /root/D-Modem-rig (target slm needs d-modem-inbound)")
     ap.add_argument('--gap', type=float, default=20, help='seconds between calls')
     args = ap.parse_args()
     args.target_ms = dict(kv.split('=', 1) for kv in args.target_ms.split(',') if kv)
@@ -455,12 +542,17 @@ def main():
     targets = args.targets.split(',')
     if args.caller == 'ours' and 'ours' in targets:
         ap.error('--caller ours cannot dial target ours')
+    if 'slm' in targets and (args.caller != 'ours' or args.slm_dmodem == 'd-modem'):
+        ap.error('target slm needs --caller ours and --slm-dmodem d-modem-inbound')
     for rnd in range(1, args.rounds + 1):
         for target in targets:
             name = '%02d-%s' % (len(results) + 1, target)
             print('CALL', name, flush=True)
             try:
-                r = one_call(args.out, name, target, args)
+                if target == 'slm':
+                    r = one_call_slm_answers(args.out, name, args)
+                else:
+                    r = one_call(args.out, name, target, args)
             except Exception as exc:
                 r = dict(name=name, target=target, error=repr(exc))
             results.append(r)
