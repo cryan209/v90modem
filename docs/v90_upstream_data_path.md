@@ -3014,3 +3014,52 @@ suite run or Linux qualification.
 Next: regain wired rig access, obtain paired taps of a current-build failure,
 check our own TX/timing and echo before the discontinuity, and require sustained
 numbered payload in both directions across repeated completed calls.
+
+## Local slip recovery: conjugated input needs the opposite phase correction
+
+A further source-level defect is now isolated in `v90_t3_offset_rotation()`.
+The T/3 ring is mixed using the absolute input sample counter. A passband
+sample delay D therefore introduces `exp(-j*omega*D)` in the complex
+baseband. Reading at offset D requires multiplying by `exp(+j*omega*D)`.
+That was the only orientation the local slip scorer and actuator handled.
+
+The acquisition path can instead select `v90_t3_fse_conjugate`. In those
+coordinates, `conj(b*exp(-j*omega*D)) = conj(b)*exp(+j*omega*D)`: the required
+rotation has the opposite sign. The scorer conjugated its samples but still
+used the unconjugated phase correction; a viable timing candidate could score
+like a closed eye, or be accepted while leaving a rotated constellation.
+The same helper drives the committed carrier phase, so both halves were wrong.
+
+The helper now reverses its sign when the FSE conjugates the input. This is a
+coordinate correction under V.90 8.5.2/9.4.2.5, not a new recovery exchange.
+It changes no thresholds, negotiated rates or sample accounting. The existing
+bounded local search and V.90 9.6 protocol fallback remain in place.
+
+`v90_upstream_slip_test` includes the production receiver to exercise the real
+static scorer and actuator, as the generator tests include `v34tx.c`. Its
+controlled ring contains known lattice points at a one-sample displacement,
+with the passband-delay phase and an independent carrier phase. It checks
+3000/3200 baud, low/high carriers, both input orientations, +/-1 sample and
+three initial carrier phases: **48 cases**. It requires both the candidate
+score and the score after the committed correction to return to zero, not
+merely a true “recovered” result. This is a unit test of coordinates and state,
+not a pulse-shaped waveform or hardware qualification.
+
+Before the fix, all 24 unconjugated controls pass and all 24 conjugated cases
+fail; conjugated candidate distances are around 0.6–0.7 in this matrix.
+After the fix, all 48 cases pass. A separate exploratory eight-point probe
+also demonstrates false success before the fix: a conjugated candidate is
+accepted at distance 0.380 rather than returning to the grid.
+
+Validation on the current working tree: **644/644 fast rows pass**
+(`test-logs/v90-slip-fast/`, 122 seconds), including captured B1/gradient
+regressions. The twelve long-hold cases also pass separately
+(`test-logs/v90-slip-hold/`), checking the same 5,742,000 bits without errors.
+The negative-control executable and probe logs are under
+`artifacts/v90-echo-continuity/`.
+
+This repairs a demonstrated local recovery defect; it does **not** explain
+the retained RasFinder +27.7 s failure, whose acquired FSE is unconjugated.
+A short-window raw TX/RX echo-lag scan of that case did not yield a coherent
+peak; no tracker threshold was relaxed on that evidence. Wired hardware
+validation remains blocked as described above.

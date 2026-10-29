@@ -85,6 +85,9 @@ sh -c 'python3 tools/k56flex_hsf_pair.py --max-upstream-rate 28800 --seconds 40 
 ./v34_data_test
 ./v34_gardner_test
 ./v34_carrier_gradient_test
+# V.90 8.5.2/9.4.2.5: passband-delay phase reverses when the FSE conjugates
+# its input. Exercise the real local slip scorer and committed correction.
+./v90_upstream_slip_test
 python3 tools/mt9234_v90_gradient_test.py
 ./fax_class_test
 ./fax_class2_test

@@ -200,7 +200,8 @@ V34_DATA_TEST_OBJS = v34_data_test.o
 V34_GARDNER_TEST_OBJS = v34_gardner_test.o
 V34_CARRIER_GRADIENT_TEST_OBJS = v34_carrier_gradient_test.o
 V90_UPSTREAM_HOLD_TEST_OBJS = v90_upstream_hold_test.o
-TEST_TARGETS += v34_carrier_gradient_test v90_upstream_hold_test
+V90_UPSTREAM_SLIP_TEST_OBJS = v90_upstream_slip_test.o
+TEST_TARGETS += v34_carrier_gradient_test v90_upstream_hold_test v90_upstream_slip_test
 FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 VFC_MAPPER_TEST_OBJS = vfc_mapper_test.o vfc_mapper.o
 VFC_SIGNATURE_TEST_OBJS = vfc_signature_test.o vfc_signature.o
@@ -1313,3 +1314,10 @@ v90_upstream_hold_test: $(V90_UPSTREAM_HOLD_TEST_OBJS) spandsp
 	$(CC) $(V90_UPSTREAM_HOLD_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v90_upstream_hold_test.o: v90_upstream_hold_test.c $(SPANDSP_DIR)/spandsp/private/v34.h
+
+# Includes the real static slip scorer/actuator; do not duplicate the DSP.
+v90_upstream_slip_test: $(V90_UPSTREAM_SLIP_TEST_OBJS) spandsp
+	$(CC) $(V90_UPSTREAM_SLIP_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+v90_upstream_slip_test.o: CFLAGS += -DHAVE_CONFIG_H -DNDEBUG -D_XOPEN_SOURCE=700 -std=c99
+v90_upstream_slip_test.o: v90_upstream_slip_test.c $(SPANDSP_DIR)/v34rx.c

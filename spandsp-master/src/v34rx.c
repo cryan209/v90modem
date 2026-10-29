@@ -12051,7 +12051,12 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     which is exactly why recovery looked like a lottery. */
 static float v90_t3_offset_rotation(const v34_rx_state_t *s, float offset)
 {
-    return 2.0f*3.14159265f
+    /* V.90 8.5.2/9.4.2.5: the FSE can conjugate its baseband input.
+       conj(b*exp(-jwD)) = conj(b)*exp(+jwD), so that orientation
+       reverses the delay-induced rotation. Both the candidate scorer and
+       the committed carrier phase must use the FSE's coordinates. */
+    return (s->v90_t3_fse_conjugate ? -1.0f : 1.0f)
+         * 2.0f*3.14159265f
          * carrier_frequency(s->baud_rate, s->high_carrier)
          * offset/s->v90_t3_internal_rate;
 }
