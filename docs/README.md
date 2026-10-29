@@ -11,7 +11,7 @@ Where to start:
 - building, making your first call, attaching an application, and troubleshooting:
   [user guide](usage.md);
 - what works and what is unqualified: [the top-level readme](../readme.md) and
-  [gap_analysis_2026-10.md](gap_analysis_2026-10.md);
+  [current open-work backlog and historical gap analysis](gap_analysis_2026-10.md);
 - running a live call against hardware: [v90_hardware_interop.md](v90_hardware_interop.md)
   and [rig/README.md](../rig/README.md);
 - configuration: the AT commands ([at_commands.md](at_commands.md),

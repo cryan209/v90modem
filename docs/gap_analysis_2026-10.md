@@ -1,10 +1,94 @@
-# Gap analysis: what stands between this tree and a general-purpose softmodem
+# Open work: reliability and interoperability
 
-Written 2026-10-05.
+## Current backlog (evidence through 29 October 2026)
 
-**Status, same day:** steps 1 (AT+MS / `--mode` configuration) and 2 (V.32bis
-on live calls, V.25 and V.32bis Annex A automode) are on `main`. Those
-sections below describe the tree as it was before them.
+This is the working list, refreshed from the topic notes and committed history
+through `25a482fe`. It is a documentation review, not a new test run or hardware
+qualification. The original 5 October assessment is retained below as historical
+evidence; its capability matrix, failures and suggested order are **not** the
+current backlog. Topic notes also contain superseded investigations: use their
+latest applicable results, not an isolated early failure.
+
+The priority is sustained, byte-exact data in both roles, not more modulation
+names. CONNECT, engine-pair payload, firmware-emulator payload and physical
+hardware payload are different levels of evidence.
+
+### P1: reproducible defects and core interoperability
+
+| Work | Current evidence / limit | Next action and acceptance | Source |
+|---|---|---|---|
+| **V.34 caller-direction data corruption** | Dialling slmodemd with CI disabled completes V.34 at 3429 baud. Its data reaches us intact (1223 lines); its receiver of our data diverges about 2 s into DATA. Initial MP requests precoding, but a 3200-baud retrain without precoding also diverges. Our answerer direction runs 60 s clean at 33600. | Compare our caller TX with the working answerer TX, starting before the first bad payload. Establish whether the forced-precoder harness preserves RX coefficients before treating it as proof. Add a regression for the identified defect and grade sustained numbered payload both ways. | [slmodemd comparison, final section](slmodemd_vs_hardware_20261029.md#slmodemd-as-the-answerer-us-dialling-it) |
+| **V.90 digital upstream continuity and recovery** | RasFinder hardware reaches DATA, but recent calls lose upstream synchronisation about 2 s in. Early V.90 §9.6 renegotiation is unanswered and falls back to a lengthy retrain, losing the login banner. The old live/replay discrepancy is closed; sustained hardware transfers remain unqualified across chipsets. | Reproduce the first discontinuity from taps, check our TX before attributing it to the peer, distinguish tracking failure from a signal change, and validate acquisition/recovery. Require exact bidirectional payload over sustained calls and repeated starts, including renegotiation/retrain. | [recent RasFinder comparison](slmodemd_vs_hardware_20261029.md), [upstream investigation](v90_upstream_data_path.md), [hardware results](v90_hardware_interop.md) |
+| **V.34 Phase-4 S generation and acquisition** | The recent transmit audit identifies the wrong S orientation relative to V.34 §10.1.3.7. Correcting TX alone moves loopback failures because our caller's S/S-bar acquisition is fragile. This is separate from the fixed answer-side J-to-S delay. | Correct the receiver and transmitter together; grade payload and acquisition pass rates over `V34_DUPLEX_DELAY`, both G.711 laws and relevant rates. Retain a regression for the normative S waveform. | [Phase-4 investigation, item 1](slmodemd_vs_hardware_20261029.md#what-this-says-about-us) |
+| **V.34 negotiated-option and recovery coverage** | Negotiated symbol rates now reach 3429/33600; that is not the old fixed-3200 blocker. Exact waveform coverage for all shaping/nonlinear/precoder combinations and plain-V.34 recovery remains incomplete. The duplex audit lists V.34 §§11.5–11.7 qualification gaps. | Refresh the clause matrix against current code before implementing old audit items. Exercise caller/answerer retrain, rate renegotiation, zero-rate MP cleardown and deterministic DTE carrier loss, plus directional encoder options. | [duplex clause audit](v34_spec_gap.md), [3429 data](v34_3429_dense_data.md), [retrain/resync](retrain_and_resync.md) |
+
+Start with the caller-direction V.34 failure: it has a repeatable foreign-peer
+case and a working opposite direction for comparison. V.90 digital upstream
+continuity remains the main product-level qualification gate.
+
+### P2: qualification, portability and operation
+
+| Work | What is already demonstrated | Remaining qualification / next action | Source |
+|---|---|---|---|
+| **V.92 with physical hardware** | slmodemd PCM upstream at 36000 / 53333 downstream, clean for 170 s; Quick Connect in engine tests. The old claim that PCM upstream has never worked is superseded. | Full startup and exact payload with a hardware V.92 peer, then retrain, Quick Connect/short phases and modem-on-hold. slmodemd's retrained PCM-upstream startup is separately open. | [V.92 startup](v92_full_startup.md), [Quick Connect](v92_quick_connect.md), [README status](../readme.md#status-26-october-2026) |
+| **Broader hardware coverage** | V.90 analogue caller has Eicon hardware soaks, both laws, LAPM/V.42bis, PPP and exact HTTP. Legacy families have engine-pair payload; V.22bis also has hardware evidence. | Expand peers and networks for V.90 analogue, V.92 analogue and the legacy ladder. V.91/V.110/V.120 need a foreign digital endpoint and byte-exact bearer. Do not infer qualification from two instances of our own engine. | [Eicon soaks](eicon_soak_ppp.md), [hardware procedure](v90_hardware_interop.md), [README status](../readme.md#status-26-october-2026) |
+| **Fax upper rate and robustness** | Real Eicon pages in both directions and both laws up to 28800. T.30 Annex F is no longer a missing integration task. | Qualify 33600/class 2.1 on hardware and extend page/turnaround/recovery coverage. Check the later results in the fax notes rather than their early “absent” descriptions. | [Eicon fax results](eicon_v34_fax_20261009.md), [Annex F investigation](t30_annex_f_v34_fax.md), [HDX audit](v34_hdx_conformance_audit.md) |
+| **Multi-line deployment and setup load** | `--lines N` provides supervised process-per-line operation; local concurrent payload and a single-line CPU measurement exist. A per-call context rewrite is not a prerequisite for a pool of lines. | Qualify the supervisor behind the rig PBX, including registration/contact limits, restart/recycle, simultaneous training and sustained payload. Re-measure CPU under concurrent setup; the 10 October numbers below are not a current capacity guarantee. | [multi-line](multi_line.md), historical CPU measurement below |
+| **Cross-platform test baseline** | `tools/run_tests.py` runs fast/slow lists independently and reports all failures; the old stop-at-first-failure runner blocker is resolved. | Establish current clean macOS/ARM and Linux/x86-64 results. Recheck the historical K56flex floating-point-margin row before calling it a current failure; do not carry forward the old 86/87 count. | [test runner](../tools/run_tests.py), [fast list](../tests/fast.list), [slow list](../tests/slow.list) |
+
+All live PCM qualification requires law-matched, byte-exact G.711. The recent
+A↔mu-law-transcoded Diva comparisons are not evidence of a V.90 datapump defect.
+Use wired tower calls, alternating A/B arms and one changed variable; retain
+both taps and grade only completed runs.
+
+### P3: secondary and experimental work
+
+- **K56flex:** no longer “neither side completes a call”. The client achieved
+  52000/31200, LAPM/PPP and zero ping loss against hardware 7910 (4/4 calls
+  completing V.8bis in the cited series); the MT5634MU hardware client later
+  connected to our server, with the evening Phase-2 fixes yielding 8/8
+  connections. Expand sustained, checked duplex payload and impairment/peer
+  coverage rather than treating CONNECT as full qualification. See the later
+  27–28 October entries in [K56flex](k56flex_implementation.md) and the
+  [MT5634MU note](mt5634mu_usb_modem.md).
+- **x2:** duplex LAPM against original Courier firmware in an emulator is
+  demonstrated; real-hardware qualification remains open
+  ([x2](x2_implementation.md)).
+- **MNP 5:** compression remains unimplemented; establish a bit-exact reference
+  before adding it. MNP 2–4 already has live connections (8/9 in the README
+  summary), not merely self-loopback evidence ([MNP](mnp.md)).
+- **Analogue USB front ends:** qualify each device/path independently. Recent
+  Apple law/forwarding work is bounded evidence, not general V.90/V.92
+  analogue hardware qualification ([Apple SM56](apple_usb_modem_sm56.md),
+  [HSF coupler](hsf_analogue_v90_coupler.md)).
+- **Configuration cleanup:** keep supported controls on the AT interface and
+  experimental knobs classified. `AT+MS`, strict option parsing, stored
+  profiles and the environment inventory already exist; their implementation
+  is not an open product blocker ([AT commands](at_commands.md),
+  [environment inventory](env_knobs.md)).
+
+### Completed or superseded: do not restart these from the old list
+
+- AT modulation/rate selection and strict command-line parsing.
+- V.32/V.32bis engine integration and legacy V.25/Annex A automode, including
+  V.21, V.23 and Bell 103/212A selection.
+- Supervised process-per-line multi-line operation.
+- Independent test execution with every failure reported.
+- T.30 Annex F integration and initial real-hardware fax pages.
+- V.90 analogue Eicon data/PPP/HTTP qualification on the measured path.
+- Initial V.92 PCM-upstream payload against slmodemd.
+- V.34 answer-side J-to-S wait (V.34 §11.3.1.2.6): slmodemd's former 9600
+  limitation is fixed by the 250 ms delay.
+- V.34 fixed-3200 ceiling: symbol rate is negotiated through 3429; the
+  RasFinder B1 switching-pattern alignment was corrected.
+- Initial hardware K56flex connections in both client and server roles.
+
+## Historical assessment — 5 October 2026 (with original appended updates)
+
+**Historical only.** The following is preserved to explain the original gaps
+and subsequent measurements. References to “today”, “current source”, missing
+features and failing tests describe that assessment, not the refreshed tree.
+Use the current backlog above to select work.
 
 The target is one softmodem that works in two roles:
 
@@ -237,7 +321,7 @@ suite run on this date. Interop claims come from the dated entries in
   - Not yet tried behind the rig's Asterisk, which needs `max_contacts` on
     the AOR.
 
-## 4. Suggested order
+## 4. Original suggested order (historical; superseded above)
 
 1. Build fixes (done with this note). Still to do: make `make test` run
    every binary even when one fails, and fix `k56flex_client_test` on x86-64.
