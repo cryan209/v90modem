@@ -2073,17 +2073,13 @@ static int phase4_trn_should_freeze_tracking(const v34_rx_state_t *s)
     /* Also freeze carrier tracking during MP — the carrier phase was locked
        during TRN and CMA-based QPSK slicer decisions during MP are too noisy
        to drive carrier tracking without corrupting the locked phase. */
-    if (v34_rx_stage_is_phase4_frame(s->stage))
-        return 1;
-    return (s->stage == V34_RX_STAGE_PHASE4_TRN
-            && s->phase4_j_seen
-            && s->phase4_trn_lock_hyp >= 0
-            && s->phase4_trn_lock_score >= PHASE4_TRN_FREEZE_SCORE
-            && s->phase4_trn_current_hyp == s->phase4_trn_lock_hyp
-            && s->phase4_trn_current_tap == s->phase4_trn_lock_tap
-            && s->phase4_trn_current_order == s->phase4_trn_lock_order
-            && s->phase4_trn_current_domain == s->phase4_trn_lock_domain
-            && s->phase4_trn_current_score >= PHASE4_TRN_FREEZE_SCORE);
+    /* Not during TRN.  TRN's decisions are right once its lock is real, and
+       the carrier loop needs all of TRN to settle the phase and the residual
+       frequency it carries into MP and B1.  This used to freeze at an 80%
+       TRN lock, which the biased absolute slicer (v34rx_phase4_trn.c)
+       seldom reached; with the slicer corrected the lock comes early and the
+       freeze left DATA rotating to white (distance to grid 0.66). */
+    return v34_rx_stage_is_phase4_frame(s->stage);
 }
 /*- End of function --------------------------------------------------------*/
 

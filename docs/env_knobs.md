@@ -655,6 +655,7 @@ the tools' command lines; listed here so nothing reads an environment silently.
 | `V34_DUPLEX_ECHO_DB` | v34_duplex_test.c | tdh |
 | `V34_DUPLEX_ECHO_DELAY` | v34_duplex_test.c | td |
 | `V34_DUPLEX_ECHO_SIDE` | v34_duplex_test.c | t |
+| `V34_DUPLEX_EXPECT_MAX_RATES` | v34_duplex_test.c | tsd |
 | `V34_DUPLEX_EXPECT_RATES` | v34_duplex_test.c | tsd |
 | `V34_DUPLEX_G711_SNR` | v34_duplex_test.c | tdh |
 | `V34_DUPLEX_HARDWARE_DIRECTION` | v34_duplex_test.c | ts |

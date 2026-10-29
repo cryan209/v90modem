@@ -239,7 +239,16 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
-        abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
+        /* Absolute (direct-mapped) dibit for V.34 10.1.3.8 TRN.  The +45
+           degree bias belongs to the DIFFERENTIAL decode above, where phase
+           differences cluster on 0/90/180/270.  The 4-point training points
+           sit at 45/135/225/315 (training_constellation_4), so the same bias
+           here put every TRN symbol on a decision boundary: against the
+           transmitted TRN a converged eye agreed 100% under one rotation
+           while this slicer scored 50%, and the 65% ones-lock passed or
+           failed on chance (the defect v34rx_phase3.c fixed for Phase 3).
+           The absolute slicer's boundaries are the quadrant edges. */
+        abs_bits = (int) (ang1 >> 30) & 0x3;
         s->duration++;
 
         /* I/Q constellation diagnostic: log first 64 bauds of S+Sbar and first 64 bauds of TRN scoring */

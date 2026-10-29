@@ -88,7 +88,6 @@ int v34_rx_trace_diagnostics(void);
 #define PHASE4_TRN_READY_MIN_BAUD       4800
 #define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
-#define PHASE4_TRN_FREEZE_SCORE         80
 #define PHASE4_J_PROGRESS_LOG_INTERVAL  32
 #define V34_DEBUG_IQ_LOG                0
 

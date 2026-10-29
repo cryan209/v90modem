@@ -776,6 +776,31 @@ static int run_case(int baud, int bps, bool alaw)
             return 1;
         }
     }
+    /* V34_DUPLEX_EXPECT_MAX_RATES=a2c,c2a: the MP exchange must have settled
+       on nonzero rates no higher than these, at both ends.  For noise rows
+       whose point is that 11.4 selection steps down: inside one noise band
+       the exact step it picks moves with the bearer delay and with the
+       platform's float rounding, which an exact pin turns into a lottery.
+       The payload is still graded bit for bit. */
+    if (getenv("V34_DUPLEX_EXPECT_MAX_RATES")) {
+        int max_a2c = 0, max_c2a = 0;
+        int got[2][2] = { { 0, 0 }, { 0, 0 } };
+        bool ok;
+
+        sscanf(getenv("V34_DUPLEX_EXPECT_MAX_RATES"), "%d,%d", &max_a2c, &max_c2a);
+        ok = v34_get_negotiated_mp_rates(call_modem, &got[0][0], &got[0][1]) == 0
+          && v34_get_negotiated_mp_rates(answer_modem, &got[1][0], &got[1][1]) == 0;
+        printf("MP rates: caller a2c=%d c2a=%d, answerer a2c=%d c2a=%d (max %d/%d)\n",
+               got[0][0]*2400, got[0][1]*2400, got[1][0]*2400, got[1][1]*2400,
+               max_a2c, max_c2a);
+        for (int k = 0; k < 2; k++)
+            ok = ok && got[k][0] > 0 && got[k][1] > 0
+                    && got[k][0]*2400 <= max_a2c && got[k][1]*2400 <= max_c2a;
+        if (!ok) {
+            printf("FAIL: MP rates exceed V34_DUPLEX_EXPECT_MAX_RATES\n");
+            return 1;
+        }
+    }
     printf("  source bits: caller=%d answer=%d; sync skipped=%d/%d; "
            "peaks=%d/%d clipped=%d/%d\n",
            caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits,
