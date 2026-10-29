@@ -3063,3 +3063,79 @@ the retained RasFinder +27.7 s failure, whose acquired FSE is unconjugated.
 A short-window raw TX/RX echo-lag scan of that case did not yield a coherent
 peak; no tracker threshold was relaxed on that evidence. Wired hardware
 validation remains blocked as described above.
+
+## Fractional sample carries must preserve the scored position (2026-10-29)
+
+A second independent defect is in `v90_t3_raw_get_frac()`. The local timing
+scorer adds its candidate offset to Gardner's residual. Their sum need not
+remain within one sample. The float reader adjusted a negative fraction only
+once and treated any fraction >= 1 as an exact read at `index+1`: for example,
+`(index, 1.25)` silently became `(index+1, 0)` rather than `(index+1, 0.25)`.
+The optional Q16 linear reader instead extrapolated beyond its two samples.
+Neither evaluated the position that the timing actuator would commit.
+
+Both readers now carry the complete integer part into the index before
+interpolating the residual in [0,1). The fixed-point implementation uses
+quotient/remainder and corrects negative remainders, without depending on a
+signed right shift. The sinc lookahead guard also carries positive whole
+samples: a fraction of 1.25 requires the sample at `index+5`, not just
+`index+4`. The existing conservative guard for the ordinary range is retained.
+This is a coordinate correction within V.90 9.4.2.5 upstream reception, not a
+change to recovery thresholds, rate negotiation, RTP sample accounting or the
+interpolation coefficients.
+
+The extended `v90_upstream_slip_test` checks ten equivalent fractional
+positions from -2.25 through +2.25, their lookahead, and two equivalent-position
+candidate-score comparisons (both FSE orientations), plus the same ten
+positions through the Q16 reader. Before correction, four positions fail in
+each reader; the float candidate comparison scores the same physical instant
+as 0.704821 versus 0.657034. After correction all **70 checks** pass, including
+the previous 48 integer-slip cases. These are deterministic ring tests, not
+pulse-shaped channel qualification. Both macOS and the isolated Linux build
+pass this regression.
+
+Validation: **645/645 fast rows pass** (`test-logs/v90-fractional-fast/`,
+111 seconds); the twelve long-hold cases pass separately
+(`test-logs/v90-fractional-hold/`), checking 5,742,000 bits without errors.
+Controlled engine replay, restoring just the two old float helpers for the
+negative arm, does **not** move either retained RasFinder failure: 6311 still
+requests recovery at +27700 ms and loses carrier at distance 0.591 with
+baseline ready; 6312 still loses carrier at 0.644 without a ready baseline.
+The repair does not close either recorded failure. Build/test/negative-control
+logs are under `artifacts/v90-fractional-recovery/`.
+
+### Wired access recovered; current-call continuity is still an open test
+
+The earlier access failures were real, but the fully qualified
+`vmhost.net.cryan.nz` works from this host. CT117 now has an isolated detached
+worktree at `/root/v90cont-fraction-20261029`, based on `33affbc5`, with separate
+baseline/fixed executables. The only candidate source changes are the
+fractional-carry patch and regression above. The bounded driver owns its server
+process and uses account 2903, SIP 5078/RTP 14500, PCMU and raw paired taps;
+no existing service was stopped or rebuilt. It submits no username or password
+to the RasFinder: numbered 16-byte strings are echoed at its login prompt,
+then erased without a CR.
+
+The first completed 6311 comparison is mixed: the baseline returned three exact
+markers, then missed the next three and requested resync at TRACE +40549 ms.
+A fixed-build attempt failed earlier in V.8 and cannot grade upstream recovery.
+The next fixed-build call returned **11/11 exact markers (176 bytes)** during a
+60-second post-CONNECT hold without a resync or carrier-loss report. That is
+one call, not a measured improvement in pass rate or a sustained duplex
+qualification. Both data-bearing arms negotiated 31200 upstream and 50666
+downstream. Unexpected bytes in the erasure responses occur in both arms;
+exact marker matches must not be described as a byte-perfect whole transcript.
+The subsequent compression-disabled baseline/fixed pair both failed before
+DTE CONNECT: the baseline lost upstream carrier before its baseline was ready;
+the fixed call retrained before DATA. Those calls cannot resolve the erasure
+response anomaly or establish a change in continuity pass rate. They are not
+being silently excluded from the outcome.
+
+All six completed attempts, paired taps, transcripts, executable hashes,
+minimal source patch and bounded driver are retained locally at
+`reference-data/artifacts/rf-fractional-20261029/` (originals in
+`/root/v90cont-runs/` on CT117), indexed in `reference-data/index.tsv` and covered
+by a SHA256 manifest. They are evidence, not new regression dependencies.
+Next: obtain repeated data-bearing alternated arms and account for every
+received byte, rather than promoting a single 60-second marker success to
+hardware qualification.

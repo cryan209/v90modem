@@ -11765,13 +11765,15 @@ static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
     static float cached_frac = -1.0f;
     static float h[2*H];
     complexf_t z = {0.0f, 0.0f};
+    int whole = (int) floorf(frac);
 
-    if (frac < 0.0f)
-    {
-        index--;
-        frac += 1.0f;
-    }
-    /*endif*/
+    /* V.90 9.4.2.5: evaluate the position the timing actuator will use.
+       The slip scorer adds its trial fraction to Gardner's residual; that
+       sum can exceed one even when both operands are individually valid.
+       Carry all whole samples before applying the fractional-delay kernel.
+       Clamping frac>=1 to index+1 scores a different sampling instant. */
+    index += whole;
+    frac -= whole;
     if (frac <= 1e-4f)
         return v90_t3_raw_get(s, index);
     /*endif*/
@@ -12086,8 +12088,12 @@ static float v90_t3_offset_rotation(const v34_rx_state_t *s, float offset)
    one, whatever the fraction (it is held under 1.5 by the loop's clamp). */
 static int v90_t3_frac_lookahead(float frac)
 {
-    /* v90_t3_raw_get_frac()'s windowed sinc reads up to four samples on. */
-    return (fabsf(frac) > 1e-4f) ? 4 : 0;
+    /* Keep the existing conservative four-sample guard for fractions in
+       [-1,1]. A positive carry moves the sinc window as well as its centre:
+       e.g. frac=1.25 reads through index+5, not index+4. Never score or emit
+       against an unreceived sample (which the ring reader returns as zero). */
+    return (fabsf(frac) > 1e-4f)
+         ? 4 + (frac > 1.0f ? (int) floorf(frac) : 0) : 0;
 }
 /*- End of function --------------------------------------------------------*/
 

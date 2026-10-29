@@ -1,4 +1,5 @@
 path	files	bytes	retention_reason
+reference-data/artifacts/rf-fractional-20261029	46	9677327	docs/v90_upstream_data_path.md; six wired RasFinder baseline/fractional-carry calls, mixed outcomes, paired raw taps and bounded driver; local evidence, not a regression dependency
 reference-data/artifacts/k56flex-hsf-startup	34	3282778	docs/k56flex_implementation.md; native HSF V.8/INFO1/Phase-3 handoff, intermediate failures and truncated negative control; local driver-derived evidence
 reference-data/artifacts/k56flex-hsf-engine	9	1034832	docs/k56flex_implementation.md; native legacy HSF V.8bis succeeds, whole-engine post-ACK startup fails; local driver-derived evidence, not a regression dependency
 reference-data/artifacts/k56flex-vmhost-live	21	1008683	docs/k56flex_implementation.md; two wired live K56flex probe calls, no CRd/CONNECT; local evidence, not a regression dependency

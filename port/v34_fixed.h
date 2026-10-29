@@ -361,13 +361,20 @@ static __inline__ v34_fx_complex_t v34_fx_ring_get_frac(const v34_fx_complex_t *
     v34_fx_complex_t a;
     v34_fx_complex_t b;
     v34_fx_complex_t z;
+    int32_t whole = frac_q16/65536;
 
+    /* V.90 9.4.2.5: use the same position as the float timing actuator.
+       Candidate offset plus residual can cross more than one sample.
+       Division truncates toward zero; turn a negative remainder into the
+       floor representation without relying on a signed right shift. */
+    frac_q16 %= 65536;
     if (frac_q16 < 0)
     {
-        index--;
+        whole--;
         frac_q16 += 65536;
     }
     /*endif*/
+    index += whole;
     a = v34_fx_ring_get(ring, index, count, size, mask);
     if (frac_q16 <= 6)                      /* the float path's 1e-4 */
         return a;

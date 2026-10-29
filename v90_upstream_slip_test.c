@@ -10,6 +10,7 @@
  * orientations must find the same physical delay and land back on the grid.
  */
 #include "spandsp-master/src/v34rx.c"
+#include "port/v34_fixed.h"
 
 static int check_case(int baud, int high, int conjugate, int slip, float phase)
 {
@@ -69,6 +70,90 @@ static int check_case(int baud, int high, int conjugate, int slip, float phase)
     return failed;
 }
 
+/* The scorer adds a trial offset to Gardner's residual fraction. That sum
+   is not restricted to [0,1): normalize the integer carry rather than
+   clamping everything above one to a whole-sample read. */
+static int check_fractional_positions(void)
+{
+    const float fractions[] = {-2.25f, -1.25f, -0.75f, -0.25f,
+                                0.0f, 0.25f, 0.75f, 1.0f, 1.25f, 2.25f};
+    v34_rx_state_t *s = calloc(1, sizeof(*s));
+    int failed = 0;
+
+    if (!s)
+        return 1;
+    s->baud_rate = 4;
+    s->v90_t3_internal_rate = 9600;
+    s->v90_t3_raw_count = 4096;
+    s->v90_t3_next_symbol = 3999;
+    s->v90_t3_timing_enabled = true;
+    s->v90_t3_fse[V34_V90_T3_FSE_TAPS/2].re = 1.0f;
+    for (int n = 0; n < 4096; n++) {
+        s->v90_t3_raw[n].re = 5.0f*cosf(0.73f*n) + 2.0f*sinf(0.31f*n);
+        s->v90_t3_raw[n].im = 3.0f*sinf(0.83f*n) - 4.0f*cosf(0.27f*n);
+    }
+    for (unsigned k = 0; k < sizeof(fractions)/sizeof(fractions[0]); k++) {
+        float frac = fractions[k];
+        int whole = (int)floorf(frac);
+        float residual = frac - whole;
+        complexf_t got = v90_t3_raw_get_frac(s, 3000, frac);
+        complexf_t expected = v90_t3_raw_get_frac(s, 3000 + whole, residual);
+        float error = fabsf(got.re - expected.re) + fabsf(got.im - expected.im);
+        int need = whole + (residual > 1e-4f ? 4 : 0);
+        int ahead = v90_t3_frac_lookahead(frac);
+        bool bad = error > 1e-5f || ahead < need;
+
+        printf("%s: fractional read %+.2f: equivalent-position error %.6f, "
+               "lookahead=%d required=%d\n", bad ? "FAIL" : "PASS", frac,
+               error, ahead, need);
+        failed += bad;
+    }
+    for (int conjugate = 0; conjugate < 2; conjugate++) {
+        float a, b;
+        bool bad;
+
+        s->v90_t3_fse_conjugate = conjugate != 0;
+        s->v90_t3_gardner.acc = 0.4f;
+        a = v90_t3_score_offset(s, 5.0f/6.0f);
+        /* Same physical position, represented with a one-sample carry. */
+        s->v90_t3_next_symbol++;
+        s->v90_t3_gardner.acc = -0.6f;
+        b = v90_t3_score_offset(s, 5.0f/6.0f);
+        s->v90_t3_next_symbol--;
+        bad = fabsf(a - b) > 1e-4f;
+        printf("%s: fractional candidate conjugate=%d: same-position scores "
+               "%.6f / %.6f\n", bad ? "FAIL" : "PASS", conjugate, a, b);
+        failed += bad;
+    }
+    /* The optional integer actuator uses Q16 linear interpolation rather
+       than this path's sinc, but it must carry the same whole-sample part. */
+    {
+        v34_fx_complex_t ring[16];
+
+        for (int n = 0; n < 16; n++) {
+            ring[n].re = (n*n*137 + 31*n) % 2000;
+            ring[n].im = (n*n*n*19 + 7*n) % 2000;
+        }
+        for (unsigned k = 0; k < sizeof(fractions)/sizeof(fractions[0]); k++) {
+            float frac = fractions[k];
+            int whole = (int)floorf(frac);
+            int32_t q16 = (int32_t)(frac*65536.0f);
+            int32_t residual = (int32_t)((frac - whole)*65536.0f);
+            v34_fx_complex_t got = v34_fx_ring_get_frac(ring, 8, q16, 16, 16, 15);
+            v34_fx_complex_t expected = v34_fx_ring_get_frac(ring, 8 + whole,
+                                                             residual, 16, 16, 15);
+            bool bad = got.re != expected.re || got.im != expected.im;
+
+            printf("%s: Q16 fractional read %+.2f: (%d,%d) / (%d,%d)\n",
+                   bad ? "FAIL" : "PASS", frac, got.re, got.im,
+                   expected.re, expected.im);
+            failed += bad;
+        }
+    }
+    free(s);
+    return failed;
+}
+
 int main(void)
 {
     const int bauds[] = {3, 4};
@@ -81,5 +166,6 @@ int main(void)
                 for (int slip = -1; slip <= 1; slip += 2)
                     for (unsigned p = 0; p < sizeof(phases)/sizeof(phases[0]); p++)
                         failed += check_case(bauds[b], high, conjugate, slip, phases[p]);
+    failed += check_fractional_positions();
     return failed ? 1 : 0;
 }
