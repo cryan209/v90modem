@@ -224,6 +224,8 @@ TEST_TARGETS += k56flex_client_tx_test
 TEST_TARGETS += audio_sock_modem
 V90_ANALOGUE_PR4_TEST_OBJS = v90_analogue_pr4_test.o v90_analogue_pr4.o
 LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
+LINE_SUPERVISOR_TEST_OBJS = line_supervisor_test.o
+TEST_TARGETS += line_supervisor_test
 # The two DTE console arrangements (classic combined, control + data).
 CONSOLE_TEST_OBJS = console_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 # AT+MS through the real engine and PTY, plus at_ms.c on its own.
@@ -522,6 +524,11 @@ fax_class_test: $(FAX_CLASS_TEST_OBJS) spandsp
 
 line_monitor_test: $(LINE_MONITOR_TEST_OBJS) spandsp
 	$(CC) $(LINE_MONITOR_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+line_supervisor_test: $(LINE_SUPERVISOR_TEST_OBJS)
+	$(CC) $(LINE_SUPERVISOR_TEST_OBJS) -o $@
+
+line_supervisor_test.o: line_supervisor_test.c line_supervisor.c line_supervisor.h test_tmp.h
 
 v250_ctl_test: $(V250_CTL_TEST_OBJS)
 	$(CC) $(V250_CTL_TEST_OBJS) -o $@

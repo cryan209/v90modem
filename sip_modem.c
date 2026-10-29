@@ -1431,8 +1431,16 @@ int main(int argc, char *argv[])
             fprintf(stderr, "%s: --lines takes 1 to %d\n", argv[0], LINE_SUPERVISOR_MAX_LINES);
             return 2;
         }
-        if (lines > 0 || recycle)
+        if (lines > 0 || recycle) {
+            /* Help belongs to the supervisor, not N workers that would
+               repeatedly exit and get restarted. No engine/SIP threads yet. */
+            for (int i = 1; i < argc; i++)
+                if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+                    print_usage(stdout, argv[0]);
+                    return 0;
+                }
             return line_supervisor_run(argc, argv, lines > 0 ? lines : 1, recycle);
+        }
     }
 
     const char *sip_server  = NULL;

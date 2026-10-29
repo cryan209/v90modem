@@ -4893,10 +4893,26 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
 
     if (!phase3_rx_dump_fp && !getenv("ME_GUI_PORT"))
     {
-        phase3_rx_dump_fp = fopen("/tmp/v90_phase3_rx.raw", "wb");
-        phase3_rx_dump_count = 0;
-        if (phase3_rx_dump_fp)
-            fprintf(stderr, "[V34 RX] Phase 3 RX audio dump started -> /tmp/v90_phase3_rx.raw\n");
+        const char *dir = getenv("ME_DUMP_DIR");
+        char *path;
+        size_t size;
+
+        /* Honour the engine's per-worker directory. The legacy /tmp name
+           made concurrent lines truncate one another's Phase 3 evidence. */
+        if (!dir || !*dir)
+            dir = "/tmp";
+        size = strlen(dir) + sizeof("/v90_phase3_rx.raw");
+        path = malloc(size);
+        if (path)
+        {
+            snprintf(path, size, "%s/v90_phase3_rx.raw", dir);
+            phase3_rx_dump_fp = fopen(path, "wb");
+            phase3_rx_dump_count = 0;
+            if (phase3_rx_dump_fp)
+                fprintf(stderr, "[V34 RX] Phase 3 RX audio dump started -> %s\n", path);
+            /*endif*/
+            free(path);
+        }
         /*endif*/
     }
     /*endif*/

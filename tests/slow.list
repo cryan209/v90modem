@@ -22,6 +22,9 @@ FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 ulaw 160
 ./console_test
 # Multi-line server: four concurrent V.34 calls.
 python3 tools/multi_line_test.py --lines 4 --mode v34 --connect-timeout 90
+# V.90 8.5.2/9.4.2.5: eight independent bearer/engine processes, 32 exact
+# payload blocks per call, then repeat on fresh workers after recycling.
+python3 tools/multi_line_test.py --lines 8 --mode v90 --payload-rounds 32 --recycle --io-schedule
 # Our x2 analogue client against the original Ie030002 I-modem in a clean
 # courier-emu export (../courier-emu), no ANSam knob: CONNECT and a line each way.
 sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ln -s "$PWD/../courier-emu/Ie030002.nac" "$TMPDIR/" && env -u ME_ANS_NOTCH_RATIO ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py --emu "$TMPDIR" --output "$TMPDIR/out" --fast --engine-at "AT\\N0" --engine-send OUR-X2-CLIENT-0123456789! --answer-send IMODEM-X2-SERVER-0123456789'

@@ -98,6 +98,42 @@ static const char *opt_value(int argc, char **argv, const char *opt)
     return v;
 }
 
+/* Validate the whole allocation before spawning any line. Otherwise an
+ * overlapping/overflowed port silently leaves part of the pool restarting. */
+static int valid_port_layout(int argc, char **argv, int lines)
+{
+    long sip = 5060, rtp = 4000;
+
+    for (int i = 1; i < argc; i++) {
+        bool is_sip = !strcmp(argv[i], "--local-port");
+        bool is_rtp = !strcmp(argv[i], "--rtp-port");
+        char *end;
+        long value;
+
+        if (!is_sip && !is_rtp)
+            continue;
+        if (++i == argc)
+            return 0;
+        errno = 0;
+        value = strtol(argv[i], &end, 10);
+        if (errno || end == argv[i] || *end || value < 0 || value > 65535)
+            return 0;
+        if (is_sip)
+            sip = value;
+        else
+            rtp = value ? value : 4000;
+    }
+    if (sip < 1 || sip + lines - 1 > 65535 || rtp + 100L*(lines - 1) + 1 > 65535)
+        return 0;
+    for (int i = 0; i < lines; i++) {
+        long port = rtp + 100L*i;
+
+        if (port <= sip + lines - 1 && port + 1 >= sip)
+            return 0;
+    }
+    return 1;
+}
+
 /* The k-th comma-separated field of list (the last one when there are
  * fewer), into out.  Returns the number of fields. */
 static int list_field(const char *list, int k, char *out, size_t len)
@@ -205,52 +241,158 @@ static void build_worker_args(int argc, char **argv, int line, bool recycle,
 
 extern char **environ;
 
-/* In the child: give this line its own diagnostic paths (see above). */
-static void per_line_environment(int line)
+/* Only known path-valued diagnostics get automatic suffixes. A boolean
+ * *_DUMP setting must not accidentally become a filename. Unknown paths
+ * can still use the explicit %L convention. */
+static int diagnostic_path_kind(const char *name)
 {
-    char name[256], value[1024];
+    static const char *const files[] = {
+        "ME_IO_SCHEDULE", "DS_RX_BIT_DUMP", "DS_TX_BIT_DUMP",
+        "DS_TX_FRAME_DUMP", "ME_V90_UPSTREAM_SYM_DUMP", "ME_RX_BIT_DUMP",
+        "V90_CP_ACCEPT_DUMP", "V90_CP_BIT_DUMP", "V90_RENEG_BIT_DUMP",
+        "V90_JA_BIT_DUMP", "V90A_RX_CODEWORD_DUMP", "V90A_T2_DUMP", "V90A_SYM_DUMP"
+    };
+
+    if (!strcmp(name, "ME_DUMP_DIR") || !strcmp(name, "VPCM_G711_TAP_DIR"))
+        return 1;
+    for (size_t i = 0; i < sizeof(files)/sizeof(files[0]); i++)
+        if (!strcmp(name, files[i]))
+            return 2;
+    return 0;
+}
+
+static int make_directory(const char *path)
+{
+    struct stat st;
+
+    if (mkdir(path, 0777) == 0)
+        return 0;
+    if (errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+        return 0;
+    return -1;
+}
+
+static int make_directories(char *path)
+{
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        if (make_directory(path) != 0) {
+            *p = '/';
+            return -1;
+        }
+        *p = '/';
+    }
+    return make_directory(path);
+}
+
+/* In the child, before starting threads: isolate diagnostics without
+ * changing the parent's environment. Preserve the ORIGINAL template flag:
+ * testing for %L after expansion used to append an extra /line<i>. */
+static int per_line_environment(int line)
+{
+    char name[256], number[32];
     size_t n = 0;
     char **copy;
+    int result = -1;
 
+    snprintf(number, sizeof(number), "%d", line);
     while (environ[n])
         n++;
     copy = calloc(n + 1, sizeof(char *));
     if (!copy)
-        return;
-    for (size_t i = 0; i < n; i++)
-        copy[i] = strdup(environ[i]);
+        return -1;
     for (size_t i = 0; i < n; i++) {
-        const char *eq = copy[i] ? strchr(copy[i], '=') : NULL;
+        if (!(copy[i] = strdup(environ[i])))
+            goto done;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const char *eq = strchr(copy[i], '=');
         const char *src;
-        size_t o = 0;
+        char *value;
+        size_t o = 0, capacity;
+        bool templated;
+        int kind;
 
-        if (!eq || (size_t) (eq - copy[i]) >= sizeof(name) || !strstr(eq + 1, "%L"))
+        if (!eq || (size_t)(eq - copy[i]) >= sizeof(name) || !eq[1])
             continue;
-        memcpy(name, copy[i], (size_t) (eq - copy[i]));
+        memcpy(name, copy[i], (size_t)(eq - copy[i]));
         name[eq - copy[i]] = '\0';
-        for (src = eq + 1; *src && o + 8 < sizeof(value); src++) {
+        templated = strstr(eq + 1, "%L") != NULL;
+        kind = diagnostic_path_kind(name);
+        if (!templated && !kind)
+            continue;
+        capacity = strlen(eq + 1) + 32;
+        for (src = eq + 1; (src = strstr(src, "%L")); src += 2)
+            capacity += strlen(number);
+        value = malloc(capacity);
+        if (!value)
+            goto done;
+        for (src = eq + 1; *src; src++) {
             if (src[0] == '%' && src[1] == 'L') {
-                o += (size_t) snprintf(value + o, sizeof(value) - o, "%d", line);
+                memcpy(value + o, number, strlen(number));
+                o += strlen(number);
                 src++;
             } else {
                 value[o++] = *src;
             }
         }
         value[o] = '\0';
-        setenv(name, value, 1);
-    }
-    {
-        const char *dump = getenv("ME_DUMP_DIR");
-
-        if (dump && *dump && !strstr(dump, "%L")) {
-            snprintf(value, sizeof(value), "%s/line%d", dump, line);
-            mkdir(value, 0777);
-            setenv("ME_DUMP_DIR", value, 1);
+        if (!templated && kind)
+            snprintf(value + o, capacity - o, "%sline%d", kind == 1 ? "/" : ".", line);
+        if ((kind == 1 && make_directories(value) != 0)
+            || setenv(name, value, 1) != 0) {
+            fprintf(stderr, "line supervisor: cannot isolate %s: %s\n", name, strerror(errno));
+            free(value);
+            goto done;
         }
+        free(value);
     }
+    if (!getenv("ME_DUMP_DIR") || !*getenv("ME_DUMP_DIR")) {
+        const char *tmp = getenv("TMPDIR");
+        char *path;
+
+        if (!tmp || !*tmp)
+            tmp = "/tmp";
+        path = malloc(strlen(tmp) + 64);
+        if (!path)
+            goto done;
+        snprintf(path, strlen(tmp) + 64, "%s/v90modem-line%d-XXXXXX", tmp, line);
+        if (!mkdtemp(path) || setenv("ME_DUMP_DIR", path, 1) != 0) {
+            perror("line supervisor: private dump directory");
+            free(path);
+            goto done;
+        }
+        free(path);
+    }
+    result = 0;
+done:
     for (size_t i = 0; i < n; i++)
         free(copy[i]);
     free(copy);
+    return result;
+}
+
+/* The supervisor's read ends must not leak into subsequently exec'd lines.
+ * Set flags before fork; only dup2's stdout/stderr survive in the worker. */
+static int make_worker_pipe(int fds[2])
+{
+    int flags;
+
+    if (pipe(fds) != 0)
+        return -1;
+    flags = fcntl(fds[0], F_GETFL);
+    if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) < 0
+        || fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0
+        || fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0) {
+        int saved = errno;
+        close(fds[0]);
+        close(fds[1]);
+        errno = saved;
+        return -1;
+    }
+    return 0;
 }
 
 static int start_worker(worker_t *wk, int line, int argc, char **argv, bool recycle)
@@ -260,7 +402,7 @@ static int start_worker(worker_t *wk, int line, int argc, char **argv, bool recy
     worker_args_t args;
 
     build_worker_args(argc, argv, line, recycle, &args);
-    if (pipe(fds) != 0)
+    if (make_worker_pipe(fds) != 0)
         return -1;
     pid = fork();
     if (pid < 0) {
@@ -275,14 +417,14 @@ static int start_worker(worker_t *wk, int line, int argc, char **argv, bool recy
         close(fds[1]);
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
-        per_line_environment(line);
+        if (per_line_environment(line) != 0)
+            _exit(127);
         execv(argv[0], args.argv);
         execvp(argv[0], args.argv);
         perror("line supervisor: exec");
         _exit(127);
     }
     close(fds[1]);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
     wk->pid = pid;
     wk->fd = fds[0];
     wk->len = 0;
@@ -297,7 +439,11 @@ static int start_worker(worker_t *wk, int line, int argc, char **argv, bool recy
 /* Copy whole lines of a worker's output to ours, prefixed. */
 static void drain(worker_t *wk, int line, bool flush_partial)
 {
-    for (;;) {
+    unsigned reads = 0;
+
+    /* A continuously chatty worker must not starve other lines, restarts
+       or signal handling. After exit, drain the finite remainder to EOF. */
+    while (flush_partial || reads++ < 16) {
         ssize_t n = wk->fd >= 0
             ? read(wk->fd, wk->buf + wk->len, sizeof(wk->buf) - 1 - wk->len) : 0;
 
@@ -327,6 +473,18 @@ int line_supervisor_run(int argc, char **argv, int lines, bool recycle)
     worker_t wk[LINE_SUPERVISOR_MAX_LINES];
     struct sigaction sa;
 
+    if (lines < 1 || lines > LINE_SUPERVISOR_MAX_LINES
+        || !valid_port_layout(argc, argv, lines)) {
+        fprintf(stderr, "%s: --lines requires disjoint SIP and RTP/RTCP ports within 1..65535; "
+                        "choose --local-port/--rtp-port bases (e.g. --rtp-port 10000)\n", argv[0]);
+        return 2;
+    }
+    if ((opt_value(argc, argv, "--control-link") != NULL)
+        != (opt_value(argc, argv, "--data-link") != NULL)
+        || (opt_value(argc, argv, "--control-link") && opt_value(argc, argv, "--pty-link"))) {
+        fprintf(stderr, "%s: use --pty-link or both --control-link/--data-link with --lines\n", argv[0]);
+        return 2;
+    }
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--gui") || !strcmp(argv[i], "--gui-web")
             || !strcmp(argv[i], "--gui-loopback") || !strcmp(argv[i], "--line-index")

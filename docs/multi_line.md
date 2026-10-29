@@ -3,8 +3,10 @@
 The engine keeps one call's state in file-scope statics, so a line is a
 process. `sip_v90_modem --lines N ...` re-executes itself N times, one worker
 per line, and supervises them (`line_supervisor.c`). This is the gap
-analysis's "cheap" option (item 1). Hoisting the globals into a per-call
-context remains the proper one.
+analysis's process-isolated option (item 1): multiple calls are supported
+concurrently, with one engine/PTY/SIP/RTP instance per worker. Do not raise a
+worker's PJSUA call limit and share the DSP globals between calls. Supporting
+multiple calls *inside one worker* would require a separate context refactor.
 
 ```bash
 ./sip_v90_modem --lines 4 --sip-server asterisk.net.cryan.nz --username 6001 --password 6001 --pty-link /tmp/v90modem
@@ -21,15 +23,48 @@ Worker i runs with the supervisor's arguments, plus these:
 | console | `<--pty-link>.i` (default `/tmp/modem0.i`), or `<--control-link>.i` and `<--data-link>.i` |
 | stored profiles | `<--profile>.i` |
 | account | the i-th entry of a comma-separated `--username` / `--password`, or the only entry |
-| environment | `%L` in any value becomes i; `ME_DUMP_DIR` without `%L` gets a `line<i>` subdirectory |
+| environment | `%L` in any value becomes i; diagnostic directory/file paths without `%L` are separated automatically (below) |
 
-**Diagnostics.** The environment rule matters because the file-naming
-diagnostics (`ME_IO_SCHEDULE`, `ME_DUMP_DIR`, ...) name one file per process.
-Without it, every worker would write the same one. For example,
-`ME_IO_SCHEDULE=/tmp/sched.%L` gives each line its own file.
+**Diagnostics.** Each line must have separate files, not just separate DSP
+memory. `%L` is expanded using the original value: a template is not then
+suffixed a second time. In particular, `ME_DUMP_DIR=/tmp/dump.%L` means
+`/tmp/dump.0`, not `/tmp/dump.0/line0`. Missing directory parents are created.
+
+- `ME_DUMP_DIR` and `VPCM_G711_TAP_DIR` without `%L` get a `line<i>`
+  subdirectory. If `ME_DUMP_DIR` is absent/empty, each worker gets a private
+  `v90modem-line<i>-XXXXXX` directory under `TMPDIR` (or `/tmp`), rather than
+  all workers overwriting the legacy `/tmp` PCM filenames. The V.90 Phase 3
+  receiver dump also honours this directory instead of a shared absolute
+  `/tmp/v90_phase3_rx.raw`. Optional G.711
+  recording is **not** enabled unless requested.
+- Known diagnostic **files** without `%L` get `.line<i>` appended:
+  `ME_IO_SCHEDULE`, `DS_RX_BIT_DUMP`, `DS_TX_BIT_DUMP`, `DS_TX_FRAME_DUMP`,
+  `ME_V90_UPSTREAM_SYM_DUMP`, `ME_RX_BIT_DUMP`, `V90_CP_ACCEPT_DUMP`,
+  `V90_CP_BIT_DUMP`, `V90_RENEG_BIT_DUMP`, `V90_JA_BIT_DUMP`,
+  `V90A_RX_CODEWORD_DUMP`, `V90A_T2_DUMP`, `V90A_SYM_DUMP`.
+- Other environment values retain the explicit `%L` convention; boolean
+  dump switches are not treated as filenames. Values are not truncated at
+  1024 bytes. An isolation/setup failure stops that worker before SIP starts.
+
+For example, `ME_IO_SCHEDULE=/tmp/sched.%L` gives each line its own file.
+Explicit per-line paths can still be reused across calls/recycles; they are
+not a per-call recording archive.
+
+**Ports.** The entire SIP and RTP/RTCP allocation is checked before any worker
+starts. Overflow, malformed ports and overlapping pools fail immediately
+instead of leaving a partially working pool in a restart loop. Default bases
+remain disjoint through 40 lines before SIP 5060+i meets RTP 4000+100*i. For a larger
+pool, choose disjoint bases, for example `--lines 64 --rtp-port 10000`.
+Split consoles require both links and cannot be combined with `--pty-link`.
+`--lines N --help` prints help once without starting workers.
 
 **Output.** Workers' stdout and stderr are copied to the supervisor's, a line
-at a time, prefixed `[Li]`.
+at a time, prefixed `[Li]`. A busy worker yields after at most sixteen reads
+per drain, so it cannot monopolize other lines' output, restarts or signal
+handling. After a worker exits, its finite remaining output is drained to
+EOF. Supervisor pipe descriptors close on exec instead of accumulating in
+other workers. A slow external stdout consumer can still apply backpressure;
+this is fairness, not a hard real-time logging guarantee.
 
 **Restarts.** A worker that exits is started again: after 1 s, or after 10 s
 when it has failed three times within 5 s of starting.
@@ -84,8 +119,13 @@ the AOR change above. The local test below uses no registrar.
 - **Setup.** One supervisor with N lines answering on 127.0.0.1, with no
   registrar: each worker listens on its own port. N ordinary caller
   instances each dial a different line, all at once.
-- **Checks.** Every line's console echoes after CONNECT. Every caller must get
-  its own payload back byte-exact, and the calls must overlap in time.
+- **Checks.** Every line's console echoes after CONNECT. A startup barrier
+  keeps early callers connected until all callers have trained. Each caller
+  must receive exactly its own payload (not just find it inside garbage).
+  `--payload-rounds N` sends N distinct blocks on each call, and a completion
+  barrier keeps the calls open while their peers finish. Nonblocking short
+  PTY writes are completed; failure aborts the startup barrier rather than
+  leaving other callers stuck.
 - **`--recycle`.** It checks that every line got a fresh worker, then runs a
   second round on the new workers.
 - **Shutdown.** The supervisor is stopped, and no worker may outlive it.
@@ -100,7 +140,7 @@ the AOR change above. The local test below uses no registrar.
 | 4 lines V.90 (callers analogue) | ok, CONNECT 56000 on all four, ~1.5 CPU-s per worker to data mode |
 | 8 lines V.90 | 7/8 every run: line 6 fails |
 
-**The 8-line failure is not the server.**
+**Historical 8-line failure (the earlier build):**
 - One line with line 6's payload fails on its own:
   `--lines 1 --mode v90 --payload-offset 6`.
 - The echo goes wrong after its first line: a character-framing slip, then
@@ -109,7 +149,54 @@ the AOR change above. The local test below uses no registrar.
   jitter buffer) and balanced sample counts.
 - So it is a content-dependent defect in the V.90 upstream data path. It is
   filed for its own investigation, not covered up here.
-- That is why the test lists use V.22bis (fast) and V.34 (slow).
+- At the time, that kept V.90 out of the lists; the current slow tier now
+  includes the stronger eight-line V.90 regression below.
+
+### 2026-10-29: current concurrent-call validation
+
+The historical line-6 result **does not reproduce in the current working
+tree**. An initial unchanged-harness run also passes 8/8, so do not attribute
+that difference to the supervisor changes or infer which earlier DSP fix
+resolved the old short test. The stronger test now gives:
+
+| Local software-peer run | Result |
+| --- | --- |
+| 8 V.90 lines, 32 blocks/call, recycle, 2 rounds | **16/16 calls**, 14,392 exact echoed bytes each; **230,272 bytes total** |
+| 4 V.34 lines, 8 blocks/call, recycle, 2 rounds | **8/8 calls**, 3,552 exact echoed bytes each; **28,416 bytes total** |
+| 3 V.22bis lines, recycle, 2 rounds (fast tier) | **6/6 calls**, 416 exact echoed bytes each |
+
+All eight V.90 calls are connected together for at least 20 seconds per
+round. In the capture-enabled run, every server line has its own G.711 tap
+directory with no shared root tap and its own nonempty Phase 3 PCM dump.
+A fresh recycled worker truncates its per-line G.711 files at initialization;
+those empty final tap files are **not** retained payload evidence or a
+per-call archive. Exact payload results come from the DTE checks, not these
+post-recycle taps. The reported final-round schedules have
+balanced RX/TX sample counts. V.90 and V.34 matrices also ran concurrently on
+this Mac. This exercises real local SIP/RTP and software modems, **not eight
+physical analogue modems, PBX hunt-group routing or RasFinder qualification**.
+The existing physical single-call continuity failures remain open.
+
+`line_supervisor_test` directly tests the production static helpers: template
+handling, directory creation, private defaults, file isolation, long values,
+bounded draining, close-on-exec pipes and port layouts. Before the fixes, all
+five environment cases and the busy-drain case fail. The Python harness tests
+cover short writes, recycled PTYs whose symlink was already replaced, startup
+failure, help/preflight, and a SIP-free two-worker fixture: killing worker 0
+restarts only worker 0, preserves worker 1's PID, and shutdown leaves no
+fixture workers alive. It is a process-lifecycle test, not active-call crash
+recovery.
+
+**648/648 fast rows pass** (`test-logs/multi-call-isolation-final/`, 129 s).
+The eight-line V.90 row is also listed in `tests/slow.list`; the whole slow
+matrix was not rerun here.
+The first whole-tier invocation exceeded its outer 240-second tool budget;
+it is not counted as a pass. A complete fresh invocation with a sufficient
+budget produced the result above. Small retained logs/provenance are under
+`reference-data/artifacts/multi-call-isolation-20261029/`; large disposable
+local captures are under `artifacts/multi-call-isolation/`. Tests ran in the
+shared working tree with unrelated pending HDX/K56flex changes; those are not
+part of the supervisor change or physical qualification.
 
 ## CPU
 

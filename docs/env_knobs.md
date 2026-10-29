@@ -65,7 +65,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_RETRAIN_ON_LOSS_DWELL_MS` | modem_engine.c | Minimum time between those retrains. |
 | `ME_V90_MAX_DOWNSTREAM_RATE` | v90.c | V.90 downstream ceiling in bit/s (AT+MS does the same per call). |
 | `ME_V90_DATA_LEAN` | v34rx_data.c | 1 drops the V.90 data-mode measurement work (embedded targets). |
-| `ME_DUMP_DIR` | line_supervisor.c, modem_engine.c | Directory for engine PCM dumps; set one per process. |
+| `ME_DUMP_DIR` | line_supervisor.c, modem_engine.c, spandsp-master/src/v34rx.c | Directory for engine/Phase 3 PCM dumps; `--lines` isolates it per worker ([multi-line](multi_line.md)). |
 | `ME_G711_CAPTURE` | modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 

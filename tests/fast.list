@@ -840,6 +840,8 @@ python3 tools/pcm_ber_regression.py
 # N concurrent local SIP calls echoed byte-exact; --recycle gives each call a
 # fresh worker and the second round runs on them.  The first round is the
 # plain N-line check, so there is no separate row for it.
+./line_supervisor_test
+python3 tools/test_multi_line_harness.py
 python3 tools/multi_line_test.py --lines 3 --mode v22 --recycle
 
 # V.34 12.5.2: dense 33600 primary resynchronization, both roles/laws.

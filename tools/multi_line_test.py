@@ -14,6 +14,7 @@ Finally the supervisor is stopped and no worker may survive it.
 import argparse
 import os
 import re
+import select
 import signal
 import socket
 import subprocess
@@ -29,20 +30,24 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = str(ROOT / 'sip_v90_modem')
 
 
-def free_port_block(n, step=1):
-    """A base port with base, base+step, ... base+(n-1)*step free for UDP."""
+def free_port_block(n, step=1, width=1, avoid=(), even=False):
+    """Check disjoint UDP allocations, including the adjacent RTCP ports."""
+    avoid = set(avoid)
     for _ in range(200):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1', 0))
             base = s.getsockname()[1]
-        if base + n * step >= 65000:
+        if even:
+            base &= ~1
+        ports = [base + i * step + k for i in range(n) for k in range(width)]
+        if max(ports) >= 65000 or not avoid.isdisjoint(ports):
             continue
         socks = []
         try:
-            for i in range(n):
+            for port in ports:
                 t = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 socks.append(t)
-                t.bind(('127.0.0.1', base + i * step))
+                t.bind(('127.0.0.1', port))
             return base
         except OSError:
             pass
@@ -90,57 +95,94 @@ class Pump(threading.Thread):
         return ''.join(self.lines)
 
 
+def write_all(fd, data, timeout=10):
+    """PTYs are nonblocking; a short write must not silently truncate a probe."""
+    pending = memoryview(data)
+    deadline = time.monotonic() + timeout
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('PTY write timed out')
+        if not select.select([], [fd], [], remaining)[1]:
+            continue
+        try:
+            count = os.write(fd, pending)
+        except BlockingIOError:
+            continue
+        if count <= 0:
+            raise OSError('PTY write returned no bytes')
+        pending = pending[count:]
+
+
 def line_echo(path, stop, connected, idx):
     """A line's DTE: after CONNECT, echo every byte back."""
     fd = None
     seen = b''
-    while not stop.is_set():
-        if fd is None:
+    try:
+        while not stop.is_set():
+            if fd is None:
+                try:
+                    fd = open_pty(path, timeout=1)
+                except (SystemExit, OSError):
+                    continue
             try:
-                fd = open_pty(path, timeout=1)
-            except SystemExit:
+                data = os.read(fd, 4096)
+            except BlockingIOError:
+                time.sleep(0.01)
                 continue
-        data = read_some(fd)
-        if not data:
-            if not os.path.exists(path):      # recycled worker: new PTY
+            except OSError:
+                data = b''
+            if not data:
+                # EOF/EIO means the old master is gone even when a recycled
+                # worker has already replaced the symlink. Do not keep the
+                # dead descriptor just because that pathname exists again.
                 os.close(fd)
                 fd, seen = None, b''
-            time.sleep(0.01)
-            continue
-        if b'CONNECT' not in seen:
-            seen += data
-            if b'CONNECT' in seen:
-                connected[idx] = time.time()
-                tail = seen.split(b'CONNECT', 1)[1]
-                tail = tail.split(b'\n', 1)[1] if b'\n' in tail else b''
-                if tail:
-                    os.write(fd, tail)
-            continue
-        if b'NO CARRIER' in data:
-            seen = b''
-            continue
-        os.write(fd, data)
+                time.sleep(0.01)
+                continue
+            if b'CONNECT' not in seen:
+                seen += data
+                if b'CONNECT' in seen:
+                    connected[idx] = time.time()
+                    tail = seen.split(b'CONNECT', 1)[1]
+                    tail = tail.split(b'\n', 1)[1] if b'\n' in tail else b''
+                    if tail:
+                        write_all(fd, tail)
+                continue
+            if b'NO CARRIER' in data:
+                seen = b''
+                continue
+            write_all(fd, data)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
-def one_call(i, args, tmp, line_port, rtp_base, results):
+def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_base=None):
     """Caller i: dial line i, send a payload, wait for the echo."""
-    port = free_port_block(1)
-    pty = str(tmp / f'call.{i}')
-    proc = subprocess.Popen(
-        [BINARY, '--bind-addr', '127.0.0.1', '--local-port', str(port),
-         '--rtp-port', str(rtp_base + 100 * i),
-         '--sip-server', f'127.0.0.1:{line_port + i}', '--mode', args.mode,
-         '--auto-answer', '0', '--pty-link', pty],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env=dict(os.environ, ME_DATA_FRAMING='v14', **caller_env(args),
-                 **({'ME_IO_SCHEDULE': str(tmp / f'call.{i}.sched')} if args.io_schedule else {})))
-    pump = Pump(proc)
-    pump.start()
-    r = {'ok': False, 'why': '', 'connect': None, 'done': None}
+    r = {'ok': False, 'why': '', 'connect': None, 'done': None, 'bytes_echoed': 0}
     results[i] = r
+    fd = proc = pump = None
     try:
+        port = caller_sip_base + i if caller_sip_base is not None else free_port_block(1)
+        pty = str(tmp / f'call.{i}')
+        dumps = tmp / f'caller.{i}.dumps'
+        dumps.mkdir(exist_ok=True)
+        proc = subprocess.Popen(
+            [BINARY, '--bind-addr', '127.0.0.1', '--local-port', str(port),
+             '--rtp-port', str(rtp_base + 100 * i),
+             '--sip-server', f'127.0.0.1:{line_port + i}', '--mode', args.mode,
+             '--auto-answer', '0', '--pty-link', pty],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=dict(os.environ, ME_DATA_FRAMING='v14', ME_DUMP_DIR=str(dumps),
+                     **caller_env(args),
+                     **({'VPCM_G711_TAP_DIR': str(dumps / 'g711')}
+                        if os.environ.get('VPCM_G711_TAP_DIR') else {}),
+                     **({'ME_IO_SCHEDULE': str(tmp / f'call.{i}.sched')} if args.io_schedule else {})))
+        pump = Pump(proc)
+        pump.start()
         fd = open_pty(pty)
-        os.write(fd, b'ATD1234\r')
+        write_all(fd, b'ATD1234\r')
         got = b''
         deadline = time.time() + args.connect_timeout
         while b'CONNECT' not in got and time.time() < deadline:
@@ -155,27 +197,50 @@ def one_call(i, args, tmp, line_port, rtp_base, results):
         m = re.search(rb'CONNECT (\d+)', got)
         r['rate'] = int(m.group(1)) if m else 0
         time.sleep(1.0)                       # let both ends settle
-        payload = (f'line {i + args.payload_offset} '.encode() + bytes(range(32, 127)) + b'\r\n') * 4
-        os.write(fd, payload)
-        echo = b''
-        deadline = time.time() + args.echo_timeout
-        while payload not in echo and time.time() < deadline:
-            echo += read_some(fd)
-            time.sleep(0.02)
-        if payload not in echo:
-            r['why'] = f'echo incomplete: {len(echo)} of {len(payload)} bytes'
-            (tmp / f'echo.{i}.bin').write_bytes(echo)
-            (tmp / f'sent.{i}.bin').write_bytes(payload)
-            return
+        # Do not let an early caller finish before the slowest has trained.
+        barrier.wait(timeout=args.connect_timeout)
+        for block in range(args.payload_rounds):
+            label = f'line {i + args.payload_offset} '
+            if block:
+                label += f'block {block} '
+            payload = (label.encode() + bytes(range(32, 127)) + b'\r\n') * 4
+            write_all(fd, payload, args.echo_timeout)
+            echo = b''
+            deadline = time.monotonic() + args.echo_timeout
+            while len(echo) < len(payload) and time.monotonic() < deadline:
+                echo += read_some(fd)
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.02)
+            if echo != payload:
+                r['why'] = f'block {block}: echo mismatch: {len(echo)} of {len(payload)} bytes'
+                (tmp / f'echo.{i}.block{block}.bin').write_bytes(echo)
+                (tmp / f'sent.{i}.block{block}.bin').write_bytes(payload)
+                return
+            r['bytes_echoed'] += len(payload)
         r['done'] = time.time()
         r['ok'] = True
-    finally:
         try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        r['log'] = pump.text()
+            barrier.wait(timeout=args.echo_timeout)
+        except threading.BrokenBarrierError:
+            pass  # Keep this channel's exact result if a different one failed.
+    except (OSError, TimeoutError, SystemExit, threading.BrokenBarrierError) as exc:
+        r['why'] = str(exc) or type(exc).__name__
+    finally:
+        if not r['ok']:
+            barrier.abort()
+        if fd is not None:
+            os.close(fd)
+        if proc is not None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(5)
+        if pump is not None:
+            pump.join(timeout=2)
+            r['log'] = pump.text()
 
 
 def caller_env(args):
@@ -222,6 +287,8 @@ def main():
     ap.add_argument('--mode', default='v22')
     ap.add_argument('--recycle', action='store_true')
     ap.add_argument('--rounds', type=int, default=1)
+    ap.add_argument('--payload-rounds', type=int, default=1,
+                    help='distinct payload blocks per call, checked byte-for-byte')
     ap.add_argument('--payload-offset', type=int, default=0,
                     help='number the payloads from this instead of 0')
     ap.add_argument('--io-schedule', action='store_true',
@@ -229,20 +296,26 @@ def main():
     ap.add_argument('--connect-timeout', type=float, default=60)
     ap.add_argument('--echo-timeout', type=float, default=30)
     args = ap.parse_args()
+    if not 1 <= args.lines <= 64 or args.payload_rounds < 1 or args.rounds < 1:
+        ap.error('lines must be 1..64; payload-rounds and rounds must be positive')
     if args.recycle and args.rounds < 2:
         args.rounds = 2
 
     tmp = Path(tempfile.mkdtemp(prefix='multi-line-'))
     line_port = free_port_block(args.lines)
-    line_rtp = free_port_block(args.lines, 100)
-    call_rtp = free_port_block(args.lines, 100)
+    allocated = set(range(line_port, line_port + args.lines))
+    line_rtp = free_port_block(args.lines, 100, width=2, avoid=allocated, even=True)
+    allocated.update(line_rtp + 100*i + k for i in range(args.lines) for k in range(2))
+    call_rtp = free_port_block(args.lines, 100, width=2, avoid=allocated, even=True)
+    allocated.update(call_rtp + 100*i + k for i in range(args.lines) for k in range(2))
+    call_port = free_port_block(args.lines, avoid=allocated)
     sup_args = [BINARY, '--lines', str(args.lines), '--bind-addr', '127.0.0.1',
                 '--local-port', str(line_port), '--rtp-port', str(line_rtp),
                 '--auto-answer', '1', '--mode', args.mode,
                 '--pty-link', str(tmp / 'line')]
     if args.recycle:
         sup_args.append('--recycle')
-    line_env = {'ME_DATA_FRAMING': 'v14'}
+    line_env = {'ME_DATA_FRAMING': 'v14', 'ME_DUMP_DIR': str(tmp / 'line-dumps')}
     if args.mode in ('v90', 'v92'):
         # Our own analogue caller against our digital lines: the strict Ja
         # handling the GUI's V.90 loopback fixture also uses.
@@ -262,11 +335,12 @@ def main():
     failures = 0
     try:
         for i in range(args.lines):
-            open_pty(str(tmp / f'line.{i}'))
+            os.close(open_pty(str(tmp / f'line.{i}')))
         for rnd in range(args.rounds):
             results = {}
+            barrier = threading.Barrier(args.lines)
             callers = [threading.Thread(target=one_call,
-                                        args=(i, args, tmp, line_port, call_rtp, results))
+                                        args=(i, args, tmp, line_port, call_rtp, results, barrier, call_port))
                        for i in range(args.lines)]
             for t in callers:
                 t.start()
@@ -277,7 +351,8 @@ def main():
                 r = results[i]
                 state = 'ok' if r['ok'] else 'FAIL ' + r['why']
                 rate = r.get('rate', 0)
-                print(f'round {rnd} line {i}: CONNECT {rate}, {state}')
+                print(f'round {rnd} line {i}: CONNECT {rate}, {state}, '
+                      f'{r["bytes_echoed"]} exact bytes')
                 if not r['ok']:
                     failures += 1
                     (tmp / f'caller.{i}.round{rnd}.log').write_text(r.get('log', ''))
@@ -311,9 +386,11 @@ def main():
                 else:
                     print(f'round {rnd}: every line recycled into a fresh worker')
                 for i in range(args.lines):
-                    open_pty(str(tmp / f'line.{i}'))
+                    os.close(open_pty(str(tmp / f'line.{i}')))
     finally:
         stop.set()
+        for t in echoes:
+            t.join(timeout=2)
         pids = [int(p) for _, p in worker_pids(sup_out.text())]
         sup.send_signal(signal.SIGTERM)
         try:
@@ -338,6 +415,7 @@ def main():
             print(f'{f.name}: {schedule_summary(f)}')
     print('multi_line_test: ' + ('FAILED' if failures else
           f'OK ({args.lines} lines, {args.rounds} round(s){", recycled" if args.recycle else ""})'))
+    print(f'logs/captures: {tmp}')
     return 1 if failures else 0
 
 
