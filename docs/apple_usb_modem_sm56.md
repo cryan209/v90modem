@@ -4386,3 +4386,83 @@ v90-rr-4, server clock: CP' accepted +32.844 (T/3 ring armed), E-run
   bit), so the prelude/fast windows have no live A/B; the rig yielded
   Phase-3/Ja failures.  Offline replay of v90-rr-4 diverges from the live
   call (different transmit), so it cannot score this either.
+
+### V.34/V.90 follow-up: access signalling and peer PCM law (2026-10-29)
+
+**V.90 is not working yet.** A V.34 9600 call passed three distinct PPP LCP
+payload echoes, but higher-rate V.34 is not qualified. The latest 14400 call
+established LAPM and received 16 valid PPP frames with zero bad FCS, yet passed
+**zero** exact echoes; the peer's LAPM acknowledgements stopped advancing at
+N(R)=9. CONNECT and clean incoming frames are not bidirectional data success.
+
+Two independently verified protocol defects are corrected:
+
+- The Apple telephone bearer is analogue, independently of which PCM modem
+  role the engine offers. `me_set_analogue_network_access(true)` clears only
+  V.8's digital-access bit. V.8 6.3/6.5 and Tables 5/7 also require the access
+  category when PCM availability is present, including its zero value.
+  Independent V.21 decoding of the local transmit tap gives old CM
+  `e0 c1 65 10 10 2a 27 8d`, corrected CM
+  `e0 c1 65 10 10 2a 27 0d`. A fresh old-access control selects V.34;
+  corrected calls select V.90 analogue and can reach Phase 4.
+- V.90 Table 7 bits 33:39 describe the digital peer's PCM law/power, not a
+  physical coupler's placeholder SIP codec. Valid INFO0d here announces
+  **A-law**, initially max-power code 17 (-9 dBm0). A passive gateway-side
+  capture independently confirms this: all **7920/7920** samples of the first
+  measurement-DIL cycle match the authored A-law sequence converted to u-law;
+  the u-law-only prediction matches 18.18%. The sampled cycle starts at
+  offset 210205 in the retained gateway-to-PBX G.711 stream. This proves a
+  law conversion on that path, not an end-to-end byte-exact PCM circuit.
+  Physical analogue receive/measurement/constellation paths now use valid
+  peer metadata. Digital/SIP bearer codewords and their configured law are
+  unchanged. V.90 9.5.2 retrains omit INFO0: cache valid metadata across them,
+  update it on subsequent valid INFO0d, and clear it on fresh call/reset.
+
+Current failures and controls are retained, not folded into the successes:
+
+- Corrected V.90 reached DIL/CPt/Ri but no CONNECT or payload echo. Its
+  noise-ignored 53333-bps constellation is a plan, **not an achieved rate**.
+  Trials with a lower upstream ceiling, no DIL, longer Ja deadline, retained
+  law/power, full DIL coverage, and SCR during DIL did not establish data.
+  Full coverage and SCR trials did not reach completed DIL; they cannot
+  evaluate a Phase-4 improvement. No such DSP/timing default is shipped.
+- The original retained executable and a freshly built old-access control
+  each passed three exact V.32bis-9600 LCP echoes. The normal corrected
+  frontend passed a repeat after one training failure (1/2). An isolated
+  explicit-zero-access-category experiment also passed, but the normal
+  repeat disproves a deterministic omission regression. Do **not** globally
+  emit extra V.8 categories on the strength of that one experiment.
+- An independent 6004 SIP capture shows the HT802 offers PCMU and PCMA, but
+  the PBX endpoint currently allows `clearmode|ulaw`; these calls use PCMU.
+  No PBX/ATA codec policy was changed. Avoiding the demonstrated conversion
+  is a useful next controlled experiment, not a proven diagnosis of every
+  remaining training or payload failure.
+- An independent 600-baud differential decoder finds CRC-valid V.90 INFO1a
+  on both local TX PCM and gateway-bound RTP. A coarse decoder's INFO1_BAD
+  output alone is not evidence that we truncated this transmission.
+- A physical-audio closed-loop law-mismatch experiment selected the announced
+  A-law and reached Ri/TRN2d, but failed its B1d deadline. It is a retained
+  failure, not a passing end-to-end physical-bearer regression.
+
+Hardware-free validation: all 16 CM/JM × PCM0–3 × analogue/digital serializer
+cases pass; the old serializer fails the six zero-access/PCM-present cases.
+Peer metadata tests cover both laws, an unchanged digital bearer, invalid
+INFO0/retrain retention, all power codes and new-call reset. Standard A-law
+and u-law whole-engine V.90 pairs exchange payload (31200 caller/56000
+answerer); these do **not** qualify the physical Apple path. The Apple
+selftest and both stored-profile/reset checks pass without seizing a line.
+
+Runs use isolated builds, restoring only the isolated copies of the V.34
+sources/headers from HEAD; unrelated working-tree DSP edits and the root
+Apple executable are untouched. Builds straddled concurrent V.34 commits,
+so the later `build-current` provenance identifies its source revision and
+hashes separately; do not treat calls from different builds as a one-variable
+A/B. Live calls were bounded and spaced at least 65 seconds apart. Cleanup
+verified hook/monitor off, protection enabled, no render errors and no TX-ring
+under/overruns.
+
+Retained evidence: `reference-data/artifacts/apple-v34-v90-20261028/`
+(local retained corpus, indexed in `reference-data/index.tsv`). It includes
+failed summaries, transmit/receive taps, independent CM/INFO decodes, the
+passive capture and extracted G.711 streams, and isolated build provenance.
+Fresh disposable output originated under `artifacts/apple-v34-v90-20261028/`.

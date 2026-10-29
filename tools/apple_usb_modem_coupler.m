@@ -2744,6 +2744,7 @@ int main(int argc, char **argv)
         signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
         setenv("ME_V90_ROLE","analogue",0);
         me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
+        me_set_analogue_network_access(true);
         di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
         di_set_dial_plan_callback(gui_dial_plan);
         if (di_open_split(g_control_link,g_data_link) < 0) { me_destroy(); return 1; }
@@ -2804,6 +2805,7 @@ int main(int argc, char **argv)
         me_set_verbose(1);
         me_init();
         me_set_law(ME_LAW_ULAW);
+        me_set_analogue_network_access(true);
         if (g_pty_link && di_open(g_pty_link) < 0) {
             fprintf(stderr, "failed to open PTY %s\n", g_pty_link);
             return 1;
@@ -2846,6 +2848,7 @@ int main(int argc, char **argv)
 
     if (!g_gui_control) {
         me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
+        me_set_analogue_network_access(true);
         di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
         di_set_dial_plan_callback(gui_dial_plan);
         if ((g_control_link ? di_open_split(g_control_link,g_data_link) :

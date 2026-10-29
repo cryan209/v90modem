@@ -106,6 +106,8 @@ python3 tools/mt9234_v90_gradient_test.py
 ./engine_pair_test --alaw --fax-hdlc --both-at 'AT+FCLASS=1.0' --both-at 'AT+F34=4,1,1' --seconds 25
 @group
 ./at_ms_test
+./v8_access_test
+./vpcm_analogue_peer_test
 ./line_monitor_test
 ./v250_ctl_test
 ./near_echo_test

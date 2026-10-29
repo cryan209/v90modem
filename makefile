@@ -222,6 +222,8 @@ CONSOLE_TEST_OBJS = console_test.o data_interface.o fax_class2.o at_ms.o at_test
 # AT+MS through the real engine and PTY, plus at_ms.c on its own.
 AT_TEST_TEST_OBJS = at_test_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 AT_MS_TEST_OBJS = at_ms_test.o $(filter-out sip_modem.o,$(OBJS))
+TEST_TARGETS += v8_access_test vpcm_analogue_peer_test
+V8_ACCESS_TEST_OBJS = v8_access_test.o
 # Clear channel / V.120: the module back to back, and the engine looped on
 # itself through the PTY.
 CLEAR_CHANNEL_TEST_OBJS = clear_channel_test.o $(filter-out sip_modem.o,$(OBJS))
@@ -827,6 +829,17 @@ v90_engine_replay: $(V90_ENGINE_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 
 at_test_test: $(AT_TEST_TEST_OBJS) spandsp
 	$(CC) $(AT_TEST_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+v8_access_test: $(V8_ACCESS_TEST_OBJS) spandsp
+	$(CC) $(V8_ACCESS_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+vpcm_analogue_peer_test: vpcm_analogue_peer_test.o
+	$(CC) $^ -o $@
+
+vpcm_analogue_peer_test.o: vpcm_analogue_peer.h
+
+v8_access_test.o: CFLAGS += -DHAVE_CONFIG_H
+v8_access_test.o: spandsp-master/src/v8.c
 
 at_ms_test: $(AT_MS_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(AT_MS_TEST_OBJS) -o $@ $(LDFLAGS)

@@ -41,6 +41,7 @@
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
 #include "v90_analogue_phase3.h"
+#include "vpcm_analogue_peer.h"
 #include "v92_analogue_phase3.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
@@ -3503,6 +3504,7 @@ static x2_client_dn_t g_x2_client_last_dn;
  * renegotiation and §9.7 cleardown.  See docs/v90_analogue_role.md.
  */
 static bool g_v90_analogue_role = false;
+static bool g_analogue_network_access; /* physical bearer, not PCM role */
 /* This call is ANSWERED by the V.90/V.92 analogue role (V.92 9.2.3: the digital
  * modem called). Phase 2 is the analogue modem's whatever the call direction, so
  * the borrowed SpanDSP engine is initialised as its "calling" (analogue) side. */
@@ -4020,6 +4022,14 @@ static v90_analogue_phase3_t *g_v90a = NULL;
 static v92a_t *g_v92a = NULL;
 static int g_v92a_last_stage = -1;
 static bool     g_v90a_started = false;
+static vpcm_analogue_peer_t g_v90a_peer;
+
+static me_law_t me_v90a_pcm_law(void)
+{
+    return vpcm_analogue_peer_alaw(&g_v90a_peer, g_analogue_network_access,
+                                   g_law == ME_LAW_ALAW)
+           ? ME_LAW_ALAW : ME_LAW_ULAW;
+}
 /*
  * The slicer that lets the analogue role run over a real analogue line.
  *
@@ -6190,8 +6200,8 @@ static int me_start_or_restart_v8_locked(int answer_tone)
          *
          * pstn_access describes how this DCE reaches the network, and the
          * answer does not change with the role we play: the media here is
-         * G.711 over SIP, so V8_PSTN_ACCESS_DCE_ON_DIGITAL stays set because
-         * it is true.  pcm_modem_availability is the field that offers a
+         * G.711 over SIP by default. Physical couplers override the access
+         * category below (V.8 6.5/Table 7). pcm_modem_availability offers a
          * V.90/V.92 role, and that is the one that flips.
          *
          * (A peer could in principle object that a digital access has no
@@ -6249,6 +6259,12 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     }
     v8_parms.jm_cm.nsf                = -1;
     v8_parms.jm_cm.t66                = -1;
+
+    /* V.8 6.3/6.5, Tables 5/7: the Apple/HSF physical telephone bearer is
+       analogue even when this engine otherwise uses the SIP call API.
+       Clear only the access bit; never change the offered PCM modem role. */
+    if (g_analogue_network_access)
+        v8_parms.jm_cm.pstn_access &= ~V8_PSTN_ACCESS_DCE_ON_DIGITAL;
 
     if (g_v8) {
         if (v8_restart(g_v8, v8_calling, &v8_parms) != 0)
@@ -11451,6 +11467,8 @@ static void me_v90_prepare_info0a_preroll(void)
 
 static void start_v34_training(void)
 {
+    /* Fresh startup, not 9.5.2 (which restarts SpanDSP directly). */
+    vpcm_analogue_peer_reset(&g_v90a_peer);
     g_v34_startup_restarts = 0;
     me_k56c_reset_locked();
     /* Must be called with g_state_mtx held */
@@ -13370,6 +13388,8 @@ void me_init(void)
         ds_set_wire_observer(gui_wire_observer);
     }
     pthread_mutex_init(&g_state_mtx, NULL);
+    g_analogue_network_access = false;
+    vpcm_analogue_peer_reset(&g_v90a_peer);
     /* Report the arithmetic libspandsp was built with, not the flag this
        object saw: an A/B of the two datapaths has to be able to confirm from
        the log which arm ran, and a -D in CFLAGS can leave the library and the
@@ -17307,19 +17327,31 @@ static void prepare_v90_analogue_phase3_locked(void)
     if (v34_get_tx_stage(g_v34) < V34_TX_STAGE_FIRST_S)
         return;
 
-    if (v34_v92_pcm_upstream_selected(g_v34)) {
+    /* Table 7 bit 39 describes the DIGITAL modem, not the bearer codec.
+     * 9.5.2 omits INFO0 on retrain: retain the last valid law/power. */
+    {
         v34_v90_info0a_t info0d;
+        if (v34_get_v90_received_info0a(g_v34, &info0d))
+            vpcm_analogue_peer_note(&g_v90a_peer, info0d.info0d_extensions_valid,
+                info0d.info0d_pcm_alaw, info0d.info0d_max_power_code,
+                info0d.info0d_power_measured_at_codec_output);
+    }
+    ME_LOG("[ME] V.90 analogue PCM: %s (%s INFO0d, bearer %s)\n",
+           me_v90a_pcm_law() == ME_LAW_ALAW ? "A-law" : "mu-law",
+           g_v90a_peer.valid ? "retained" : "no valid",
+           g_law == ME_LAW_ALAW ? "A-law" : "mu-law");
+
+    if (v34_v92_pcm_upstream_selected(g_v34)) {
         int delay = v34_get_round_trip_delay_samples(g_v34);
         v92a_config_t pcm = {
-            .law = g_law == ME_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW,
+            .law = me_v90a_pcm_law() == ME_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW,
             .u_info = v34_get_v90_tx_u_info(g_v34), .md_units = 0,
             .round_trip_symbols = delay > 0 ? (unsigned)delay : 0,
             .lu = 6000, .digital_max_tx_dbm0 = -16,
             .dil = g_v90a_dil, .upstream_rate_mask = 0x7ffff
         };
-        if (v34_get_v90_received_info0a(g_v34, &info0d)
-            && info0d.info0d_extensions_valid)
-            pcm.digital_max_tx_dbm0 = -0.5*(info0d.info0d_max_power_code + 1);
+        if (g_v90a_peer.valid)
+            pcm.digital_max_tx_dbm0 = vpcm_analogue_peer_max_power(&g_v90a_peer);
         g_v92a = v92a_init(&pcm);
         if (!g_v92a) {
             ME_LOG("[ME] V.92 analogue could not initialize negotiated PCM startup\n");
@@ -17334,7 +17366,7 @@ static void prepare_v90_analogue_phase3_locked(void)
     }
 
     memset(&cfg, 0, sizeof(cfg));
-    cfg.law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    cfg.law = (me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     /* Table 10 bits 34:36 were selected from INFO1d when INFO1a was built.
      * 3200 is mandatory; 3000/3429 are used only when the peer enabled them. */
     cfg.baud_rate_code = v34_get_tx_baud_rate(g_v34);
@@ -17382,20 +17414,18 @@ static void prepare_v90_analogue_phase3_locked(void)
     cfg.md_units = 0;                   /* INFO1a announces no MD */
     cfg.digital_max_tx_dbm0 = 0.0;
     {
-        v34_v90_info0a_t info0d;
 
         /* V.90 §8.2.1/Table 7 bits 33:37: code 0 is -0.5 dBm0 and code
          * 31 is -16 dBm0.  §8.5.2/Table 15 requires CP's average power to
          * obey this value; omitting it made clean digital calls offer every
          * measured Ucode at 56 kbit/s regardless of the peer's limit. */
-        if (v34_get_v90_received_info0a(g_v34, &info0d)
-            && info0d.info0d_extensions_valid) {
-            cfg.digital_max_tx_dbm0 = -0.5*(info0d.info0d_max_power_code + 1);
+        if (g_v90a_peer.valid) {
+            cfg.digital_max_tx_dbm0 = vpcm_analogue_peer_max_power(&g_v90a_peer);
             ME_LOG("[ME] V.90 analogue downstream: INFO0d maximum transmit "
                    "power %.1f dBm0 (code %u, measured at %s)\n",
                    cfg.digital_max_tx_dbm0,
-                   (unsigned) info0d.info0d_max_power_code,
-                   info0d.info0d_power_measured_at_codec_output
+                   g_v90a_peer.max_power_code,
+                   g_v90a_peer.codec_output
                        ? "codec output" : "digital-modem terminals");
         } else {
             ME_LOG("[ME] V.90 analogue downstream: INFO0d power extension "
@@ -17663,7 +17693,7 @@ static void me_v90_analogue_progress_locked(void)
             /* What the line would actually carry.  This is the whole point of
                taking the analogue role: the constellation decision is ours. */
             if (v90_dil_measure_plan_rate(m, 0, 3.0, 0.0,
-                                          (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+                                          (me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW
                                                                  : V90_LAW_ULAW,
                                           &plan)) {
                 ME_LOG("[ME] V.90 analogue constellation: Mi = %d %d %d %d %d %d, "
@@ -17687,7 +17717,7 @@ static void me_v90_analogue_progress_locked(void)
                  * logged neither.
                  */
                 any = v90_dil_measure_plan_rate(m, 0, 0.0, 0.0,
-                                                (g_law == ME_LAW_ALAW)
+                                                (me_v90a_pcm_law() == ME_LAW_ALAW)
                                                     ? V90_LAW_ALAW
                                                     : V90_LAW_ULAW,
                                                 &raw);
@@ -19248,7 +19278,7 @@ static void me_v90a_calibrate_locked(void)
 
         g_v90a_dil_tracking = true;
         if (g_v90a_dil_valid)
-            n = v90_dil_ucode_set((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+            n = v90_dil_ucode_set((me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW
                                                          : V90_LAW_ULAW,
                                   &g_v90a_dil, set, (int) sizeof(set));
         v90a_linear_set_constellation(g_v90a_linear, n > 0 ? set : NULL, n);
@@ -19360,7 +19390,7 @@ static bool me_v90a_dil_decision_locked(double *decision)
         if (cycle <= 0  ||  cycle > V90A_DIL_SEQ_MAX)
             return false;
         g_v90a_dil_seq_len = v90_dil_generate_codewords(
-            (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
+            (me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
             &g_v90a_dil, g_v90a_dil_seq, cycle);
         if (g_v90a_dil_seq_len <= 0)
             return false;
@@ -19369,7 +19399,7 @@ static bool me_v90a_dil_decision_locked(double *decision)
     pos = v90_analogue_rx_dil_symbols(rx) - 1;
     if (pos < 0)
         return false;
-    v90_codeword_decompose((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
+    v90_codeword_decompose((me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
                            g_v90a_dil_seq[pos % g_v90a_dil_seq_len], &ucode, &sign);
     level = v90a_linear_ucode_level(g_v90a_linear, ucode)/V90A_FSE_SCALE;
     if (level <= 0.0)
@@ -19393,7 +19423,7 @@ static int me_v90a_pr4_set(void *user, int64_t index, double *levels,
 {
     const v90_analogue_phase4_t *p4;
     uint8_t ucodes[128];
-    v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v90_law_t law = (me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     int64_t ahead;
     int n, m = 0;
 
@@ -19572,7 +19602,7 @@ static void me_v90a_phase4_slicer_locked(void)
         int m = 0;
 
         if (g_v90a_dil_valid)
-            m = v90_dil_ucode_set((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+            m = v90_dil_ucode_set((me_v90a_pcm_law() == ME_LAW_ALAW) ? V90_LAW_ALAW
                                                          : V90_LAW_ULAW,
                                   &g_v90a_dil, dil, (int) sizeof(dil));
         v90a_linear_set_constellation(g_v90a_linear, m > 0 ? dil : NULL, m);
@@ -19585,7 +19615,7 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
     if (!g_v90a_16k) {
         g_v90a_16k = true;
         if (g_v90a_linear == NULL)
-            g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
+            g_v90a_linear = v90a_linear_init((me_v90a_pcm_law() == ME_LAW_ALAW)
                                              ? V90_LAW_ALAW : V90_LAW_ULAW);
     }
     me_v90a_calibrate_locked();
@@ -19862,7 +19892,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                  * 0-5, where the ladder's steps are coarser than the noise.
                  */
                 if (g_v90a_linear == NULL)
-                    g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
+                    g_v90a_linear = v90a_linear_init((me_v90a_pcm_law() == ME_LAW_ALAW)
                                                      ? V90_LAW_ALAW
                                                      : V90_LAW_ULAW);
                 v90a_linear_set_reference(g_v90a_linear, 16 + g_v90a_u_info,
@@ -21090,6 +21120,14 @@ void me_set_law(me_law_t law)
     pthread_mutex_unlock(&g_state_mtx);
     ME_LOG("[ME] PCM law set to %s\n",
             law == ME_LAW_ALAW ? "A-law (PCMA)" : "u-law (PCMU)");
+}
+
+void me_set_analogue_network_access(bool analogue)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    g_analogue_network_access = analogue;
+    pthread_mutex_unlock(&g_state_mtx);
+    ME_LOG("[ME] V.8 network access: %s\n", analogue ? "analogue" : "digital");
 }
 
 me_law_t me_get_law(void)

@@ -277,6 +277,11 @@ bool me_rx_g711_slip_permitted(void);
 void me_set_law(me_law_t law);
 me_law_t me_get_law(void);
 
+/* V.8 6.5/Table 7: network access is independent of the V.90 role.
+ * SIP defaults to digital; physical telephone-line couplers set true after
+ * me_init(), before starting a call. Reset by me_init(), not per call. */
+void me_set_analogue_network_access(bool analogue);
+
 /* Enable/disable verbose [ME]/[TRACE] debug output to stderr.
  * Also controllable via VPCM_ME_VERBOSE env var.
  * Pass --verbose on the sip_v90_modem command line to activate. */
