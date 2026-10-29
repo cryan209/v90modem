@@ -86,9 +86,10 @@ engine-pair tests retain their verbose default. The production server is
 already quiet unless verbose diagnostics are requested.
 
 Use the same machine, compiler/library build, block size, payload, diagnostic
-environment and host load for comparisons. In particular, captures still do
+environment and host load for comparisons. Some legacy captures still do
 synchronous I/O: use a private `ME_DUMP_DIR` for each run and keep its storage
-constant across arms. Record revision and dirty-tree status. Alternate A/B
+constant across arms. The G.711 taps described below use background writers;
+keep their configuration constant unless capture overhead is the A/B variable. Record revision and dirty-tree status. Alternate A/B
 arms, let every run finish, and require payload correctness as well as timing.
 Use an OS profiler (`sample`/Instruments on macOS, `perf` on Linux) for CPU
 hotspots; `wall_ms / audio_ms` is not CPU utilisation. Use an OS timing tool
@@ -100,13 +101,95 @@ claim, clean regression baseline, or hardware interoperability result. The
 host and vendored DSP tree had unrelated ongoing changes. Live qualification
 must run on the wired rig, following [hardware interop](v90_hardware_interop.md).
 
+## Background G.711 captures
+
+`async_capture.c` now isolates disk I/O for these existing opt-in captures:
+
+| Switch | Raw files (unchanged formats) |
+|---|---|
+| `VPCM_G711_TAP_DIR` | `<dir>/live-rx.g711`, `<dir>/live-tx.g711` |
+| `ME_G711_CAPTURE` | `<prefix>.rx.ulaw` (legacy name, also used for A-law) |
+
+The settings are latched at engine initialisation. Setup creates/truncates the
+files on the control thread. Use unique paths per engine. The multi-line
+supervisor isolates both the tap directory and `ME_G711_CAPTURE` prefix per
+worker (including their status sidecars); explicit `%L` templates also work. Each stream has a **256 KiB diagnostic queue**,
+plus a private writer thread and its stack. Disabled streams allocate no
+queue or worker. Queue storage is touched during setup to avoid initial
+producer-side page faults (this is not `mlock` or a hard real-time guarantee).
+The media producer copies a whole block and publishes it using lock-free
+atomics; it does not allocate, acquire a mutex, signal a condition variable,
+log, or access the filesystem. One serialized producer owns each stream.
+The worker polls at 10 ms intervals and does the actual disk writes. This is
+latency isolation, not a claim of reduced total CPU: enabled workers add
+polling and stack overhead. Unsupported non-lock-free atomic implementations disable capture, rather than
+falling back to locks or synchronous writes. Only regular files are accepted.
+
+**Fail-stop, not lossy continuation:** if the queue fills, reject the entire
+new block and all subsequent blocks for that stream until engine restart.
+The worker drains the already accepted prefix. If a disk write fails, retain
+only the prefix actually written and reject later producer blocks. Never
+append later bytes after a missing block. Live samples are never dropped,
+inserted, modified or held waiting for diagnostic storage by this policy. Each
+stream fails independently, including setup: a failed RX tap does not disable
+an available TX recording or the independent prefix capture.
+
+Each raw file has a `<raw-path>.status.json` sidecar:
+
+- `recording`: setup succeeded, but there is no clean completion certificate;
+- `complete`: clean close with no recorded failure;
+- `incomplete`: capture failed; raw bytes are only a prefix;
+- `offered_bytes`, `accepted_bytes`, `written_bytes`, `rejected_bytes`, `error`:
+  final counters and the first failure's errno number;
+- `prefix_only`: this capture format never silently removes internal gaps.
+
+On disk errors, accepted bytes can remain unwritten. Total missing capture
+bytes are `offered_bytes - written_bytes`, not just `rejected_bytes`.
+
+Only metadata written at orderly close is final: a running worker's failure snapshot can
+precede further rejected blocks. For a complete recording require
+`state == "complete"`, `error == 0`, `rejected_bytes == 0`, and equal offered,
+accepted, written and actual raw-file byte counts. A missing, malformed or
+`recording` sidecar is **not** evidence of complete capture. A forced kill
+can leave queued bytes unwritten. Sidecar creation is required before
+truncating/enabling the raw sink, and its previous completion certificate is
+invalidated before a new recording starts. Completion describes successful
+application writes/close, not power-loss durability; no `fsync` is performed.
+Files remain process-wide across calls, like the old taps; restarting the
+engine overwrites them.
+
+`me_flush_g711_taps()` is control-thread-only: it waits for the accepted
+prefix at entry to reach `write()`, without `fsync` or a completion certificate.
+Clean engine destruction drains and joins the workers and finalizes metadata.
+Storage stalls can delay control-thread drain/shutdown, **not the producer**.
+Offline peers/replays no longer perform per-frame flush barriers: their
+control loops drain in bounded batches well below queue capacity, preserving
+complete captures even for cheap, unpaced simulated bearers. No such barrier
+is added to a live media callback. Other unpaced producers can still overflow
+a bounded capture; check the sidecar rather than assuming a passing payload
+test proves its diagnostic recording complete.
+
+The queue bounds memory, **not recording size on disk**. G.711 taps remain
+opt-in and grow while enabled. The stdout rotation utility does not rotate
+them. Legacy training PCM dumps, symbol dumps, and synchronous text traces
+have not all been migrated; do not assume every diagnostic is now off-clock.
+
+Validation: deterministic worker stalls, overflow and permanent fail-stop,
+wraparound, short writes/EINTR, disk-full errors, flush/close/reopen, missing
+sidecars and FIFO rejection are covered by `async_capture_test`. Framed engine
+tests exercise V.21, clear-channel and symmetric x2 paths in both laws,
+verifying byte-exact RX/TX and prefix taps, unchanged transmitted
+octets with captures enabled, complete recording of a long unpaced bearer and
+both fast replay modes (normal/scheduled), safe setup failure, and an unclean kill leaving
+`recording` rather than a false completion certificate. These are offline
+checks, not hardware interop or a measured live speedup.
+
 ## Next optimisation targets
 
-1. **Diagnostic I/O isolation.** Replace capture-path media-thread writes and
-   flushes with a bounded diagnostic-only queue and background writer. Define
-   loss counters and discontinuity metadata first: a dropped diagnostic
-   record must not silently produce an apparently continuous audio tap.
-   Never block the audio path to preserve a tap, and never drop live audio.
+1. **Finish diagnostic I/O isolation.** Migrate the remaining synchronous
+   capture paths using the same explicit failure/accounting policy. Training
+   PCM and per-symbol taps need separate review of their producer/lifecycle
+   contracts. Never block the audio path to preserve a diagnostic recording.
    The rotating stdout sink bounds storage, but does not make generation or
    writing of the underlying diagnostic messages asynchronous.
 2. **Measured lock contention.** Attribute long waits before shortening critical

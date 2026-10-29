@@ -185,9 +185,11 @@ void me_rx_g711(const uint8_t *codewords, int count);
 void me_rx_v90a_16k(const int16_t *amp, int len);
 int  me_tx_g711(uint8_t *codewords, int count);
 
-/* Flush the live G.711 tap files (VPCM_G711_TAP_DIR).  The taps are fully
- * memory-buffered so no disk write() lands on the media clock; call this at
- * call boundaries (media-down) so a later kill cannot lose the capture. */
+/* Drain optional VPCM_G711_TAP_DIR and ME_G711_CAPTURE diagnostic queues
+ * through the background writers (not fsync). Control thread only: this can
+ * wait for storage. No disk I/O or waiting occurs in the media enqueue path.
+ * Clean engine shutdown finalizes .status.json sidecars; an overflow/error
+ * leaves an explicitly incomplete prefix, never a tap with spliced gaps. */
 void me_flush_g711_taps(void);
 /* Offline replays only: block until the V.90 CP and Ja worker threads have
  * nothing posted or running, so their results land at the same media frame

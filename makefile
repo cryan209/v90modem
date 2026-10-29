@@ -170,7 +170,7 @@ LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
 SRCS   = k56flex_client_tx.c k56flex_startup.c k56flex_upstream_pcm.c k56flex_upstream.c v8bis_modem.c v8bis_fsm.c v8bis_ie.c v8bis_msg.c v8bis_tones.c profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_qc.c v92_anspcm_decode.c v92_short_phase1_decode.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c mnp.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_client.c x2_mp_rx.c line_supervisor.c near_echo.c v90_analogue_pr4.c
-SRCS += vfc_mapper.c vfc_signature.c vfc_frame.c vfc_trellis.c
+SRCS += vfc_mapper.c vfc_signature.c vfc_frame.c vfc_trellis.c async_capture.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = v90_b1_state_test k56flex_7910_p1_test k56flex_startup_test k56flex_upstream_pcm_test k56flex_upstream_test line_monitor_test near_echo_test v34_line_ec_test v90_analogue_pr4_test v92_b1u_lock_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test mica_qam_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_stress_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_info1a_validate_test v34_phase4_16pt_test v34_data_test v34_gardner_test fax_class_test fax_class2_test fax_v34_preamble_test v90_upstream_replay v90_engine_replay v34_duplex_test v34_fdm_test v32bis_spandsp_test v32bis_duplex_test bell212a_test v22bis_s1_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_reneg_silence_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_qc_test v92_su_test v92_qc_engine_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_client_test x2_sym_test x2_b1_test v8bis_test v8bis_fsm_test v8bis_modem_test v76_test v75_test v70_test v70_v34_test
@@ -227,6 +227,8 @@ LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
 LINE_SUPERVISOR_TEST_OBJS = line_supervisor_test.o
 TEST_TARGETS += line_supervisor_test media_perf_test
 MEDIA_PERF_TEST_OBJS = media_perf_test.o
+ASYNC_CAPTURE_TEST_OBJS = async_capture_test.o async_capture_test_impl.o
+TEST_TARGETS += async_capture_test
 # The two DTE console arrangements (classic combined, control + data).
 CONSOLE_TEST_OBJS = console_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 # AT+MS through the real engine and PTY, plus at_ms.c on its own.
@@ -322,6 +324,13 @@ test-fast: test-build
 
 test-slow: test-build
 	$(RUN_TESTS) tests/slow.list
+
+# artifacts/ and captures/ expire (docs/artifact_storage.md).  Lists runs
+# untouched for 14 days; `make expire-artifacts EXPIRE_ARGS=--delete` removes
+# them.  A KEEP file in a run, or a git worktree inside it, keeps it.
+.PHONY: expire-artifacts
+expire-artifacts:
+	python3 tools/expire_artifacts.py $(EXPIRE_ARGS)
 
 # Local preserved analogue capture, deliberately outside make test: reference-data/
 # bulk evidence is gitignored. Missing evidence is a hard error in the verifier.
@@ -530,6 +539,14 @@ media_perf_test: $(MEDIA_PERF_TEST_OBJS)
 	$(CC) $(MEDIA_PERF_TEST_OBJS) -o $@
 
 media_perf_test.o: media_perf_test.c media_perf.h
+
+async_capture_test: $(ASYNC_CAPTURE_TEST_OBJS)
+	$(CC) $(ASYNC_CAPTURE_TEST_OBJS) -o $@ -lpthread
+
+async_capture.o: async_capture.c async_capture.h
+async_capture_test.o: async_capture_test.c async_capture.h test_tmp.h
+async_capture_test_impl.o: async_capture.c async_capture.h
+	$(CC) $(CFLAGS) -DASYNC_CAPTURE_TEST -c async_capture.c -o $@
 
 line_supervisor_test: $(LINE_SUPERVISOR_TEST_OBJS)
 	$(CC) $(LINE_SUPERVISOR_TEST_OBJS) -o $@
@@ -1000,7 +1017,7 @@ sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h line_supervis
 line_supervisor.o: line_supervisor.c line_supervisor.h
 v92_qc.o: v92_qc.c v92_qc.h v92_anspcm_decode.h v92_short_phase1_decode.h v91.h
 v92_qc_test.o: v92_qc_test.c v92_qc.h v92_anspcm_decode.h v92_short_phase1_decode.h v91.h
-modem_engine.o:   modem_engine.c   media_perf.h v8bis_modem.h v8bis_fsm.h modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h mnp.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
+modem_engine.o:   modem_engine.c   media_perf.h async_capture.h v8bis_modem.h v8bis_fsm.h modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h mnp.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 # ATI3/ATI7 name the build.  Rewritten only when git describe changes, so it
 # does not force a rebuild of data_interface.o on every make.

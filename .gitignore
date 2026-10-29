@@ -27,6 +27,7 @@
 .libs/
 
 # Project binaries
+async_capture_test
 media_perf_test
 vfc_mapper_test
 vfc_signature_test

@@ -247,7 +247,7 @@ extern char **environ;
 static int diagnostic_path_kind(const char *name)
 {
     static const char *const files[] = {
-        "ME_IO_SCHEDULE", "DS_RX_BIT_DUMP", "DS_TX_BIT_DUMP",
+        "ME_IO_SCHEDULE", "ME_G711_CAPTURE", "DS_RX_BIT_DUMP", "DS_TX_BIT_DUMP",
         "DS_TX_FRAME_DUMP", "ME_V90_UPSTREAM_SYM_DUMP", "ME_RX_BIT_DUMP",
         "V90_CP_ACCEPT_DUMP", "V90_CP_BIT_DUMP", "V90_RENEG_BIT_DUMP",
         "V90_JA_BIT_DUMP", "V90A_RX_CODEWORD_DUMP", "V90A_T2_DUMP", "V90A_SYM_DUMP"

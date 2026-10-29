@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "modem_engine.h"
+#include "async_capture.h"
 #include "data_interface.h"
 #include "spandsp.h"
 static void dial(const char *uri, void *p) {(void)uri;(void)p;}
@@ -61,7 +62,7 @@ int main(int argc,char **argv) {
  di_set_callbacks(dial,control,control,NULL);
  if(di_open(pty)<0)return 2;
  me_set_law(law);
- uint8_t header[2],rx[4096],tx[4096]; unsigned long count=0; int hung=0;
+ uint8_t header[2],rx[4096],tx[4096]; unsigned long count=0, capture_flushed=0; int hung=0;
  int16_t rx8[1024],rx16[2048],tx8[1024];
  while(fread(header,1,2,stdin)==2) {
   /* The call starts with the first frame, so a driver can configure the
@@ -104,11 +105,17 @@ int main(int argc,char **argv) {
     me_tx_audio(tx8,n);
     for(int i=0;i<n;i++)tx[i]=law==ME_LAW_ALAW ? linear_to_alaw(tx8[i]) : linear_to_ulaw(tx8[i]);
    }else{
-    (void)me_tx_g711(tx,n); me_flush_g711_taps();
+    (void)me_tx_g711(tx,n); /* diagnostic writers drain at shutdown */
    }
    if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
   }
   count+=n;
+  /* Offline control only: batch barriers keep even cheap, unpaced simulated
+     bearers lossless without reinstating a disk wait after every frame.
+     Live SIP media callbacks never perform this drain. */
+  if(count-capture_flushed>=ASYNC_CAPTURE_DEFAULT_CAPACITY/4){
+   me_flush_g711_taps();capture_flushed=count;
+  }
   /* sip_modem.c turns an engine hang-up request (a V.42 failure, +ES/+DS
      "required" not met) into a SIP BYE and so into me_on_sip_disconnected();
      there is no SIP here, so do the local half of that once. */

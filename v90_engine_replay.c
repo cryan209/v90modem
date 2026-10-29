@@ -61,6 +61,7 @@
 
 #include "data_interface.h"
 #include "modem_engine.h"
+#include "async_capture.h"
 
 /* One media frame: 20 ms of G.711 at 8 kHz, as the RTP path delivers it. */
 #define FRAME_BYTES     160
@@ -249,6 +250,7 @@ int main(int argc, char *argv[])
     long pos;
     int64_t t0;
     int frames = 0;
+    size_t capture_pending = 0;
     me_diag_snapshot_t snap;
 
     if (argc < 2) {
@@ -437,7 +439,13 @@ int main(int argc, char *argv[])
                 (void)me_tx_g711(buf, rec.count);
                 tx_recs++;
             }
-            me_flush_g711_taps();
+            /* Offline control: bounded batches preserve a complete capture
+             * even when --fast produces samples much faster than wall time. */
+            capture_pending += (size_t)rec.count;
+            if (capture_pending >= ASYNC_CAPTURE_DEFAULT_CAPACITY / 4) {
+                me_flush_g711_taps();
+                capture_pending = 0;
+            }
         }
         fclose(sf);
         printf("engine replay: schedule %s: %ld RX and %ld TX calls, %.1f s of tap\n",
@@ -464,7 +472,11 @@ int main(int argc, char *argv[])
         (void)me_tx_g711(tx, FRAME_BYTES);
         if (sync)
             me_replay_wait_workers();
-        me_flush_g711_taps();
+        capture_pending += 2 * FRAME_BYTES;
+        if (capture_pending >= ASYNC_CAPTURE_DEFAULT_CAPACITY / 4) {
+            me_flush_g711_taps();
+            capture_pending = 0;
+        }
         if (!fast) {
             /* Absolute schedule rather than a fixed sleep, so the replay does
                not drift away from the media clock it is imitating. */

@@ -21,6 +21,7 @@
 
 #include "modem_engine.h"
 #include "media_perf.h"
+#include "async_capture.h"
 #include "x2_session.h"
 #include "data_interface.h"
 #include "line_monitor.h"
@@ -4611,8 +4612,9 @@ static bool           g_v34_rx_accounting_logged = false;
 static uint64_t       g_g711_tx_octets = 0;
 static uint64_t       g_g711_raw_v90_tx_octets = 0;
 static uint64_t       g_g711_linear_tx_octets = 0;
-static FILE          *g_g711_rx_tap = NULL;
-static FILE          *g_g711_tx_tap = NULL;
+static async_capture_t *g_g711_rx_tap = NULL;
+static async_capture_t *g_g711_tx_tap = NULL;
+static async_capture_t *g_g711_prefix_tap = NULL;
 
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
@@ -4632,16 +4634,23 @@ static int v8_alternate_answer_tone(int tone)
         : MODEM_CONNECT_TONES_ANSAM_PR;
 }
 
+static void g711_tap_close(async_capture_t **tap, const char *name)
+{
+    if (*tap) {
+        async_capture_stats_t stats = {0};
+        if (async_capture_close(*tap, &stats) < 0)
+            fprintf(stderr, "[CAPTURE] %s incomplete at close: %s (written=%llu rejected=%llu)\n",
+                    name, strerror(errno), (unsigned long long)stats.written_bytes,
+                    (unsigned long long)stats.rejected_bytes);
+        *tap = NULL;
+    }
+}
+
 static void g711_taps_close(void)
 {
-    if (g_g711_rx_tap) {
-        fclose(g_g711_rx_tap);
-        g_g711_rx_tap = NULL;
-    }
-    if (g_g711_tx_tap) {
-        fclose(g_g711_tx_tap);
-        g_g711_tx_tap = NULL;
-    }
+    g711_tap_close(&g_g711_rx_tap, "live RX");
+    g711_tap_close(&g_g711_tx_tap, "live TX");
+    g711_tap_close(&g_g711_prefix_tap, "ME_G711_CAPTURE RX");
 }
 
 static void g711_taps_init(void)
@@ -4651,6 +4660,19 @@ static void g711_taps_init(void)
     char tx_path[1024];
 
     g711_taps_close();
+    /* Capture setup is control-thread work, never a first-frame fopen().
+     * These optional settings are latched at engine initialisation. */
+    const char *prefix = getenv("ME_G711_CAPTURE");
+    if (prefix && *prefix) {
+        char path[1024];
+        if (snprintf(path, sizeof(path), "%s.rx.ulaw", prefix) >= (int)sizeof(path)) {
+            fprintf(stderr, "[ME] ME_G711_CAPTURE path is too long; capture disabled\n");
+        } else {
+            g_g711_prefix_tap = async_capture_open(path, ASYNC_CAPTURE_DEFAULT_CAPACITY);
+            if (!g_g711_prefix_tap)
+                fprintf(stderr, "[ME] Cannot open G.711 capture %s: %s\n", path, strerror(errno));
+        }
+    }
     if (!dir || !dir[0])
         return;
     if (snprintf(rx_path, sizeof(rx_path), "%s/live-rx.g711", dir) >= (int)sizeof(rx_path)
@@ -4663,30 +4685,27 @@ static void g711_taps_init(void)
         fprintf(stderr, "[ME] VPCM_G711_TAP_DIR mkdir %s: %s\n",
                 dir, strerror(errno));
     }
-    g_g711_rx_tap = fopen(rx_path, "wb");
-    g_g711_tx_tap = fopen(tx_path, "wb");
-    if (!g_g711_rx_tap || !g_g711_tx_tap) {
-        fprintf(stderr, "[ME] Unable to open live G.711 taps in %s\n", dir);
-        g711_taps_close();
+    g_g711_rx_tap = async_capture_open(rx_path, ASYNC_CAPTURE_DEFAULT_CAPACITY);
+    int rx_error = g_g711_rx_tap ? 0 : errno;
+    g_g711_tx_tap = async_capture_open(tx_path, ASYNC_CAPTURE_DEFAULT_CAPACITY);
+    int tx_error = g_g711_tx_tap ? 0 : errno;
+    if (rx_error || tx_error)
+        fprintf(stderr, "[ME] Unable to open live G.711 taps in %s: RX errno=%d TX errno=%d (0=enabled)\n",
+                dir, rx_error, tx_error);
+    if (!g_g711_rx_tap && !g_g711_tx_tap)
         return;
-    }
-    /* The tap fwrites run on the media clock; with default 4 KB stdio
-     * buffers each flush is a disk write() on that path, and an occasional
-     * stall past the 20 ms frame deadline slips a frame — fatal for the
-     * sample-exact V.90 PCM stages while leaving tones/DPSK fine (observed
-     * live 2026-07-23: taps-on 0/9 attempts decode Jd, taps-off 4/4).
-     * 64 MB per tap holds >2 h of G.711, so no write() lands mid-call. */
-    setvbuf(g_g711_rx_tap, NULL, _IOFBF, 64 * 1024 * 1024);
-    setvbuf(g_g711_tx_tap, NULL, _IOFBF, 64 * 1024 * 1024);
-    ME_LOG("[ME] Live G.711 taps: RX=%s TX=%s\n", rx_path, tx_path);
+    /* The media clock only copies into bounded diagnostic queues. A stalled
+     * writer stops the affected capture at a prefix, not the live stream;
+     * its status sidecar records failure instead of silently splicing gaps. */
+    ME_LOG("[ME] Live G.711 taps: RX=%s TX=%s\n",
+           g_g711_rx_tap ? rx_path : "disabled", g_g711_tx_tap ? tx_path : "disabled");
 }
 
 void me_flush_g711_taps(void)
 {
-    if (g_g711_rx_tap)
-        fflush(g_g711_rx_tap);
-    if (g_g711_tx_tap)
-        fflush(g_g711_tx_tap);
+    (void)async_capture_flush(g_g711_rx_tap);
+    (void)async_capture_flush(g_g711_tx_tap);
+    (void)async_capture_flush(g_g711_prefix_tap);
 }
 
 /* Voice-mode PCM fidelity testing (tools/voice_pcm_fidelity.py).
@@ -19066,27 +19085,8 @@ static void me_tx_audio_impl(int16_t *amp, int len)
  */
 static void me_g711_capture_rx(const uint8_t *codewords, int count)
 {
-    static FILE *f;
-    static bool tried;
-
-    if (!tried) {
-        const char *prefix = getenv("ME_G711_CAPTURE");
-        char path[512];
-
-        tried = true;
-        if (prefix == NULL  ||  prefix[0] == '\0')
-            return;
-        snprintf(path, sizeof(path), "%s.rx.ulaw", prefix);
-        if ((f = fopen(path, "wb")) == NULL) {
-            ME_LOG("[ME] G.711 capture: cannot write %s\n", path);
-            return;
-        }
-        ME_LOG("[ME] G.711 capture: recording received octets to %s\n", path);
-    }
-    if (f) {
-        fwrite(codewords, 1, (size_t) count, f);
-        fflush(f);
-    }
+    if (g_g711_prefix_tap && codewords && count > 0)
+        (void)async_capture_push(g_g711_prefix_tap, codewords, (size_t)count);
 }
 
 /*
@@ -20490,7 +20490,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
             me_x2_symmetric_progress_locked();
         }
         pthread_mutex_unlock(&g_state_mtx);
-        if(g_g711_rx_tap)(void)fwrite(codewords,1,(size_t)count,g_g711_rx_tap);
+        if(g_g711_rx_tap)(void)async_capture_push(g_g711_rx_tap,codewords,(size_t)count);
         me_drain_rx_to_dte();
         return;
     }
@@ -20504,7 +20504,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         if (connect > 0)
             di_on_connected(connect);
         if (g_g711_rx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+            (void)async_capture_push(g_g711_rx_tap, codewords, (size_t)count);
         me_drain_rx_to_dte();
         return;
     }
@@ -20526,14 +20526,14 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         g_rx_audio_samples += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_rx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+            (void)async_capture_push(g_g711_rx_tap, codewords, (size_t)count);
         return;
     }
     if (mh_rx_locked(codewords, count)) {
         g_rx_audio_samples += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_rx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+            (void)async_capture_push(g_g711_rx_tap, codewords, (size_t)count);
         return;
     }
     v92_retrain_watch_locked(codewords, count);
@@ -20799,7 +20799,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     }
     pthread_mutex_unlock(&g_state_mtx);
     if (g_g711_rx_tap)
-        (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+        (void)async_capture_push(g_g711_rx_tap, codewords, (size_t)count);
 
     if (raw_v91) {
         me_drain_rx_to_dte();
@@ -20910,7 +20910,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         }
         /*endif*/
         if (g_g711_tx_tap)
-            (void) fwrite(codewords, 1, (size_t) count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
     /*endif*/
@@ -20919,7 +20919,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
 
@@ -20928,7 +20928,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
 
@@ -20947,7 +20947,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
     if (g_k56_train) {
@@ -20955,7 +20955,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
     pthread_mutex_unlock(&g_state_mtx);
@@ -20981,7 +20981,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
-            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+            (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
         return count;
     }
     pthread_mutex_unlock(&g_state_mtx);
@@ -21038,7 +21038,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     g_g711_linear_tx_octets += linear_octets;
     pthread_mutex_unlock(&g_state_mtx);
     if (g_g711_tx_tap)
-        (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        (void)async_capture_push(g_g711_tx_tap, codewords, (size_t)count);
     return count;
 }
 

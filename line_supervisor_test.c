@@ -34,14 +34,17 @@ static int environment_case(int which)
     unsetenv("ME_DUMP_DIR");
     unsetenv("VPCM_G711_TAP_DIR");
     unsetenv("ME_IO_SCHEDULE");
+    unsetenv("ME_G711_CAPTURE");
     unsetenv("DS_TX_BIT_DUMP");
     snprintf(root, sizeof(root), "%s", test_tmp("supervisor-env"));
     if (which == 0) {
         snprintf(value, sizeof(value), "%s/template.%%L", root);
         setenv("ME_DUMP_DIR", value, 1);
+        setenv("ME_G711_CAPTURE", value, 1);
         CHECK(per_line_environment(3) == 0);
         snprintf(expected, sizeof(expected), "%s/template.3", root);
         CHECK(!strcmp(getenv("ME_DUMP_DIR"), expected));
+        CHECK(!strcmp(getenv("ME_G711_CAPTURE"), expected));
         CHECK(stat(expected, &st) == 0 && S_ISDIR(st.st_mode));
     } else if (which == 1) {
         snprintf(value, sizeof(value), "%s/shared/nested", root);
@@ -59,9 +62,11 @@ static int environment_case(int which)
         CHECK(getenv("VPCM_G711_TAP_DIR") == NULL);
     } else if (which == 3) {
         setenv("ME_IO_SCHEDULE", "/not-created/schedule", 1);
+        setenv("ME_G711_CAPTURE", "/not-created/capture", 1);
         setenv("DS_TX_BIT_DUMP", "/not-created/tx.%L", 1);
         CHECK(per_line_environment(3) == 0);
         CHECK(!strcmp(getenv("ME_IO_SCHEDULE"), "/not-created/schedule.line3"));
+        CHECK(!strcmp(getenv("ME_G711_CAPTURE"), "/not-created/capture.line3"));
         CHECK(!strcmp(getenv("DS_TX_BIT_DUMP"), "/not-created/tx.3"));
     } else if (which == 4) {
         memset(value, 'a', 2048);
