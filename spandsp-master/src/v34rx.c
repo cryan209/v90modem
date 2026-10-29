@@ -18254,6 +18254,17 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
     /* 10.1.3.1 has the trellis encoder zeroed before B1; see
        v34_rx_b1_search() for the peer that does not. */
     tx->tx.state = initial_state;
+    /* 8.2 sets the switching-pattern counter to zero before each data frame;
+       a peer whose pattern runs ahead (v34_rx_b1_search()) is modelled by
+       advancing it that many mapping frames. */
+    for (int f = 0;  f < rx->b1_swp_frames;  f++)
+    {
+        tx->tx.s_bit_cnt += tx->tx.parms.r;
+        if (tx->tx.s_bit_cnt >= tx->tx.parms.p)
+            tx->tx.s_bit_cnt -= tx->tx.parms.p;
+        /*endif*/
+    }
+    /*endfor*/
     if (tx->tx.parms.j > 0)
     {
         tx->tx.super_frame = tx->tx.parms.j - 1;
@@ -18434,6 +18445,7 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     int states = s->viterbi.state_count;
     int best_state = 0;
     int best_offset = 0;
+    int best_swp;
     float best = -1.0f;
     int prior;
 
@@ -18441,29 +18453,50 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
         states = 1;
     /*endif*/
     b1_template_skip_cma = true;
-    for (int st = 0;  st < states;  st++)
+    /* The same peer also sends one mapping frame more than 10.1.3.2's E
+       before B1 (the +8 symbols v34_rx_b1_search_symbols() is sized for), and
+       its 8.2 switching pattern counts that frame: its B1 runs the pattern
+       one mapping frame ahead of a counter reset at B1.  Wherever every
+       mapping frame is a high frame (r == P: 3200/24000, 2400/9600) the two
+       are the same pattern, which is why only some rates showed it -- at
+       3429/33600 (SWP 14A5) every template read 0.22-0.24 at every offset and
+       state, and one frame ahead reads 1.000 at +8, state 13, the offset and
+       state its 3200 B1 always has (rf3429 replay, a-oc/04-6312).  So try one
+       frame ahead only when the 8.2 pattern found nothing. */
+    best_swp = 0;
+    for (int swp = 0;  swp <= 1;  swp++)
     {
-        if (!v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, st))
+        if (swp > 0  &&  (best >= 0.9f  ||  s->parms.r >= s->parms.p))
             break;
         /*endif*/
-        for (int k = 0;  k <= search;  k++)
+        s->b1_swp_frames = swp;
+        for (int st = 0;  st < states;  st++)
         {
-            float score = v34_rx_b1_score_at(s, k);
-
-            if (st == 0  &&  k == 0  &&  zero_score_out)
-                *zero_score_out = score;
+            if (!v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, st))
+                break;
             /*endif*/
-            if (score > best)
+            for (int k = 0;  k <= search;  k++)
             {
-                best = score;
-                best_state = st;
-                best_offset = k;
+                float score = v34_rx_b1_score_at(s, k);
+
+                if (swp == 0  &&  st == 0  &&  k == 0  &&  zero_score_out)
+                    *zero_score_out = score;
+                /*endif*/
+                if (score > best)
+                {
+                    best = score;
+                    best_state = st;
+                    best_offset = k;
+                    best_swp = swp;
+                }
+                /*endif*/
             }
-            /*endif*/
+            /*endfor*/
         }
         /*endfor*/
     }
     /*endfor*/
+    s->b1_swp_frames = best_swp;
     b1_template_skip_cma = false;
     (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);
     /* 10.1.3.1 requires a zero-state B1 at the final data-frame epoch.
@@ -18705,6 +18738,7 @@ static int begin_rx_data(v34_state_t *s, bool report_e)
         s->rx.v90_t3_prelude_start = 0;
     }
     /*endif*/
+    s->rx.b1_swp_frames = 0;
     if (v34_rx_t2_data_path(&s->rx) && v34_build_expected_b1(&s->rx))
         s->rx.b1_acquisition_active = true;
     /* 11.4.1.1.5/11.4.1.2.5 conditions on the complete known B1 before

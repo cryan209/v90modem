@@ -1472,13 +1472,10 @@ static int v34_configured_rate_n(const v34_state_t *s, int baud_idx)
    INFO1d shares this builder and its single-row offer is what the live V.90
    work is calibrated against.
 
-   DEFAULT OFF, on a measurement: offering every row lets the answer modem
-   select 3429 baud, which this tree does not train (it is the one row the
-   symbol-rate matrix has never carried), and the 2743/9600 u-law duplex row
-   stops training as a result.  The live problem it was written for is fixed
-   instead by the start profile itself -- g_v34_start_baud was 2400 for a
-   reason that no longer holds -- so the gate keeps the rows honest about what
-   we can actually receive. */
+   Off because the start profile does the job: the engine's plain V.34
+   profile is the top of the range (3429, modem_engine.c g_v34_start_baud),
+   so every row is offered unless the user lowered the ceiling, and a lowered
+   ceiling is exactly what should zero the rows above it. */
 static bool v34_info1c_offer_all_rates(const v34_state_t *s)
 {
     (void) s;

@@ -2561,6 +2561,10 @@ typedef struct
         its search offset and conjugation, reused when a later B1 does not. */
     bool b1_good_valid;
     int b1_good_offset;
+    /*! Mapping frames the far end's 8.2 switching pattern runs ahead of a
+        counter reset at the start of B1 (0 per 8.2/10.1.3.1; 1 for the
+        MT5634SMI).  Set by v34_rx_b1_search(), per call. */
+    int b1_swp_frames;
     bool b1_good_conjugate;
     int data_decision_count;
     int last_logged_mp_diag_state;

@@ -4288,9 +4288,15 @@ static bool me_v90a_load_dil(v90_dil_desc_t *desc)
    RasFinder answers that offer with nothing at all -- it holds Tone A until
    the call dies (reference-data/artifacts/rf-v34-a1, -b1).  At 3200 the same peer returns
    INFO1a and the call runs Phase 3 and Phase 4 (reference-data/artifacts/rf-v34-c3).
-   3200 rather than 3429 because 3429 is the one row the symbol-rate matrix
-   has never trained.  ME_V34_BAUD overrides. */
-static int        g_v34_start_baud = 3200;
+   It is the CEILING, not a choice: 10.1.2.3.4/Table 15 and 11.2.1.2.9 pick
+   the symbol rate per call from the L1/L2 probe, and every row above this
+   value is zeroed in INFO1c and skipped by INFO1a.  So it sits at the top of
+   V.34's range, 3429, and the line decides (2026-10-29: 3200 held slmodemd,
+   which reaches 33600 at 3429 against the hardware answerers, to 31200;
+   3429 gives 33600 both ways).  ME_V34_BAUD/ME_V34_BPS and AT+MS lower it.
+   The V.90 paths set their own 3200 ceiling (V.90 6.2: 3000 and 3200;
+   3429 needs INFO0d bit 40 and a 3429 upstream receiver). */
+static int        g_v34_start_baud = 3429;
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 
@@ -6862,6 +6868,9 @@ static int me_v90_reneg_enabled(void)
 #define ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT 20000
 
 static unsigned g_loss_retrains = 0;
+/* This call's V.34 symbol-rate ceiling, lowered when B1 shows our receiver
+   cannot take the symbol rate the far end picked (0 = the start profile). */
+static int g_v34_call_baud_cap = 0;
 /* How far this call has backed off the receive rate it asks for in MP.  See
    v34_rx_rate_backoff_locked(). */
 static int      g_v34_rx_rate_backoff_n = 0;
@@ -7027,6 +7036,26 @@ static bool v34_b1_rate_check_locked(void)
        then measured 22.5 dB at 4800 -- and taking that at face value sends
        the call straight to the 4800 floor.  Below 6 dB, read it as "too
        high" and step down two N, as v34_rx_rate_backoff_locked() does. */
+    if (snr < 6.0f && rx_code > 0 && !g_v90_fallback_v34_logged
+        && retrain_on_loss_due(me_v34_max_loss_retrains())) {
+        /* No correlation at all says this receiver cannot take THIS symbol
+           rate on this line, not that the line is two N short: against the
+           RasFinder every 3429-baud B1 read about -12 dB and the 3200-baud
+           retrain then measured 33-35 dB, but the two-N step stuck across the
+           symbol-rate change and left one call at 14400.  Lower this call's
+           symbol-rate ceiling one step instead, so the retrain's INFO1c zeroes
+           the row (10.1.2.3.4/Table 15 rows are what this receiver can
+           accept) and its probe sets the rate; the MP policy is untouched. */
+        g_v34_call_baud_cap = baud_by_code[rx_code - 1];
+        g_loss_retrains++;
+        g_last_loss_retrain_ms = trace_now_ms();
+        v34_reneg_clear_locked();
+        ME_LOG("[ME] V.34 B1: did not correlate at %d baud (%.1f dB); retraining "
+               "per 11.5 with %d baud as this call's symbol-rate ceiling\n",
+               baud_by_code[rx_code], snr, g_v34_call_baud_cap);
+        (void) restart_v34_phase2_locked("B1 did not correlate at this symbol rate");
+        return true;
+    }
     if (snr < 6.0f)
         supported = *ours - 2;
     if (supported < 2)
@@ -8686,7 +8715,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_dil_capture_start_logged = false;
     g_v90_phase2_restarts = 0;
     /* Per call, not per process: this server runs many calls in one. */
+    vpcm_analogue_peer_reset(&g_v90a_peer);
     g_loss_retrains = 0;
+    g_v34_call_baud_cap = 0;
     g_v34_rx_rate_backoff_n = 0;
     g_data_link_redetect = false;
     g_data_loss_recovering = false;
@@ -8792,6 +8823,8 @@ static bool restart_v34_phase2_locked(const char *reason)
         return false;
 
     baud = g_v34_start_baud ? g_v34_start_baud : 3200;
+    if (g_v34_call_baud_cap > 0 && baud > g_v34_call_baud_cap)
+        baud = g_v34_call_baud_cap;
     bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(baud);
     /* Keep the half-duplex role across a retrain.  The `true` here was
        unconditional, so a clause 12 call that took a retrain for any reason

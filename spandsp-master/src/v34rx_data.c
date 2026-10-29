@@ -617,6 +617,17 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                 }
                 s->mapping_frame_count = 0;
+                /* The deframer has to run the switching pattern at the phase
+                   the B1 search matched (v34_rx_b1_search()); B1 is one whole
+                   data frame, so data keeps that phase after it. */
+                for (int f = 0;  f < s->b1_swp_frames;  f++)
+                {
+                    s->s_bit_cnt += s->parms.r;
+                    if (s->s_bit_cnt >= s->parms.p)
+                        s->s_bit_cnt -= s->parms.p;
+                    /*endif*/
+                }
+                /*endfor*/
                 for (int i = 0; i < s->v90_t3_b1_symbols; i++)
                 {
                     complexf_t o = (s->duplex && !v34_rx_b1_batch_eq_enabled(s)) ? s->b1_observed[i]

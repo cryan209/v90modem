@@ -96,7 +96,7 @@ one the V.34 bank sees.
 
 | call (96 kHz, ME_V90_JA_HEURISTIC_FALLBACK_MS=0 on the digital side) | result |
 |---|---|
-| plain V.34 both ends, slot 5, G.711 both sides | CONNECT 24000, payload intact (`make test` row) |
+| plain V.34 both ends, slot 5, G.711 both sides | CONNECT 33600, payload intact (`make test` row; 24000 before the 3429 start ceiling, 2026-10-29) |
 | V.90, clean DS0, no slot | CONNECT 56000 down / 31200 up, payload intact (`make test` row) |
 | V.90, slot 0 or 5, caller on G.711 | Phase 2 completes; the analogue receiver never finds Sd |
 | V.90, slot 0, caller linear | **Phase 3 completes**; Phase 4 stops at TRN2d (0 ones), §9.4.2 deadline, retrain loop |

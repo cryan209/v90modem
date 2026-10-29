@@ -63,3 +63,32 @@ The broad `make test` run found three K56flex client assertions on its A-law
 32k noisy PRIME row; those reproduce with this repair disabled. A subsequent
 `make -i test` was interrupted after stalling in the multi-page fax Class 2
 receive test. Therefore the complete suite is not reported as passing.
+
+## Live: the MT5634SMI's B1 switching phase (2026-10-29)
+
+The first live 3429 calls came when the plain V.34 start profile became a
+ceiling (3429/33600, `modem_engine.c` `g_v34_start_baud`) and the line probe
+picked the symbol rate.  Against the RasFinder (an MT5634SMI, Lucent) every
+3429 call failed the same way: MP decoded cleanly (|z| sd 0.016, 0.7 degrees
+from the 4-point grid), then B1 correlated 0.22-0.24 at every offset and
+trellis state, the B1 check retrained and the call often died.  The data
+symbols were not corrupt -- fitted to the lattice they carry ~34-35 dB, the
+same as this peer's 3200/24000 data -- so the template was wrong.
+
+The template follows 8.2 exactly (`SWP` 14A5 MSB-first, counter zeroed
+before the data frame).  This peer sends one mapping frame more than E's 20
+bits before B1 (the +8 symbols `v34_rx_b1_search_symbols()` already allows
+for), and its switching pattern counts that frame, so its B1 runs the pattern
+one mapping frame ahead.  Wherever r == P every mapping frame is a high frame
+and the two patterns coincide, which is why 3200/24000 (SWP FFFF) always
+worked and 3429/33600 never did.  With the template's counter one frame
+ahead, B1 is found at +8, trellis state 13, correlation 1.000, on all five
+recorded failing calls (both lines).  `v34_rx_b1_search()` now tries one
+frame ahead when the 8.2 phase finds nothing (`b1_swp_frames`), and the
+deframer runs data at the phase it matched.  Regression row:
+`reference-data/artifacts/rf-mt5634-v34-3429-swp`, which fails without the
+fix.
+
+Live A/B (alternated, same lines): with the fix 3429/33600 both ways with
+login and every probe echoed; the 3200-ceiling build 24000.  The peer's
+"retrain" on the failing calls was only it following ours.

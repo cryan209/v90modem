@@ -105,6 +105,19 @@ call, so 55/56 with one bad FCS is a pass.
    31200 on the 7910 and Diva.  On the Diva our V.34 originate reached only
    16800/21600 against its 28800/31200.
 
+   **Resolved later the same day: the symbol rate is now negotiated.**  The
+   3200 "start profile" was a hard ceiling -- INFO1c and INFO1a zero every
+   row above it -- so it is now the top of the range (3429/33600) and the L1/L2
+   probe picks per call; `ME_V34_BAUD`/`ME_V34_BPS` and `+MS` still lower it,
+   and V.90 keeps 3200 (V.90 6.2's 3000/3200; 3429 upstream needs INFO0d bit
+   40 and a 3429 T/3 receiver).  slmodemd into us then reaches 33600 both ways
+   at 3429.  Against the RasFinder, 3429 first failed every B1: its B1 runs
+   8.2's switching pattern one mapping frame ahead (docs/v34_3429_dense_data.md).
+   With that fixed our client gets 3429/33600 on both RasFinder lines, where
+   the 3200 ceiling gave 24000.  A B1 that does not correlate at all now lowers
+   that call's symbol-rate ceiling one step on the retrain instead of stepping
+   the bit rate down two levels.
+
 4. **V.90 to the Diva through the A<->mu transcode fails for both clients**,
    slmodemd in Phase 3, ours in Phase 4.  This is the leg, not either modem:
    our usual Diva harness uses the law-matched account (2905, A-law) and
