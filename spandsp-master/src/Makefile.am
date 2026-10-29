@@ -571,7 +571,8 @@ v29tx.lo: ${V29_TX_INCL}
 v29tx_rrc.h: make_modem_filter$(EXEEXT)
 	./make_modem_filter$(EXEEXT) -m V.29 -t >v29tx_rrc.h
 
-V34_TX_INCL = v34_tx_2400_rrc.h \
+V34_TX_INCL = v22bis_tx_rrc.h \
+              v34_tx_2400_rrc.h \
               v34_tx_2743_rrc.h \
               v34_tx_2800_rrc.h \
               v34_tx_3000_rrc.h \
@@ -582,7 +583,9 @@ V34_TX_INCL = v34_tx_2400_rrc.h \
               v34_shell_map.h \
               v34_tx_pre_emphasis_filters.h
 
-V34_RX_INCL = v34_rx_2400_low_carrier_rrc.h \
+V34_RX_INCL = v22bis_rx_1200_rrc.h \
+              v22bis_rx_2400_rrc.h \
+              v34_rx_2400_low_carrier_rrc.h \
               v34_rx_2400_high_carrier_rrc.h \
               v34_rx_2743_low_carrier_rrc.h \
               v34_rx_2743_high_carrier_rrc.h \

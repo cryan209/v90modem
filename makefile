@@ -474,7 +474,8 @@ apple_usb_modem_coupler: $(APPLE_USB_MODEM_COUPLER_OBJS) spandsp $(PJ_BUILD_PRER
 
 tools/apple_usb_modem_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 tools/apple_usb_modem_coupler.o: tools/apple_usb_modem_coupler.m \
-    modem_engine.h data_interface.h line_monitor.h tools/apple_modem_line.h tools/apple_modem_loopback.h tools/apple_modem_dial.h
+    modem_engine.h data_interface.h line_monitor.h tools/apple_modem_line.h tools/apple_modem_loopback.h tools/apple_modem_dial.h \
+    | $(SPANDSP_LIB) $(PJ_BUILD_PREREQ)
 	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
@@ -860,7 +861,7 @@ v92_p3_rx_line_test: $(V92_P3_RX_LINE_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 v92_p3_probe: $(V92_P3_PROBE_OBJS) spandsp
 	$(CC) $(V92_P3_PROBE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-v92_p3_probe.o: tools/v92_p3_probe.c v92_p3_rx.h v92_ja_decode.h v90.h
+v92_p3_probe.o: tools/v92_p3_probe.c v92_p3_rx.h v92_ja_decode.h v90.h | $(SPANDSP_LIB) $(PJ_BUILD_PREREQ)
 	$(CC) $(CFLAGS) -c tools/v92_p3_probe.c -o $@
 
 fax_hdx_handoff_test: $(FAX_HDX_HANDOFF_TEST_OBJS) spandsp
@@ -917,6 +918,10 @@ v92_mh_retrain_test: $(V92_MH_RETRAIN_TEST_OBJS) spandsp
 v92_mh_line_test: $(V92_MH_LINE_TEST_OBJS) spandsp
 	$(CC) $(V92_MH_LINE_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+# The host stamps record the host a tree is CONFIGURED for, so each is
+# written once configure succeeds.  Written after the build instead, a
+# failed first build left the stamp absent and every retry ran distclean,
+# which deletes SpanDSP's generated filter tables.
 $(SPANDSP_LIB): FORCE
 	@set -e; \
 	current_host="$(HOST_TAG)"; \
@@ -943,6 +948,7 @@ $(SPANDSP_LIB): FORCE
 		 LDFLAGS="$(TIFF_LDFLAGS) $(JPEG_LDFLAGS)" \
 		 ./configure --enable-v34 --enable-v32bis); \
 	fi; \
+	printf '%s\n' "$$current_host" > "$(SPANDSP_HOST_STAMP)"; \
 	if $(CC) --version 2>/dev/null | grep -q clang; then \
 		opt="$(SPANDSP_V34RX_OPT_CFLAGS)"; \
 	else \
@@ -958,10 +964,12 @@ $(SPANDSP_LIB): FORCE
 			CFLAGS="$$opt $$(sed -n 's/^CFLAGS = //p' "$(SPANDSP_ROOT)/src/Makefile")" \
 			v34rx.lo; \
 	fi; \
-	$(MAKE) -C "$(SPANDSP_ROOT)"; \
-	printf '%s\n' "$$current_host" > "$(SPANDSP_HOST_STAMP)"
+	$(MAKE) -C "$(SPANDSP_ROOT)"
 
-%.o: %.c
+# Order-only: under make -j nothing may compile before SpanDSP's configure
+# has written spandsp.h and pjproject's has written pj/compat/os_auto.h, and
+# the tests that #include v34rx.c need its generated tables.
+%.o: %.c | $(SPANDSP_LIB) $(PJ_BUILD_PREREQ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Keep object layouts synchronized with the headers that define them.  This is
@@ -1031,10 +1039,10 @@ v90_engine_replay.o: v90_engine_replay.c modem_engine.h
 v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_fdm_test.o: v34_fdm_test.c fdm_bank.h $(SPANDSP_DIR)/spandsp/v34.h
 fdm_bank.o: fdm_bank.c fdm_bank.h
-v32bis_duplex_test.o: v32bis_duplex_test.c $(SPANDSP_DIR)/spandsp/v32bis.h spandsp
-bell212a_test.o: bell212a_test.c $(SPANDSP_DIR)/spandsp/v22bis.h spandsp
-v22bis_s1_test.o: v22bis_s1_test.c $(SPANDSP_DIR)/spandsp/v22bis.h spandsp
-v32bis_spandsp_test.o: v32bis_spandsp_test.c $(SPANDSP_DIR)/spandsp/v32bis.h spandsp
+v32bis_duplex_test.o: v32bis_duplex_test.c $(SPANDSP_DIR)/spandsp/v32bis.h
+bell212a_test.o: bell212a_test.c $(SPANDSP_DIR)/spandsp/v22bis.h
+v22bis_s1_test.o: v22bis_s1_test.c $(SPANDSP_DIR)/spandsp/v22bis.h
+v32bis_spandsp_test.o: v32bis_spandsp_test.c $(SPANDSP_DIR)/spandsp/v32bis.h
 v34_info_decode.o: v34_info_decode.c v34_info_decode.h v90.h
 v21_fsk_demod.o:  v21_fsk_demod.c  v21_fsk_demod.h
 phase12_decode.o: phase12_decode.c phase12_decode.h v21_fsk_demod.h v34_info_decode.h v90.h v8bis_decode.h
@@ -1069,8 +1077,8 @@ pjproject:
 		echo "Configuring local pjproject in $(PJ_LOCAL_ROOT)"; \
 		(cd "$(PJ_LOCAL_ROOT)" && ./aconfigure); \
 	fi; \
-	$(MAKE) -C "$(PJ_LOCAL_ROOT)" lib; \
-	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"
+	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"; \
+	$(MAKE) -C "$(PJ_LOCAL_ROOT)" lib
 
 # Switch the tree to the integer datapath.  Rebuilds spandsp too, because
 # v34rx.c and the private header both change under the flag.
