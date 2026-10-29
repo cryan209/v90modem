@@ -225,7 +225,8 @@ TEST_TARGETS += audio_sock_modem
 V90_ANALOGUE_PR4_TEST_OBJS = v90_analogue_pr4_test.o v90_analogue_pr4.o
 LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
 LINE_SUPERVISOR_TEST_OBJS = line_supervisor_test.o
-TEST_TARGETS += line_supervisor_test
+TEST_TARGETS += line_supervisor_test media_perf_test
+MEDIA_PERF_TEST_OBJS = media_perf_test.o
 # The two DTE console arrangements (classic combined, control + data).
 CONSOLE_TEST_OBJS = console_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 # AT+MS through the real engine and PTY, plus at_ms.c on its own.
@@ -524,6 +525,11 @@ fax_class_test: $(FAX_CLASS_TEST_OBJS) spandsp
 
 line_monitor_test: $(LINE_MONITOR_TEST_OBJS) spandsp
 	$(CC) $(LINE_MONITOR_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+media_perf_test: $(MEDIA_PERF_TEST_OBJS)
+	$(CC) $(MEDIA_PERF_TEST_OBJS) -o $@
+
+media_perf_test.o: media_perf_test.c media_perf.h
 
 line_supervisor_test: $(LINE_SUPERVISOR_TEST_OBJS)
 	$(CC) $(LINE_SUPERVISOR_TEST_OBJS) -o $@
@@ -994,7 +1000,7 @@ sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h line_supervis
 line_supervisor.o: line_supervisor.c line_supervisor.h
 v92_qc.o: v92_qc.c v92_qc.h v92_anspcm_decode.h v92_short_phase1_decode.h v91.h
 v92_qc_test.o: v92_qc_test.c v92_qc.h v92_anspcm_decode.h v92_short_phase1_decode.h v91.h
-modem_engine.o:   modem_engine.c   v8bis_modem.h v8bis_fsm.h modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h mnp.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
+modem_engine.o:   modem_engine.c   media_perf.h v8bis_modem.h v8bis_fsm.h modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h mnp.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 # ATI3/ATI7 name the build.  Rewritten only when git describe changes, so it
 # does not force a rebuild of data_interface.o on every make.

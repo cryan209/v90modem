@@ -54,7 +54,10 @@ int main(int argc,char **argv) {
  int wire=dup(STDOUT_FILENO); if(wire<0)return 2;
  dup2(STDERR_FILENO,STDOUT_FILENO);
  FILE *output=fdopen(wire,"wb"); if(!output)return 2;
- me_set_verbose(1); me_init();
+ /* Performance baselines must not include verbose formatting/section clocks.
+    Keep the existing diagnostic default for ordinary interoperability tests. */
+ const char *quiet=getenv("ENGINE_PEER_QUIET");
+ me_set_verbose(!(quiet && atoi(quiet)!=0)); me_init();
  di_set_callbacks(dial,control,control,NULL);
  if(di_open(pty)<0)return 2;
  me_set_law(law);

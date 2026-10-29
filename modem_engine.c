@@ -20,6 +20,7 @@
  */
 
 #include "modem_engine.h"
+#include "media_perf.h"
 #include "x2_session.h"
 #include "data_interface.h"
 #include "line_monitor.h"
@@ -86,8 +87,18 @@
    capture hypotheses. */
 static uint64_t g_cb_prof_ns[4];
 static uint64_t me_mono_ns(void);
+/* Section clocks only feed optional verbose detail. Quiet runs still collect
+ * whole-callback histograms, but need not time every inner DSP section. */
 #define ME_CB_PROF(slot, stmt) \
-    do { uint64_t cb_t0_ = me_mono_ns(); stmt; g_cb_prof_ns[slot] += me_mono_ns() - cb_t0_; } while (0)
+    do { \
+        if (me_verbose_enabled()) { \
+            uint64_t cb_t0_ = me_mono_ns(); \
+            stmt; \
+            g_cb_prof_ns[slot] += me_mono_ns() - cb_t0_; \
+        } else { \
+            stmt; \
+        } \
+    } while (0)
 
 
 /* V.34 RX/TX stage enums — copied from spandsp/private/v34.h to avoid
@@ -1404,6 +1415,35 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 static me_state_t      g_state     = ME_IDLE;   /* tentatively declared above the DTE callbacks */
 static me_modulation_t g_mod       = ME_MOD_NONE;   /* tentatively declared above the DTE callbacks */
 static pthread_mutex_t g_state_mtx;
+
+/* Same lock as call state: record/copy only, never format or write under it.
+ * Phase is the state at callback entry; a transition is counted separately.
+ * Epochs exclude callbacks spanning teardown/reinitialisation of a call. */
+static media_perf_t g_media_perf[2][3]; /* rx/tx; training/data/other */
+static uint64_t g_media_perf_epoch;
+static bool g_media_perf_active;
+static unsigned g_media_slow_reports;
+static uint64_t g_media_slow_limit_ns = 20000000;
+static void me_media_perf_finish(void);
+
+static void me_media_perf_reset_locked(void)
+{
+    memset(g_media_perf, 0, sizeof(g_media_perf));
+    g_media_perf_epoch++;
+    g_media_perf_active = true;
+    g_media_slow_reports = 0;
+    /* Cache the diagnostic threshold at the call boundary, not in the media
+     * path. It does not change the sample-derived deadline counter. */
+    g_media_slow_limit_ns = 20000000;
+    const char *e = getenv("ME_SLOW_CALLBACK_US");
+    if (e && *e && *e != '-') {
+        char *end;
+        errno = 0;
+        unsigned long long us = strtoull(e, &end, 10);
+        if (!errno && !*end && us > 0 && us <= UINT64_MAX / 1000)
+            g_media_slow_limit_ns = (uint64_t)us * 1000;
+    }
+}
 static bool            g_calling_party = false; /* false=answerer, true=caller */
 static int             g_v8_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
 static int             g_v8_active_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
@@ -13516,6 +13556,7 @@ void me_init(void)
 
 void me_destroy(void)
 {
+    me_media_perf_finish();
     v90_cp_live_worker_stop();
     v90_p3_ja_worker_stop();
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
@@ -13847,6 +13888,7 @@ void me_on_sip_connected(void)
 {
     lm_reset();
     pthread_mutex_lock(&g_state_mtx);
+    me_media_perf_reset_locked();
     g_awaiting_answer = false;
 
     /* AT+MS since the last call takes effect here, at the call boundary. */
@@ -14092,6 +14134,7 @@ void me_on_sip_disconnected(void)
 
 void me_on_sip_disconnected_status(int sip_status)
 {
+    me_media_perf_finish();
     me_relay_reset();
     pthread_mutex_lock(&g_state_mtx);
 
@@ -18850,13 +18893,20 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                                (int)g_mod);
                     }
                 }
-                for (int i = 0; i < len; i++)
-                    tx_energy += (int64_t)amp[i] * amp[i];
+                /* This second pass only supplies the verbose RMS message;
+                 * quiet calls need neither the sample scan nor the sqrt.
+                 * Keep the existing capture flush cadence independent of it. */
+                if (me_verbose_enabled()) {
+                    for (int i = 0; i < len; i++)
+                        tx_energy += (int64_t)amp[i] * amp[i];
+                }
                 tx_count += len;
                 if (tx_count >= 8000) {
-                    double rms = sqrt((double)tx_energy / tx_count);
-                    ME_LOG("[ME] Training TX: RMS=%.1f (%d samples)\n",
-                            rms, tx_count);
+                    if (me_verbose_enabled()) {
+                        double rms = sqrt((double)tx_energy / tx_count);
+                        ME_LOG("[ME] Training TX: RMS=%.1f (%d samples)\n",
+                                rms, tx_count);
+                    }
                     if (tx_dump) fflush(tx_dump);
                     tx_energy = 0;
                     tx_count = 0;
@@ -21148,23 +21198,90 @@ const char *me_get_dial_uri(void)
    V.34 data-mode entry and retrain while the receive side was paced to
    0.2 ms.  Log any callback over 20 ms (one packet) with where the engine was,
    so the slow step can be named.  Cheap: two clock reads per callback. */
-static void me_media_timing_note(const char *dir, uint64_t ns)
-{
-    static uint64_t limit_ns;
+typedef struct {
+    uint64_t epoch;
+    me_state_t state;
+} me_media_perf_token_t;
 
-    /* ME_SLOW_CALLBACK_US lowers the threshold (diagnostic): a replay on a
-       faster host shows the same steps at a fraction of the mini's time. */
-    if (limit_ns == 0)
-    {
-        const char *e = getenv("ME_SLOW_CALLBACK_US");
-        limit_ns = (e && atoi(e) > 0) ? 1000ULL*(uint64_t) atoi(e) : 20000000ULL;
+static me_media_perf_token_t me_media_perf_begin(void)
+{
+    me_media_perf_token_t token;
+    pthread_mutex_lock(&g_state_mtx);
+    token.epoch = g_media_perf_epoch;
+    token.state = g_state;
+    pthread_mutex_unlock(&g_state_mtx);
+    return token;
+}
+
+static void me_media_perf_finish(void)
+{
+    media_perf_t snapshot[2][3];
+    pthread_mutex_lock(&g_state_mtx);
+    bool active = g_media_perf_active;
+    uint64_t epoch = g_media_perf_epoch;
+    g_media_perf_active = false;
+    memcpy(snapshot, g_media_perf, sizeof(snapshot));
+    pthread_mutex_unlock(&g_state_mtx);
+    if (!active)
+        return;
+    static const char *phase[] = {"training", "data", "other"};
+    for (unsigned d = 0; d < 2; d++) {
+        for (unsigned p = 0; p < 3; p++) {
+            const media_perf_t *s = &snapshot[d][p];
+            if (!s->calls)
+                continue;
+            /* Wall time includes scheduling/lock waits; this is NOT CPU load.
+             * Histogram percentiles are approximate upper bounds, max exact. */
+            fprintf(stderr, "[PERF] scope=g711 call=%llu dir=%s phase=%s calls=%llu "
+                    "audio_ms=%.3f wall_ms=%.3f mean_us=%.3f "
+                    "p95_us_upper=%.3f p99_us_upper=%.3f max_us=%.3f "
+                    "over_budget=%llu transitions=%llu\n",
+                    (unsigned long long)epoch, d ? "tx" : "rx", phase[p],
+                    (unsigned long long)s->calls,
+                    (double)s->samples / 8.0, (double)s->wall_ns / 1e6,
+                    (double)s->wall_ns / (double)s->calls / 1e3,
+                    (double)media_perf_percentile_ns(s, 95) / 1e3,
+                    (double)media_perf_percentile_ns(s, 99) / 1e3,
+                    (double)s->max_ns / 1e3,
+                    (unsigned long long)s->over_budget,
+                    (unsigned long long)s->transitions);
+        }
     }
-    if (ns > limit_ns)
+}
+
+static void me_media_timing_note(const char *dir, uint64_t start_ns, int samples,
+                                 me_media_perf_token_t token)
+{
+    bool print_slow = false;
+    int state = 0, mod = 0, rx_stage = -1, tx_stage = -1;
+    uint64_t sections[4] = {0};
+    pthread_mutex_lock(&g_state_mtx);
+    /* Include the bookkeeping lock wait in the measured callback, too. */
+    uint64_t ns = me_mono_ns() - start_ns;
+    if (g_media_perf_active && token.epoch == g_media_perf_epoch && samples > 0) {
+        unsigned phase = token.state == ME_DATA ? 1
+                       : (token.state == ME_V8 || token.state == ME_TRAINING) ? 0 : 2;
+        media_perf_note(&g_media_perf[dir[0] == 't'][phase], ns,
+                        (unsigned)samples, token.state != g_state);
+        /* Keep optional verbose detail useful without a retrain carousel
+         * generating an unbounded stream of slow-callback messages. */
+        if (ns > g_media_slow_limit_ns && g_media_slow_reports < 4) {
+            g_media_slow_reports++;
+            print_slow = true;
+            state = (int)g_state;
+            mod = (int)g_mod;
+            rx_stage = g_v34 ? v34_get_rx_stage(g_v34) : -1;
+            tx_stage = g_v34 ? v34_get_tx_stage(g_v34) : -1;
+            if (dir[0] == 'r')
+                memcpy(sections, g_cb_prof_ns, sizeof(sections));
+        }
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+    if (print_slow)
         ME_LOG("[ME] slow media callback: %s took %.1f ms (state=%d mod=%d v34_rx=%d v34_tx=%d) [lec %.1f v34_rx %.1f ja %.1f dil %.1f ms]\n",
-               dir, (double) ns/1e6, (int) g_state, (int) g_mod,
-               g_v34 ? v34_get_rx_stage(g_v34) : -1, g_v34 ? v34_get_tx_stage(g_v34) : -1,
-               (double) g_cb_prof_ns[0]/1e6, (double) g_cb_prof_ns[1]/1e6,
-               (double) g_cb_prof_ns[2]/1e6, (double) g_cb_prof_ns[3]/1e6);
+               dir, (double)ns/1e6, state, mod, rx_stage, tx_stage,
+               (double)sections[0]/1e6, (double)sections[1]/1e6,
+               (double)sections[2]/1e6, (double)sections[3]/1e6);
 }
 
 static uint64_t me_mono_ns(void)
@@ -21316,28 +21433,32 @@ static void me_relay_tx(uint8_t *codewords, int count)
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
+    me_media_perf_token_t token = me_media_perf_begin();
     memset(g_cb_prof_ns, 0, sizeof g_cb_prof_ns);
     if (codewords && count > 0)
         lm_feed_g711(LM_RX, codewords, count, g_law == ME_LAW_ALAW);
     if (me_relay_wanted()) {
         if (!me_relay_rx(codewords, count))
             me_hangup();
+        me_media_timing_note("rx", t0, codewords ? count : 0, token);
         return;
     }
     me_rx_g711_impl(codewords, count);
-    me_media_timing_note("rx", me_mono_ns() - t0);
     if (count > 0)
         me_link_publish_tick(count);
+    me_media_timing_note("rx", t0, codewords ? count : 0, token);
 }
 
 int me_tx_g711(uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
+    me_media_perf_token_t token = me_media_perf_begin();
     int n;
 
     if (me_relay_wanted()  &&  codewords  &&  count > 0) {
         me_relay_tx(codewords, count);
         lm_feed_g711(LM_TX, codewords, count, g_law == ME_LAW_ALAW);
+        me_media_timing_note("tx", t0, count, token);
         return count;
     }
     g_tx_from_g711 = true;
@@ -21345,6 +21466,6 @@ int me_tx_g711(uint8_t *codewords, int count)
     g_tx_from_g711 = false;
     if (codewords && n > 0)
         lm_feed_g711(LM_TX, codewords, n, g_law == ME_LAW_ALAW);
-    me_media_timing_note("tx", me_mono_ns() - t0);
+    me_media_timing_note("tx", t0, codewords && n > 0 ? n : 0, token);
     return n;
 }

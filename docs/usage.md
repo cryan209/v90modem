@@ -327,6 +327,10 @@ those captures when not needed. Routine live runs should also leave
 traces are synchronous and can interfere with real-time audio, not just fill
 disk. `V34_DUPLEX_LOG` enables similarly verbose offline training traces.
 
+For callback stalls and CPU investigation, start with the compact per-call
+`[PERF]` summaries described in [performance](performance.md). They are
+available without enabling verbose traces.
+
 Most environment variables are diagnostic or experimental, not normal user
 configuration. Prefer AT commands and documented launch options; consult the
 [classified environment inventory](env_knobs.md) before using a tuning knob.

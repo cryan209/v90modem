@@ -32,6 +32,7 @@ Where to start:
 | [v54_diagnostics.md](v54_diagnostics.md) | `AT+T*` loops and self-tests |
 | [carrier_loss.md](carrier_loss.md) | S10 carrier-loss hold in data mode |
 | [multi_line.md](multi_line.md) | `--lines N` multi-line server |
+| [performance.md](performance.md) | Compact callback latency summaries, baseline procedure and optimisation priorities |
 | [gui_mode.md](gui_mode.md) | `--gui`, `--gui-web`, `--gui-loopback` |
 | [browser_modem_demo.md](browser_modem_demo.md) | Browser modem demo |
 | [html_call_export.md](html_call_export.md) | Offline call HTML export |
