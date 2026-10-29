@@ -40,6 +40,18 @@ The corpus retained by the 2026-10-18 cleanup below predates these rules and
 stays until its datasets are reviewed. A dataset that only a doc cites can be
 removed once that doc carries the finding inline.
 
+On 2026-10-30, with the user's approval, we deleted 110 retained runs (801 MB)
+and their `index.tsv` rows. None were tracked or read by code, and the only
+citations were wildcards in docs or code comments. The families were
+`x2-20261019-*`, `x2-s39q-*`, `x2-headroom-full-*`, `x2-higher-*`,
+`x2-rx-improve-*`, `x2-ds-pace-*`, `x2-host-analog-20261006-exact`,
+`rf-tower-*` (39 calls), `rf-te-ab-*`, `v34-rate-20260822T*`,
+`trn1d-long-221035Z`, `trn1d-long-ab-222757Z`, `lossretrain-ab-004426Z`,
+`gate-ab-28800-073139Z` and `eicon-v90a-trn1d-ab-native{3,4}-r1-20261009`.
+We also deleted the unindexed, uncited `rf-echo-default-20261022`. Docs that
+cite these runs now point at provenance that no longer exists; their stated
+results stand as written.
+
 ## Retained corpus
 
 `reference-data/artifacts/` and `reference-data/captures/` hold retained input

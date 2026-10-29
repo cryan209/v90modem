@@ -125,13 +125,10 @@ reference-data/artifacts/eicon-v90a-gates-20261009	5	1028166	docs/eicon_v90a_202
 reference-data/artifacts/eicon-v90a-self-20261009	6	1991465	docs/eicon_v90a_20261009.md
 reference-data/artifacts/eicon-v90a-trn1d-ab-30k-r1-20261009	8	5789742	docs/eicon_v90a_20261009.md
 reference-data/artifacts/eicon-v90a-trn1d-ab-def-r1-20261009	8	5674149	docs/eicon_v90a_20261009.md
-reference-data/artifacts/eicon-v90a-trn1d-ab-native3-r1-20261009	8	5028709	modem_engine.c
-reference-data/artifacts/eicon-v90a-trn1d-ab-native4-r1-20261009	8	7493031	modem_engine.c
 reference-data/artifacts/eicon-v90a-x4-20261009	7	1803684	docs/eicon_v90a_20261009.md
 reference-data/artifacts/eicon-v90a-zero-20261009	4	918627	docs/eicon_v90a_20261009.md
 reference-data/artifacts/eicon-zmodem-20261008	13	1911780	docs/v90_hardware_interop.md
 reference-data/artifacts/eqoff-28800-r1	13	6188107	docs/project_history.md; docs/v90_upstream_data_path.md
-reference-data/artifacts/gate-ab-28800-073139Z	158	39434547	docs/v90_upstream_data_path.md
 reference-data/artifacts/goal-matrix-115515Z	204	109809970	docs/project_history.md; docs/retrain_and_resync.md; docs/v90_upstream_data_path.md; modem_engine.h
 reference-data/artifacts/goal-v90-073744Z	13	8423612	docs/v90_upstream_data_path.md
 reference-data/artifacts/goal-v90-p2cap-r2-103404Z	15	15538746	docs/v90_upstream_data_path.md
@@ -152,7 +149,6 @@ reference-data/artifacts/hsf-v90	458	584780324	docs/hsf_analogue_v90_coupler.md;
 reference-data/artifacts/jafb-500	77	41692304	v90.c
 reference-data/artifacts/k56flex-response-20261009	38	16226094	docs/mica_qam_firmware.md
 reference-data/artifacts/live-verify-231747Z	268	155535670	docs/v90_upstream_data_path.md
-reference-data/artifacts/lossretrain-ab-004426Z	84	192400657	docs/project_history.md; docs/retrain_and_resync.md
 reference-data/artifacts/lossretrain-ab-004426Z.log	1	2560	docs/project_history.md; docs/retrain_and_resync.md
 reference-data/artifacts/modem-lab.html	1	8722500	docs/browser_modem_demo.md; tools/package_modem_demo.py
 reference-data/artifacts/modem-showcase	81	10320906	tools/modem_showcase.py
@@ -179,84 +175,33 @@ reference-data/artifacts/rf-mt5634-v90-b1	1	589440	docs/v90_rasfinder_phase4.md;
 reference-data/artifacts/rf-padrep-a1	5	1422170	docs/project_history.md
 reference-data/artifacts/rf-pp-carrier-20260929-r1	5	1322761	docs/v90_rasfinder_phase4.md
 reference-data/artifacts/rf-pve-20261015	66	22464482	artifacts/rf-pve-20261015/run.sh; docs/v90_rasfinder_phase4.md
-reference-data/artifacts/rf-te-ab-ctl-1	5	299098	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-ctl-2	5	319627	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-ctl-3	5	287998	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-ctl-4	5	287038	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-ctl-5	5	289046	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-ctl-6	5	288242	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-1	5	289002	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-2	5	298660	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-3	5	289080	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-4	5	289969	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-5	5	289345	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-te-ab-te-6	5	298051	docs/v8_conformance_audit.md
-reference-data/artifacts/rf-tower-1	5	993659	docs/project_history.md; docs/v8_conformance_audit.md
 reference-data/artifacts/rf-tower-2	5	8434	docs/project_history.md
-reference-data/artifacts/rf-tower-3	5	1350443	docs/project_history.md; docs/v8_conformance_audit.md
 reference-data/artifacts/rf-tower-4	5	1339704	docs/project_history.md; docs/v8_conformance_audit.md; modem_engine.c
-reference-data/artifacts/rf-tower-5	5	1325247	docs/project_history.md; docs/v8_conformance_audit.md
-reference-data/artifacts/rf-tower-6	5	1352365	docs/project_history.md; docs/v8_conformance_audit.md
-reference-data/artifacts/rf-tower-7	5	1356569	docs/project_history.md; docs/v8_conformance_audit.md
 reference-data/artifacts/rf-tower-fb-1	6	431923	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-11	6	1669007	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-12	6	1591771	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-13	6	1997451	docs/project_history.md
-reference-data/artifacts/rf-tower-fb-14	6	1592545	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-15	6	1825478	docs/project_history.md
-reference-data/artifacts/rf-tower-fb-16	6	1615912	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-19	8	6966964	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-2	6	1615324	docs/project_history.md
-reference-data/artifacts/rf-tower-fb-3	6	4044	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-4	6	1625857	docs/project_history.md
-reference-data/artifacts/rf-tower-fb-5	6	4043	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-6	6	1820851	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-7	6	2164927	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-8	6	1727616	docs/project_history.md
 reference-data/artifacts/rf-tower-fb-9	6	2938430	docs/project_history.md
-reference-data/artifacts/rf-tower-hold-1	6	3592236	docs/project_history.md
-reference-data/artifacts/rf-tower-jb0-1	5	1096924	docs/project_history.md
 reference-data/artifacts/rf-tower-jds-1	5	1555951	docs/project_history.md
-reference-data/artifacts/rf-tower-jds-2	5	1682130	docs/project_history.md
-reference-data/artifacts/rf-tower-jds-3	5	1622366	docs/project_history.md
-reference-data/artifacts/rf-tower-n400-1	6	3606226	docs/project_history.md
 reference-data/artifacts/rf-tower-n400-2	6	2060387	docs/project_history.md
 reference-data/artifacts/rf-tower-nop3-1	5	1449862	docs/project_history.md
-reference-data/artifacts/rf-tower-pcap-1	6	3906794	docs/project_history.md
 reference-data/artifacts/rf-tower-scan1-1	5	1608919	docs/project_history.md
-reference-data/artifacts/rf-tower-scan1-2	5	1558785	docs/project_history.md
-reference-data/artifacts/rf-tower-scan1-3	5	1630865	docs/project_history.md
-reference-data/artifacts/rf-tower-scan1-4	5	1576494	docs/project_history.md
-reference-data/artifacts/rf-tower-scan1-5	5	1641514	docs/project_history.md
 reference-data/artifacts/rf-tower-scan1-6	5	1602058	docs/project_history.md
-reference-data/artifacts/rf-tower-trn2dlvl-1	6	1456292	docs/project_history.md
 reference-data/artifacts/rf-tower-u2900-1	8	3537162	docs/project_history.md
-reference-data/artifacts/rf-tower-u2905-1	6	1476867	docs/project_history.md
 reference-data/artifacts/rf-tower-v34-1	6	3580433	docs/project_history.md
 reference-data/artifacts/rf-tower-v34-2	6	3560754	docs/project_history.md
-reference-data/artifacts/rf-tower-v34-3	6	3547734	docs/project_history.md
-reference-data/artifacts/rf-tower-v34-l2540	6	3576401	docs/project_history.md
-reference-data/artifacts/rf-tower-v34-l2hold	6	3580392	docs/project_history.md
-reference-data/artifacts/rf-tower-v34-lvl10	6	3558962	docs/project_history.md
-reference-data/artifacts/rf-tower-v34-no32h	6	3560860	docs/project_history.md
 reference-data/artifacts/rf-tower-v34b-1	7	5089825	docs/project_history.md
-reference-data/artifacts/rf-tower-v34b-2	5	964061	docs/project_history.md
-reference-data/artifacts/rf-tower-v34b-3	5	1260600	docs/project_history.md
-reference-data/artifacts/rf-tower-v34b1-16800	4	1256163	docs/project_history.md
 reference-data/artifacts/rf-tower-v34b1rc-1	5	1250968	docs/project_history.md
 reference-data/artifacts/rf-tower-v34cma-1	6	5096041	docs/project_history.md
-reference-data/artifacts/rf-tower-v34dd-1	5	1245091	docs/project_history.md
-reference-data/artifacts/rf-tower-v34dd-2	5	1239811	docs/project_history.md
-reference-data/artifacts/rf-tower-v34dd-3	5	1243594	docs/project_history.md
 reference-data/artifacts/rf-tower-v34frz-1	4	1250605	docs/project_history.md
-reference-data/artifacts/rf-tower-v34lec-1	4	1239393	docs/project_history.md
-reference-data/artifacts/rf-tower-v34lec-19200	5	1230956	docs/project_history.md
-reference-data/artifacts/rf-tower-v34lec-2	5	1260140	docs/project_history.md
 reference-data/artifacts/rf-tower-v34p4s-1	4	1249850	docs/project_history.md
-reference-data/artifacts/rf-tower-v34rec-1	5	954217	docs/project_history.md
-reference-data/artifacts/rf-tower-v90lec-1	6	1453502	docs/project_history.md
-reference-data/artifacts/rf-tower-v90lec-2900	6	7034	docs/project_history.md
-reference-data/artifacts/rf-tower-v90lec-2900b	6	7041	docs/project_history.md
 reference-data/artifacts/rf-v22-v8-2	6	697530	docs/v32bis_compliance_plan.md
 reference-data/artifacts/rf-v34-a1	5	1430888	docs/project_history.md; docs/v34_plain_phase2_call_role.md
 reference-data/artifacts/rf-v34-b1	5	1546316	docs/v34_plain_phase2_call_role.md
@@ -281,9 +226,7 @@ reference-data/artifacts/trn1d-16008b-131324Z	168	73741784	docs/v90_phase3_s_and
 reference-data/artifacts/trn1d-ab-063857Z	112	48507072	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; tools/soak/v90_trn1d_ab.sh
 reference-data/artifacts/trn1d-knee-075140Z	17	4827451	docs/v90_phase3_s_and_rbs_false_positive.md
 reference-data/artifacts/trn1d-knee-122741Z	168	73497830	docs/v90_phase3_s_and_rbs_false_positive.md
-reference-data/artifacts/trn1d-long-221035Z	70	32689271	docs/v90_phase3_s_and_rbs_false_positive.md
 reference-data/artifacts/trn1d-long-221035Z.log	1	1827	docs/v90_phase3_s_and_rbs_false_positive.md
-reference-data/artifacts/trn1d-long-ab-222757Z	168	78908060	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; v90.c
 reference-data/artifacts/trn1d-long-ab-222757Z.log	1	2905	docs/project_history.md; docs/v90_phase3_s_and_rbs_false_positive.md; v90.c
 reference-data/artifacts/trn2d-ab-212417Z	46	23124785	docs/v90_phase3_s_and_rbs_false_positive.md
 reference-data/artifacts/v34-21600-20260822T-c65	10	2426421	docs/project_history.md; docs/v34_data_mode_rates.md
@@ -292,17 +235,7 @@ reference-data/artifacts/v34-3429-diagnosis-20261008	112	2531676	docs/eicon_othe
 reference-data/artifacts/v34-peer-retrain-data-20260825T225827Z	10	9999652	artifacts/v34-peer-retrain-data-20260825T225827Z/README.md; artifacts/v34-peer-retrain-response-20260825T224623Z/README.md; docs/retrain_and_resync.md
 reference-data/artifacts/v34-peer-retrain-response-20260825T224623Z	10	4094612	artifacts/v34-peer-retrain-response-20260825T224623Z/README.md; docs/retrain_and_resync.md
 reference-data/artifacts/v34-rate-20260822T081433Z-b3000-14400	5	1228452	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T081759Z-b3000-21600	5	483529	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T082052Z-b3000-16800	5	3030200	docs/project_history.md; docs/v34_data_mode_rates.md
 reference-data/artifacts/v34-rate-20260822T083436Z-b3429-16800	4	493392	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T083842Z-b3000-14400-hr1	5	1136860	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T084132Z-b3200-16800	5	480944	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T085240Z-b3000-14400-up64	6	2324433	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T085727Z-b3429-9600	4	492314	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T110100Z-b3000-9600-echo-notch	8	2596244	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T110307Z-b3000-9600-echo-auto	8	2599492	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T110513Z-b3000-21600-echo-auto	8	2596818	docs/project_history.md; docs/v34_data_mode_rates.md
-reference-data/artifacts/v34-rate-20260822T110913Z-b3429-16800-echo-auto	8	2710206	docs/project_history.md; docs/v34_data_mode_rates.md
 reference-data/artifacts/v56	322	250406	docs/v56_loopback.md; tools/v56_sweep.py
 reference-data/artifacts/v90-cap-20260822T130820Z-9600	19	10734420	docs/project_history.md; docs/v90_upstream_data_path.md
 reference-data/artifacts/v90-ecoff-d-233840Z	13	8069171	docs/v90_upstream_data_path.md
@@ -320,40 +253,21 @@ reference-data/artifacts/x2-codex-20261012-control-socket	13	5660127	docs/x2_imp
 reference-data/artifacts/x2-codex-20261012-long	13	5683334	docs/x2_implementation.md
 reference-data/artifacts/x2-codex-20261012-output-capture	17	38181550	docs/x2_implementation.md
 reference-data/artifacts/x2-downstream-20261006	5	87429	docs/x2_implementation.md
-reference-data/artifacts/x2-ds-pace-20261010-burst	13	5671038	docs/x2_implementation.md
 reference-data/artifacts/x2-ds-pace-20261010-fixed	13	5672625	docs/x2_implementation.md
-reference-data/artifacts/x2-ds-pace-20261010-paced	13	5672543	docs/x2_implementation.md
 reference-data/artifacts/x2-ff3-20261010	13	35373775	docs/x2_implementation.md
 reference-data/artifacts/x2-final-20261010-default	13	11084028	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-final-20261010-nvram	13	11088835	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-handoff-20261006	287	121075610	artifacts/x2-handoff-20261006/README.md; docs/x2_implementation.md
-reference-data/artifacts/x2-headroom-full-20261006-12000	20	17336431	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-headroom-full-20261006-14400	20	17302994	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-headroom-full-20261006-19200	21	17378143	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-headroom-full-20261006-24000	20	18369561	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-headroom-full-20261006-7200	21	17211570	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-headroom-full-20261006-9600	20	17288772	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-higher-20261006-12000	16	13757265	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-higher-20261006-7200	16	13701389	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-higher-20261006-9600	17	16434305	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-host-analog-20261006	3	5707	docs/x2_implementation.md
-reference-data/artifacts/x2-host-analog-20261006-exact	12	7683379	artifacts/x2-host-analog-20261006/exact-symbol-phase-search.py
 reference-data/artifacts/x2-pm-origin-20261006-9600	21	6356229	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-rates-20261010	13	11050212	modem_engine.c
-reference-data/artifacts/x2-rx-improve-20261006-baseline	19	16344329	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-rx-improve-20261006-final	14	5680357	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-rx-improve-20261006-handoff	17	16341926	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-rx-improve-20261006-long	13	5692187	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-rx-improve-20261006-long-fixed	14	5683596	docs/x2_implementation.md; docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-rx-improve-20261006-long-rx-fixed	13	5676910	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-12000	13	10744402	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-14400	13	10718251	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-19200	13	10865752	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-24000	13	11088413	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-26400	13	11088413	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-28800	13	11088413	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-7200	13	10589949	docs/x2_v34_upstream_review.md
-reference-data/artifacts/x2-s39q-20261010-9600	13	10686131	docs/x2_v34_upstream_review.md
 reference-data/artifacts/x2-strict-20261010	13	10850288	docs/x2_implementation.md
 reference-data/artifacts/x2-symmetric-20261006	108	13476615	docs/x2_implementation.md
 reference-data/artifacts/x2-v34-review-20261006-9600	17	16343335	docs/x2_v34_upstream_review.md
@@ -361,31 +275,7 @@ reference-data/artifacts/apple-direct-review-20261018	95	21567518	docs/apple_usb
 reference-data/artifacts/apple-direct-resume-20261018	301	53651265	docs/apple_usb_modem_sm56.md; resumed alternating direct-pair tests and live CP-prime recovery evidence
 reference-data/artifacts/apple-cx-direct-20261018	69	20068016	docs/apple_usb_modem_sm56.md; Conexant CX93001 direct-pair Phase 2 and V34 payload evidence
 reference-data/artifacts/apple-cx-clocking-20261018	59	6633107	docs/apple_usb_modem_sm56.md; clock-reference audit and alternating measured-offset Phase 2 comparison
-reference-data/artifacts/x2-20261019-head-after-change	13	5665851	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-fix-cap32000	13	5665585	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-fix-cap36000	13	5604547	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-fix-cap44000	13	5604746	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-fix-cap52000	13	5604931	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-fix-cap0	13	5665930	docs/x2_implementation.md
 reference-data/artifacts/x2-20261019-arq-short	13	5754879	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap32000	13	5784742	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap36000	13	5723236	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap40000	13	5724298	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap44000	13	5724989	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap48000	13	5723895	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap52000	13	5720261	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-cap0	13	5779902	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-long40000	13	28208673	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-mptrace44000	13	5260527	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-cpi3.5	13	7602065	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-cpi4.5	13	6800561	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-cap40000	13	5226096	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-cap48000	13	5226303	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-cap44000	13	5226270	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-arq-after	13	5779776	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-align0-44000	13	5284788	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-rb-index1	13	5615700	docs/x2_implementation.md
-reference-data/artifacts/x2-20261019-rb-training	13	4862207	docs/x2_implementation.md
 reference-data/artifacts/x2-20261019-rec1-cap44000	13	5226499	docs/x2_implementation.md
 reference-data/artifacts/rf-modulation-20261020	117	52465270	docs/rasfinder_modulation_tests_20261020.md; 12 wired RasFinder calls, four modulation offers across 6311-6313; exact source snapshot, binary, logs, PTY bytes and RTP/G.711 taps; local hardware evidence, not a regression dependency
 reference-data/artifacts/v32bis-rf-fixes-20261020	142	30631535	docs/v32bis_compliance_plan.md; 12 follow-up wired RasFinder calls across S acquisition, echo gating and bulk-delay cancellation; exact corrected binary/source, logs, PTY and RTP/G.711 evidence; local evidence, not a regression dependency
