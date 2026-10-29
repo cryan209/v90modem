@@ -3240,3 +3240,98 @@ scripts and benchmark logs are retained locally under
 manifest and index entry. The next targets are the acquisition deadline
 misses and the independent no-echo-step constellation collapse; hardware
 continuity remains open.
+
+## Fixed analytic-window work and explicit RTP-gap evidence (2026-10-29)
+
+The T/3 analytic front end also recomputed the same 63-tap Hilbert window
+inside **every input-sample convolution**. It now computes those coefficients
+once per receive block. The formula, float narrowing, convolution order and
+existing internal T/3 resampler are unchanged (V.90 8.5.2). There is no new
+persistent state, table, buffering, gain or sample-rate adjustment.
+
+`v90_upstream_slip_test` adds fifty frontend cases: 3000/3200 baud; impulses,
+full-range pseudorandom PCM, DC, alternating extremes and silence; blocks of
+1/7/80/160/511 samples. **117,010 analytic complex samples exactly match** an
+independent copy of the old scalar formula. Raw and matched output rings are
+identical across block partitions, and all input/output counters agree with
+the existing rational sample accounting. Native empty-block calls are also
+checked. The fifty cases pass on Linux with `-O2` and `-O3`, including
+`-ffast-math -ffp-contract=off`. A retained replay again produces the identical
+63,813-line symbol dump, including its unchanged failure.
+
+An in-process A/B/B/A benchmark measures the whole **unacquired frontend**
+(Hilbert, existing resampler, mixer and RRC; acquisition disabled), not just
+coefficient generation. After ten warmups, ninety rounds have median
+candidate/control CPU ratios **0.909 on macOS** and **0.700 on Linux** with
+the vendor floating-point flags; both compare complete raw/matched rings
+exactly. Those are about 9%/30% less frontend CPU, not end-to-end latency or
+physical pass-rate improvements. Final fast tier: **646/646 pass**, 119 seconds
+(`test-logs/v90-frontend-fast-final/`); the twelve hold cases still check
+5,742,000 bits error-free (`test-logs/v90-frontend-hold/`). The holds do not
+qualify the 28800/31200 rates negotiated below, and the previously observed
+31200 software errors remain open.
+
+### Six completed calls, with failures kept
+
+Two unpaced pairs ran A/B then B/A with identical 0,7 P-core affinity. Control
+1 reached DATA at 28800 and echoed **10/10 markers (160 bytes)** over its
+60-second post-CONNECT hold. Candidate 1 and control 2 failed in V.8, before
+this code. Candidate 2 reached 28800, echoed **8/10 (128 bytes)**, then had
+two real four-second timeouts and resynced at **TRACE +68558 ms**. Replays,
+builds and a benchmark overlapped parts of these attempts: they are not an
+uncontaminated hardware performance comparison.
+
+A separate quiet pair had no concurrent owned build/replay/benchmark and
+30-second intercall rig pacing, **not a production recovery delay**. Both
+negotiated 31200 and DTE CONNECT. Control 3 resynced at +26429 ms; its retained
+PTY contains the banner/login prompt but no marker probes were completed or
+submitted before the hold deadline. Candidate 3 echoed **9/10 (144 bytes)**,
+then resynced at +73169 ms and timed out its last marker. Neither quiet call
+has receive-RTP sequence gaps. These mixed outcomes establish no hardware
+continuity improvement.
+
+### One failure is aligned to actual missing RTP and existing fill
+
+Candidate 2 has **23 packets absent from its receive observer trace**, in
+sixteen gaps. The first gap is two consecutive packets: missing RTP times
+68.30/68.32 s, next packet at 68.34 s. The raw received-codeword tap contains
+exactly **320 bytes of 0xFF at samples 548000–548319 (68.500–68.540 s)**,
+precisely the existing 200 ms jitter-buffer displacement. All sixteen gap
+starts match their silence-run starts at that displacement, with no later
+arrivals recorded. Resync follows the first fill at +68558 ms. Its held-out
+echo model validates at 23.8 dB and retains zero delay shift through this
+failure. The successful control has neither sequence gaps nor a delay step.
+This identifies a transport-erasure-associated failure, not a universal DSP
+explanation and not the location or cause of packet loss.
+
+`sip_modem.c:modem_passthrough_get_frame()` already supplies law-correct silence
+when the jitter buffer supplies no codewords, preserving bearer length. Do
+**not** remove that fill, delete samples, enlarge a buffer or retune recovery
+thresholds on this evidence. A future erasure-aware receiver must distinguish
+known synthesized input from ordinary channel observations without changing
+time accounting. `v34_rx_fillin()` is not a drop-in solution: it only advances
+the legacy carrier, not the T/3/filter/frame state.
+
+The quiet calls still need a separate explanation. Validated echo models
+find +/-40-sample changes in windows straddling or following their resyncs;
+the half-second windows do not establish that those changes preceded the
+original failure. Do not reverse that causality. Likewise, a bounded static
+gain/rotation search on the earlier no-step collapse leaves held-out distance
+near white (0.63–0.70 versus about 0.17 before it); it does not justify a
+carrier retune.
+
+`tools/rtp_gap_audit.py <run-directory>` makes the gap/fill audit reproducible.
+It matches sequence **and timestamp**, accounts for later arrivals and wrap,
+and labels silence only as a candidate until correlated with transport.
+Eight synthetic metadata tests are in the fast tier; the tool does not locate
+network loss or replace a packet capture. Check RTP/tap/TRACE epochs before
+using its relative times on a different capture.
+
+All six calls, paired taps, frame/bit traces, summaries, drivers, patch,
+benchmarks and analysis are retained locally in
+`reference-data/artifacts/rf-frontend-budget-20261029/`, with checksums and an
+index entry. The driver now terminates its owned server to hang up: it never
+sends an unchecked escape followed by `ATH\r`, which could otherwise submit
+a remote login line if escape failed. No CR or credentials were submitted to
+the remote application. Printable marker matches are still not whole-stream
+BER, backspace semantics, authenticated login or duplex qualification.

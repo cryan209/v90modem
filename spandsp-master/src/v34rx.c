@@ -14912,6 +14912,25 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
 static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 {
     const int half = V34_V90_T3_RESAMPLE_TAPS/2;
+    float hilbert_coeff[V34_V90_T3_HILBERT_TAPS];
+
+    /* V.90 8.5.2: the existing analytic front end has a fixed Hilbert
+       window. Evaluate its coefficients once per block, not once per input
+       sample. Keep the float narrowing and convolution order unchanged. */
+    for (int tap = 0;  tap < V34_V90_T3_HILBERT_TAPS;  tap++)
+    {
+        int m = tap - V34_V90_T3_HILBERT_TAPS/2;
+        double window;
+
+        if (m == 0 || (m & 1) == 0)
+            continue;
+        window = 0.42 - 0.5*cos(2.0*M_PI*tap
+                                /(V34_V90_T3_HILBERT_TAPS - 1))
+                 + 0.08*cos(4.0*M_PI*tap
+                            /(V34_V90_T3_HILBERT_TAPS - 1));
+        hilbert_coeff[tap] = (float)(window*2.0/(M_PI*m));
+    }
+    /*endfor*/
 
     for (int i = 0;  i < len;  i++)
     {
@@ -14942,18 +14961,12 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             {
                 int m = tap - centre;
                 int pos;
-                double window;
                 if (m == 0 || (m & 1) == 0)
                     continue;
                 pos = s->v90_t3_hilbert_pos - 1 - tap;
                 if (pos < 0)
                     pos += V34_V90_T3_HILBERT_TAPS;
-                window = 0.42 - 0.5*cos(2.0*M_PI*tap
-                                        /(V34_V90_T3_HILBERT_TAPS - 1))
-                         + 0.08*cos(4.0*M_PI*tap
-                                    /(V34_V90_T3_HILBERT_TAPS - 1));
-                analytic.im += (float)(window*2.0/(M_PI*m))
-                             * s->v90_t3_hilbert[pos];
+                analytic.im += hilbert_coeff[tap]*s->v90_t3_hilbert[pos];
             }
         }
         n = s->v90_t3_input_count++;

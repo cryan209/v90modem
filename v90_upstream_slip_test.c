@@ -9,7 +9,8 @@
  * phase. The other positions deliberately have a closed eye. Both input
  * orientations must find the same physical delay and land back on the grid.
  * Also check fractional-coordinate equivalence and the V.34 10.1.3.1 B1
- * acquisition correlation's invariance when template energy is cached.
+ * acquisition correlation's invariance when template energy is cached, and
+ * exact analytic samples/block-partition invariance after Hilbert hoisting.
  */
 #include "spandsp-master/src/v34rx.c"
 #include "port/v34_fixed.h"
@@ -202,6 +203,115 @@ static int check_coarse_template_power(void)
     return failed;
 }
 
+/* V.90 8.5.2: moving invariant Hilbert coefficients out of the sample loop
+   must preserve the analytic signal and the existing T/3 sample accounting.
+   Reconstruct the old scalar convolution from the original PCM, not from
+   the optimized coefficient buffer. Test block partitions independently. */
+static complexf_t reference_analytic(const int16_t pcm[], int n)
+{
+    const int centre = V34_V90_T3_HILBERT_TAPS/2;
+    complexf_t y = {n >= centre ? pcm[n - centre] : 0.0f, 0.0f};
+
+    for (int tap = 0; tap < V34_V90_T3_HILBERT_TAPS; tap++) {
+        int m = tap - centre;
+        double window;
+
+        if (m == 0 || (m & 1) == 0 || n < tap)
+            continue;
+        window = 0.42 - 0.5*cos(2.0*M_PI*tap
+                                /(V34_V90_T3_HILBERT_TAPS - 1))
+                 + 0.08*cos(4.0*M_PI*tap
+                            /(V34_V90_T3_HILBERT_TAPS - 1));
+        y.im += (float)(window*2.0/(M_PI*m))*pcm[n - tap];
+    }
+    return y;
+}
+
+static int check_analytic_frontend(void)
+{
+    const int blocks[] = {1, 7, 80, 160, 511};
+    const int ring = V34_V90_T3_RESAMPLE_TAPS + 8;
+    int16_t pcm[4096];
+    int failed = 0;
+
+    for (int baud = 3; baud <= 4; baud++) {
+        for (int mode = 0; mode < 5; mode++) {
+            v34_rx_state_t *reference = NULL;
+            uint32_t random = 17;
+
+            for (int n = 0; n < 4096; n++) {
+                random = random*1664525U + 1013904223U;
+                switch (mode) {
+                case 0: pcm[n] = n == 0 || n == 63 || n == 160 ? 32767 : 0; break;
+                case 1: pcm[n] = (int16_t)((int32_t)(random >> 16) - 32768); break;
+                case 2: pcm[n] = -32768; break;
+                case 3: pcm[n] = n & 1 ? 32767 : -32768; break;
+                default: pcm[n] = 0; break;
+                }
+            }
+            for (unsigned b = 0; b < sizeof(blocks)/sizeof(blocks[0]); b++) {
+                v34_rx_state_t *s = calloc(1, sizeof(*s));
+                int mismatches = 0;
+                int checked = 0;
+                int64_t outputs;
+
+                if (!s) {
+                    free(reference);
+                    return 1;
+                }
+                s->baud_rate = baud;
+                s->v90_t3_internal_rate = 3*baud_rate_parameters[baud].baud_rate;
+                s->v90_t3_capture_only = true;
+                s->v90_t3_e_anchor = -1;
+                v90_t3_make_rrc(s);
+                v90_t3_primary_rx(s, NULL, 0);
+                for (int n = 0; n < 4096;) {
+                    int count = blocks[b];
+                    int first;
+
+                    if (count > 4096 - n)
+                        count = 4096 - n;
+                    v90_t3_primary_rx(s, pcm + n, count);
+                    first = count > ring ? n + count - ring : n;
+                    for (int k = first; k < n + count; k++) {
+                        complexf_t expected = reference_analytic(pcm, k);
+                        complexf_t got = s->v90_t3_input[k % ring];
+
+                        mismatches += got.re != expected.re || got.im != expected.im;
+                        checked++;
+                    }
+                    n += count;
+                }
+                v90_t3_primary_rx(s, NULL, 0);
+                outputs = (int64_t)s->v90_t3_internal_rate
+                          *(4095 - V34_V90_T3_RESAMPLE_TAPS/2)/8000 + 1;
+                mismatches += s->v90_t3_input_count != 4096
+                           || s->v90_t3_next_output != outputs
+                           || s->v90_t3_output_count != outputs
+                           || s->v90_t3_raw_count != outputs;
+                if (reference) {
+                    mismatches += memcmp(s->v90_t3_raw, reference->v90_t3_raw,
+                                          sizeof(s->v90_t3_raw)) != 0;
+                    mismatches += memcmp(s->v90_t3_matched, reference->v90_t3_matched,
+                                          sizeof(s->v90_t3_matched)) != 0;
+                }
+                printf("%s: analytic frontend baud=%d mode=%d block=%d: "
+                       "%d scalar checks, %d mismatches, %" PRId64 " T/3 samples\n",
+                       mismatches ? "FAIL" : "PASS",
+                       baud_rate_parameters[baud].baud_rate, mode, blocks[b],
+                       checked, mismatches, outputs);
+                failed += mismatches;
+                if (!reference)
+                    reference = s;
+                else
+                    free(s);
+            }
+            free(reference);
+        }
+    }
+    return failed;
+}
+
 int main(void)
 {
     const int bauds[] = {3, 4};
@@ -216,5 +326,6 @@ int main(void)
                         failed += check_case(bauds[b], high, conjugate, slip, phases[p]);
     failed += check_fractional_positions();
     failed += check_coarse_template_power();
+    failed += check_analytic_frontend();
     return failed ? 1 : 0;
 }
