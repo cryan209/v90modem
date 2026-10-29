@@ -9,6 +9,39 @@ The packaged browser demo and its offline test also use the retained
 new experiments. Put durable dependencies in `reference-data/`, update their
 consumers, and record why they are needed in `reference-data/index.tsv`.
 
+## Retention rules (2026-10-30)
+
+A citation used to oblige us to keep the whole run it named, so a doc line
+saying "see `artifacts/foo/`" quietly made gigabytes permanent. At this date
+only 19 of 419 retained datasets (843 MB of 7 GB) were named by a test. The
+rest were kept because a doc or code comment mentioned them. From now on:
+
+1. **Cite the finding, not the run.** A doc, comment or commit message states
+   the measured value and how it was measured, inline. A run path may follow
+   as provenance. It does not oblige anyone to keep that run, and readers
+   must expect it to be gone.
+2. **Only a consumer makes data permanent.** Data that a test, tool or the
+   makefile reads goes in `reference-data/`, cut to the minimum window the
+   consumer needs (one tap segment, not the whole run), with a row in
+   `index.tsv` naming that consumer. Track it if it is a regression fixture.
+3. **`artifacts/` and `captures/` expire.** `make expire-artifacts` lists runs
+   untouched for 14 days. `make expire-artifacts EXPIRE_ARGS=--delete` removes
+   them. A `KEEP` file at the top of a run (with the reason in it) or a git
+   worktree inside it exempts the run. A `KEEP` is a stopgap; promote the data
+   under rule 2 or let it go.
+4. **Enforced in `make test-fast`.** `tools/check_reference_data.py` fails
+   when tracked code, tests, tools or the makefile (comments excluded) read a
+   `reference-data/` dataset that has no `index.tsv` row, or read a
+   disposable `artifacts/`/`captures/` run. `--docs` lists runs that docs
+   cite, for review. A tool allowed to break when its input expires (rig
+   one-offs) goes in the checker's `ALLOWED` set.
+
+The corpus retained by the 2026-10-18 cleanup below predates these rules and
+stays until its datasets are reviewed. A dataset that only a doc cites can be
+removed once that doc carries the finding inline.
+
+## Retained corpus
+
 `reference-data/artifacts/` and `reference-data/captures/` hold retained input
 recordings, fixtures and evidence cited by source or documentation. Their
 relative run layouts are unchanged. Existing regression fixtures are tracked;

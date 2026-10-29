@@ -61,9 +61,11 @@ supported interface; `--mode`/`ME_MODE` set the power-on offer. The `ME_*`,
 - Each module's header comment states its role and spec clauses; read it first.
 - `docs/` has one note per topic, indexed in `docs/README.md`; read the relevant
   one before changing a phase.
-  `artifacts/` and `captures/` hold disposable local runs. Retained fixtures and
-  cited evidence live in `reference-data/`; see `docs/artifact_storage.md`.
-  Force-add only new regression fixtures, not whole evidence directories.
+  `artifacts/` and `captures/` hold disposable local runs that expire after
+  14 days (`make expire-artifacts`). Data a test or tool reads lives in
+  `reference-data/` with an `index.tsv` row naming that consumer; see
+  `docs/artifact_storage.md`. Force-add only new regression fixtures, not whole
+  evidence directories.
 
 ## Method -- traps that have each cost more than one session
 
@@ -91,5 +93,7 @@ supported interface; `--mode`/`ME_MODE` set the power-on offer. The `ME_*`,
 
 - Commit straight to `main` (single maintainer, linear history), and push.
 - Record new findings in the topic doc in `docs/`, not here.
+- Cite the finding, not the run: state the measured value inline. A run path
+  is provenance only and does not keep the run.
 
 `AGENTS.md` is the parallel copy of this file for other coding agents; mirror guidance changes there.

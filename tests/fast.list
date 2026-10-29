@@ -5,6 +5,9 @@
 # "@group a b" tags the rows that follow, until the next bare "@group", for
 # `tools/run_tests.py --group a`; the per-area make targets use it.
 
+# Retention: only indexed reference-data/ may be read; artifacts/ expires.
+python3 tools/test_retention.py
+python3 tools/check_reference_data.py
 # Bounded stdout/stderr capture and test-runner status handling.
 python3 tools/test_log_capture.py
 # Allocation-free media callback latency histograms (no hardware dependency).
