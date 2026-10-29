@@ -1371,3 +1371,46 @@ It checks:
 **Not done.** No real server or Courier hardware has been tried. Our client
 does not start a retrain on its own downstream loss; nothing has needed it on
 a byte-exact bearer.
+
+## The `\N0` client row and the first CM's inversion (30 October 2026)
+
+The slow row for our client with `\N0` against Ie030002 had started failing
+before the server-retrain work. The client sat in `TONE_A` until the stage
+watchdog fired, because the I-modem never began x2 Phase 2. Its JM gave the
+reason. It answered `c1 45 13 10 83`, its "not x2" JM (V.8 report
+`0071:0006`), where a passing call gets `.. 8d` (`0071:0007`).
+
+**What broke it.** `0a43d6a5` (V.25 4.3) holds CI back through 1.8-3.0 s so
+it cannot land on an answerer's ANSam onset. Until then our third CI burst
+was still going out when we recognised Ie030002's ANSam (onset 1.97 s,
+recognised about 3.0 s). SpanDSP's fall-through then sent CM straight after
+it, on the same carrier. Since the hold, no CI is draining at that moment,
+so the 1 s Te is honoured and our CM starts **from silence**.
+
+The x2 signature is a carrier inversion at each CM's preamble (`get_bit`'s
+0x81). A CM that starts from silence has no carrier to measure its first
+inversion against. The six-octet LAPM CM still scored enough to pass. The
+five-octet `\N0` CM did not.
+
+**Ruled out**, each run against Ie030002 with the hold in place:
+- CM sent sooner: Te of 0.5 s, and a V.8 8.1.1 Te timed from the end of CI
+  (CM at once, about 1 s after ANSam onset). Both still drew `83`.
+- CM octets: ours are `e0 c1 45 13 10 0d`, the same as the passing run's;
+  the Courier's are `.. 90 0d`.
+
+**The fix.** When an x2 CM starts from silence, SpanDSP's V.8 now sends ten
+marks of carrier ahead of it (`v8.c`, the `V8_HEARD_ANSAM` CM start). With
+the CI hold kept:
+- `\N0` gives JM `8d` and `CONNECT 57333/x2/NONE`, with lines both ways;
+- the LAPM, rate-change and retrain rows still pass;
+- all four x2 slow rows pass in parallel, and `make test-fast` passes
+  655/655.
+
+V.8 CM receivers synchronise on the ten-one preamble and the sync octet, so
+leading marks are idle carrier. The lead-in applies only with the x2
+signature on, so other modes are unchanged.
+
+Open: Ie030002's DE14 arithmetic is still unread. The Courier's own first CM
+also starts from silence, about 1.2 s after its CI, and it shows 11 marks
+before its sync octet. Why that scores and ours did not is unexplained.
+Read DE14's inputs before changing the lead-in.

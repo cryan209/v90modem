@@ -1513,6 +1513,17 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 s->negotiation_timer = milliseconds_to_samples(5000);
                 fsk_tx_restart(&s->v21tx, &preset_fsk_specs[FSK_V21CH1]);
                 conditionally_send_v92(s);
+                /* x2's CM signature is a carrier inversion at each CM's
+                   preamble (get_bit, 0x81).  Ie030002 scores the inversions
+                   (DE14) and answers JM 8d, x2, or 83, not x2.  A CM that
+                   follows CI's carrier has its first inversion measured
+                   against it; one that starts from silence does not, and
+                   since the CI hold (V.25 4.3 window) ours does: Ie030002
+                   then answered 83 to the 5-octet AT\N0 CM on every call.
+                   Ten marks of carrier first restore the first inversion
+                   (docs/x2_implementation.md, 30 October). */
+                if (s->x2_phase_reversal  &&  !s->fsk_tx_on)
+                    v8_put_preamble(s);
                 send_cm_jm(s);
                 s->fsk_tx_on = true;
                 s->state = V8_CM_ON;
