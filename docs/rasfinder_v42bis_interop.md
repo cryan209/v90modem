@@ -326,3 +326,40 @@ application authentication response. Neither establishes a successful
 password parse. These controls are under `xid-validation/plain-delimiters`.
 A bridge-bound AF_PACKET observer did not see a known local BBS connection,
 so its absence of RasFinder packets is not valid negative evidence.
+
+## 2026-10-29: backspace responses are not a codec error oracle
+
+During V.90 continuity probes, sixteen printable marker bytes echo exactly,
+but erasing them returns unexpected bytes. A separate wired V.34 control at a
+diagnostic 9600 ceiling reproduces the observation. No login credentials or CR
+were submitted. Its transmit-bit capture has 40 CRC-valid HDLC frames and zero
+bad FCS; independent in-sequence extraction and the separate Python V.42bis
+decoder recover exactly the DTE's six markers and five sixteen-backspace runs
+(176 bytes). The outgoing compressed boundary and actual TX bits agree.
+
+The first unexpected RX erasure is already literal transparent payload in a
+CRC-valid I-frame, before receive decompression. More decisively, a fresh
+`AT+DS=0` call negotiates P0=0/P1=512/P2=6 and repeats exactly the same response:
+`08 6e ab a9 be 05 dd 16 be 2a d8 c5 2c a9 a9 e2`. Its plain-LAPM TX contains
+34 valid frames with zero bad FCS and exact marker/backspace data. This rules
+out V.42bis as a necessary cause; it does not establish the remote terminal's
+editing rules or prove a peer firmware defect. No codec workaround or
+compression default change follows from these tests.
+
+Both RX captures contain later bad-FCS/malformed candidates, so neither whole
+call is declared error-free. The compressed call's last marker was cut short
+by the scratch driver's hold deadline and is incomplete, not a measured
+four-second timeout. The uncompressed call has a later real timeout. A
+receive-only-compression control disconnects before completing V.8 and cannot
+grade directional compression.
+
+The existing 79 independent codec cases pass, as do 36 additional offline
+bidirectional cases of this exact marker/erasure pattern over dictionary sizes,
+string limits, compression modes and fragmentation. These checks cannot define
+what a remote login editor should echo. Future integrity tests must distinguish
+known printable payload from unknown terminal control responses.
+
+Evidence and the bounded driver are retained locally under
+`reference-data/artifacts/rf-continuity-audit-20261029/`; see
+[v90_upstream_data_path.md](v90_upstream_data_path.md) for the separate
+continuity failures and scheduling investigation.

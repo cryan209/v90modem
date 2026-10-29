@@ -11919,13 +11919,14 @@ static float v90_t3_coarse_score(v34_rx_state_t *s, int64_t first,
 
 /* Score both spectral orientations from one read of each sample. This is
    the same correlation as v90_t3_coarse_score(), including accumulation
-   order; V.34 10.1.3.1 B1 templates and acceptance criteria are unchanged. */
-static void v90_t3_coarse_scores(v34_rx_state_t *s, int64_t first, float score[2])
+   order; V.34 10.1.3.1 B1 templates and acceptance criteria are unchanged.
+   target_power is summed once per template, not at every trial position. */
+static void v90_t3_coarse_scores(v34_rx_state_t *s, int64_t first,
+                                  double target_power, float score[2])
 {
     double cross_re[2] = {0.0, 0.0};
     double cross_im[2] = {0.0, 0.0};
     double input_power = 0.0;
-    double target_power = 0.0;
 
     for (int n = 0; n < s->v90_t3_b1_symbols; n++)
     {
@@ -11936,7 +11937,6 @@ static void v90_t3_coarse_scores(v34_rx_state_t *s, int64_t first, float score[2
         cross_re[1] += y.re*x.re + y.im*(-x.im);
         cross_im[1] += y.im*x.re - y.re*(-x.im);
         input_power += x.re*x.re + x.im*x.im;
-        target_power += y.re*y.re + y.im*y.im;
     }
     for (int c = 0; c < 2; c++)
         score[c] = (input_power < 1e-12 || target_power < 1e-12) ? 0.0f
@@ -13223,6 +13223,16 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
     bool conjugate[KEEP] = {0};
     float best_match = 0.0f;
     int pre = V34_V90_T3_FSE_TAPS/2;
+    double target_power = 0.0;
+
+    /* V.34 10.1.3.1: this B1 template is fixed for the entire scan.
+       Preserve the scalar scorer's product and accumulation order, but
+       do not recompute its energy thousands of times in the media thread. */
+    for (int n = 0; n < s->v90_t3_b1_symbols; n++)
+    {
+        complexf_t y = s->v90_t3_b1[n];
+        target_power += y.re*y.re + y.im*y.im;
+    }
 
     /* This runs synchronously in the media thread, so its cost is real time
        the audio path does not get.  A full-resolution scan of 30000 offsets
@@ -13233,7 +13243,7 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
     for (int64_t f = search_start;  f <= search_end;  f += 3)
     {
         float orientation_score[2];
-        v90_t3_coarse_scores(s, f, orientation_score);
+        v90_t3_coarse_scores(s, f, target_power, orientation_score);
         for (int c = 0;  c < 2;  c++)
         {
             float q = orientation_score[c];

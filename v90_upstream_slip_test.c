@@ -8,6 +8,8 @@
  * sample away, with the passband-delay phase and an independent carrier
  * phase. The other positions deliberately have a closed eye. Both input
  * orientations must find the same physical delay and land back on the grid.
+ * Also check fractional-coordinate equivalence and the V.34 10.1.3.1 B1
+ * acquisition correlation's invariance when template energy is cached.
  */
 #include "spandsp-master/src/v34rx.c"
 #include "port/v34_fixed.h"
@@ -154,6 +156,52 @@ static int check_fractional_positions(void)
     return failed;
 }
 
+/* Hoisting template energy must not change either spectral orientation's
+   normalized correlation (V.34 10.1.3.1), including clipped ring windows. */
+static int check_coarse_template_power(void)
+{
+    const int64_t positions[] = {-2, 0, 1, 37, 128, 999, 4080, 4096};
+    v34_rx_state_t *s = calloc(1, sizeof(*s));
+    int failed = 0;
+
+    if (!s)
+        return 1;
+    s->v90_t3_raw_count = 4096;
+    for (int mode = 0; mode < 4; mode++) {
+        double power = 0.0;
+        int mismatches = 0;
+
+        s->v90_t3_b1_symbols = mode & 1 ? 128 : 32;
+        for (int n = 0; n < 4096; n++) {
+            s->v90_t3_matched[n].re = mode == 2 ? 0.0f :
+                ((n*137 + 31) % 4093 - 2046)*0.03125f;
+            s->v90_t3_matched[n].im = mode == 2 ? 0.0f :
+                ((n*239 + 17) % 4091 - 2045)*0.007f;
+        }
+        for (int n = 0; n < s->v90_t3_b1_symbols; n++) {
+            complexf_t y = {mode == 3 ? 0.0f : (n % 17 - 8)*0.13f,
+                            mode == 3 ? 0.0f : (n % 13 - 6)*0.27f};
+            s->v90_t3_b1[n] = y;
+            power += y.re*y.re + y.im*y.im;
+        }
+        for (unsigned k = 0; k < sizeof(positions)/sizeof(positions[0]); k++) {
+            float score[2];
+
+            v90_t3_coarse_scores(s, positions[k], power, score);
+            for (int conjugate = 0; conjugate < 2; conjugate++) {
+                float reference = v90_t3_coarse_score(s, positions[k],
+                                                       conjugate != 0);
+                mismatches += score[conjugate] != reference;
+            }
+        }
+        printf("%s: cached template energy mode=%d: %d/16 score mismatches\n",
+               mismatches ? "FAIL" : "PASS", mode, mismatches);
+        failed += mismatches;
+    }
+    free(s);
+    return failed;
+}
+
 int main(void)
 {
     const int bauds[] = {3, 4};
@@ -167,5 +215,6 @@ int main(void)
                     for (unsigned p = 0; p < sizeof(phases)/sizeof(phases[0]); p++)
                         failed += check_case(bauds[b], high, conjugate, slip, phases[p]);
     failed += check_fractional_positions();
+    failed += check_coarse_template_power();
     return failed ? 1 : 0;
 }

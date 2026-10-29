@@ -3139,3 +3139,104 @@ by a SHA256 manifest. They are evidence, not new regression dependencies.
 Next: obtain repeated data-bearing alternated arms and account for every
 received byte, rather than promoting a single 60-second marker success to
 hardware qualification.
+
+## Wire audit and acquisition CPU budget (2026-10-29 follow-up)
+
+Nine more bounded wired calls are retained, including failed attempts. The
+additional uncapped V.90 baseline/fractional-fixed pair did not reach DTE
+CONNECT. A diagnostic 21600 upstream cap also failed and is not a proposed
+rate policy. An uncapped V.34 control failed too. V.34 at a diagnostic 9600
+ceiling reached the login prompt with and without compression, enabling the
+byte audit below; that lower-rate result does not qualify V.90.
+
+### The erasure bytes are already present on the incoming wire
+
+On the compressed V.34 control, independent HDLC destuffing/FCS verification
+finds **40 valid TX frames, zero bad FCS**, and 11 in-sequence information
+frames. An independent V.42bis decoder recovers exactly the DTE's six markers
+and five runs of sixteen backspaces: 176 outgoing bytes. RX independently
+decodes the same unexpected erasure bytes as the live PTY. Crucially, the first
+bad-looking erasure is already a literal transparent information payload, not
+something fabricated by our decompressor.
+
+With `AT+DS=0`, the peer agrees P0=0 and the same V.34 control reproduces the
+same erasure sequence: `08 6e ab a9 be 05 dd 16 be 2a d8 c5 2c a9 a9 e2`.
+Its TX has 34 valid frames, zero bad FCS, and exact uncompressed DTE payloads;
+RX has ten accepted information frames. Compression is therefore not necessary
+for this observation. No new codec workaround is justified. The remote
+terminal's editing semantics and the reason for these bytes remain unknown;
+do not classify backspace echoes as a known plaintext BER reference. See
+[the compression interoperability note](rasfinder_v42bis_interop.md).
+
+These whole RX dumps also contain bad-FCS/malformed candidates, including
+later loss; neither whole call is being called error-free. One last marker in
+the compressed control was stopped by the hold deadline with only 1.5 of its
+four allowed seconds elapsed: it is **incomplete**, not a measured timeout.
+The scratch driver now reserves the full response budget and marks an
+unfinished probe incomplete. The compression-disabled call has a genuine
+later four-second marker timeout. A receive-only-compression attempt failed
+before V.8 completed and cannot grade compression.
+
+### Two different continuity failures, not one echo explanation
+
+Fitting a 96-tap echo model only on TRN1d, then validating it on held-out
+training, gives 23.9 dB echo reduction on `trace-baseline-6311-1`. With the
+same model and LPC whitening in DATA, the two-second windows independently
+find a **+560 sample / 70 ms** delay step: +0 at 23 s, +560 at 25 s and all
+later windows through 35 s. The shifted peak is 8.8–15.0 times the correlation
+spread and 2.4–4.6 times the next separated peak. This is not just the engine
+tracker printing an unverified move.
+
+Check our own TX first: its RTP timestamps remain 160 samples apart, but six
+successive sends near RTP time 25.08–25.18 s are **33–42 ms apart**, not 20 ms;
+the last is about 101 ms behind the nominal clock. This precedes/overlaps the
+echo-delay change. It is a concrete scheduling lead, not proof of an external
+peer defect or permission to insert/delete bearer samples.
+
+In contrast, the earlier `baseline-6311-2` has a separately validated 23.8 dB
+model and **no echo-delay step** across 24–44 s, including its +40549 ms
+resync. Its replay symbol dump shows a real rapid collapse from about 0.19 to
+0.66, not merely a false alarm inferred from the preceding slow log average.
+No whole-sample timing correction occurs at that collapse. Neither a tracker
+threshold relaxation nor a rate cap explains both captures. The offline model
+uses this rig's measured +80-sample tap/canceller offset; that offset is not a
+new production timing constant.
+
+### Remove repeated template-energy arithmetic without changing the scan
+
+Offline-only timing instrumentation finds synchronous B1 acquisition passes
+that exceed a ten-millisecond receive-block budget. One coarse scan repeatedly
+sums the **same B1 template energy at every trial position**. It is now summed
+once per pass and supplied to the two-orientation correlator. V.34 10.1.3.1
+symbols, product/accumulation order, normalization, candidates, fits and
+acceptance thresholds are unchanged. No buffering, rate or recovery policy is
+added.
+
+`v90_upstream_slip_test` adds **64 exact scalar-reference score comparisons**:
+both orientations, 32/128-symbol templates, ordinary/zero input and zero target,
+and clipped ring boundaries. All pass on macOS and Linux, including Linux
+with the vendor's `-ffast-math -ffp-contract=off` options. The previous 70
+recovery/coordinate checks still pass. Replaying the earlier baseline capture
+with and without this hoist produces identical **63,813-line symbol dumps**;
+its failure remains unchanged. This is computation equivalence, not a new
+hardware recovery result or grading of peer behaviour after divergent TX.
+
+An in-process Linux A/B/B/A microbenchmark of the old/new correlation loops
+has a median candidate/control CPU-time ratio of **0.813** over 190 measured
+rounds after ten warmups (about 19% less time). Full-replay timing comparisons
+were too variable to support an end-to-end speedup number: CT117 can run on
+both P and E cores of an i5-1240P, and even pinning still left large timing
+variation. The microbenchmark must not be promoted to a hardware pass-rate
+claim. A fresh live control/candidate pair with identical P-core affinity
+also failed before DTE CONNECT (candidate disconnected during V.8), so it
+does not establish a continuity improvement.
+
+Validation: **645/645 fast rows pass** in 105 seconds
+(`test-logs/v90-acquisition-power-fast/`); the twelve long-hold cases again
+check **5,742,000 bits with zero errors** (`test-logs/v90-acquisition-power-hold/`).
+Raw paired taps, bit/frame traces, all nine call summaries, model/profiling
+scripts and benchmark logs are retained locally under
+`reference-data/artifacts/rf-continuity-audit-20261029/`, with a checksum
+manifest and index entry. The next targets are the acquisition deadline
+misses and the independent no-echo-step constellation collapse; hardware
+continuity remains open.
