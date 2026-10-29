@@ -5,6 +5,9 @@
 # "@group a b" tags the rows that follow, until the next bare "@group", for
 # `tools/run_tests.py --group a`; the per-area make targets use it.
 
+# Bounded stdout/stderr capture and test-runner status handling.
+python3 tools/test_log_capture.py
+
 # MT5634MU diagnostic transport only; does not require or qualify hardware.
 python3 tools/mt5634mu_diag_test.py
 

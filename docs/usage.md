@@ -296,6 +296,37 @@ recorded call, follow [README diagnostics](../readme.md#diagnostics) and
 [hardware interoperability](v90_hardware_interop.md). Check our transmit tap
 before attributing a failure to the peer. Treat recordings as sensitive.
 
+### Keeping logs bounded
+
+The test runner retains two output segments per test: `test-logs/NNNN.log`
+(newest) and `NNNN.log.1` (previous). Each is limited to **4 MiB**, so captured
+stdout/stderr uses at most **8 MiB per test**. Older output is discarded;
+read `.log.1` before `.log` for chronological order. Exit statuses, timeouts
+and failure scratch directories are still preserved. Increase the capture
+window when needed with `tools/run_tests.py --log-segment-mib 16 ...`.
+
+For a long-running server, use the same bounded capture instead of an unlimited
+shell redirect (substitute your normal arguments):
+
+```bash
+set -o pipefail
+./sip_v90_modem ... 2>&1 | python3 tools/rotate_log.py modem.log
+```
+
+This also retains two 4 MiB segments, `modem.log.1` then `modem.log`. Use
+`--segment-mib 16` to increase each segment. **The command overwrites these
+paths on startup.** Output goes to the files, not the terminal; use
+`tail -F modem.log` in another terminal to follow rotation. With a pipeline,
+`$!` identifies the logger, not the modem; use your normal process supervisor
+to stop/manage the server.
+
+These limits apply only to captured stdout/stderr, not G.711/PCM taps, packet
+captures, or separate diagnostic files opened by a test or the modem. Disable
+those captures when not needed. Routine live runs should also leave
+`ME_V34_SPAN_FLOW_LOG`, `VPCM_ME_VERBOSE` and `--verbose` off; SpanDSP FLOW
+traces are synchronous and can interfere with real-time audio, not just fill
+disk. `V34_DUPLEX_LOG` enables similarly verbose offline training traces.
+
 Most environment variables are diagnostic or experimental, not normal user
 configuration. Prefer AT commands and documented launch options; consult the
 [classified environment inventory](env_knobs.md) before using a tuning knob.
