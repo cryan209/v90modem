@@ -1649,3 +1649,14 @@ Not established: whether the 7910 then completes Phase 2 after our Tone B
 (needs a live call). Also open: **why it never received our J**. The failing
 binaries predate the 250 ms caller Phase 3 S wait
 (`docs/slmodemd_vs_hardware_20261029.md`). A live A/B of that wait against the 7910 is next.
+
+**Live A/B the same evening** (`artifacts/apple-7910-v34-recovery-20261029`, 8 calls
+alternating `V34_CALL_P3_S_DELAY_MS=0`/`250`, V.34 cap 14400, build = 3bf92ef8 plus
+the uncommitted working tree, which includes the 250 ms wait): **8/8 connected and
+passed 3/3 PPP LCP echoes.** In every call the 7910 sent Phase 4 S after our J, so the
+INFO0a recovery never fired: no false triggers in 8 calls, and still no live proof that it recovers.
+The post-J stall (2/6 that afternoon) did not recur in either arm, so these calls neither
+confirm nor rule out the 250 ms wait as its cause. One 250 ms call (`call-2-d250`)
+had a different failure: 3 s into DATA our receiver reported "data mode has stopped
+decoding", the 7910 answered our §11.6 renegotiation with no E, and the §11.5 retrain
+recovered the call at 9600. That is the `final-cap9600` failure, and here it was recovered.
