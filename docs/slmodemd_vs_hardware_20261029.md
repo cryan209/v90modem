@@ -217,3 +217,38 @@ targets: the worst send gap within 0.5 s of DATA entry is 26-45 ms (9/20 over
 35 ms) before and 21.7-27.1 ms (0/20) after.  Outcomes: 19/20 CONNECT and one
 lost RasFinder probe (on a call that re-entered DATA after a 39 ms gap) before;
 20/20 CONNECT with every probe, numbered line and Diva echo intact after.
+
+**Open: our MP under-asks the 7910 (26400 where it carries 31200).**  Every
+call from our V.34 caller to the 7910 trains a2c 26400 (20/20 on 30 October)
+while slmodemd trains 31200 on the same bearer.  The limit is our MP: the
+Phase 4 TRN SNR reads 27.1-27.7 dB (`v34_phase4_trn_measured_rate_n()`,
+V.34 11.4 / Table 16 calibration), while the same receiver reads 34.0-34.9 dB
+in DATA -- the RasFinder's range at 33600.  A scratch override of our MP
+receive ask, three rotated rounds per arm, B1 check margin lifted:
+| ask | a2c | DATA SNR | worst grid distance | PPP |
+|---|---|---|---|---|
+| TRN (default) | 26400 | 34.1-34.9 | 0.062 | 3/3, FCS bad 1 |
+| 28800 | 28800 | 34.2-34.8 | 0.101 | 3/3, FCS bad 2 |
+| 31200 | 31200 | 33.9-34.9 | 0.174 | 3/3, FCS bad 0 |
+| 33600 | 31200 (the 7910's mask has no 33600) | 34.0-34.9 | 0.173 | 3/3, FCS bad 1 |
+No stops, no retrains (`reference-data` not kept; `/root/slmx/r7910-*` in CT
+117).  What is known about the under-read:
+- It is not the step size, the carrier loop or the timing loop: on the
+  replayed 7910 tap the TRN plateau (27.8 dB from TRN symbol 1536 on) is the
+  same at a quarter of the DD-LMS step, a quarter of the carrier gains, or with
+  the Godard loop frozen; smaller steps or a frozen carrier only lower it.
+  Magnitude spread 30.4 dB and angle spread 31.2 dB contribute equally.
+- It is not echo (rms 8 while the 7910 is silent) and not level (TX and RX RMS
+  are the same through TRN and DATA).
+- Loopback fits TRN SNR = DATA SNR combined with a fixed 33.7 dB floor (clean
+  32.1/37.1, 36 dB noise 30.5/33.4, 33 dB noise 29.4/31.5).  The floor differs
+  by far transmitter: about 38 dB for the RasFinder, about 28.8 dB for the
+  7910, so the Table 16 thresholds cannot absorb it.
+- B1 at DATA entry still uses the TRN-end equalizer and under-reads the same
+  way (28-30 dB): the B1 rate check would retrain a 31200 call down to 28800.
+- Fall forward in data mode is not available against this peer: three
+  §11.6 renegotiations we opened (`ME_V34_RENEG_AFTER_MS=8000`, MP asking
+  31200) produced no E, and the §11.5 fallback landed at 21600-24000.
+Next: find what the DATA receiver does that TRN does not (DATA has the
+zero-delay decision-aided derotator after the taps and Mueller-Muller timing),
+or measure our own transmitter's TRN floor, which sets the loopback 33.7 dB.

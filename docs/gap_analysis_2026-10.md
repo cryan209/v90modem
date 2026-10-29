@@ -90,6 +90,9 @@ both taps and grade only completed runs.
   measurement on the T/2 path, and the B1 search seeds its model once; worst
   gap 26-45 ms -> 22-27 ms live, 19/20 -> 20/20
   ([slmodemd comparison](slmodemd_vs_hardware_20261029.md)).
+- Open: our V.34 MP asks the 7910 for 26400 where it carries 31200 cleanly
+  (Phase 4 TRN under-reads that peer by ~6 dB against DATA; it does not answer
+  our §11.6, so no fall forward) -- same document.
 
 ## Historical assessment — 5 October 2026 (with original appended updates)
 
