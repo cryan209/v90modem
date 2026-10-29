@@ -17,14 +17,12 @@ hardware payload are different levels of evidence.
 
 | Work | Current evidence / limit | Next action and acceptance | Source |
 |---|---|---|---|
-| **V.34 caller-direction data corruption** | Dialling slmodemd with CI disabled completes V.34 at 3429 baud. Its data reaches us intact (1223 lines); its receiver of our data diverges about 2 s into DATA. Initial MP requests precoding, but a 3200-baud retrain without precoding also diverges. Our answerer direction runs 60 s clean at 33600. | Compare our caller TX with the working answerer TX, starting before the first bad payload. Establish whether the forced-precoder harness preserves RX coefficients before treating it as proof. Add a regression for the identified defect and grade sustained numbered payload both ways. | [slmodemd comparison, final section](slmodemd_vs_hardware_20261029.md#slmodemd-as-the-answerer-us-dialling-it) |
 | **V.90 digital upstream continuity and recovery** | RasFinder hardware reaches DATA, but recent calls lose upstream synchronisation about 2 s in. Early V.90 §9.6 renegotiation is unanswered and falls back to a lengthy retrain, losing the login banner. The old live/replay discrepancy is closed. The 28 October gradient correction has bounded MT9234 hardware payload evidence, but the retained RasFinder discontinuity still reproduces at +27.7 s. Sustained transfers remain unqualified across chipsets. | Reproduce the first discontinuity from taps, check our TX before attributing it to the peer, distinguish tracking failure from a signal change, and validate acquisition/recovery. Require exact bidirectional payload over sustained calls and repeated starts, including renegotiation/retrain. | [recent RasFinder comparison](slmodemd_vs_hardware_20261029.md), [upstream investigation and continuity follow-up](v90_upstream_data_path.md), [MT9234 gradient correction](mt9234_v90_gradient.md), [hardware results](v90_hardware_interop.md) |
 | **V.34 Phase-4 S generation and acquisition** | The recent transmit audit identifies the wrong S orientation relative to V.34 §10.1.3.7. Correcting TX alone moves loopback failures because our caller's S/S-bar acquisition is fragile. This is separate from the fixed answer-side J-to-S delay. | Correct the receiver and transmitter together; grade payload and acquisition pass rates over `V34_DUPLEX_DELAY`, both G.711 laws and relevant rates. Retain a regression for the normative S waveform. | [Phase-4 investigation, item 1](slmodemd_vs_hardware_20261029.md#what-this-says-about-us) |
 | **V.34 negotiated-option and recovery coverage** | Negotiated symbol rates now reach 3429/33600; that is not the old fixed-3200 blocker. Exact waveform coverage for all shaping/nonlinear/precoder combinations and plain-V.34 recovery remains incomplete. The duplex audit lists V.34 §§11.5–11.7 qualification gaps. | Refresh the clause matrix against current code before implementing old audit items. Exercise caller/answerer retrain, rate renegotiation, zero-rate MP cleardown and deterministic DTE carrier loss, plus directional encoder options. | [duplex clause audit](v34_spec_gap.md), [3429 data](v34_3429_dense_data.md), [retrain/resync](retrain_and_resync.md) |
 
-Start with the caller-direction V.34 failure: it has a repeatable foreign-peer
-case and a working opposite direction for comparison. V.90 digital upstream
-continuity remains the main product-level qualification gate.
+V.90 digital upstream continuity is the main product-level qualification
+gate. The V.34 caller-direction corruption is closed (see Completed below).
 
 ### P2: qualification, portability and operation
 
@@ -77,6 +75,11 @@ both taps and grade only completed runs.
 - T.30 Annex F integration and initial real-hardware fax pages.
 - V.90 analogue Eicon data/PPP/HTTP qualification on the measured path.
 - Initial V.92 PCM-upstream payload against slmodemd.
+- V.34 caller-direction data corruption against slmodemd: our Phase 3 S
+  started inside its echo-canceller freeze window; the caller now waits
+  250 ms after J (V.34 §11.3.1.1.3), 4/4 calls clean both ways
+  ([slmodemd comparison](slmodemd_vs_hardware_20261029.md#slmodemd-as-the-answerer-us-dialling-it)).
+  slmodemd answering still needs `ME_V8_NO_CI=1`.
 - V.34 answer-side J-to-S wait (V.34 §11.3.1.2.6): slmodemd's former 9600
   limitation is fixed by the 250 ms delay.
 - V.34 fixed-3200 ceiling: symbol rate is negotiated through 3429; the

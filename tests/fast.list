@@ -133,7 +133,7 @@ sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e
 ./v34_duplex_test 2400 9600 ulaw
 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2400 9600 ulaw
 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 2400 9600 ulaw
-V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 3200 9600 alaw
+V34_DUPLEX_DELAY=5 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 3200 9600 alaw
 # Delay 23: at delay 0 this recovery row sits on a knife edge across the
 # 11.3.1.2.6 Phase 4 S wait (docs/slmodemd_vs_hardware_20261029.md).
 V34_DUPLEX_DELAY=23 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 3200 9600 alaw
@@ -176,12 +176,14 @@ V34_DUPLEX_DELAY=79 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3429 33600 ulaw
 # proven clean rate, without forcing MP limits or bypassing the selector.
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=0 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=1 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
-V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=7 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
-V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=23 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,31200 V34_DUPLEX_DELAY=7 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=31200,31200 V34_DUPLEX_DELAY=23 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+# 7 and 23 above sit on the 32 dB TRN-SNR edge for 33600 and move with the
+# caller's 11.3.1.1.3 wait (pass rates over V34_DUPLEX_DELAY unchanged: 65/80, 63/80).
 # Automatic selection must still step down with injected noise.  At 40 dB
 # the answer-to-caller direction measures one step higher since the
 # 11.3.1.2.6 Phase 4 S wait; 1 Mbit still decodes with no errors.
-V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,31200 V34_DUPLEX_NOISE_DB=40 V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=6000 ./v34_duplex_test 3429 33600 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=31200,31200 V34_DUPLEX_NOISE_DB=40 V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=6000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=28800,28800 V34_DUPLEX_NOISE_DB=36 V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=6000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=26400,26400 V34_DUPLEX_NOISE_DB=30 V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=6000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=19200,19200 V34_DUPLEX_NOISE_DB=24 V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=6000 ./v34_duplex_test 3429 33600 ulaw
@@ -255,7 +257,7 @@ V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 alaw
 V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=3 ./v34_duplex_test 3000 9600 ulaw
 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw
 V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=23 ./v34_duplex_test 3200 9600 ulaw
-V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 alaw
+V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=5 ./v34_duplex_test 3200 9600 alaw
 # V.34 clause 12 half-duplex: the control channel start-up of 12.4, run
 # end to end between a source and a recipient over G.711.  Each row goes
 # through Phase 2 (INFOh), Phase 3 (S/S-bar/PP/TRN), then PPh, ALT, the MPh
@@ -638,8 +640,9 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # the short procedure after their timers and the call completes on the full one.
 ./engine_pair_test --expect V90 --seconds 60 --both-at "AT+PIG=0" --both-at "AT+PQC=2" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-env V92_SHORT_TEST_NO_REPLY=1 --call-expect "CONNECT 48000" --call-log "short Phase 2 abandoned (no Tone B reversal)" --answer-log "short Phase 2 abandoned (no Tone A reversal)"
 # A whole V.34 call through one slot of the channel bank (docs/v34_fdm.md).
-# 33600 since the start profile became a ceiling (3429) and the probe picks.
-./engine_pair_test --expect V34 --expect-connect 33600 --both-env ME_MODE=v34 --fdm-slot 5
+# 33600 since the start profile became a ceiling (3429) and the probe picks; the
+# answer side's TRN SNR sits on the 32 dB edge for 33600 (31200 with 11.3.1.1.3's wait).
+./engine_pair_test --expect V34 --call-expect "CONNECT 33600" --answer-expect "CONNECT 31200" --both-env ME_MODE=v34 --fdm-slot 5
 ./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-env ME_V8BIS=1 --both-env VPCM_ME_VERBOSE=1 --both-log "V.8bis complete" --both-log "MS mode" --both-nolog "ended without a mode"
@@ -868,7 +871,7 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAM
 # V.34 11.5.1.1/11.8.1: the 7910 never received our Phase 3 J and restarted Phase 2 with one INFO0a
 # (DPSK, 2400 Hz) 3.2 s later; our caller sat in PHASE3_WAIT_S until it hung up.  macOS only (CoreAudio).
 sh -c '[ "$(uname -s)" != Darwin ] || ./apple_usb_modem_coupler --rx-replay reference-data/artifacts/apple-7910-v34-info0a-after-j/rx.s16 2>&1 | grep -q "peer retrain tone detected; responding per 11.5"'
-sh -c './v90_engine_replay reference-data/artifacts/rf-mt5634-v34-3429-swp/live-rx.g711 ulaw --fast --dial --at "AT+MS=V34,0" 2>&1 | grep -q "B1 found 8 symbols after the E detection, far-end trellis state 13 (normalized correlation 1.000"'
+sh -c 'V34_CALL_P3_S_DELAY_MS=0 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v34-3429-swp/live-rx.g711 ulaw --fast --dial --at "AT+MS=V34,0" 2>&1 | grep -q "B1 found 8 symbols after the E detection, far-end trellis state 13 (normalized correlation 1.000"'
 sh -c 'ME_V90_UPSTREAM_MAX_BPS=9600 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v90-b1/live-rx.g711 ulaw --fast --dial 2>&1 | grep -q "upstream DATA bits: t=0.1s tap=4 ones=100%"'
 # V.90 9.2.1.1.6: our Tone B reversal waits for the CX93001's Tone A reversal.  With the RX clock frozen at 0 the
 # 9.2.1.2.4 deadline read as expired and we reversed after 2 bauds, into the peer's L2 (docs/v90_hardware_interop.md).

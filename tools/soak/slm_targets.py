@@ -373,10 +373,23 @@ def one_call_slm_answers(out, name, args):
                 time.sleep(1)
                 if sx("grep -ac 'registration success' /tmp/slm.log").strip() not in ('', '0'):
                     break
-            mark_o, mark_p = len(ours.rx), len(peer.rx)
-            t_dial = time.monotonic()
-            ours.send('ATD%s\r' % SLM_ACCT)
             stop = [b'CONNECT', b'NO CARRIER', b'BUSY', b'NO DIAL', b'NO ANSWER']
+            # The PBX does not always route to a freshly registered account
+            # (slm_call.sh saw the same): redial until the INVITE reaches it.
+            for attempt in range(1, 4):
+                mark_o, mark_p = len(ours.rx), len(peer.rx)
+                t_dial = time.monotonic()
+                ours.send('ATD%s\r' % SLM_ACCT)
+                for _ in range(8):
+                    ours.pump(1.0)
+                    if sx("grep -ac 'Incoming call' /tmp/slm.log").strip() not in ('', '0'):
+                        break
+                else:
+                    r['redials'] = attempt
+                    ours.send('ATH\r')
+                    ours.run_for(4)
+                    continue
+                break
             got = ours.wait(stop, 100, mark_o)
             r['result'] = got.decode() if got else 'timeout'
             peer.wait([b'CONNECT', b'NO CARRIER'], 5, mark_p)

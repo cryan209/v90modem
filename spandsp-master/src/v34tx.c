@@ -6743,17 +6743,59 @@ static void infoh_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The call modem's wait between receiving J and starting its Phase 3 S
+   (11.3.1.1.3 allows up to 500 ms); see get_v34_call_phase3_wait_baud().
+   V34_CALL_P3_S_DELAY_MS overrides it, so a replay of a call recorded
+   before the wait existed can reproduce that call's own timing (0). */
+#define CALL_PHASE3_S_DELAY_MS v34_call_phase3_s_delay_ms()
+
+static int v34_call_phase3_s_delay_ms(void)
+{
+    const char *e = getenv("V34_CALL_P3_S_DELAY_MS");
+    int ms = (e  &&  *e)  ?  atoi(e)  :  250;
+
+    return (ms < 0)  ?  0  :  (ms > 500)  ?  500  :  ms;
+}
+
 static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s)
 {
     /* V.34 11.3.1.1.1-.3: after INFO1c the call modem is silent while
-       receiving the answerer's S/S-bar, PP, first 512T of TRN and J. */
+       receiving the answerer's S/S-bar, PP, first 512T of TRN and J.
+       11.3.1.1.3: "After receiving J, the call modem may wait for up to
+       500 ms and then shall transmit signal S."  Use that wait, as the
+       answer modem does before Phase 4 (get_v34_answer_phase3_wait_j_baud()):
+       slmodemd answering schedules its echo-canceller freeze 1348 samples
+       into its own J, and our S landing ~150 ms into that J left the
+       canceller adapting on our signal -- every data mode we sent it then
+       diverged ~1.3 s in, at every rate from 4800 to 24000 (equalizer error
+       ~30 -> 500-11000), and it retrained until it hung up.  tone_duration
+       counts the wait down once J is in (phase3_call_wait_j clear). */
+    if (!s->tx.phase3_call_wait_j)
+    {
+        if (--s->tx.tone_duration <= 0)
+        {
+            s->tx.tone_duration = 0;
+            s->tx.current_getbaud = get_s_not_s_baud;
+        }
+        /*endif*/
+        return zero;
+    }
+    /*endif*/
     if (s->rx.received_event == V34_EVENT_J)
     {
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.34 caller: far-end J received, starting local Phase 3 S/S-bar\n");
+                 "Tx - V.34 caller: far-end J received, starting local Phase 3 S/S-bar after %d ms\n",
+                 CALL_PHASE3_S_DELAY_MS);
         s->rx.received_event = V34_EVENT_NONE;
         s->tx.phase3_call_wait_j = false;
-        s->tx.current_getbaud = get_s_not_s_baud;
+        s->tx.tone_duration =
+            (baud_rate_parameters[s->tx.baud_rate].baud_rate*CALL_PHASE3_S_DELAY_MS)/1000;
+        if (s->tx.tone_duration <= 0)
+        {
+            s->tx.tone_duration = 0;
+            s->tx.current_getbaud = get_s_not_s_baud;
+        }
+        /*endif*/
     }
     else if (getenv("V34_CALL_P3_S_AFTER_MS"))
     {

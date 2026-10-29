@@ -167,3 +167,20 @@ answer-mode JM offers no PCM):
   The 3200 retrain asked for no precoding and still diverged, so there is a
   second defect in our caller-direction data mode.  Our answer-direction
   transmitter (slmodemd calling us) runs 60 s clean at 33600.
+
+**Fixed: our caller started Phase 3 S inside slmodemd's echo-canceller
+freeze window.**  The data failure was rate-independent (4800 to 24000 all
+diverged ~1.3 s into data, equalizer error ~30 -> 500-11000, deterministic
+call to call; changing the J=7 inversion pattern only made it worse, so the
+current 0x5FEE is right).  As answerer slmodemd logs "On J TX start, would
+freeze EC after bulk delay (1348 samples)", and our S started ~150 ms into
+its J -- the mirror of the answer-side Phase 4 S bug.  V.34 11.3.1.1.3 lets
+the call modem "wait for up to 500 ms" after J; with 250 ms
+(`CALL_PHASE3_S_DELAY_MS`, `V34_CALL_P3_S_DELAY_MS` overrides) slmodemd
+answering us carries every numbered line both ways with no retrains, 4/4
+calls (us 21600 up, it 16800-33600).  Regression, same day: RasFinder
+6311/6312 33600 4/4, 7900 21600 2/2, 7910 26400 2/2, slmodemd calling us
+33600.  Loopback pass rates over `V34_DUPLEX_DELAY` unchanged (65/80 HEAD,
+63/80); five knife-edge rows and the FDM row re-pinned, and the MT5634SMI
+replay fixture runs with `V34_CALL_P3_S_DELAY_MS=0` (the call it recorded had
+no wait).  V.8 still needs `ME_V8_NO_CI=1` against slmodemd answering.
