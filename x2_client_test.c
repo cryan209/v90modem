@@ -331,6 +331,80 @@ static void retrain_answer(void)
     (void)marker_end;
 }
 
+/* Our server's retrain (x2_session_server_retrain) against our client's
+ * answer, both sessions in lockstep over a byte-exact line: 70 ms of
+ * silence then Tone B on 1200 Hz; the client answers 70 ms after hearing
+ * it; the server reverses 40 ms after the client's first reversal, ends
+ * Tone B 10 ms later and stays silent until the client's second reversal;
+ * its probe 14 ms after that (Ie030002's timing, artifacts/x2-rt-answer3);
+ * then the marker 69 on 2400 Hz is accepted and Phase 3 is next. Also: Tone A
+ * in data is answered while the call has retrains left (9.5.1.2). */
+static void server_retrain(void)
+{
+    static x2_session_t srv, cli;
+    CHECK(!x2_session_init(&srv));
+    CHECK(!x2_session_init_client(&cli,0x7fff,0x1fff,5));
+    CHECK(x2_session_server_retrain(&srv)==-1);   /* only in data */
+    srv.stage=X2_PAYLOAD;cli.stage=X2_CLIENT;
+    CHECK(!x2_session_server_retrain(&srv) && srv.stage==X2_TONE_A && srv.retrains==1 && !srv.answering);
+    unsigned n, tone_b_start=0, srv_rev=0, cli_rev1=0, cli_rev2=0, probe_start=0, b_end=0;
+    unsigned prev_cli=0, quiet=0;
+    int16_t to_cli=0, to_srv=0;
+    for(n=0;n<8000*4 && srv.stage!=X2_UPSTREAM_WAIT;++n) {
+        uint8_t a,b;
+        unsigned srv_before=srv.a_reversals;
+        x2_session_stage_t srv_stage=srv.stage;
+        CHECK(x2_session_tx(&srv,&a,1)==1 && x2_session_tx(&cli,&b,1)==1);
+        to_cli=(int16_t)ulaw_to_linear(a);to_srv=(int16_t)ulaw_to_linear(b);
+        if(!tone_b_start && to_cli)tone_b_start=n;
+        if(srv.a_reversals!=srv_before)srv_rev=n;
+        /* Tone B passes through zero every fifth sample: its end is the
+           start of 5 ms of silence. */
+        quiet=to_cli ? 0 : quiet+1;
+        if(srv_rev && !b_end && n>srv_rev && quiet==40)b_end=n-39;
+        if(srv_stage!=X2_PROBE && srv.stage==X2_PROBE)probe_start=n;
+        if(cli.a_reversals!=prev_cli){if(cli.a_reversals==1)cli_rev1=n;else cli_rev2=n;prev_cli=cli.a_reversals;}
+        /* The client hears Tone B as x2_client.c's tone_b would, 50 ms in. */
+        if(cli.stage==X2_CLIENT && !cli.retrains && tone_b_start && n>=tone_b_start+400)
+            CHECK(!x2_session_client_retrain(&cli));
+        x2_session_rx(&cli,&to_cli,1);x2_session_rx(&srv,&to_srv,1);
+        CHECK(srv.stage!=X2_FAILED && cli.stage!=X2_FAILED);
+    }
+    CHECK(srv.stage==X2_UPSTREAM_WAIT && srv.marker_valid && srv.marker==0x69);
+    CHECK(tone_b_start==560);
+    CHECK(srv_rev>=cli_rev1+300 && srv_rev<=cli_rev1+360);
+    CHECK(b_end>=srv_rev+60 && b_end<=srv_rev+100);
+    CHECK(cli_rev2>=srv_rev+300 && cli_rev2<=srv_rev+360);
+    CHECK(probe_start>=cli_rev2+80 && probe_start<=cli_rev2+160);
+    for(unsigned k=0;k<200 && cli.stage!=X2_CLIENT;++k) {
+        uint8_t b;x2_session_tx(&cli,&b,1);
+    }
+    CHECK(cli.stage==X2_CLIENT && !cli.answering);
+    printf("  server retrain against our client: Tone B at 70 ms, its reversal %u ms after the client's, probe %u ms after the second, marker 69 accepted at %u ms\n",
+           (srv_rev-cli_rev1)/8,(probe_start-cli_rev2)/8,n/8);
+    /* 9.5.1.2: Tone A in data starts the same retrain while one is left. */
+    for(unsigned left=0;left<2;++left) {
+        CHECK(!x2_session_init(&srv));
+        srv.stage=X2_PAYLOAD;srv.max_retrains=left;
+        int16_t rx[160];uint8_t tx[160];
+        for(unsigned t=0;t<4000 && srv.stage==X2_PAYLOAD;t+=160) {
+            for(unsigned k=0;k<160;++k)
+                rx[k]=(int16_t)lrint(1660*(sqrt(0.8)*cos(2*M_PI*2400*(t+k)/8000)+sqrt(0.2)*cos(2*M_PI*1800*(t+k)/8000)));
+            x2_session_rx(&srv,rx,160);
+        }
+        if(left)CHECK(srv.stage==X2_TONE_A && srv.retrains==1 && srv.peer_info_valid);
+        else CHECK(srv.stage==X2_FAILED && srv.failure==X2_FAILURE_PEER_RETRAIN);
+        if(left) {
+            /* Silence for 70 ms, then Tone B, though Tone A is already up. */
+            CHECK(x2_session_tx(&srv,tx,160)==160);
+            for(unsigned k=0;k<160;++k)CHECK(ulaw_to_linear(tx[k])==0);
+            /* No second retrain from Tone A once the call has used its one. */
+            CHECK(x2_session_server_retrain(&srv)==-1);
+        }
+    }
+    printf("  Tone A in data: answered with a retrain while one is left, else the call ends\n");
+}
+
 int main(void)
 {
     downstream(0x0001,1,13,0);
@@ -345,6 +419,7 @@ int main(void)
     rate_change(0x003f,6,6);
     tone_b();
     retrain_answer();
+    server_retrain();
     printf("x2 client: downstream record/final/payload at four ceilings, upstream MP/E and in-data rate changes passed\n");
     return 0;
 }

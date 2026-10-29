@@ -32,6 +32,10 @@ python3 tools/mt5634mu_diag_test.py
 ./engine_pair_test --both-at 'AT+MS=X2' --expect X2 --seconds 25
 ./engine_pair_test --call-at 'AT+MS=X2,0,0,40000' --answer-at 'AT+MS=X2' --expect X2 --expect-connect 40000 --seconds 25
 ./engine_pair_test --call-at 'AT+MS=X2,0,0,9600,0,0' --answer-at 'AT+MS=X2' --expect X2 --seconds 25
+# Our x2 server retrains when it loses our client's upstream (V.90 9.5.1.1,
+# ME_X2_RETRAIN_ON_LOSS) and the client answers it; the V.42 payload must
+# arrive intact both ways across the retrain.
+./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_SILENCE_AFTER_MS=1000 --call-env ME_X2_CLIENT_SILENCE_MS=1500 --answer-env ME_X2_RETRAIN_ON_LOSS=1 --answer-log 'upstream=31200 (after a retrain)' --call-log '(after the server' --payload-printable RR --payload-reps 400 --expect X2 --seconds 60
 # Our x2 client opens an in-data rate change (15 -> 6) mid-payload; both
 # ends must complete it and the V.42 text must arrive intact both ways.
 ./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_RENEG_AFTER_MS=1000 --call-env ME_X2_CLIENT_RENEG_INDEX=6 --call-log 'X2 client rate change complete: index=6 downstream=44000' --answer-log 'X2 rate change complete: index=6' --payload-printable RR --payload-reps 128 --expect X2 --seconds 40

@@ -3507,6 +3507,13 @@ static bool g_x2_upstream_prepared, g_x2_upstream_started;
 static bool g_x2_reneg_seen;
 static bool g_x2_data_stack_started;
 static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
+/* x2 server retrains (x2_session_server_retrain): the ones the receiver has
+   been restarted for, those our own upstream loss started, and the
+   transmit sample where data began (for the silence test hook). */
+static unsigned g_x2_server_retrains_seen, g_x2_loss_retrains;
+static bool g_x2_loss_retrain_started;
+static uint64_t g_x2_server_data_tx_sample;
+#define ME_X2_SERVER_MAX_RETRAINS 2
 /* x2 analogue client (x2_client.c): SpanDSP's V.34 modulator carries the
    upstream from the end of the marker; the downstream is decoded from the
    received codewords. */
@@ -11986,7 +11993,9 @@ static void me_x2_progress_locked(void)
         int upstream=(int)g_x2.upstream_rate_n*2400;
         g_state=ME_DATA;g_phase_start_ms=0;
         g_report_tx_rate=downstream;g_report_rx_rate=upstream;
-        trace_phase("X2 host enter DATA: downstream=%d upstream=%d",downstream,upstream);
+        if(!g_x2.retrains)g_x2_server_data_tx_sample=g_x2.tx_samples;
+        trace_phase("X2 host enter DATA: downstream=%d upstream=%d%s",downstream,upstream,
+                    g_x2.retrains?" (after a retrain)":"");
         if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
             g_data_connect_reported=true;di_on_connected(downstream);
         }
@@ -12039,6 +12048,18 @@ static bool me_x2_tx_locked(uint8_t *codewords, int count)
         return true;
     }
     x2_session_tx(&g_x2, codewords, (size_t)count);
+    /* ME_X2_SERVER_SILENCE_AFTER_MS=<a>, ME_X2_SERVER_SILENCE_MS=<d>: a TEST
+       HOOK, the server's sibling of ME_X2_CLIENT_SILENCE_AFTER_MS. It
+       silences our downstream for d ms (default 1000) from a ms into data,
+       once per call, to make the analogue modem retrain (V.90 9.5.2.1). */
+    int quiet_at=parse_env_int("ME_X2_SERVER_SILENCE_AFTER_MS",0);
+    if(quiet_at>0 && !g_x2.client && !g_x2.symmetric && g_state==ME_DATA && !g_x2.retrains) {
+        uint64_t from=g_x2_server_data_tx_sample+(uint64_t)quiet_at*8;
+        uint64_t len=(uint64_t)parse_env_int("ME_X2_SERVER_SILENCE_MS",1000)*8;
+        uint64_t first=g_x2.tx_samples-(uint64_t)count;
+        for(int i=0;i<count;i++)
+            if(first+(uint64_t)i>=from && first+(uint64_t)i<from+len)codewords[i]=0xff;
+    }
     if(g_x2.symmetric)me_x2_symmetric_progress_locked();
     me_x2_progress_locked();
     return true;
@@ -12101,6 +12122,10 @@ static void me_x2_start_locked(void)
         }
         trace_phase("X2 host upstream limit: %d bit/s, upstream mask %04x, downstream mask %04x",
                     rate,g_x2.upstream_rate_mask,g_x2.downstream_rate_mask);
+        /* V.90 9.5.1.2: answer the analogue modem's retrain (its Tone A in
+           data) rather than hang up, as many times as the client answers
+           ours. */
+        g_x2.max_retrains=ME_X2_SERVER_MAX_RETRAINS;
     }
     x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
@@ -12108,6 +12133,8 @@ static void me_x2_start_locked(void)
     g_x2_client_samples=0;
     g_x2_client_data_sample=0;g_x2_client_reneg_done=g_x2_client_rr_open=false;
     g_x2_client_pad=0;g_x2_client_retraining=false;
+    g_x2_server_retrains_seen=g_x2_loss_retrains=0;g_x2_server_data_tx_sample=0;
+    g_x2_loss_retrain_started=false;
     g_x2_client_last_up=X2C_UP_DATA;g_x2_client_last_dn=X2C_DN_FAILED;
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;
@@ -12147,6 +12174,35 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
         me_x2_client_progress_locked();
         me_x2_progress_locked();
         return;
+    }
+    /* ME_X2_RETRAIN_ON_LOSS=<n>: retrain (V.90 9.5.1.1) up to n times when
+     * our upstream receiver has lost the peer. Default 0, as V.90's
+     * ME_V90_RETRAIN_ON_LOSS and for its reason: a retrain on our receiver's
+     * account costs a working downstream, and the analogue modem retrains
+     * itself when ITS receiver fails (9.5.2.1), which we now answer. */
+    if(g_state==ME_DATA && g_x2.stage==X2_PAYLOAD && !x2_session_renegotiating(&g_x2)
+       && g_v34 && g_x2_upstream_started && v34_v90_upstream_carrier_lost(g_v34)
+       && g_x2.retrains<g_x2.max_retrains
+       && (int)g_x2_loss_retrains<parse_env_int("ME_X2_RETRAIN_ON_LOSS",0)
+       && !x2_session_server_retrain(&g_x2)) {
+        ++g_x2_loss_retrains;g_x2_loss_retrain_started=true;
+        trace_phase("X2 upstream lost: retraining (V.90 9.5.1.1), %u of %u",g_x2.retrains,g_x2.max_retrains);
+    }
+    if(g_x2.retrains!=g_x2_server_retrains_seen && g_x2.stage!=X2_FAILED) {
+        /* A retrain, ours or the peer's Tone A answered: Phase 2 tones, the
+           marker, then Phase 3 again on a fresh upstream receiver, armed
+           again at the marker. The data stack keeps running; V.42 recovers
+           what the retrain cost. */
+        g_x2_server_retrains_seen=g_x2.retrains;
+        if(!g_x2_loss_retrain_started)
+            trace_phase("X2 Tone A from the client in data (V.90 9.5.2.1); answering the retrain (9.5.1.2), %u of %u",
+                        g_x2.retrains,g_x2.max_retrains);
+        if(g_v34){v34_free(g_v34);g_v34=NULL;}
+        g_x2_receiver_started=g_x2_upstream_prepared=g_x2_upstream_started=false;
+        g_x2_reneg_seen=false;g_x2_loss_retrain_started=false;
+        g_x2_squelch=false;g_x2_good_bits=0;g_x2_squelched_bits=0;
+        me_x2_hold_release(UINT64_MAX);
+        g_state=ME_TRAINING;
     }
     if(g_x2.mp_valid && !g_x2_data_stack_started && g_x2.stage!=X2_FAILED) {
         unsigned bits=x2_pcm_frame_bits(&g_x2.data_config);

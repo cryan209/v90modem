@@ -247,7 +247,9 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     uint32_t body;
     if(!s->client && s->peer_info_valid && length==23 && !x2_info_decode(h->bits,7,&body)) {
         unsigned index,high;
-        if(!x2_marker_parse(body,1,&index,&high)) {
+        /* At startup we answer; in our retrain the marker comes the other
+           way round (69, x2_session_client_retrain). */
+        if(!x2_marker_parse(body,s->answering,&index,&high)) {
             h->count=0;
             if(index!=4 || !high){stage(s,X2_FAILED);return;}
             s->marker=(uint8_t)body;s->marker_valid=1;++s->accepted_frames;
@@ -322,11 +324,14 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
     /* V.90 9.5.2.1 retrain: the Courier abandons a rate change it was not
      * answered in, or retrains outright in data, with 70 ms of silence then
      * 2400 Hz Tone A and the 1800 Hz guard (0.8 of the power in Tone A).
-     * Nothing in x2 data is a pure 2400 Hz line for 40 ms. We do not answer
-     * the retrain (that is a full Phase 2 restart): end the call with the
-     * cause, rather than send data nobody is decoding. */
+     * Nothing in x2 data is a pure 2400 Hz line for 40 ms. Answer it
+     * (9.5.1.2) while the call has retrains left; otherwise end the call
+     * with the cause, rather than send data nobody is decoding. */
     if(energy>=40*250.0*250.0 && a_re*a_re+a_im*a_im>=0.6*20*energy) {
-        if(++s->tone_a_windows>=64){fail(s,X2_FAILURE_PEER_RETRAIN);return;}
+        if(++s->tone_a_windows>=64) {
+            if(s->retrains<s->max_retrains && !x2_session_server_retrain(s))return;
+            fail(s,X2_FAILURE_PEER_RETRAIN);return;
+        }
     } else s->tone_a_windows=0;
     for(k=0;k<3;++k){power[k]=re[k]*re[k]+im[k]*im[k];total+=power[k];}
     if(energy<40*10000.0 || total<0.75*energy*20
@@ -382,6 +387,15 @@ static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
     /* V.34 §11.2.1.1.3: caller reverses B 40 ms after the first A
      * reversal, sends reversed B for 10 ms, then waits silently. */
     if(!s->answering && s->b_present) {
+        /* Server retrain: after our reversal, the analogue modem reverses
+           Tone A back 40 ms later (9.2.2.1.5); our probe follows it. */
+        if(s->server_rt && s->a_reversals==1 && !s->a_second_seen) {
+            if(reference>0 && dot > 0.8*reference && energy>100000) {
+                /* The window centre, where it reversed, is 20 samples back. */
+                s->a_second_seen=1;s->probe_tx_sample=tx_time+112-20;
+            }
+            return;
+        }
         if(!s->b_crossing_valid && dot<0) {
             s->b_crossing_sample=s->rx_samples-20;s->b_crossing_valid=1;
         }
@@ -495,6 +509,33 @@ int x2_session_client_retrain(x2_session_t *s)
     stage(s,X2_TONE_A);
     return 0;
 }
+int x2_session_server_retrain(x2_session_t *s)
+{
+    if(!s || s->client || s->symmetric)return -1;
+    if(s->stage!=X2_PAYLOAD && !(s->reneg && s->stage>=X2_RECORD_ALIGN && s->stage<=X2_RECORD_TX))
+        return -1;
+    ++s->retrains;
+    /* 9.2.1.1.3: the Tone B side, the non-answering branch of
+       x2_session_tx's TONE_A, which reverses 40 ms after the peer's Tone A
+       reversal. Neither side sends INFO0 in a retrain (9.5.1.1 continues at
+       9.2.1.1.3), so none is waited for. */
+    s->answering=0;s->peer_info_valid=1;
+    s->a_reversals=s->b_reversed=s->b_present=s->b_stable=0;
+    s->b_samples=s->b_position=s->b_crossing_valid=0;
+    s->b_reference_re=s->b_reference_im=0;
+    s->second_a_tx_sample=0;s->sign=0;
+    /* Phase 3 again from the marker: a fresh MP/E receiver (its old E
+       would release the new upstream at once), a new record and data banks. */
+    s->marker_valid=s->upstream_ready=s->s_bar_seen=0;
+    s->mp_valid=0;s->reneg=s->reneg_ack=s->reneg_record_started=s->record_ack_built=0;
+    s->tone_a_windows=0;s->s_stable=s->s_missing=s->s_samples=0;
+    x2_mp_rx_init(&s->mp_rx,mp_received,s);
+    for(unsigned i=0;i<40;++i){s->info_rx[i].count=0;s->info_rx[i].sync=0;}
+    s->server_rt=1;s->a_second_seen=0;s->probe_tx_sample=0;
+    s->rt_silence=560;
+    stage(s,X2_TONE_A);
+    return 0;
+}
 unsigned x2_session_renegotiating(const x2_session_t *s)
 {
     return s ? s->reneg : 0;
@@ -543,7 +584,12 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                     }
                 }
             } else if(s->stage==X2_TONE_A) {
-                if(s->a_reversals==(s->answering?2u:1u) && s->tx_samples>=s->second_a_tx_sample+79)
+                if(s->server_rt && s->a_reversals==1 && s->tx_samples>=s->second_a_tx_sample+80) {
+                    /* 9.2.1.1.3: Tone B ends 10 ms after its reversal; silent
+                       until the probe is due. */
+                    code=linear_code(s,0);
+                    if(s->a_second_seen && s->tx_samples>=s->probe_tx_sample){s->server_rt=0;stage(s,X2_PROBE);}
+                } else if(!s->server_rt && s->a_reversals==(s->answering?2u:1u) && s->tx_samples>=s->second_a_tx_sample+79)
                     stage(s,s->symmetric?X2_SYMMETRIC:s->client?X2_CLIENT_PROBE:X2_PROBE);
             }
             break;

@@ -949,7 +949,8 @@ run is 3 steps, against the 64 needed. That includes the 132 s LAPM soak,
   nine checks pass, including exact host-to-Courier delivery over this longer
   (220M-instruction) run.
 
-**Why we hang up instead of answering the retrain.** Answering Tone A with
+**Why we hang up instead of answering the retrain.** (Superseded 30 October:
+the server now answers it; see "The server's retrain" at the end.) Answering Tone A with
 Tone B does make the Courier reverse it (10 October). After that comes a full
 Phase 2 restart, with the Courier in the Tone A role, which is the reverse of
 the startup roles our asymmetric session implements. We would then need the
@@ -1307,3 +1308,66 @@ after the server's, and the marker 87 ms after its probe.
 One trap: the silence hook measured from data entry, which a retrain
 resets, so every recovered call was silenced again and retrained again. It
 now fires once per call.
+
+## The server's retrain (30 October 2026)
+
+Until now our server hung up when the Courier retrained, and never retrained
+itself. The client's answer to Ie030002 (above) showed what an x2 server does
+in a retrain, so `x2_session_server_retrain()` now does it with the roles the
+other way round. V.90 9.5.1.1 (we start it) and 9.5.1.2 (we answer Tone A
+heard for 50 ms) end in the same steps:
+- 70 ms of silence, then Tone B on 1200 Hz. No INFO0 either way.
+- 9.2.1.1.3: reverse Tone B 40 ms after the analogue modem's Tone A
+  reversal, send 10 ms more, then go silent.
+- Wait for its second Tone A reversal, then send our 160 ms probe 14 ms
+  later. This is Ie030002's timing, measured from our own retrain answer to
+  it (`artifacts/x2-rt-answer3-20261028`, receive tap): Tone B ends 10 ms
+  after its reversal, and the probe starts 14 ms after our second reversal.
+- Hear the marker on 2400 Hz. It is `69` (indices the other way round, so
+  `x2_marker_parse()` now reads it for the role we hold), then Phase 3 runs
+  from `X2_UPSTREAM_WAIT` as at startup.
+
+The engine frees the V.34 receiver at the retrain and builds a fresh one at
+the marker. The MP/E receiver restarts too: its old E would otherwise release
+the new upstream at once. The data stack keeps running and V.42 carries what
+the retrain cost. A call answers or starts at most two retrains
+(`ME_X2_SERVER_MAX_RETRAINS`). After that, Tone A ends the call as before.
+
+**Against the original Courier 403** (clean courier-emu `f1ccd92`,
+`S39=8&M5&K0`, `AT+MS=X2,0,0,40000`, LAPM): `ME_X2_SERVER_SILENCE_AFTER_MS=6000`
+silences our downstream for 1 s, 6 s into data. The Courier then:
+- retrains with Tone A;
+- reverses and sends the marker `69` on 2400 Hz, which was never seen before
+  (the Courier picks the same marker Ie030002 expects from a client);
+- trains Phase 3 again, and data resumes 8.3 s after the retrain began
+  (66240 samples; most of it is Phase 3's own length, as at startup);
+- 8.4 s later, falls forward from index 1 to index 3 (40000/31200), which
+  also completes.
+
+(Measure these in samples: in `--fast` runs the trace clock is wall time.)
+
+Its DTE reads `CONNECT 53333/ARQ/x2/LAPM`, then our line (queued during the
+retrain), and no NO CARRIER. All nine probe checks pass, including exact
+delivery both ways (`artifacts/x2-srv-rt1-20261030`). Before this change the
+same Tone A hung the call up. That row is in `tests/slow.list` (33 s).
+
+**Starting a retrain on our own upstream loss** is opt-in:
+`ME_X2_RETRAIN_ON_LOSS=<n>`, default 0. The reason is V.90's
+(`ME_V90_RETRAIN_ON_LOSS`, `docs/retrain_and_resync.md`): a retrain
+on our receiver's account costs a working downstream, and the analogue modem
+retrains when its own receiver fails, which we now answer. With the knob set,
+our client going silent for 1.5 s trips `v34_v90_upstream_carrier_lost()`
+1 s in. Our client then answers the server's Tone B, and data resumes
+8.3 s after the retrain starts. A 400-line V.42 payload arrives exact both ways across
+it (`tests/fast.list`). `x2_client_test` runs the two sessions in lockstep.
+It checks:
+- Tone B at 70 ms;
+- our reversal 40 ms after the client's;
+- the probe 16 ms after its second reversal;
+- marker `69` accepted;
+- Tone A in data answered while a retrain is left, and the call ending once
+  none is.
+
+**Not done.** No real server or Courier hardware has been tried. Our client
+does not start a retrain on its own downstream loss; nothing has needed it on
+a byte-exact bearer.

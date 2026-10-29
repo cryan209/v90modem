@@ -31,6 +31,10 @@ python3 tools/multi_line_test.py --lines 8 --mode v90 --payload-rounds 32 --recy
 # peers to finish their original exact payloads while it trains and reconnects.
 python3 tools/multi_line_test.py --lines 3 --mode v90 --payload-rounds 64 --restart-line 0 --io-schedule
 @group
+# Our x2 server against the original Courier 403: our downstream goes quiet
+# for 1 s, 6 s into data; the Courier retrains (V.90 9.5.2.1, Tone A), we
+# answer (9.5.1.2), data resumes, and both lines arrive exactly with LAPM.
+sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ME_X2_SERVER_SILENCE_AFTER_MS=6000 ME_X2_SERVER_SILENCE_MS=1000 X2_HOST_EMU_ROOT="$TMPDIR" ../courier-emu/.venv/bin/python tools/probe_x2_host_courier.py --courier-at "S39=8&M5&K0" --engine-at "AT+MS=X2,0,0,40000" --output "$TMPDIR/out" --fast --pty-source --host-pace-samples 16 --instructions 300000000 && grep -q "answering the retrain (9.5.1.2)" "$TMPDIR/out/engine.log" && grep -q "X2 host enter DATA: .*(after a retrain)" "$TMPDIR/out/engine.log"'
 # Our x2 analogue client against the original Ie030002 I-modem in a clean
 # courier-emu export (../courier-emu), no ANSam knob: CONNECT and a line each way.
 sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ln -s "$PWD/../courier-emu/Ie030002.nac" "$TMPDIR/" && env -u ME_ANS_NOTCH_RATIO ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py --emu "$TMPDIR" --output "$TMPDIR/out" --fast --engine-at "AT\\N0" --engine-send OUR-X2-CLIENT-0123456789! --answer-send IMODEM-X2-SERVER-0123456789'

@@ -22,7 +22,7 @@ typedef enum {
 typedef enum {
     X2_FAILURE_NONE,
     X2_FAILURE_STAGE_TIMEOUT,   /* a startup stage ran 10 s */
-    X2_FAILURE_PEER_RETRAIN,    /* the Courier's V.90 9.5.2.1 Tone A in data */
+    X2_FAILURE_PEER_RETRAIN,    /* the peer's retrain in data, not answered */
     X2_FAILURE_RENEG_TIMEOUT,   /* no E within X2_RENEG_DEADLINE of its S */
     X2_FAILURE_CLIENT           /* client: no usable record, or no data in time */
 } x2_session_failure_t;
@@ -84,6 +84,14 @@ typedef struct {
        answered (x2_session_client_retrain) and the silence still to send
        before its Tone A. */
     unsigned marker_carrier, retrains, rt_silence;
+    /* Server: the most retrains a call answers or starts
+       (x2_session_server_retrain); 0, the default, hangs up on Tone A. */
+    unsigned max_retrains;
+    /* Server retrain, the Tone B side (9.2.1.1.3-.4): set until the probe;
+       the analogue modem's second Tone A reversal heard, and when our probe
+       starts (14 ms after it, as Ie030002's does: artifacts/x2-rt-answer3). */
+    unsigned server_rt, a_second_seen;
+    uint64_t probe_tx_sample;
     unsigned tone_a_windows;
     x2_session_failure_t failure;
     x2_session_stage_t failed_stage;
@@ -124,4 +132,14 @@ const char *x2_session_failure_name(x2_session_failure_t failure);
  * our Tone A carrier, 2400 Hz, and the client's startup from X2_CLIENT
  * again. Returns -1 unless the session is a client in X2_CLIENT. */
 int x2_session_client_retrain(x2_session_t *s);
+/* Server in data: retrain (V.90 9.5.1.1), or answer the analogue modem's
+ * Tone A (9.5.1.2, which x2_session_rx does itself while retrains <
+ * max_retrains). Both send 70 ms of silence then Tone B and go on at
+ * 9.2.1.1.3, the roles of x2_session_client_retrain the other way round:
+ * our Tone B on 1200 Hz against its Tone A, its first reversal answered
+ * 40 ms later, 10 ms more, our probe, then its marker 69 heard on 2400 Hz
+ * and Phase 3 from X2_UPSTREAM_WAIT as at startup. Returns -1 unless the
+ * session is a server in data (PAYLOAD, or a rate change's RECORD_ALIGN or
+ * RECORD_TX). */
+int x2_session_server_retrain(x2_session_t *s);
 #endif
