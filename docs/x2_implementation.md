@@ -1454,3 +1454,43 @@ side's Tone A. It is in `tests/slow.list`.
 **Against our own server** the same hook makes our server answer through
 9.5.1.2, and a 400-line V.42 payload arrives exact both ways
 (`tests/fast.list`).
+
+## First live x2 calls, through Asterisk (30 October 2026)
+
+Until now every x2 result came from byte-exact offline harnesses. The open
+question was whether the live SIP path keeps the bytes as they are, since
+x2's downstream depends on it. `tools/soak/x2_live_pair.sh` runs our x2
+server (account 2902) and our client (2903) as two `sip_v90_modem`s, both
+PCMU, on vmhost CT 117. They call through Asterisk, which relays the media
+(both legs' RTP peer is 192.168.88.122, the PBX). Each side sends 40
+numbered lines after CONNECT. The build was `aaa00968` in its own worktree;
+tower was offline.
+
+| run | what | CONNECT (both ends) | lines each way | bytes changed down / up |
+|---|---|---|---|---|
+| 1 | plain | 56000/ARQ/X2/LAPM/V42BIS | 40/40, 40/40 | 0 of 728960 / 0 of 728800 |
+| 2 | repeat | 56000/ARQ/X2/LAPM/V42BIS | 40/40, 40/40 | 0 of 729120 / 0 of 729280 |
+| 3 | client deaf 1 s, 5 s into data | 56000/ARQ/X2/LAPM/V42BIS | 40/40, 40/40 | 0 of 891840 / 0 of 891840 |
+| 4 | `\N0`, V.14 | 56000 | 40/40, 40/40 | 0 of 729120 / 0 of 729280 |
+
+All runs reached 56000 down and 31200 up, with no NO CARRIER.
+
+**The bearer is byte-exact.** The bytes were checked by aligning each
+sender's `live-tx.g711` tap with the receiver's `live-rx.g711` and comparing
+every byte. Over about 26 minutes of bearer (four calls, both directions,
+retrain included), not one codeword changed. The delay was a constant 180 or
+200 ms, which includes the jitter buffers, and there were no slips. So
+Asterisk with PCMU on both legs, and `PJMEDIA_HAS_PASSTHROUGH_CODECS` at our
+ends, meets x2's assumption.
+
+**Run 3 is the client's loss retrain, live.** The client logged the loss at
+333 frames, and our server answered its Tone A (9.5.1.2). Both were in data
+again 9.8 s after the loss. The lines, sent over 20 s, crossed it intact.
+
+Still not tried live: a real x2 server or Courier hardware, A-law, and long
+soaks. To rerun from the repository root on a rig host:
+
+```
+tools/soak/x2_live_pair.sh live/run1 90
+CLI_ENV="ME_X2_CLIENT_DEAF_AFTER_MS=5000 ME_X2_CLIENT_DEAF_MS=1000" tools/soak/x2_live_pair.sh live/run3 110
+```
