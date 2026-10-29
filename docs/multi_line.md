@@ -128,6 +128,15 @@ the AOR change above. The local test below uses no registrar.
   leaving other callers stuck.
 - **`--recycle`.** It checks that every line got a fresh worker, then runs a
   second round on the new workers.
+- **`--restart-line I`.** Intentionally kills that owned worker during exact
+  payload, stops only its original caller, and redials the fresh worker while
+  peers continue. Requires at least two lines, 64 payload blocks, one round
+  and no `--recycle`. The destroyed call is explicitly reported as lost; it
+  is not counted as a successful call or in-place protocol recovery.
+- **Executable identity.** Each invocation freezes a private executable copy
+  for both the supervisor and callers, with SHA256 printed in the log.
+  `--binary PATH` selects the source image; concurrent builds cannot silently
+  mix caller/worker versions across a recycle or restart.
 - **Shutdown.** The supervisor is stopped, and no worker may outlive it.
 - **`--io-schedule`.** Records each process's RX/TX timing and reports its
   longest gap.
@@ -197,6 +206,57 @@ budget produced the result above. Small retained logs/provenance are under
 local captures are under `artifacts/multi-call-isolation/`. Tests ran in the
 shared working tree with unrelated pending HDX/K56flex changes; those are not
 part of the supervisor change or physical qualification.
+
+### 2026-10-30: active-worker failure isolation
+
+The SIP-free lifecycle fixture is now complemented by **active data calls**:
+
+```bash
+python3 tools/multi_line_test.py --lines 3 --mode v90 \
+  --payload-rounds 64 --restart-line 0 --io-schedule
+# Also exercised a nonzero worker and a different modulation:
+python3 tools/multi_line_test.py --lines 4 --mode v34 \
+  --payload-rounds 64 --restart-line 2 --io-schedule
+```
+
+In a clean detached `596c2776` worktree plus only the harness/list changes,
+with fresh SpanDSP and top-level binaries:
+
+| Active-worker fault | Completed calls, excluding the intentionally lost original call |
+| --- | --- |
+| 3 V.90 lines, kill worker 0 | Two untouched callers plus the replacement each return **28,856 exact bytes**; **86,568 total**. All three are connected together for **20.1 s** after replacement. |
+| 4 V.34 lines, kill worker 2 | Three untouched callers plus the replacement each return **28,856 exact bytes**; **115,424 total**. All four overlap for **23.7 s** after replacement. |
+
+Each destroyed original call had returned 416 exact bytes before SIGKILL;
+those two partial calls are **intentional losses**, not passes. Other worker
+PIDs remain unchanged. The surviving callers are not restarted or redialled:
+they finish their original payloads across the fault and replacement training.
+The replacement is a new call, not recovery of the destroyed SIP dialog.
+
+The same isolated build repeats the eight-line/two-round V.90 check:
+**16/16 completed calls, 230,272 exact bytes**, all eight connected together
+for at least 20.6 s per round. **649/649 fast rows pass in 118 s**. Ten Python harness
+unit tests include executable freezing, targeted fault injection and rejection
+of an unrelated worker restart. The V.90 active-fault command is in the slow
+tier. `--group multi-line-sip` filters these harness rows; groups are labels,
+not scheduling locks, so use `-j1` when separate harness runs are desired.
+The selected three-case run used `-j2`: the eight-line V.90 and three-line
+fault cases overlapped. No quiet-load performance benefit is inferred.
+
+The build reuses the same vendored pjproject libraries and retained input
+fixtures, but excludes concurrent working-tree DSP/rate-expectation edits.
+A preceding shared-tree whole-tier attempt had six non-owned DSP/expectation
+failures and one executable-change failure; all six V.22bis payloads in that
+last row had passed before the identity guard rejected the changing image.
+An initial detached attempt accidentally included concurrent rate-expectation
+hunks and lost its shared log directory during another runner's cleanup;
+it is incomplete, not a pass. The corrected run uses only owned list hunks,
+a private log directory and the frozen executable strategy above.
+
+Logs, owned patch, failed-attempt summaries and provenance are retained in
+`reference-data/artifacts/multi-call-active-20261030/`. These remain **local
+software SIP/RTP tests**, not physical modem continuity, PBX hunt routing,
+authenticated service access or a guaranteed host capacity.
 
 ## CPU
 

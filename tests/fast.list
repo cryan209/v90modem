@@ -839,7 +839,9 @@ python3 tools/pcm_ber_regression.py
 # plain N-line check, so there is no separate row for it.
 ./line_supervisor_test
 python3 tools/test_multi_line_harness.py
+@group multi-line-sip
 python3 tools/multi_line_test.py --lines 3 --mode v22 --recycle
+@group
 
 # V.34 12.5.2: dense 33600 primary resynchronization, both roles/laws.
 V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3429 33600 ulaw 12

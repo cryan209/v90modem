@@ -12,9 +12,11 @@ Finally the supervisor is stopped and no worker may survive it.
   tools/multi_line_test.py [--lines N] [--mode v22] [--recycle] [--rounds R]
 """
 import argparse
+import hashlib
 import os
 import re
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,6 +30,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = str(ROOT / 'sip_v90_modem')
+
+
+def freeze_binary(source, destination):
+    """Use one executable image even if another build replaces the source."""
+    source, destination = Path(source), Path(destination)
+    for _ in range(3):
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        shutil.copy2(source, destination)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        if before == digest == hashlib.sha256(source.read_bytes()).hexdigest():
+            return digest
+    raise RuntimeError('executable changed while taking its snapshot')
 
 
 def free_port_block(n, step=1, width=1, avoid=(), even=False):
@@ -158,11 +172,18 @@ def line_echo(path, stop, connected, idx):
             os.close(fd)
 
 
-def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_base=None):
+def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_base=None,
+             cancel=None):
     """Caller i: dial line i, send a payload, wait for the echo."""
     r = {'ok': False, 'why': '', 'connect': None, 'done': None, 'bytes_echoed': 0}
     results[i] = r
     fd = proc = pump = None
+
+    def check_cancelled():
+        if cancel is not None and cancel.is_set():
+            r['cancelled'] = True
+            raise InterruptedError('original caller stopped for intentional worker-crash test')
+
     try:
         port = caller_sip_base + i if caller_sip_base is not None else free_port_block(1)
         pty = str(tmp / f'call.{i}')
@@ -186,6 +207,7 @@ def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_bas
         got = b''
         deadline = time.time() + args.connect_timeout
         while b'CONNECT' not in got and time.time() < deadline:
+            check_cancelled()
             got += read_some(fd)
             if b'NO CARRIER' in got:
                 break
@@ -200,6 +222,7 @@ def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_bas
         # Do not let an early caller finish before the slowest has trained.
         barrier.wait(timeout=args.connect_timeout)
         for block in range(args.payload_rounds):
+            check_cancelled()
             label = f'line {i + args.payload_offset} '
             if block:
                 label += f'block {block} '
@@ -208,6 +231,7 @@ def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_bas
             echo = b''
             deadline = time.monotonic() + args.echo_timeout
             while len(echo) < len(payload) and time.monotonic() < deadline:
+                check_cancelled()
                 echo += read_some(fd)
                 if proc.poll() is not None:
                     break
@@ -241,6 +265,57 @@ def one_call(i, args, tmp, line_port, rtp_base, results, barrier, caller_sip_bas
         if pump is not None:
             pump.join(timeout=2)
             r['log'] = pump.text()
+
+
+def restart_active_line(line, args, tmp, results, callers, cancellations,
+                        sup_out, line_port, call_rtp, call_port):
+    """Kill one owned active worker, preserve peers, and redial the fresh line.
+
+    The original call is intentionally destroyed, never graded as a pass.
+    Other calls must keep their original caller and complete exact payloads.
+    """
+    deadline = time.monotonic() + args.connect_timeout + args.echo_timeout
+    while not results.get(line, {}).get('bytes_echoed'):
+        if time.monotonic() >= deadline or not callers[line].is_alive():
+            raise RuntimeError('fault target did not reach exact payload')
+        time.sleep(.02)
+    if results[line].get('done') is not None:
+        raise RuntimeError('fault target finished before injection; use more payload rounds')
+    before = dict(worker_pids(sup_out.text()))
+    old_pid = int(before[str(line)])
+    print(f'fault: killing owned worker line {line} pid {old_pid} during payload')
+    os.kill(old_pid, signal.SIGKILL)
+    cancellations[line].set()
+    callers[line].join(timeout=15)
+    if callers[line].is_alive():
+        raise RuntimeError('original fault-target caller did not stop')
+    original = results[line]
+    (tmp / f'intentionally-faulted-caller.{line}.log').write_text(original.get('log', ''))
+    if original.get('ok'):
+        raise RuntimeError('fault did not interrupt the intended active caller')
+    deadline = time.monotonic() + 15
+    while True:
+        text = sup_out.text()
+        after = dict(worker_pids(text))
+        pid = int(after.get(str(line), old_pid))
+        marker = f'line {line}: worker pid {pid} started'
+        tail = text[text.rfind(marker):] if marker in text else ''
+        ready = re.search(rf'^\[L{line}\].*SIP V\.90 modem ready', tail, re.MULTILINE)
+        if pid != old_pid and ready:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('replacement worker did not become ready')
+        time.sleep(.02)
+    for other in range(args.lines):
+        if other != line and before[str(other)] != after.get(str(other)):
+            raise RuntimeError(f'unrelated worker {other} restarted')
+    replacement = threading.Thread(target=one_call,
+                                   args=(line, args, tmp, line_port, call_rtp,
+                                         results, threading.Barrier(1), call_port))
+    replacement.start()
+    callers[line] = replacement
+    print(f'fault: line {line} restarted as pid {pid}; other worker PIDs unchanged')
+    return original['bytes_echoed']
 
 
 def caller_env(args):
@@ -282,11 +357,16 @@ def worker_pids(text):
 
 
 def main():
+    global BINARY
     ap = argparse.ArgumentParser()
+    ap.add_argument('--binary', type=Path, default=Path(BINARY),
+                    help='freeze/select the executable under test')
     ap.add_argument('--lines', type=int, default=3)
     ap.add_argument('--mode', default='v22')
     ap.add_argument('--recycle', action='store_true')
     ap.add_argument('--rounds', type=int, default=1)
+    ap.add_argument('--restart-line', type=int,
+                    help='kill this active worker and redial it while peers continue; needs >=64 payload rounds')
     ap.add_argument('--payload-rounds', type=int, default=1,
                     help='distinct payload blocks per call, checked byte-for-byte')
     ap.add_argument('--payload-offset', type=int, default=0,
@@ -296,12 +376,21 @@ def main():
     ap.add_argument('--connect-timeout', type=float, default=60)
     ap.add_argument('--echo-timeout', type=float, default=30)
     args = ap.parse_args()
+    BINARY = str(args.binary.resolve())
     if not 1 <= args.lines <= 64 or args.payload_rounds < 1 or args.rounds < 1:
         ap.error('lines must be 1..64; payload-rounds and rounds must be positive')
+    if args.restart_line is not None:
+        if (not 0 <= args.restart_line < args.lines or args.lines < 2
+                or args.recycle or args.rounds != 1 or args.payload_rounds < 64):
+            ap.error('restart-line needs >=2 lines, >=64 payload-rounds, one round and no recycle')
     if args.recycle and args.rounds < 2:
         args.rounds = 2
 
+    source_binary = BINARY
     tmp = Path(tempfile.mkdtemp(prefix='multi-line-'))
+    BINARY = str(tmp / 'sip_v90_modem')
+    binary_hash = freeze_binary(source_binary, BINARY)
+    print(f'binary: {source_binary} frozen={BINARY} sha256={binary_hash}')
     line_port = free_port_block(args.lines)
     allocated = set(range(line_port, line_port + args.lines))
     line_rtp = free_port_block(args.lines, 100, width=2, avoid=allocated, even=True)
@@ -339,11 +428,23 @@ def main():
         for rnd in range(args.rounds):
             results = {}
             barrier = threading.Barrier(args.lines)
+            cancellations = [threading.Event() for _ in range(args.lines)]
             callers = [threading.Thread(target=one_call,
-                                        args=(i, args, tmp, line_port, call_rtp, results, barrier, call_port))
+                                        args=(i, args, tmp, line_port, call_rtp, results,
+                                              barrier, call_port, cancellations[i]))
                        for i in range(args.lines)]
             for t in callers:
                 t.start()
+            if args.restart_line is not None:
+                try:
+                    interrupted_bytes = restart_active_line(
+                        args.restart_line, args, tmp, results, callers, cancellations,
+                        sup_out, line_port, call_rtp, call_port)
+                    print(f'fault: original call intentionally lost after {interrupted_bytes} exact bytes; '
+                          'replacement must pass independently')
+                except (OSError, RuntimeError) as exc:
+                    failures += 1
+                    print(f'FAIL: active-worker isolation: {exc}')
             for t in callers:
                 t.join()
             ok = [results[i]['ok'] for i in range(args.lines)]
@@ -413,8 +514,12 @@ def main():
     if args.io_schedule:
         for f in sorted(tmp.glob('*.sched')):
             print(f'{f.name}: {schedule_summary(f)}')
+    if hashlib.sha256(Path(BINARY).read_bytes()).hexdigest() != binary_hash:
+        failures += 1
+        print('FAIL: executable changed during the run; use --binary with a frozen copy')
+    fault_note = '; one intentional call loss, replacement validated' if args.restart_line is not None else ''
     print('multi_line_test: ' + ('FAILED' if failures else
-          f'OK ({args.lines} lines, {args.rounds} round(s){", recycled" if args.recycle else ""})'))
+          f'OK ({args.lines} lines, {args.rounds} round(s){", recycled" if args.recycle else ""}{fault_note})'))
     print(f'logs/captures: {tmp}')
     return 1 if failures else 0
 

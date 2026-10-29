@@ -10,11 +10,22 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import multi_line_test as harness
 
 
 class HarnessTest(unittest.TestCase):
+    def test_frozen_image_survives_source_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, frozen = Path(tmp) / 'source', Path(tmp) / 'frozen'
+            source.write_bytes(b'original executable image')
+            source.chmod(0o755)
+            digest = harness.freeze_binary(source, frozen)
+            source.write_bytes(b'new build')
+            self.assertEqual(frozen.read_bytes(), b'original executable image')
+            self.assertEqual(digest, harness.hashlib.sha256(frozen.read_bytes()).hexdigest())
+            self.assertTrue(frozen.stat().st_mode & 0o111)
+
     def test_short_writes_and_would_block(self):
         sent = bytearray()
         calls = 0
@@ -135,6 +146,36 @@ class HarnessTest(unittest.TestCase):
                 os.kill(pid, signal.SIGKILL)
             self.assertEqual(survivors, [], 'fixture workers survived shutdown')
             proc.stdout.close()
+
+    def test_active_fault_targets_only_owned_line_and_checks_survivor_pid(self):
+        for survivor in [200, 201]:
+            with self.subTest(survivor=survivor), tempfile.TemporaryDirectory() as tmp:
+                original = {'bytes_echoed': 416, 'ok': False, 'done': None, 'log': 'faulted'}
+                results = {0: original}
+                callers = [Mock(), Mock()]
+                callers[0].is_alive.return_value = False
+                cancel = [threading.Event(), threading.Event()]
+                output = Mock()
+                output.text.side_effect = [
+                    'line 0: worker pid 100 started\nline 1: worker pid 200 started\n',
+                    f'line 0: worker pid 101 started\nline 1: worker pid {survivor} started\n'
+                    '[L0] SIP V.90 modem ready. PTY link: /unused\n']
+                args = SimpleNamespace(lines=2, connect_timeout=1, echo_timeout=1)
+                with patch.object(harness.os, 'kill') as killed, \
+                     patch.object(harness.threading, 'Thread') as replacement:
+                    if survivor == 200:
+                        count = harness.restart_active_line(0, args, Path(tmp), results, callers,
+                                                            cancel, output, 10000, 20000, 30000)
+                        self.assertEqual(count, 416)
+                        replacement.return_value.start.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'unrelated worker 1'):
+                            harness.restart_active_line(0, args, Path(tmp), results, callers,
+                                                        cancel, output, 10000, 20000, 30000)
+                        replacement.assert_not_called()
+                killed.assert_called_once_with(100, signal.SIGKILL)
+                self.assertTrue(cancel[0].is_set())
+                self.assertFalse(cancel[1].is_set())
 
     def test_spawn_failure_aborts_other_callers_barrier(self):
         args = SimpleNamespace(mode='v90', io_schedule=False)

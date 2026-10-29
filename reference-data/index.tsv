@@ -1,4 +1,5 @@
 path	files	bytes	retention_reason
+reference-data/artifacts/multi-call-active-20261030	20	486615	docs/multi_line.md; active V.90/V.34 worker-fault isolation, eight-line payload repeats and clean 649-row fast qualification; intentional lost calls excluded, software-only
 reference-data/artifacts/multi-call-isolation-20261029	13	289475	docs/multi_line.md; eight concurrent local V.90 calls, recycled payload checks, supervisor isolation negatives and retained build provenance; software evidence, not physical qualification
 reference-data/artifacts/rf-frontend-budget-20261029	97	26181137	docs/v90_upstream_data_path.md; six bounded wired calls, exact analytic-window tests, frontend CPU benchmark and RTP gap/fill audit; local evidence, not a regression dependency
 reference-data/artifacts/rf-continuity-audit-20261029	139	27548247	docs/v90_upstream_data_path.md; docs/rasfinder_v42bis_interop.md; nine bounded wired calls, independent TX/RX byte audit, held-out echo models and acquisition profiling; local evidence, not a regression dependency
