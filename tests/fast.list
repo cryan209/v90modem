@@ -865,6 +865,9 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAM
 # the upstream trains on the 4-point CP'/E instead and must decode B1 as scrambled ones (docs/v90_rasfinder_phase4.md).
 # 3429/33600 from the MT5634SMI: its B1 runs the 8.2 switching pattern one mapping
 # frame ahead (v34_rx_b1_search()); found at +8, state 13, where 0.24 was the best before.
+# V.34 11.5.1.1/11.8.1: the 7910 never received our Phase 3 J and restarted Phase 2 with one INFO0a
+# (DPSK, 2400 Hz) 3.2 s later; our caller sat in PHASE3_WAIT_S until it hung up.  macOS only (CoreAudio).
+sh -c '[ "$(uname -s)" != Darwin ] || ./apple_usb_modem_coupler --rx-replay reference-data/artifacts/apple-7910-v34-info0a-after-j/rx.s16 2>&1 | grep -q "peer retrain tone detected; responding per 11.5"'
 sh -c './v90_engine_replay reference-data/artifacts/rf-mt5634-v34-3429-swp/live-rx.g711 ulaw --fast --dial --at "AT+MS=V34,0" 2>&1 | grep -q "B1 found 8 symbols after the E detection, far-end trellis state 13 (normalized correlation 1.000"'
 sh -c 'ME_V90_UPSTREAM_MAX_BPS=9600 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v90-b1/live-rx.g711 ulaw --fast --dial 2>&1 | grep -q "upstream DATA bits: t=0.1s tap=4 ones=100%"'
 # V.90 9.2.1.1.6: our Tone B reversal waits for the CX93001's Tone A reversal.  With the RX clock frozen at 0 the

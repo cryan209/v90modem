@@ -1607,3 +1607,45 @@ not by a protocol timeout. The call delivered 4,341 intact upstream pattern
 lines and 39,026 downstream lines. This is the first controlled proof here
 that a one-sample receive discontinuity leads all the way through the
 specification's resynchronization exchange to a fresh upstream B1, repeatedly.
+
+## A call modem stuck after its Phase 3 J: the answerer restarts with INFO0a (2026-10-29)
+
+Apple USB modem (our engine, call modem) dialling the MultiTech 7910 in V.34,
+cap 14400 at 3000 baud: two of six calls that day hung in `PHASE3_WAIT_S`
+with the same receive tap
+(`artifacts/apple-v34-v90-20261028/v34-7910-{final-cap14400,alaw-policy-cap14400}`).
+A third failure, `final-cap9600`, is a different one: its §11.6
+renegotiation produced no E, and the §11.5 retrain then stalled in Phase 2.
+We sent S, S-bar, PP, TRN and J
+(11.3.1.1.7). The 7910 went silent, never sent its Phase 4 S, and about 3.2 s
+after our J (its 11.3.2.2.2 timer: no J "within 2600 ms plus two round trip
+delays") sent one 120 ms burst on 2400 Hz. DPSK-demodulated, the burst is
+`1111 01110010 ...`: fill, INFO sync, 37 bits. That is **INFO0a**, so the
+7910 restarted Phase 2. After it the line was silent until the 7910 hung up
+about 35 s later. A-law was not the cause: one failure was on the plain
+mu-law trunk.
+
+V.34 covers this: a call modem that receives INFO0a while waiting for a
+retrain goes back to Phase 2 (11.5.1.1, "proceed in accordance with 11.8.1";
+also 11.2.2.1.1). Our receiver could not see the burst. `v34_rx_watch_peer_retrain()`
+looks for Tone A with a 2400 Hz Goertzel against block energy. A DPSK
+reversal inside the 20 ms block cancels the bin, so the bursts read
+0.11/0.44/0.12/0.45 against a 0.70 threshold.
+
+The watcher now also squares each baud's 2400 Hz correlation (12 bauds per
+160-sample block), which removes the 0/180 degree modulation. A block counts
+when coherence |sum z^2|/sum |z|^2 > 0.9 and in-band fraction > 0.3 (INFO0a
+reads 0.43-0.75 and 0.99), and 4 blocks (80 ms) report `V34_EVENT_PEER_RETRAIN`.
+The engine then restarts Phase 2 through the existing 11.5 path: 70 ms of silence, then Tone B.
+That path already recovered a 7910 call at 11:04 the same day (`v34-7910-cap14400`,
+"peer retrain tone detected"). The check is scoped to a duplex plain-V.34 call
+modem in `PHASE3_WAIT_S` and `PHASE4_S`..`PHASE4_MP`. `PHASE3_TRAINING` is left
+out because it can still hold the tail of INFO1a. Replays of all six calls fire
+only on the two INFO0a bursts. Regression fixture:
+`reference-data/artifacts/apple-7910-v34-info0a-after-j` (`--rx-replay`, macOS row in
+`tests/fast.list`). `V34_RETRAIN_TONE_DEBUG=1` now prints `cc_frac`/`cc_coh`.
+
+Not established: whether the 7910 then completes Phase 2 after our Tone B
+(needs a live call). Also open: **why it never received our J**. The failing
+binaries predate the 250 ms caller Phase 3 S wait
+(`docs/slmodemd_vs_hardware_20261029.md`). A live A/B of that wait against the 7910 is next.

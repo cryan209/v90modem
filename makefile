@@ -202,6 +202,11 @@ V34_CARRIER_GRADIENT_TEST_OBJS = v34_carrier_gradient_test.o
 V90_UPSTREAM_HOLD_TEST_OBJS = v90_upstream_hold_test.o
 V90_UPSTREAM_SLIP_TEST_OBJS = v90_upstream_slip_test.o
 TEST_TARGETS += v34_carrier_gradient_test v90_upstream_hold_test v90_upstream_slip_test
+# The Apple coupler links CoreAudio/AVFoundation; its --rx-replay rows in
+# tests/fast.list run only on macOS.
+ifeq ($(UNAME_S),Darwin)
+TEST_TARGETS += apple_usb_modem_coupler
+endif
 FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 VFC_MAPPER_TEST_OBJS = vfc_mapper_test.o vfc_mapper.o
 VFC_SIGNATURE_TEST_OBJS = vfc_signature_test.o vfc_signature.o

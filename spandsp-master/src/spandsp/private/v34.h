@@ -2127,6 +2127,13 @@ typedef struct
     /*! \brief Set once a Tone A retrain has been reported, so it is announced
                only once per Phase 3/4 attempt. */
     bool phase34_tone_a_reported;
+    /*! \brief V.34 11.5.1.1 / 11.8.1: the answer modem's 2400 Hz DPSK control
+               channel (INFO0a) seen by a duplex call modem in Phase 3/4.
+               Per-baud correlations for the current 160-sample block, and
+               the run of qualifying blocks. */
+    float phase34_cc_re[12];
+    float phase34_cc_im[12];
+    int phase34_cc_blocks;
 
     bool info0_acknowledgement;
     uint8_t info0_raw_26_27;

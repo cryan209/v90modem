@@ -15931,11 +15931,59 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
         const float tone_a_coeff = listen_tone_a ? -0.6180339887f
                                                  :  1.1755705046f;
         static const int tone_a_block = 160;
+        /* V.34 11.5.1.1 ("If INFO0a is received, the modem shall proceed in
+           accordance with 11.8.1") and 11.2.2.1.1: the answer modem can
+           restart Phase 2 with INFO0a rather than a bare Tone A.  The MultiTech
+           7910 does exactly that when it never receives our Phase 3 J
+           (11.3.2.2.2): one INFO0a about 3.2 s after our J, then silence until
+           it hangs up (artifacts/apple-v34-v90-20261028/v34-7910-*-cap14400).
+           INFO0a is DPSK on the 2400 Hz control carrier, so the Goertzel
+           above loses it at every phase reversal (ratio 0.11/0.44 alternating
+           on that capture).  Squaring each baud's 2400 Hz correlation removes
+           the 0/180 degree modulation: coherence |sum z^2|/sum |z|^2 is ~1
+           for Tone A or INFO0a and ~0 for the four-fold symmetric primary
+           channel, whose S lines and TRN never sit at 2400 Hz in any case.
+           Duplex plain-V.34 call modem only, and only where the receiver is
+           waiting on the answerer's primary channel (not PHASE3_TRAINING,
+           which can still hold the tail of INFO1a). */
+        const bool watch_cc = s->duplex  &&  s->calling_party  &&  !s->v90_mode
+                            &&  (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
+                                 ||  (s->stage >= V34_RX_STAGE_PHASE4_S
+                                      &&  s->stage <= V34_RX_STAGE_PHASE4_MP));
+        /* exp(-j*2*pi*2400*n/8000) repeats every 10 samples (3 cycles), so a
+           160-sample block always starts at phase 0. */
+        static const float cc_cos[10] =
+        {
+             1.000000f, -0.309017f, -0.809017f,  0.809017f,  0.309017f,
+            -1.000000f,  0.309017f,  0.809017f, -0.809017f, -0.309017f
+        };
+        static const float cc_sin[10] =
+        {
+                  0.0f,  0.951057f, -0.587785f, -0.587785f,  0.951057f,
+                  0.0f, -0.951057f,  0.587785f,  0.587785f, -0.951057f
+        };
 
+        if (!watch_cc)
+        {
+            s->phase34_cc_blocks = 0;
+            memset(s->phase34_cc_re, 0, sizeof(s->phase34_cc_re));
+            memset(s->phase34_cc_im, 0, sizeof(s->phase34_cc_im));
+        }
+        /*endif*/
         for (i = 0;  i < len;  i++)
         {
             float x = (float) amp[i];
             float g0 = x + tone_a_coeff*s->phase34_tone_a_g1 - s->phase34_tone_a_g2;
+
+            if (watch_cc)
+            {
+                /* 600 baud: 40/3 samples a baud, 12 bauds a block. */
+                int baud = (s->phase34_tone_a_samples*3)/40;
+
+                s->phase34_cc_re[baud] += x*cc_cos[s->phase34_tone_a_samples % 10];
+                s->phase34_cc_im[baud] -= x*cc_sin[s->phase34_tone_a_samples % 10];
+            }
+            /*endif*/
 
             s->phase34_tone_a_g2 = s->phase34_tone_a_g1;
             s->phase34_tone_a_g1 = g0;
@@ -15996,6 +16044,50 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                 else
                     s->phase34_tone_a_blocks = 0;
                 /*endif*/
+                float cc_frac = -1.0f;
+                float cc_coh = -1.0f;
+
+                if (watch_cc)
+                {
+                    float p = 0.0f;
+                    float q_re = 0.0f;
+                    float q_im = 0.0f;
+                    int k;
+
+                    for (k = 0;  k < 12;  k++)
+                    {
+                        float re = s->phase34_cc_re[k];
+                        float im = s->phase34_cc_im[k];
+
+                        p += re*re + im*im;
+                        q_re += re*re - im*im;
+                        q_im += 2.0f*re*im;
+                    }
+                    /*endfor*/
+                    /* p ~= energy*(40/3)/2 for a tone; a baud straddling a
+                       reversal loses its share, so INFO0a reads 0.35-1.0
+                       per block depending on alignment. */
+                    if (s->phase34_tone_a_energy > 0.0f  &&  p > 0.0f)
+                    {
+                        cc_frac = p/(s->phase34_tone_a_energy*(20.0f/3.0f));
+                        cc_coh = sqrtf(q_re*q_re + q_im*q_im)/p;
+                    }
+                    /*endif*/
+                    if (s->phase34_tone_a_energy > 10000.0f*(float) tone_a_block
+                        &&  p > 0.3f*s->phase34_tone_a_energy*(20.0f/3.0f)
+                        &&  q_re*q_re + q_im*q_im > 0.81f*p*p)
+                    {
+                        s->phase34_cc_blocks++;
+                    }
+                    else
+                    {
+                        s->phase34_cc_blocks = 0;
+                    }
+                    /*endif*/
+                    memset(s->phase34_cc_re, 0, sizeof(s->phase34_cc_re));
+                    memset(s->phase34_cc_im, 0, sizeof(s->phase34_cc_im));
+                }
+                /*endif*/
                 {
                     static int tdebug = -1;
 
@@ -16006,13 +16098,17 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                     {
                         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - retrain tone watch: stage=%s dur=%d "
-                                 "meansq=%.0f ratio=%.3f tonal=%d run=%d\n",
+                                 "meansq=%.0f ratio=%.3f tonal=%d run=%d "
+                                 "cc_frac=%.2f cc_coh=%.2f cc_run=%d\n",
                                  v34_rx_stage_to_str(s->stage),
                                  s->duration,
                                  (double) (s->phase34_tone_a_energy/(float) tone_a_block),
                                  (denom > 0.0f) ? (double) (tone_power/denom) : -1.0,
                                  tonal ? 1 : 0,
-                                 s->phase34_tone_a_blocks);
+                                 s->phase34_tone_a_blocks,
+                                 (double) cc_frac,
+                                 (double) cc_coh,
+                                 s->phase34_cc_blocks);
                     }
                     /*endif*/
                 }
@@ -16036,6 +16132,17 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                              v34_rx_stage_to_str(s->stage),
                              s->phase34_tone_a_blocks*tone_a_block/8);
                 }
+                else if (s->phase34_cc_blocks >= 4  &&  !s->phase34_tone_a_reported)
+                {
+                    s->phase34_tone_a_reported = true;
+                    s->received_event = V34_EVENT_PEER_RETRAIN;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - answer modem's 2400 Hz control channel (INFO0a/Tone A) "
+                             "in stage %s (%d ms); it has restarted Phase 2, reporting "
+                             "peer retrain per V.34 11.5.1.1/11.8.1\n",
+                             v34_rx_stage_to_str(s->stage),
+                             s->phase34_cc_blocks*tone_a_block/8);
+                }
                 /*endif*/
             }
             /*endif*/
@@ -16052,6 +16159,9 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
         s->phase34_tone_a_samples = 0;
         s->phase34_tone_a_blocks = 0;
         s->phase34_tone_a_reported = false;
+        s->phase34_cc_blocks = 0;
+        memset(s->phase34_cc_re, 0, sizeof(s->phase34_cc_re));
+        memset(s->phase34_cc_im, 0, sizeof(s->phase34_cc_im));
     }
     /*endif*/
 }
@@ -17452,6 +17562,7 @@ SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s)
     {
         s->rx.phase34_tone_a_blocks = 0;
         s->rx.phase34_tone_a_reported = false;
+        s->rx.phase34_cc_blocks = 0;
     }
     /*endif*/
 }
@@ -18876,6 +18987,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase34_tone_a_samples = 0;
     s->rx.phase34_tone_a_blocks = 0;
     s->rx.phase34_tone_a_reported = false;
+    s->rx.phase34_cc_blocks = 0;
+    memset(s->rx.phase34_cc_re, 0, sizeof(s->rx.phase34_cc_re));
+    memset(s->rx.phase34_cc_im, 0, sizeof(s->rx.phase34_cc_im));
     s->rx.phase3_energy_samples = 0;
     s->rx.phase3_energy_retrain_reported = false;
 
