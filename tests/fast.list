@@ -42,6 +42,10 @@ python3 tools/mt5634mu_diag_test.py
 # ME_X2_RETRAIN_ON_LOSS) and the client answers it; the V.42 payload must
 # arrive intact both ways across the retrain.
 ./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_SILENCE_AFTER_MS=1000 --call-env ME_X2_CLIENT_SILENCE_MS=1500 --answer-env ME_X2_RETRAIN_ON_LOSS=1 --answer-log 'upstream=31200 (after a retrain)' --call-log '(after the server' --payload-printable RR --payload-reps 400 --expect X2 --seconds 60
+# Our x2 client loses its downstream for 1 s and retrains (V.90 9.5.2.1,
+# Tone A); our server answers it (9.5.1.2) and the V.42 payload arrives
+# intact both ways across it.
+./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_DEAF_AFTER_MS=1000 --call-env ME_X2_CLIENT_DEAF_MS=1000 --call-log '(after our retrain)' --answer-log 'answering the retrain (9.5.1.2)' --answer-log 'upstream=31200 (after a retrain)' --payload-printable RR --payload-reps 400 --expect X2 --seconds 60
 # Our x2 client opens an in-data rate change (15 -> 6) mid-payload; both
 # ends must complete it and the V.42 text must arrive intact both ways.
 ./engine_pair_test --both-at 'AT+MS=X2' --call-env ME_X2_CLIENT_RENEG_AFTER_MS=1000 --call-env ME_X2_CLIENT_RENEG_INDEX=6 --call-log 'X2 client rate change complete: index=6 downstream=44000' --answer-log 'X2 rate change complete: index=6' --payload-printable RR --payload-reps 128 --expect X2 --seconds 40

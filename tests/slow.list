@@ -31,6 +31,10 @@ python3 tools/multi_line_test.py --lines 8 --mode v90 --payload-rounds 32 --recy
 # peers to finish their original exact payloads while it trains and reconnects.
 python3 tools/multi_line_test.py --lines 3 --mode v90 --payload-rounds 64 --restart-line 0 --io-schedule
 @group
+# Our client retrains itself (V.90 9.5.2.1) when its downstream is lost
+# for 1 s; Ie030002 answers our Tone A (9.5.1.2), data resumes, and all ten
+# of our lines reach its DTE with no NO CARRIER.
+sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ln -s "$PWD/../courier-emu/Ie030002.nac" "$TMPDIR/" && ME_X2_CLIENT_DEAF_AFTER_MS=6000 ME_X2_CLIENT_DEAF_MS=1000 ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py --emu "$TMPDIR" --output "$TMPDIR/out" --fast --engine-at "AT&A3" --engine-send OUR-X2-CLIENT-0123456789! --answer-send IMODEM-X2-SERVER-0123456789 && grep -q "retraining (V.90 9.5.2.1)" "$TMPDIR/out/engine.log" && grep -q "X2 client enter DATA: .*(after our retrain)" "$TMPDIR/out/engine.log" && python3 -c "import json,sys; r=json.load(open(sys.argv[1])); t=\"\".join(s[\"text\"] for s in r[\"serial_session\"] if s[\"direction\"].startswith(\"received\")); sys.exit(0 if t.count(\"OUR-X2-CLIENT-0123456789!\")==10 and \"NO CARRIER\" not in t else 1)" "$TMPDIR/out/imodem-result.json"'
 # Our x2 server against the original Courier 403: our downstream goes quiet
 # for 1 s, 6 s into data; the Courier retrains (V.90 9.5.2.1, Tone A), we
 # answer (9.5.1.2), data resumes, and both lines arrive exactly with LAPM.

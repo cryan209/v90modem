@@ -3532,7 +3532,7 @@ static bool g_x2_client_reneg_done, g_x2_client_rr_open;
 static int g_x2_client_pad, g_x2_client_pad_index;
 /* A server retrain being answered (x2_session_client_retrain), and the most
    a call answers. */
-static bool g_x2_client_retraining;
+static bool g_x2_client_retraining, g_x2_client_retrain_ours;
 #define ME_X2_CLIENT_MAX_RETRAINS 2
 static unsigned g_x2_client_pad_bits;
 static x2_client_up_t g_x2_client_last_up;
@@ -11855,26 +11855,38 @@ static void me_x2_client_progress_locked(void)
         g_x2_client_last_up=c->up;g_x2_client_last_dn=c->dn;
     }
     if(g_x2.stage!=X2_CLIENT)return;
-    if(c->tone_b) {
-        /* V.90 9.5.2.2: answer it. The session sends the tones and marker;
+    if(c->tone_b || c->dn_lost) {
+        /* V.90 9.5.2.2: answer the server's retrain; 9.5.2.1: start one
+           when our downstream is lost. Both are the same steps from here
+           (x2_session_client_retrain: silence, Tone A, the reversals once
+           Tone B is heard). The session sends the tones and marker;
            after the marker the client's startup runs again, on a fresh V.34
            modulator and decoder with the same masks. The data stack keeps
            running: V.42 recovers what the retrain cost. */
         uint16_t pcm=c->pcm_mask,up=c->mp.words[1];
         unsigned md=c->md;
+        bool ours=!c->tone_b;
         if(g_x2.retrains>=ME_X2_CLIENT_MAX_RETRAINS || x2_session_client_retrain(&g_x2)) {
-            trace_phase("X2 client: Tone B from the server in data (a V.90 9.5.1.1 retrain); not answered after %u, ending the call",
-                        g_x2.retrains);
-            x2_session_fail(&g_x2,X2_FAILURE_PEER_RETRAIN);return;
+            if(ours)
+                trace_phase("X2 client: downstream lost (%u frames outside the banks); no retrain left after %u, ending the call",
+                            c->bad_frames,g_x2.retrains);
+            else
+                trace_phase("X2 client: Tone B from the server in data (a V.90 9.5.1.1 retrain); not answered after %u, ending the call",
+                            g_x2.retrains);
+            x2_session_fail(&g_x2,ours?X2_FAILURE_CLIENT:X2_FAILURE_PEER_RETRAIN);return;
         }
-        trace_phase("X2 client: Tone B from the server in data (V.90 9.5.1.1); answering the retrain (9.5.2.2), %u of %u",
-                    g_x2.retrains,ME_X2_CLIENT_MAX_RETRAINS);
+        if(ours)
+            trace_phase("X2 client: downstream lost (%u frames outside the banks); retraining (V.90 9.5.2.1), %u of %u",
+                        c->bad_frames,g_x2.retrains,ME_X2_CLIENT_MAX_RETRAINS);
+        else
+            trace_phase("X2 client: Tone B from the server in data (V.90 9.5.1.1); answering the retrain (9.5.2.2), %u of %u",
+                        g_x2.retrains,ME_X2_CLIENT_MAX_RETRAINS);
         if(g_v34){v34_free(g_v34);g_v34=NULL;}
         g_x2_client_tx_started=g_x2_client_armed=false;g_x2_client_samples=0;
         g_x2_client_pad=0;g_x2_client_rr_open=false;
         x2_client_init(c,pcm,up,md);
         x2_client_set_put_bit(c,me_x2_client_put_bit,NULL);
-        g_state=ME_TRAINING;g_x2_client_retraining=true;
+        g_state=ME_TRAINING;g_x2_client_retraining=true;g_x2_client_retrain_ours=ours;
         return;
     }
     if(c->dn==X2C_DN_FAILED) {
@@ -11927,7 +11939,8 @@ static void me_x2_client_progress_locked(void)
         g_report_tx_rate=upstream;g_report_rx_rate=downstream;
         g_x2_client_data_sample=g_x2_client_samples;
         trace_phase("X2 client enter DATA: downstream=%d upstream=%d%s",downstream,upstream,
-                    g_x2_client_retraining?" (after the server's retrain)":"");
+                    !g_x2_client_retraining ? "" : g_x2_client_retrain_ours ? " (after our retrain)"
+                                                                            : " (after the server's retrain)");
         g_x2_client_retraining=false;
         if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
             g_data_connect_reported=true;di_on_connected(downstream);
@@ -20481,8 +20494,22 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
        (Draft 0.33 3.5, 10, 11); the linear copy still reaches
        me_x2_rx_locked below for the stage bookkeeping. */
     if(g_mod==ME_MOD_X2 && g_x2.client && g_x2.stage==X2_CLIENT
-       && (g_state==ME_TRAINING || g_state==ME_DATA))
-        x2_client_rx_codewords(&g_x2.cl,codewords,(size_t)count);
+       && (g_state==ME_TRAINING || g_state==ME_DATA)) {
+        /* ME_X2_CLIENT_DEAF_AFTER_MS=<a>, ME_X2_CLIENT_DEAF_MS=<d>: a TEST
+           HOOK. Our client hears silence in place of the downstream for d ms
+           (default 1000) from a ms into data, once per call, as if its
+           receiver had failed, so it retrains (V.90 9.5.2.1). */
+        int deaf_at=parse_env_int("ME_X2_CLIENT_DEAF_AFTER_MS",0);
+        uint8_t deaf[320];
+        if(deaf_at>0 && g_state==ME_DATA && g_x2.retrains==0 && count<=(int)sizeof(deaf)) {
+            uint64_t t=g_x2_client_samples-g_x2_client_data_sample;
+            uint64_t from=(uint64_t)deaf_at*8,len=(uint64_t)parse_env_int("ME_X2_CLIENT_DEAF_MS",1000)*8;
+            if(t>=from && t<from+len) {
+                memset(deaf,0xff,(size_t)count);
+                x2_client_rx_codewords(&g_x2.cl,deaf,(size_t)count);
+            } else x2_client_rx_codewords(&g_x2.cl,codewords,(size_t)count);
+        } else x2_client_rx_codewords(&g_x2.cl,codewords,(size_t)count);
+    }
     if(g_mod==ME_MOD_X2 && g_x2.symmetric && g_x2.stage==X2_SYMMETRIC
        && (g_state==ME_TRAINING || g_state==ME_DATA)) {
         for(int i=0;i<count;++i) {

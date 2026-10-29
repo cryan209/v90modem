@@ -1368,9 +1368,9 @@ It checks:
 - Tone A in data answered while a retrain is left, and the call ending once
   none is.
 
-**Not done.** No real server or Courier hardware has been tried. Our client
-does not start a retrain on its own downstream loss; nothing has needed it on
-a byte-exact bearer.
+**Not done.** No real server or Courier hardware has been tried. (Our
+client starting a retrain on its own downstream loss is now done; see the
+next section but one.)
 
 ## The `\N0` client row and the first CM's inversion (30 October 2026)
 
@@ -1414,3 +1414,43 @@ Open: Ie030002's DE14 arithmetic is still unread. The Courier's own first CM
 also starts from silence, about 1.2 s after its CI, and it shows 11 marks
 before its sync octet. Why that scores and ours did not is unexplained.
 Read DE14's inputs before changing the lead-in.
+
+## The client starts a retrain (30 October 2026)
+
+That completes the four retrain cases. Each side can start one, and each
+side answers the other's:
+
+| starts | how | answered by |
+|---|---|---|
+| server (Ie030002, ours) | 70 ms silence, Tone B (9.5.1.1) | our client (9.5.2.2) |
+| client (Courier, ours) | 70 ms silence, Tone A (9.5.2.1) | our server (9.5.1.2), Ie030002 |
+
+**Trigger.** On a byte-exact bearer every data frame decodes. The client
+now counts consecutive data frames that fall outside the banks
+(`x2_pcm_decode` fails), which it already refused to deliver. At
+`X2_CLIENT_LOSS_FRAMES` (333 frames, 250 ms) it sets `dn_lost`, and the
+engine retrains through `x2_session_client_retrain()`. Those steps are
+already 9.5.2.1's: silence, Tone A, its first reversal once Tone B has been
+heard and Tone A has run 50 ms. 250 ms is longer than a server's own
+retrain takes to show (70 ms of silence, then 40 ms of Tone B), so that
+case is still recognised as the server's. The client's two retrains a call
+are shared between the two causes. Any data frame that decodes clears the
+count. `x2_client_test` checks the trigger at every allocation it tests:
+48000 clean payload samples never set it, and 0xff silence sets it at
+exactly 333 frames.
+
+`ME_X2_CLIENT_DEAF_AFTER_MS`/`_MS` is the test hook. It feeds the client's
+decoder silence in place of the downstream for a while, once per call.
+
+**Against Ie030002** (deaf for 1 s, 6 s into data, LAPM):
+- the client logs the loss at 333 frames and sends Tone A;
+- the I-modem's Tone B arrives 70 ms after our Tone A begins;
+- the reversals, its probe and our marker `69` follow as in its own retrain;
+- data resumes, all ten of our lines reach its DTE, and there is no NO CARRIER.
+
+This is the first time Ie030002 has been seen to answer an analogue
+side's Tone A. It is in `tests/slow.list`.
+
+**Against our own server** the same hook makes our server answer through
+9.5.1.2, and a 400-line V.42 payload arrives exact both ways
+(`tests/fast.list`).

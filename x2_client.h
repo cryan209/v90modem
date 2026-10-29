@@ -42,6 +42,11 @@ typedef enum {
     X2C_DN_WAIT_B, X2C_DN_B, X2C_DN_TRAIN, X2C_DN_RECORD, X2C_DN_DATA,
     X2C_DN_FAILED, X2C_DN_RR_RECORD
 } x2_client_dn_t;
+/* 250 ms of six-octet frames. On a byte-exact bearer every data frame
+ * decodes, so a run of this many outside the banks is a lost downstream. It
+ * is longer than a server's own retrain takes to show (70 ms of silence,
+ * then 40 ms of Tone B), so that is still answered as the server's. */
+#define X2_CLIENT_LOSS_FRAMES 333
 typedef void (*x2_client_put_bit_t)(void *context, unsigned bit);
 
 /* One frame-phase decoder: six-octet frames through the training or data
@@ -101,6 +106,10 @@ typedef struct {
        Tone B (1200 Hz) in place of data; 40-sample blocks. */
     int16_t tone_window[40];
     unsigned tone_pos, tone_b_blocks, tone_b;
+    /* V.90 9.5.2.1: the analogue modem retrains when its receiver fails.
+       Consecutive data frames outside the banks; dn_lost once there have
+       been X2_CLIENT_LOSS_FRAMES of them. */
+    unsigned bad_frames, dn_lost;
     /* Results. */
     unsigned j_seen, record_valid, final_seen, e_sent;
     unsigned selected_index, upstream_n;

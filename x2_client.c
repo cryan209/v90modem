@@ -396,7 +396,11 @@ static void main_frame(x2_client_t *c)
          * delivering them would break a V.14 character. Dropped, the
          * stream continues exactly where it stopped. */
         unsigned drop=c->drop_frames ? (--c->drop_frames,3u) : 1u;
-        if(decode_frame(c,d,&c->data,drop)<0)++c->decode_errors;
+        if(decode_frame(c,d,&c->data,drop)<0) {
+            ++c->decode_errors;
+            if(++c->bad_frames>=X2_CLIENT_LOSS_FRAMES)c->dn_lost=1;
+        }
+        else c->bad_frames=0;
         return;
     }
     int ones=decode_frame(c,d,&c->training,0);

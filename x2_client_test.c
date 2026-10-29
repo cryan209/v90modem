@@ -79,6 +79,16 @@ static void downstream(uint16_t pcm_mask, unsigned expected_index, unsigned expe
     size_t offset=sink.count-source.count;
     for(size_t i=0;i<offset;++i)CHECK(sink.bits[i]==1);
     for(size_t i=0;i<source.count;++i)CHECK(sink.bits[offset+i]==source.bits[i]);
+    /* V.90 9.5.2.1's trigger: clean data never sets dn_lost; silence
+       (0xff, outside every data bank) does, after exactly
+       X2_CLIENT_LOSS_FRAMES frames. */
+    CHECK(!client.dn_lost && client.bad_frames==0);
+    unsigned frames=0;
+    for(;frames<X2_CLIENT_LOSS_FRAMES+10 && !client.dn_lost;++frames) {
+        uint8_t quiet[6]={0xff,0xff,0xff,0xff,0xff,0xff};
+        x2_client_rx_codewords(&client,quiet,6);
+    }
+    CHECK(client.dn_lost && frames==X2_CLIENT_LOSS_FRAMES);
     printf("  index %2u (%u bit/s down, upstream N=%u)%s: %zu payload bits exact after %zu ones\n",
            expected_index,x2_client_downstream_rate(&client),expected_n,
            no_align?", no alignment word":"",source.count,offset);
