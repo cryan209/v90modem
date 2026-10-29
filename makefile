@@ -325,13 +325,6 @@ test-fast: test-build
 test-slow: test-build
 	$(RUN_TESTS) tests/slow.list
 
-# artifacts/ and captures/ expire (docs/artifact_storage.md).  Lists runs
-# untouched for 14 days; `make expire-artifacts EXPIRE_ARGS=--delete` removes
-# them.  A KEEP file in a run, or a git worktree inside it, keeps it.
-.PHONY: expire-artifacts
-expire-artifacts:
-	python3 tools/expire_artifacts.py $(EXPIRE_ARGS)
-
 # Local preserved analogue capture, deliberately outside make test: reference-data/
 # bulk evidence is gitignored. Missing evidence is a hard error in the verifier.
 V90_LINE_PYTHON ?= python3
