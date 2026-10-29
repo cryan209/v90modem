@@ -18334,13 +18334,14 @@ static void b1_cma_store(v34_rx_state_t *rx, double p2_sum, double p4_sum, int n
 }
 /*- End of function --------------------------------------------------------*/
 
-static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
-                                              int scrambler_tap,
-                                              int trellis_override,
-                                              int initial_state)
+/* The far end's transmitter, seeded for B1 (10.1.3.1) but not yet started:
+   everything the template depends on except the trellis encoder's starting
+   state and the 8.2 switching-pattern advance. */
+static v34_state_t *b1_template_model(v34_rx_state_t *rx,
+                                      int scrambler_tap,
+                                      int trellis_override)
 {
     v34_state_t *tx;
-    int16_t frame[16];
     int16_t precoder[6];
     int rate = (rx->bit_rate/2 + 1)*2400;
     /* The V.90 upstream (T/3 receiver) takes its B1 parameters from V.90.  A
@@ -18374,7 +18375,7 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                   v90_t3_b1_get_bit, NULL,
                   v90_t3_b1_put_bit, NULL);
     if (!tx)
-        return false;
+        return NULL;
     /* The received B1 uses the far-end role's clause-7 scrambler.  6.5/V.90
        says the analogue modem uses GPA, but slmodemd measurably scrambles its
        upstream with GPC (Phase-4 TRN descrambles to 100% ones at tap 17 and
@@ -18390,8 +18391,18 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                          v90_upstream ? NULL : precoder) != 0)
     {
         v34_free(tx);
-        return false;
+        return NULL;
     }
+    return tx;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Start a seeded model in trellis state initial_state and emit its B1 into
+   rx->v90_t3_b1.  Only the model's tx half is used (v34_get_mapping_frame()). */
+static bool b1_template_generate(v34_rx_state_t *rx, v34_state_t *tx, int initial_state)
+{
+    int16_t frame[16];
+
     /* 10.1.3.1 has the trellis encoder zeroed before B1; see
        v34_rx_b1_search() for the peer that does not. */
     tx->tx.state = initial_state;
@@ -18420,13 +18431,28 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
         {
             int dst = rx->v90_t3_b1_symbols++;
             if (dst >= V34_V90_T3_B1_MAX_SYMBOLS)
-            {
-                v34_free(tx);
                 return false;
-            }
             rx->v90_t3_b1[dst].re = frame[2*n]/128.0f;
             rx->v90_t3_b1[dst].im = frame[2*n + 1]/128.0f;
         }
+    }
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
+                                              int scrambler_tap,
+                                              int trellis_override,
+                                              int initial_state)
+{
+    v34_state_t *tx;
+
+    if ((tx = b1_template_model(rx, scrambler_tap, trellis_override)) == NULL)
+        return false;
+    if (!b1_template_generate(rx, tx, initial_state))
+    {
+        v34_free(tx);
+        return false;
     }
     /* The constellation power: see b1_cma_template_sums(). */
     if (b1_template_cma_deferred)
@@ -18442,7 +18468,16 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
         return rx->v90_t3_b1_symbols > 0;
     }
     /*endif*/
-    if (!b1_template_skip_cma)
+    /* Only the V.90 T/3 upstream receiver uses this measurement (its blind
+       CMA step and 4-point training target).  On the T/2 data path -- plain
+       V.34, and a V.90 call that fell back to it -- nothing reads it, and
+       running 32000 symbols through the mapper here cost the media callback
+       ~20 ms at the data-mode entry and again after the B1 search, twice in
+       a row: 40-55 ms of RTP send stall on the slowest live host, where the
+       RasFinder's gateway then moved its playout and our echo with it, under
+       a canceller fitted to the old delay (white 0.22 s into DATA, the
+       echo's round trip; 2 of 12 calls). */
+    if (!b1_template_skip_cma  &&  !v34_rx_t2_data_path(rx))
     {
         double p2_sum = 0.0;
         double p4_sum = 0.0;
@@ -18589,6 +18624,8 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     int best_swp;
     float best = -1.0f;
     int prior;
+    v34_state_t *model = NULL;
+    v34_tx_state_t seeded;
 
     if (states <= 0  ||  states > 64)
         states = 1;
@@ -18613,7 +18650,22 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
         s->b1_swp_frames = swp;
         for (int st = 0;  st < states;  st++)
         {
-            if (!v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, st))
+            /* One seeded model for the whole search, its encoder state put
+               back before each trellis state.  A v34_init() per state zeroed
+               the 2.25 MB v34_state_t up to 128 times -- most of the B1
+               callback's 28.7 ms on the slowest live host, where a send
+               stall over ~35 ms moves the far end's playout and our echo
+               with it.  Only the 1.3 KB tx half carries the template. */
+            if (model == NULL)
+            {
+                if ((model = b1_template_model(s, v34_expected_b1_default_tap(s), -1)) == NULL)
+                    break;
+                /*endif*/
+                seeded = model->tx;
+            }
+            /*endif*/
+            model->tx = seeded;
+            if (!b1_template_generate(s, model, st))
                 break;
             /*endif*/
             for (int k = 0;  k <= search;  k++)
@@ -18637,6 +18689,7 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
         /*endfor*/
     }
     /*endfor*/
+    v34_free(model);
     s->b1_swp_frames = best_swp;
     b1_template_skip_cma = false;
     (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);

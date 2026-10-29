@@ -195,3 +195,25 @@ CI).  Live A/B, our V.34 caller, three alternated rounds per arm, five targets:
 slmodemd answering 0/3 -> 3/3 (33600, every numbered line both ways; 0/9
 across the day without it), all targets 10/15 -> 14/15 CONNECT; RasFinder,
 7900 and 7910 unchanged.  `ME_V8_NO_CI=1` is no longer needed.
+
+**Fixed: a 30-45 ms RTP send gap at V.34 DATA entry.**  About one RasFinder
+call in six went white about 0.22 s after B1 -- the echo round trip (1683-1763
+samples).  The AudioCodes gateway re-times its playout when our RTP send gap
+exceeds about 35 ms; that moves our echo, the line canceller stays fitted to
+the old delay, and the receiver goes white.  Passing calls had a 32.8 ms gap
+at DATA entry, failing ones 39-55 ms.  The gap was ours, all in building the
+expected B1 (V.34 10.1.3.1, a full data frame of 1s):
+- `v34_build_expected_b1_tap_trellis` ran the 32,000-symbol CMA constellation
+  measurement on every build (14.7 ms CPU on the Mac), but only the V.90 T/3
+  upstream receiver reads it.  It is now skipped on the T/2 data path
+  (0.07 ms a build).
+- The B1 search's last rebuild ran that measurement a second time, and every
+  candidate state called `v34_init()` on a fresh 2.25 MB `v34_state_t`.  The
+  builder is split into a model (init and seed, once) and a generator (restores
+  the 1.3 KB `tx` half per state): the search costs 1.1 ms instead of about
+  24 ms.  Decode output is identical on four replays.
+Live A/B, our V.34 caller in CT 117, four alternated rounds per arm, five
+targets: the worst send gap within 0.5 s of DATA entry is 26-45 ms (9/20 over
+35 ms) before and 21.7-27.1 ms (0/20) after.  Outcomes: 19/20 CONNECT and one
+lost RasFinder probe (on a call that re-entered DATA after a 39 ms gap) before;
+20/20 CONNECT with every probe, numbered line and Diva echo intact after.

@@ -85,6 +85,11 @@ both taps and grade only completed runs.
 - V.34 fixed-3200 ceiling: symbol rate is negotiated through 3429; the
   RasFinder B1 switching-pattern alignment was corrected.
 - Initial hardware K56flex connections in both client and server roles.
+- RTP send gap at V.34 DATA entry (the AudioCodes playout move behind
+  RasFinder white-after-B1): the expected-B1 build no longer runs the T/3 CMA
+  measurement on the T/2 path, and the B1 search seeds its model once; worst
+  gap 26-45 ms -> 22-27 ms live, 19/20 -> 20/20
+  ([slmodemd comparison](slmodemd_vs_hardware_20261029.md)).
 
 ## Historical assessment — 5 October 2026 (with original appended updates)
 
