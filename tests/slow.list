@@ -2,6 +2,11 @@
 # (they wait on the fax protocol, not on the CPU).  Measured 2026-10-10;
 # the fax matrix was cut to four rows 2026-10-15.
 
+# V.90 8.5.2/9.4.2.5: 20 s of exact upstream PRBS, both laws, 21600/26400,
+# zero and +/-0.1 Hz carrier offsets. Carrier phase crosses full turns while
+# the FSE adapts; no LAPM hides bit errors (docs/v90_upstream_data_path.md).
+./v90_upstream_hold_test
+
 @group fax-v34-test fax-v34-engine-test
 # Full pages through two production engines.  One row per class and callback
 # size, with law and paper alternated so each class still sees A4 and Letter,

@@ -199,7 +199,8 @@ V34_MP_TEST_OBJS = v34_mp_test.o
 V34_DATA_TEST_OBJS = v34_data_test.o
 V34_GARDNER_TEST_OBJS = v34_gardner_test.o
 V34_CARRIER_GRADIENT_TEST_OBJS = v34_carrier_gradient_test.o
-TEST_TARGETS += v34_carrier_gradient_test
+V90_UPSTREAM_HOLD_TEST_OBJS = v90_upstream_hold_test.o
+TEST_TARGETS += v34_carrier_gradient_test v90_upstream_hold_test
 FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o at_help.o line_monitor.o profile_file.o
 VFC_MAPPER_TEST_OBJS = vfc_mapper_test.o vfc_mapper.o
 VFC_SIGNATURE_TEST_OBJS = vfc_signature_test.o vfc_signature.o
@@ -1306,3 +1307,9 @@ v34_carrier_gradient_test: $(V34_CARRIER_GRADIENT_TEST_OBJS)
 	$(CC) $(V34_CARRIER_GRADIENT_TEST_OBJS) -o $@ -lm
 
 v34_carrier_gradient_test.o: v34_carrier_gradient_test.c $(SPANDSP_DIR)/v34_carrier.h
+
+# Twenty-second PRBS holds across carrier turns; no LAPM error masking.
+v90_upstream_hold_test: $(V90_UPSTREAM_HOLD_TEST_OBJS) spandsp
+	$(CC) $(V90_UPSTREAM_HOLD_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+v90_upstream_hold_test.o: v90_upstream_hold_test.c $(SPANDSP_DIR)/spandsp/private/v34.h

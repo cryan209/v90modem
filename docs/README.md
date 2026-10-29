@@ -62,7 +62,8 @@ Where to start:
 | [v90_mi_negotiation.md](v90_mi_negotiation.md) | Mi (modulus) negotiation |
 | [v90_constellation_selection.md](v90_constellation_selection.md) | Downstream constellation and rate choice |
 | [v90_live_g711_plan.md](v90_live_g711_plan.md) | Live raw-G.711 datapump |
-| [v90_upstream_data_path.md](v90_upstream_data_path.md) | Digital-side upstream receiver |
+| [v90_upstream_data_path.md](v90_upstream_data_path.md) | Digital-side upstream receiver and continuity regression |
+| [mt9234_v90_gradient.md](mt9234_v90_gradient.md) | Carrier/equalizer coordinate correction and bounded MT9234 hardware payload |
 | [v90_upstream_3000_3200_plan.md](v90_upstream_3000_3200_plan.md) | Upstream at 3000/3200 baud |
 | [v90_upstream_rate_matrix.tsv](v90_upstream_rate_matrix.tsv) | Upstream rate matrix data |
 | [v90_v92_ja_review_plan.md](v90_v92_ja_review_plan.md) | Ja review |

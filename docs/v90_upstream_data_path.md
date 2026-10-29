@@ -2943,3 +2943,74 @@ an uncapped 29.0 dB estimate; higher estimates still select 31200. None of
 those six calls establishes LAPM, so this does not qualify sustained hardware
 data reception. Details and retained provenance are in
 `v90_rasfinder_phase4.md`, "Negotiated-rate contract checks".
+
+## Continuity follow-up: carrier turns and the remaining RasFinder case
+
+The 28 October correction in `e72c35e0` is already on main: the DD-NLMS
+error and CMA output must be returned from the carrier-derotated coordinates
+to the FSE input coordinates before updating taps (V.90 8.5.2/9.4.2.5).
+[MT9234 gradient results](mt9234_v90_gradient.md) records the independent
+finite-difference check, retained replay and two bounded physical calls,
+including 1920 exact upstream bytes. The project backlog initially omitted
+that result. It does not close every RasFinder discontinuity.
+
+### Long-hold regression, not just a low lattice error
+
+`v90_upstream_hold_test` exercises the actual transmitter and T/3 receiver
+at 3200 baud, low carrier, 21600 and 26400 bps, both G.711 laws. After two
+seconds it changes the test transmitter's carrier frequency continuously
+by 0 or +/-0.1 Hz, without resetting its phase. The remaining 18 seconds
+span 1.8 turns, testing adaptation well away from the phase-zero special
+case. It does not change the received sample count or the production DSP.
+
+The test fixes one PRBS alignment near startup, then checks the entire
+remaining stream with no re-alignment and no LAPM retransmission. It requires
+at least 19 seconds of bits, acquisition, no resync request and no carrier
+loss. All 12 cases pass locally: **5,742,000 checked bits, zero errors**.
+Each 21600 case checks 430650 bits; each 26400 case checks 526350 bits.
+The matrix takes about 7 seconds of wall time and is in `tests/slow.list`.
+
+A separately compiled negative-control receiver removes only the inverse
+rotation from the DD-NLMS error; CMA and every other working-tree change
+are retained. All four zero-offset controls still pass, but all eight
+nonzero-offset cases fail with resync requests. The exploratory 26400 PCMU
++0.1 Hz run has 31452 bad bits even though its final lattice error is
+0.131: low final symbol error is not proof of uninterrupted data.
+The negative-control object and executable live only under
+`artifacts/v90-upstream-continuity/`; production objects were not replaced.
+
+An exploratory 31200 extension is **not green**: over twenty seconds the
+same harness reports 410–1150 bit errors across the two laws and 0/+0.1 Hz
+runs, despite no resync request. This has not been attributed to a particular
+receiver defect or a channel limit. It is not a reason to replace negotiated
+rates with a new fixed cap, and those rows have not been disguised as passes.
+
+### The retained RasFinder failure is still reproducible
+
+Rebuilding the current replay tools, then replaying
+`rf-current-20261023/r1-v90-6311/live-rx.g711` with
+`--dial --sync --split --echo-ref` still requests discontinuity recovery at
+**TRACE +27700 ms**, matching the original call. Four-point training is clean;
+the reset-state B1 templates still fit only 17.6–21.9%, and the four-point
+fallback commits at fit=0. This older recording predates later RasFinder B1
+work; it must not be taken as proof that the peer sent an invalid B1 or that
+all current hardware calls have the same acquisition failure.
+
+The recorded echo tracker later reports +40 samples, but after our recovery
+opener. This run does not establish that delaying protocol recovery or changing
+the echo tracker fixes continuity. No result after the first divergent TX is
+used to grade hardware behaviour. The precise `opt-*`/`opt2-*` recordings from
+the older walk-off investigation are not available in this local tree.
+
+The existing MT9234 captured-gradient regression also passes. Live wired
+validation was attempted but **blocked**: SSH to `cryan-tower` timed out;
+`vmhost` did not resolve from this host. No live calls were placed and no
+hardware-continuity claim is added. Logs, the exploratory harness and the
+negative-control build are under `artifacts/v90-upstream-continuity/`. The focused runner passes **11/11**
+rows (including the 12-case hold matrix, the captured MT9234 regression,
+Gardner/gradient tests, B1 replays and `vpcm_loopback_test --all-tests`),
+with logs in `test-logs/v90-upstream-continuity-final/`. This is not a full
+suite run or Linux qualification.
+Next: regain wired rig access, obtain paired taps of a current-build failure,
+check our own TX/timing and echo before the discontinuity, and require sustained
+numbered payload in both directions across repeated completed calls.
