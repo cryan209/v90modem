@@ -922,6 +922,10 @@ v92_mh_line_test: $(V92_MH_LINE_TEST_OBJS) spandsp
 # written once configure succeeds.  Written after the build instead, a
 # failed first build left the stamp absent and every retry ran distclean,
 # which deletes SpanDSP's generated filter tables.
+# Before a fresh configure, the checked-in autotools outputs are touched
+# together: a git checkout writes aclocal.m4 before configure.ac and m4/,
+# so it can look stale and the regeneration rules then demand the exact
+# automake that made it (aclocal-1.17; Debian 12 has 1.16).
 $(SPANDSP_LIB): FORCE
 	@set -e; \
 	current_host="$(HOST_TAG)"; \
@@ -944,6 +948,7 @@ $(SPANDSP_LIB): FORCE
 	if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
 		echo "Configuring SpanDSP with V.34 and V.32bis support for $$current_host..."; \
 		(cd "$(SPANDSP_ROOT)" && \
+		 touch aclocal.m4 configure config-h.in $$(find . -name Makefile.in) && \
 		 CFLAGS="$(TIFF_CFLAGS) $(JPEG_CFLAGS)" \
 		 LDFLAGS="$(TIFF_LDFLAGS) $(JPEG_LDFLAGS)" \
 		 ./configure --enable-v34 --enable-v32bis); \

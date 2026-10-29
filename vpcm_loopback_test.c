@@ -6372,7 +6372,7 @@ static void vpcm_log_v8_result(const char *side, const v8_parms_t *result)
     if (result->jm_cm.modulations & V8_MOD_V92)
         strncat(mods, mods[0] ? "|V92" : "V92", sizeof(mods) - strlen(mods) - 1);
     if (mods[0] == '\0')
-        strlcpy(mods, "none", sizeof(mods));
+        snprintf(mods, sizeof(mods), "none");   /* no strlcpy before glibc 2.38 */
 
     vpcm_log("V.8 %s result: status=%s (%d) call=%s mods=%s pcm=0x%X pstn=0x%X",
              side,
