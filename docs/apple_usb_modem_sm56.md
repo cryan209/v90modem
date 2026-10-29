@@ -4434,9 +4434,9 @@ Current failures and controls are retained, not folded into the successes:
   emit extra V.8 categories on the strength of that one experiment.
 - An independent 6004 SIP capture shows the HT802 offers PCMU and PCMA, but
   the PBX endpoint currently allows `clearmode|ulaw`; these calls use PCMU.
-  No PBX/ATA codec policy was changed. Avoiding the demonstrated conversion
-  is a useful next controlled experiment, not a proven diagnosis of every
-  remaining training or payload failure.
+  No PBX/ATA codec policy was changed in those calls. The subsequent
+  user-authorized trial below tests an A-law bearer; conversion is not a
+  proven diagnosis of every remaining training or payload failure.
 - An independent 600-baud differential decoder finds CRC-valid V.90 INFO1a
   on both local TX PCM and gateway-bound RTP. A coarse decoder's INFO1_BAD
   output alone is not evidence that we truncated this transmission.
@@ -4466,3 +4466,58 @@ Retained evidence: `reference-data/artifacts/apple-v34-v90-20261028/`
 failed summaries, transmit/receive taps, independent CM/INFO decodes, the
 passive capture and extracted G.711 streams, and isolated build provenance.
 Fresh disposable output originated under `artifacts/apple-v34-v90-20261028/`.
+
+#### Temporary A-law bearer trial (user-authorized, 2026-10-29)
+
+A bounded test temporarily overrode **only endpoint 6004** with
+`disallow=all`, `allow=alaw`. The trunk endpoint 6501 already allowed A-law;
+no ATA or trunk configuration was edited. No calls were active at installation.
+A systemd eight-minute automatic rollback was armed **before** applying the
+change. Asterisk's PJSIP configuration was reloaded, not the PBX restarted.
+
+The passive capture confirms both the Cisco answer and the answer toward the
+HT802 negotiated **PCMA (RTP payload type 8)**. All eight captured G.711 streams
+(two calls, four legs each) contain only PT8. This was not a nominal A-law
+offer silently answered with PCMU. Matching packets by SSRC, sequence and
+RTP timestamp verifies **all 13,991 forwarded packets / 2,238,560 codewords**
+byte-for-byte across Asterisk, in both directions: zero payload differences
+and zero source packets omitted within the matched forwarding windows.
+This checks the captured PBX boundary, not every codec/hybrid in the circuit.
+
+| Trial | Frozen executable | Checked result |
+|---|---|---|
+| V.90 to 7910 | earlier `build/coupler-peer-final` | No CONNECT; zero PPP frames/echoes; repeated Ja deadlines, no completed DIL |
+| V.34 to 7910, cap14400 | `build-current/coupler-access-fixed` | No CONNECT or checked payload; Phase-3 acquisition did not complete |
+
+The second call started at least66 seconds after the first finished. These
+are **failed candidates**, not evidence that selecting A-law fixes the modem.
+The V.90 capture has three missing 20-ms uplink packets, but the first is
+about74 seconds into RTP, well after its initial Ja failures. The V.34
+capture has three uplink gap events (one, three and two missing packets),
+including a gap during Phase3; this confounds a simple codec-only explanation
+of that call's failure. Both incoming Cisco streams are gap-free. Missing
+uplink packets are already absent at the PBX ingress and remain absent at
+egress; the capture cannot distinguish loss before the PBX from skipped
+source packets. tcpdump reported zero kernel drops. Do not insert invented
+samples into a modem receive stream to conceal these gaps.
+
+After both calls, the marker-only rollback restored `/etc/asterisk/pjsip.conf`
+**byte-for-byte** (SHA256
+`57fe6ee5b68fa2a688a2bda5bb84a3e91b296bbdeb30bf5b7b1fbad8ce1e1811`).
+Runtime endpoint6004 again reported `clearmode|ulaw`; no PBX channels remained.
+Only after verification was the watchdog timer stopped. Apple cleanup on both
+calls confirmed hook/monitor off and hardware protection enabled, with zero
+render errors or TX-ring under/overruns. There is **no persistent codec change**.
+
+`tools/eicon_rtp_pcap_check.py` now reads native Linux SLL2 captures and records
+per-packet/summary payload types, instead of requiring a manual raw-IP
+conversion or assuming the codec. Its synthetic tests cover four link types,
+both pcap byte orders, exact payload preservation, visible codec changes,
+sequence/timestamp wrap and gaps, and rejection of non-IPv4 SLL2 frames.
+
+Retained local evidence: `reference-data/artifacts/apple-alaw-20261029/`
+(configuration guard/restore logs, SIP/RTP pcap, extracted streams, forwarding
+comparison, both failed call directories and executable SHA provenance).
+SIP captures include authentication digests and must not be bulk-added to Git.
+The next investigation remains our own transmitted upstream training and
+peer acquisition; this trial does not justify global DSP or codec changes.

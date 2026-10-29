@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Read Ethernet or raw IPv4 RTP from classic pcap; preserve payloads and packet gaps."""
+"""Read Ethernet, Linux SLL2 or raw IPv4 RTP from classic pcap; preserve payloads and gaps."""
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import socket
@@ -19,8 +19,8 @@ def main():
         ap.error('requires classic microsecond pcap')
     order = '<' if magic[0] == 0xd4 else '>'
     linktype = struct.unpack_from(order+'I', data, 20)[0]
-    if linktype not in (1, 12, 101):
-        ap.error('requires Ethernet or raw IP capture')
+    if linktype not in (1, 12, 101, 276):
+        ap.error('requires Ethernet, Linux SLL2 or raw IP capture')
     streams = defaultdict(list)
     pos = 24
     while pos+16 <= len(data):
@@ -32,6 +32,12 @@ def main():
             if len(frame) < 42 or frame[12:14] != b'\x08\x00':
                 continue
             ip = frame[14:]
+        elif linktype == 276:
+            # libpcap LINKTYPE_LINUX_SLL2: protocol, reserved, ifindex,
+            # hardware type, packet type, address length and address (20 B).
+            if len(frame) < 48 or frame[:2] != b'\x08\x00':
+                continue
+            ip = frame[20:]
         else:
             ip = frame
         if len(ip) < 28 or ip[0] >> 4 != 4:
@@ -50,7 +56,7 @@ def main():
             head += 4+4*struct.unpack_from('!H', rtp, head+2)[0]
         end = len(rtp)-(rtp[-1] if rtp[0] & 32 else 0)
         key = f'{src}_{sport}--{dst}_{dport}--{ssrc:08x}'
-        streams[key].append((sec+usec/1e6, seq, stamp, rtp[head:end]))
+        streams[key].append((sec+usec/1e6, seq, stamp, rtp[head:end], rtp[1] & 127))
     args.output.mkdir(exist_ok=True)
     summaries = {}
     for key, packets in streams.items():
@@ -61,9 +67,10 @@ def main():
                 gaps.append(dict(after_sequence=old[1], next_sequence=new[1],
                     sequence_delta=sd, timestamp_delta=td, time=new[0]))
         (args.output/(key+'.g711')).write_bytes(b''.join(p[3] for p in packets))
-        metadata = [dict(time=p[0], sequence=p[1], timestamp=p[2], bytes=len(p[3])) for p in packets]
+        metadata = [dict(time=p[0], sequence=p[1], timestamp=p[2], bytes=len(p[3]), payload_type=p[4]) for p in packets]
         (args.output/(key+'.json')).write_text(json.dumps(metadata, indent=2)+'\n')
         summaries[key] = dict(packets=len(packets), payload_bytes=sum(len(p[3]) for p in packets),
+            payload_types=dict(Counter(p[4] for p in packets)),
             first_time=packets[0][0], last_time=packets[-1][0], gaps=gaps,
             max_interval_ms=max((b[0]-a[0])*1000 for a,b in zip(packets,packets[1:])) if len(packets)>1 else 0)
     (args.output/'summary.json').write_text(json.dumps(summaries, indent=2)+'\n')
