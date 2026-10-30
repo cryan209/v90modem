@@ -22,8 +22,10 @@ typedef struct {
     int error;
 } async_capture_stats_t;
 
-/* Truncates the data and status files. Fails rather than enabling the sink if
- * metadata cannot be created or the required atomics are not lock-free. */
+/* Truncates the data and status files, after non-waiting advisory exclusion
+ * of other active capture handles. Fails rather than enabling the sink if a
+ * file is already owned, metadata fails, or required atomics aren't lock-free.
+ * Locks are control-setup/worker-close only; the producer never takes them. */
 async_capture_t *async_capture_open(const char *path, size_t capacity);
 /* No allocation, lock acquisition, filesystem calls, logging or waiting.
  * Returns 1 if this entire block was queued, 0 if rejected. No partial blocks. */

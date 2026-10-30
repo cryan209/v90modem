@@ -16,6 +16,7 @@ python3 tools/test_media_perf_report.py
 # Bounded diagnostic writers: stalls/errors must never block or splice audio.
 ./async_capture_test
 python3 tools/test_async_capture_engine.py
+python3 tools/test_training_pcm_capture.py
 
 # MT5634MU diagnostic transport only; does not require or qualify hardware.
 python3 tools/mt5634mu_diag_test.py

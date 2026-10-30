@@ -6,6 +6,9 @@
  * codewords never pass through this queue or wait for its disk writer.
  */
 #define _POSIX_C_SOURCE 200809L
+/* flock is a BSD interface, hidden by strict POSIX namespaces on macOS. */
+#define _DARWIN_C_SOURCE 1
+#define _DEFAULT_SOURCE 1
 #include "async_capture.h"
 
 #include <errno.h>
@@ -19,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 
 struct async_capture {
     unsigned char *queue;
@@ -151,13 +155,23 @@ static int open_regular(const char *path)
 {
     /* Reject pipes/devices: a diagnostic FIFO must not block setup or send
      * SIGPIPE into the modem. O_NONBLOCK has no effect on regular file I/O. */
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NONBLOCK, 0666);
+    int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | O_NONBLOCK, 0666);
     if (fd < 0)
         return -1;
     struct stat st;
     int result = fstat(fd, &st);
     if (result < 0 || !S_ISREG(st.st_mode)) {
         int saved = result < 0 ? errno : EINVAL;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    /* Separate engines may accidentally inherit the same dump directory.
+     * Never truncate another active writer's raw data or completion status.
+     * Advisory locks protect cooperating capture handles, not arbitrary tools;
+     * acquisition is non-waiting and happens only during control setup. */
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0 || ftruncate(fd, 0) < 0) {
+        int saved = errno;
         close(fd);
         errno = saved;
         return -1;

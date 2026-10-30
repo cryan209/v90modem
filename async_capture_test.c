@@ -213,6 +213,35 @@ static void test_oversized_block_is_never_partially_queued(void)
     cleanup(path);
 }
 
+static void test_active_capture_cannot_be_overwritten(void)
+{
+    const char *path = test_tmp("async-exclusive.bin");
+    async_capture_t *s = async_capture_open(path, 64);
+    assert(s);
+    assert(async_capture_push(s, "abc", 3));
+    assert(async_capture_flush(s) == 0);
+    assert(!async_capture_open(path, 64));
+    assert(errno == EWOULDBLOCK || errno == EAGAIN);
+    check_file(path, "abc", 3);
+    check_status(path, "recording", 0, 0, 0, 0);
+    /* A different pathname/status file must not bypass the raw inode lock. */
+    const char *alias = test_tmp("async-exclusive-alias.bin");
+    assert(link(path, alias) == 0);
+    assert(!async_capture_open(alias, 64));
+    assert(errno == EWOULDBLOCK || errno == EAGAIN);
+    check_file(path, "abc", 3);
+    cleanup(alias);
+    assert(async_capture_push(s, "def", 3));
+    assert(async_capture_close(s, NULL) == 0);
+    check_file(path, "abcdef", 6);
+    check_status(path, "complete", 6, 6, 0, 0);
+    s = async_capture_open(path, 64); /* clean close releases both locks */
+    assert(s);
+    assert(async_capture_close(s, NULL) == 0);
+    check_file(path, "", 0);
+    cleanup(path);
+}
+
 static void test_open_and_empty_lifecycle(void)
 {
     const char *path = test_tmp("async-empty.bin");
@@ -262,6 +291,7 @@ int main(void)
     test_short_writes_and_eintr();
     test_disk_error_retains_only_written_prefix();
     test_oversized_block_is_never_partially_queued();
+    test_active_capture_cannot_be_overwritten();
     test_open_and_empty_lifecycle();
     puts("async_capture_test: PASS");
     return 0;

@@ -114,7 +114,7 @@ int main(int argc,char **argv) {
      bearers lossless without reinstating a disk wait after every frame.
      Live SIP media callbacks never perform this drain. */
   if(count-capture_flushed>=ASYNC_CAPTURE_DEFAULT_CAPACITY/4){
-   me_flush_g711_taps();capture_flushed=count;
+   me_flush_diagnostic_captures();capture_flushed=count;
   }
   /* sip_modem.c turns an engine hang-up request (a V.42 failure, +ES/+DS
      "required" not met) into a SIP BYE and so into me_on_sip_disconnected();

@@ -4616,6 +4616,17 @@ static async_capture_t *g_g711_rx_tap = NULL;
 static async_capture_t *g_g711_tx_tap = NULL;
 static async_capture_t *g_g711_prefix_tap = NULL;
 
+/* Diagnostic copies only: one serialized RX/TX producer per handle. PCM
+ * needs twice the G.711 byte capacity for the same 8 kHz capture headroom.
+ * The selected training intervals and sample-position marks stay unchanged. */
+typedef struct {
+    async_capture_t *tap;
+    uint64_t samples, marked;
+} training_pcm_capture_t;
+static training_pcm_capture_t g_training_pcm_rx, g_training_pcm_tx;
+static int64_t g_training_tx_energy;
+static int g_training_tx_count;
+
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
 static int64_t g_v8_tx_energy;
@@ -4634,7 +4645,7 @@ static int v8_alternate_answer_tone(int tone)
         : MODEM_CONNECT_TONES_ANSAM_PR;
 }
 
-static void g711_tap_close(async_capture_t **tap, const char *name)
+static void diagnostic_tap_close(async_capture_t **tap, const char *name)
 {
     if (*tap) {
         async_capture_stats_t stats = {0};
@@ -4648,9 +4659,9 @@ static void g711_tap_close(async_capture_t **tap, const char *name)
 
 static void g711_taps_close(void)
 {
-    g711_tap_close(&g_g711_rx_tap, "live RX");
-    g711_tap_close(&g_g711_tx_tap, "live TX");
-    g711_tap_close(&g_g711_prefix_tap, "ME_G711_CAPTURE RX");
+    diagnostic_tap_close(&g_g711_rx_tap, "live RX");
+    diagnostic_tap_close(&g_g711_tx_tap, "live TX");
+    diagnostic_tap_close(&g_g711_prefix_tap, "ME_G711_CAPTURE RX");
 }
 
 static void g711_taps_init(void)
@@ -4701,11 +4712,55 @@ static void g711_taps_init(void)
            g_g711_rx_tap ? rx_path : "disabled", g_g711_tx_tap ? tx_path : "disabled");
 }
 
-void me_flush_g711_taps(void)
+static void training_pcm_taps_close(void)
+{
+    diagnostic_tap_close(&g_training_pcm_rx.tap, "training RX PCM");
+    diagnostic_tap_close(&g_training_pcm_tx.tap, "training TX PCM");
+}
+
+static void training_pcm_taps_init(void)
+{
+    const char *dir = getenv("ME_DUMP_DIR");
+    training_pcm_capture_t *streams[] = {&g_training_pcm_rx, &g_training_pcm_tx};
+    const char *names[] = {"v34_rx.raw", "v34_tx.raw"};
+
+    training_pcm_taps_close();
+    memset(&g_training_pcm_rx, 0, sizeof(g_training_pcm_rx));
+    memset(&g_training_pcm_tx, 0, sizeof(g_training_pcm_tx));
+    g_training_tx_energy = 0;
+    g_training_tx_count = 0;
+    /* Opt-in for headless and GUI engines alike. No implicit /tmp recordings,
+     * lazy callback opens, or repeated open attempts on a failed destination. */
+    if (!dir || !*dir)
+        return;
+    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); i++) {
+        char path[1024];
+        if (snprintf(path, sizeof(path), "%s/%s", dir, names[i]) >= (int)sizeof(path)) {
+            fprintf(stderr, "[ME] ME_DUMP_DIR path too long for %s; capture disabled\n", names[i]);
+            continue;
+        }
+        streams[i]->tap = async_capture_open(path, 2 * ASYNC_CAPTURE_DEFAULT_CAPACITY);
+        if (!streams[i]->tap)
+            fprintf(stderr, "[ME] Cannot open training PCM capture %s: %s\n", path, strerror(errno));
+        else
+            ME_LOG("[ME] %s PCM dump: %s (s16 native-endian 8000Hz mono, async)\n",
+                   i == 0 ? "RX" : "TX", path);
+    }
+}
+
+void me_flush_diagnostic_captures(void)
 {
     (void)async_capture_flush(g_g711_rx_tap);
     (void)async_capture_flush(g_g711_tx_tap);
     (void)async_capture_flush(g_g711_prefix_tap);
+    (void)async_capture_flush(g_training_pcm_rx.tap);
+    (void)async_capture_flush(g_training_pcm_tx.tap);
+}
+
+void me_flush_g711_taps(void)
+{
+    /* Compatibility entry point; drain PCM copies at call boundaries too. */
+    me_flush_diagnostic_captures();
 }
 
 /* Voice-mode PCM fidelity testing (tools/voice_pcm_fidelity.py).
@@ -13600,6 +13655,7 @@ void me_init(void)
                g_v92_trn2u_points, g_v92_trn2u_lu);
     }
     g711_taps_init();
+    training_pcm_taps_init();
     g_v8_answer_tone = parse_v8_answer_tone_env("ME_V8_ANSWER_TONE",
                                                 MODEM_CONNECT_TONES_ANSAM_PR);
     ME_LOG("[ME] V.8 answer tone: %s\n",
@@ -13665,6 +13721,7 @@ void me_destroy(void)
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     ds_release(&g_data_stack);
     g711_taps_close();
+    training_pcm_taps_close();
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -16874,25 +16931,11 @@ skip_8k_codewords:
                     if (!g_v90_dil_parse_logged)
                         ME_CB_PROF(3, (void)v90_dil_capture_try_v34_hypotheses());
                 }
-                /* RX PCM dump during training */
+                /* Copy the same post-filter training samples as the legacy
+                 * tap. Raw enqueue never waits for storage under g_state_mtx;
+                 * verbose phase marks below remain synchronous diagnostics. */
                 {
-                    static FILE *rx_dump = NULL;
-                    /* GUI diagnostics are bounded in memory; only an explicit
-                     * capture directory enables the legacy disk tap there. */
-                    if (!rx_dump && (!g_gui_enabled || getenv("ME_DUMP_DIR"))) {
-                        /* Two engines on one host -- the two ends of a call
-                         * between two analogue modems -- would otherwise both
-                         * write this one path and neither tap would be of
-                         * anything.  ME_DUMP_DIR scopes it per process. */
-                        const char *dir = getenv("ME_DUMP_DIR");
-                        char path[512];
-                        snprintf(path, sizeof path, "%s/v34_rx.raw",
-                                 (dir && *dir) ? dir : "/tmp");
-                        rx_dump = fopen(path, "wb");
-                        if (rx_dump)
-                            ME_LOG("[ME] RX PCM dump: %s (s16le 8000Hz mono)\n", path);
-                    }
-                    if (rx_dump) {
+                    if (g_training_pcm_rx.tap) {
                         /* Mark the dump against engine state every 100 ms.
                          * The file is opened once per process and appended
                          * across every call, with no timestamps of its own, so
@@ -16901,37 +16944,31 @@ skip_8k_codewords:
                          * line but not which handshake stage was running, which
                          * is the only question worth asking of it. Carrying the
                          * stages here makes each mark self-contained. */
-                        static long rx_dump_total = 0;
-                        static long rx_dump_marked = 0;
+                        (void)async_capture_push(g_training_pcm_rx.tap, filtered,
+                                                 sizeof(int16_t) * (size_t)len);
+                        g_training_pcm_rx.samples += len;
+                        if (g_training_pcm_rx.samples - g_training_pcm_rx.marked >= 800) {
+                            g_training_pcm_rx.marked = g_training_pcm_rx.samples;
+                            if (me_verbose_enabled()) {
+                                int gc_valid = 0;
+                                float gc_db = g_v34
+                                            ? v34_get_guard_carrier_db(g_v34, &gc_valid)
+                                            : 0.0f;
 
-                        fwrite(filtered, sizeof(int16_t), len, rx_dump);
-                        rx_dump_total += len;
-                        if (rx_dump_total - rx_dump_marked >= 800) {
-                            int gc_valid = 0;
-                            float gc_db = g_v34
-                                        ? v34_get_guard_carrier_db(g_v34, &gc_valid)
-                                        : 0.0f;
-
-                            rx_dump_marked = rx_dump_total;
-                            /* guard_db is the peer's 1800 Hz guard tone
-                             * relative to its 2400 Hz carrier: about +1 dB
-                             * under Tone A, about -6 dB under an INFO
-                             * sequence (V.34 10.1.2.1/10.1.2.3). Logged on
-                             * every mark so the prediction can be checked on
-                             * ordinary calls, not just the rare ones that
-                             * stall at the 9.2.1.2.6 deadline. */
-                            ME_LOG("[ME] RX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d guard_db=%.1f guard_valid=%d\n",
-                                   rx_dump_total,
-                                   g_v34 ? v34_get_rx_stage(g_v34) : -1,
-                                   g_v34 ? v34_get_tx_stage(g_v34) : -1,
-                                   (int)g_mod,
-                                   gc_db, gc_valid);
-                        }
-                        static int rx_dump_count = 0;
-                        rx_dump_count += len;
-                        if (rx_dump_count >= 8000) {
-                            fflush(rx_dump);
-                            rx_dump_count = 0;
+                                /* guard_db is the peer's 1800 Hz guard tone
+                                 * relative to its 2400 Hz carrier: about +1 dB
+                                 * under Tone A, about -6 dB under an INFO
+                                 * sequence (V.34 10.1.2.1/10.1.2.3). Logged on
+                                 * every mark so the prediction can be checked on
+                                 * ordinary calls, not just the rare ones that
+                                 * stall at the 9.2.1.2.6 deadline. */
+                                ME_LOG("[ME] RX dump mark: sample=%llu rx_stage=%d tx_stage=%d mod=%d guard_db=%.1f guard_valid=%d\n",
+                                       (unsigned long long)g_training_pcm_rx.samples,
+                                       g_v34 ? v34_get_rx_stage(g_v34) : -1,
+                                       g_v34 ? v34_get_tx_stage(g_v34) : -1,
+                                       (int)g_mod,
+                                       gc_db, gc_valid);
+                            }
                         }
                     }
                 }
@@ -18947,19 +18984,7 @@ static void me_tx_audio_impl(int16_t *amp, int len)
             pthread_mutex_unlock(&g_state_mtx);
             /* TX PCM dump + RMS diagnostic during training */
             {
-                static FILE *tx_dump = NULL;
-                static int64_t tx_energy = 0;
-                static int tx_count = 0;
-                if (!tx_dump && (!g_gui_enabled || getenv("ME_DUMP_DIR"))) {
-                    const char *dir = getenv("ME_DUMP_DIR");   /* see the RX dump */
-                    char path[512];
-                    snprintf(path, sizeof path, "%s/v34_tx.raw",
-                             (dir && *dir) ? dir : "/tmp");
-                    tx_dump = fopen(path, "wb");
-                    if (tx_dump)
-                        ME_LOG("[ME] TX PCM dump: %s (s16le 8000Hz mono)\n", path);
-                }
-                if (tx_dump) {
+                if (g_training_pcm_tx.tap) {
                     /* The TX dump is written from the transmit callback and
                      * the RX dump from the receive callback: different call
                      * sites, different rates, and the two files end up
@@ -18968,15 +18993,13 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                      * reads the wrong instant, which is exactly the error that
                      * produced a confident "our transmitter is silent during
                      * the stall" from an 8 s misalignment. */
-                    static long tx_dump_total = 0;
-                    static long tx_dump_marked = 0;
-
-                    fwrite(amp, sizeof(int16_t), len, tx_dump);
-                    tx_dump_total += len;
-                    if (tx_dump_total - tx_dump_marked >= 800) {
-                        tx_dump_marked = tx_dump_total;
-                        ME_LOG("[ME] TX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d\n",
-                               tx_dump_total,
+                    (void)async_capture_push(g_training_pcm_tx.tap, amp,
+                                             sizeof(int16_t) * (size_t)len);
+                    g_training_pcm_tx.samples += len;
+                    if (g_training_pcm_tx.samples - g_training_pcm_tx.marked >= 800) {
+                        g_training_pcm_tx.marked = g_training_pcm_tx.samples;
+                        ME_LOG("[ME] TX dump mark: sample=%llu rx_stage=%d tx_stage=%d mod=%d\n",
+                               (unsigned long long)g_training_pcm_tx.samples,
                                g_v34 ? v34_get_rx_stage(g_v34) : -1,
                                g_v34 ? v34_get_tx_stage(g_v34) : -1,
                                (int)g_mod);
@@ -18984,21 +19007,20 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                 }
                 /* This second pass only supplies the verbose RMS message;
                  * quiet calls need neither the sample scan nor the sqrt.
-                 * Keep the existing capture flush cadence independent of it. */
+                 * Capture writes are independent background work. */
                 if (me_verbose_enabled()) {
                     for (int i = 0; i < len; i++)
-                        tx_energy += (int64_t)amp[i] * amp[i];
+                        g_training_tx_energy += (int64_t)amp[i] * amp[i];
                 }
-                tx_count += len;
-                if (tx_count >= 8000) {
+                g_training_tx_count += len;
+                if (g_training_tx_count >= 8000) {
                     if (me_verbose_enabled()) {
-                        double rms = sqrt((double)tx_energy / tx_count);
+                        double rms = sqrt((double)g_training_tx_energy / g_training_tx_count);
                         ME_LOG("[ME] Training TX: RMS=%.1f (%d samples)\n",
-                                rms, tx_count);
+                                rms, g_training_tx_count);
                     }
-                    if (tx_dump) fflush(tx_dump);
-                    tx_energy = 0;
-                    tx_count = 0;
+                    g_training_tx_energy = 0;
+                    g_training_tx_count = 0;
                 }
             }
         } else if (g_mod == ME_MOD_V32BIS) {

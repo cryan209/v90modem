@@ -443,7 +443,7 @@ int main(int argc, char *argv[])
              * even when --fast produces samples much faster than wall time. */
             capture_pending += (size_t)rec.count;
             if (capture_pending >= ASYNC_CAPTURE_DEFAULT_CAPACITY / 4) {
-                me_flush_g711_taps();
+                me_flush_diagnostic_captures();
                 capture_pending = 0;
             }
         }
@@ -474,7 +474,7 @@ int main(int argc, char *argv[])
             me_replay_wait_workers();
         capture_pending += 2 * FRAME_BYTES;
         if (capture_pending >= ASYNC_CAPTURE_DEFAULT_CAPACITY / 4) {
-            me_flush_g711_taps();
+            me_flush_diagnostic_captures();
             capture_pending = 0;
         }
         if (!fast) {

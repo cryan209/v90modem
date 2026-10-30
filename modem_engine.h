@@ -185,11 +185,13 @@ void me_rx_g711(const uint8_t *codewords, int count);
 void me_rx_v90a_16k(const int16_t *amp, int len);
 int  me_tx_g711(uint8_t *codewords, int count);
 
-/* Drain optional VPCM_G711_TAP_DIR and ME_G711_CAPTURE diagnostic queues
+/* Drain optional G.711 and ME_DUMP_DIR training PCM diagnostic queues
  * through the background writers (not fsync). Control thread only: this can
  * wait for storage. No disk I/O or waiting occurs in the media enqueue path.
  * Clean engine shutdown finalizes .status.json sidecars; an overflow/error
  * leaves an explicitly incomplete prefix, never a tap with spliced gaps. */
+void me_flush_diagnostic_captures(void);
+/* Historical name retained as an alias; now also drains training PCM. */
 void me_flush_g711_taps(void);
 /* Offline replays only: block until the V.90 CP and Ja worker threads have
  * nothing posted or running, so their results land at the same media frame

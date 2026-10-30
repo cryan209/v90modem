@@ -86,10 +86,11 @@ engine-pair tests retain their verbose default. The production server is
 already quiet unless verbose diagnostics are requested.
 
 Use the same machine, compiler/library build, block size, payload, diagnostic
-environment and host load for comparisons. Some legacy captures still do
-synchronous I/O: use a private `ME_DUMP_DIR` for each run and keep its storage
-constant across arms. The G.711 taps described below use background writers;
-keep their configuration constant unless capture overhead is the A/B variable. Record revision and dirty-tree status. Alternate A/B
+environment and host load for comparisons. Some legacy symbol/codeword/text
+traces still do synchronous I/O. Use a private `ME_DUMP_DIR` for each run and
+keep its storage constant across arms. The G.711 and training PCM taps below
+use background writers; keep their configuration constant unless capture
+overhead is the A/B variable. Record revision and dirty-tree status. Alternate A/B
 arms, let every run finish, and require payload correctness as well as timing.
 Use an OS profiler (`sample`/Instruments on macOS, `perf` on Linux) for CPU
 hotspots; `wall_ms / audio_ms` is not CPU utilisation. Use an OS timing tool
@@ -101,20 +102,32 @@ claim, clean regression baseline, or hardware interoperability result. The
 host and vendored DSP tree had unrelated ongoing changes. Live qualification
 must run on the wired rig, following [hardware interop](v90_hardware_interop.md).
 
-## Background G.711 captures
+## Background diagnostic captures
 
-`async_capture.c` now isolates disk I/O for these existing opt-in captures:
+`async_capture.c` isolates disk I/O for these diagnostic copies:
 
 | Switch | Raw files (unchanged formats) |
 |---|---|
 | `VPCM_G711_TAP_DIR` | `<dir>/live-rx.g711`, `<dir>/live-tx.g711` |
 | `ME_G711_CAPTURE` | `<prefix>.rx.ulaw` (legacy name, also used for A-law) |
+| Non-empty `ME_DUMP_DIR` | `<dir>/v34_rx.raw`, `<dir>/v34_tx.raw` (selected training PCM) |
+
+Training PCM now requires a non-empty directory, for headless and GUI engines
+alike: a standalone engine no longer silently records to `/tmp` without it.
+Use `ME_DUMP_DIR=/tmp` to retain the old destinations, but use private
+directories when running multiple engines. For standalone engines,
+unset/empty disables PCM capture. The multi-line supervisor supplies a private
+`ME_DUMP_DIR` automatically when unset/empty, so its workers still enable these
+dumps. An explicitly supplied directory must already exist. Other diagnostics
+using this directory have their own activation rules.
 
 The settings are latched at engine initialisation. Setup creates/truncates the
 files on the control thread. Use unique paths per engine. The multi-line
 supervisor isolates both the tap directory and `ME_G711_CAPTURE` prefix per
-worker (including their status sidecars); explicit `%L` templates also work. Each stream has a **256 KiB diagnostic queue**,
-plus a private writer thread and its stack. Disabled streams allocate no
+worker (including their status sidecars); explicit `%L` templates also work.
+Each G.711 stream has a **256 KiB diagnostic queue**, and each training PCM
+stream **512 KiB** (two bytes per 8 kHz sample for the same headroom), plus a
+private writer thread and its stack. Disabled streams allocate no
 queue or worker. Queue storage is touched during setup to avoid initial
 producer-side page faults (this is not `mlock` or a hard real-time guarantee).
 The media producer copies a whole block and publishes it using lock-free
@@ -124,6 +137,12 @@ The worker polls at 10 ms intervals and does the actual disk writes. This is
 latency isolation, not a claim of reduced total CPU: enabled workers add
 polling and stack overhead. Unsupported non-lock-free atomic implementations disable capture, rather than
 falling back to locks or synchronous writes. Only regular files are accepted.
+Setup also takes non-waiting advisory file locks, held until close, before
+truncation. An active recording (including a raw hard-link alias) cannot be
+overwritten by another cooperating capture handle. A conflict/unsupported
+lock disables that stream, never waits or falls back to media-thread I/O.
+Use unique paths regardless: locks protect individual files, not ownership
+of an RX/TX pair, and unrelated tools can ignore advisory locks.
 
 **Fail-stop, not lossy continuation:** if the queue fills, reject the entire
 new block and all subsequent blocks for that stream until engine restart.
@@ -146,8 +165,10 @@ Each raw file has a `<raw-path>.status.json` sidecar:
 On disk errors, accepted bytes can remain unwritten. Total missing capture
 bytes are `offered_bytes - written_bytes`, not just `rejected_bytes`.
 
-Only metadata written at orderly close is final: a running worker's failure snapshot can
-precede further rejected blocks. For a complete recording require
+Require successful setup for this engine and unique/fresh output paths first:
+a failed setup can leave another engine's or an earlier run's files intact.
+Only metadata written at orderly close is final: a running worker's failure
+snapshot can precede further rejected blocks. For a complete recording require
 `state == "complete"`, `error == 0`, `rejected_bytes == 0`, and equal offered,
 accepted, written and actual raw-file byte counts. A missing, malformed or
 `recording` sidecar is **not** evidence of complete capture. A forced kill
@@ -156,11 +177,26 @@ truncating/enabling the raw sink, and its previous completion certificate is
 invalidated before a new recording starts. Completion describes successful
 application writes/close, not power-loss durability; no `fsync` is performed.
 Files remain process-wide across calls, like the old taps; restarting the
-engine overwrites them.
+engine overwrites them. Files and `recording` sidecars are created at setup,
+even if no selected training samples are subsequently offered.
 
-`me_flush_g711_taps()` is control-thread-only: it waits for the accepted
+**PCM is not a continuous line recording.** The same filtered RX samples and
+unmodified TX tap points are retained, as native-endian signed 16-bit values
+(little-endian on current Mac/Linux hosts). Only the original selected
+training intervals are recorded; V.90 phase gaps remain intentional. Preserve
+and read the verbose `RX dump mark` / `TX dump mark` sample positions before
+interpreting a tone as belonging to a handshake phase. Marks count offered
+samples; after a capture failure, marks beyond `written_bytes / 2` are not in
+the retained prefix. An incomplete PCM write can end in a partial sample;
+only its whole-sample prefix can be analysed. Capture handles, positions and
+TX diagnostic RMS accumulators reset with engine initialisation, rather than
+leaking function-static state into a later engine lifetime.
+
+`me_flush_diagnostic_captures()` is control-thread-only: it waits for the accepted
 prefix at entry to reach `write()`, without `fsync` or a completion certificate.
 Clean engine destruction drains and joins the workers and finalizes metadata.
+The historical `me_flush_g711_taps()` name remains an alias which now also
+drains training PCM, including existing media-down control callers.
 Storage stalls can delay control-thread drain/shutdown, **not the producer**.
 Offline peers/replays no longer perform per-frame flush barriers: their
 control loops drain in bounded batches well below queue capacity, preserving
@@ -171,12 +207,14 @@ test proves its diagnostic recording complete.
 
 The queue bounds memory, **not recording size on disk**. G.711 taps remain
 opt-in and grow while enabled. The stdout rotation utility does not rotate
-them. Legacy training PCM dumps, symbol dumps, and synchronous text traces
-have not all been migrated; do not assume every diagnostic is now off-clock.
+them. Other codeword/symbol dumps and synchronous text traces have not all
+been migrated; do not assume every diagnostic is now off-clock. Verbose phase
+marks themselves remain synchronous; normal quiet calls do not format them.
 
 Validation: deterministic worker stalls, overflow and permanent fail-stop,
 wraparound, short writes/EINTR, disk-full errors, flush/close/reopen, missing
-sidecars and FIFO rejection are covered by `async_capture_test`. Framed engine
+sidecars, FIFO rejection, and exclusion/reopen of active paths and hard-link
+aliases are covered by `async_capture_test`. Framed engine
 tests exercise V.21, clear-channel and symmetric x2 paths in both laws,
 verifying byte-exact RX/TX and prefix taps, unchanged transmitted
 octets with captures enabled, complete recording of a long unpaced bearer and
@@ -184,12 +222,23 @@ both fast replay modes (normal/scheduled), safe setup failure, and an unclean ki
 `recording` rather than a false completion certificate. These are offline
 checks, not hardware interop or a measured live speedup.
 
+`tools/test_training_pcm_capture.py` generates V.34 payload calls in both laws,
+checks PCM completeness and phase-mark offsets, and verifies identical G.711
+TX in deterministic training replays with PCM enabled/disabled. It also checks
+setup failure isolation, disabled capture, and two engines contending for the
+same dump files without truncating the active recording. A saved pre-change executable
+and the new build, given the same generated 10 s mu-law training schedule,
+produced identical **61,760 RX PCM bytes, 62,080 TX PCM bytes, 80,000 RX and
+80,000 TX codewords, and 76 phase marks**. This verifies preservation of those
+tap points, not hardware interop or a CPU/latency speedup. Inputs were generated
+privately for validation; no retained recording is required by the test.
+
 ## Next optimisation targets
 
 1. **Finish diagnostic I/O isolation.** Migrate the remaining synchronous
-   capture paths using the same explicit failure/accounting policy. Training
-   PCM and per-symbol taps need separate review of their producer/lifecycle
-   contracts. Never block the audio path to preserve a diagnostic recording.
+   capture paths using the same explicit failure/accounting policy. Remaining
+   codeword/per-symbol taps and replay schedule recording need separate review
+   of their producer/lifecycle contracts. Never block the audio path to preserve a diagnostic recording.
    The rotating stdout sink bounds storage, but does not make generation or
    writing of the underlying diagnostic messages asynchronous.
 2. **Measured lock contention.** Attribute long waits before shortening critical

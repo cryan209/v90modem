@@ -61,7 +61,7 @@ SETTINGS = [
     ("ME_V90_RETRAIN_ON_LOSS_DWELL_MS", "Minimum time between those retrains."),
     ("ME_V90_MAX_DOWNSTREAM_RATE", "V.90 downstream ceiling in bit/s (AT+MS does the same per call)."),
     ("ME_V90_DATA_LEAN", "1 drops the V.90 data-mode measurement work (embedded targets)."),
-    ("ME_DUMP_DIR", "Directory for engine PCM dumps; set one per process."),
+    ("ME_DUMP_DIR", "Non-empty enables selected asynchronous engine training PCM dumps; also scopes other diagnostics. Set one directory per process."),
     ("ME_G711_CAPTURE", "Record the wire codewords both ways."),
     ("VPCM_ME_VERBOSE", "Engine log verbosity."),
 ]

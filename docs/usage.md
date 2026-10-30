@@ -327,11 +327,15 @@ those captures when not needed. Routine live runs should also leave
 traces are synchronous and can interfere with real-time audio, not just fill
 disk. `V34_DUPLEX_LOG` enables similarly verbose offline training traces.
 
-Optional `VPCM_G711_TAP_DIR` and `ME_G711_CAPTURE` recordings now use bounded
-background-writer queues. Check each raw file's `.status.json` sidecar before
+`VPCM_G711_TAP_DIR`, `ME_G711_CAPTURE`, and the selected training PCM dumps
+(`ME_DUMP_DIR/v34_rx.raw` and `v34_tx.raw`) use bounded background-writer queues.
+Standalone engines now require a non-empty `ME_DUMP_DIR` to enable those PCM
+dumps, rather than recording implicitly to `/tmp`. Create a private directory
+first; `ME_DUMP_DIR=/tmp` restores the old destinations for a single engine.
+Multi-line workers still receive an automatically isolated dump directory. Check each raw file's `.status.json` sidecar before
 treating it as complete: overflow or disk errors stop that capture at a prefix,
 without changing live audio. These queues do not limit raw-file disk size.
-See [background captures](performance.md#background-g711-captures) for the
+See [background captures](performance.md#background-diagnostic-captures) for the
 completion checks and remaining synchronous diagnostic paths.
 
 For callback stalls and CPU investigation, start with the compact per-call
