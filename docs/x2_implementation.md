@@ -1539,3 +1539,62 @@ seen and B1 acquired. By then the peer is sending data. Results:
 - all five x2 slow rows still pass against the original Courier and Ie030002;
 - live, three V.14 calls with the client's first line 0.1 s after its CONNECT
   delivered 300/300 lines each way.
+
+## A-law asymmetric x2 in the I-modem firmware (30 October 2026)
+
+Asymmetric x2 is not PCMU-only in the firmware: the I-modem's S58 bit 4 is
+"Force x2 A-law mode", present since the first x2 release, `IE020104`. Where
+the A-law mode lives was traced in Ie030002's DSP image
+(`../courier-emu/tmp/imodem-x2data/dsp-program.bin`) and its supervisor.
+
+**`ffd9` bit 2 is the -6 dBm constellation, not A-law.** The bank builder
+(`CFF4`) changes every bank when `ffd9` bit 2 is set, to a set with about
+twice the minimum spacing, and E's table becomes `d241` (`95 97 9d 9f a7 ad b5
+bf d5`, 6 dB up). The only writer is the Phase 2 gate, `95cb..95d4`:
+`ffd9 |= 4` when `fef0 & f6a0 & 0200`. Those are our transmitted and the
+peer's received INFO0 bodies, each stored one bit right (`fef0` = `ffdc >> 1`).
+So the test is capability bit 10, the -6 dBm option (S58 16), in both words.
+Confirmed against the firmware: S58=48 with a client INFO0 of `25ff` set
+`ffd9` to `8004`, and E used the `d241` table (98.2% of its octets). Our client,
+which has no -6 dBm banks, then failed. Note that `c5x_disasm.py` already
+prints true bit numbers; inverting them again sends you the wrong way.
+
+**A-law is DSP host command `6b`.** The resident's dispatch table (base
+`88d5`, from `85da..85e0`) sends tag `6b` to `82d7`: `039f |= 0800` and
+`ffd9 |= 0001`.
+- `039f` bit 11 selects A-law in the resident's G.711 codec (`81b6`), which the
+  control signals (V.8, Phase 2) use.
+- `ffd9` bit 0 makes `d1c4` set `@23 = 2a`, `@6b = 42`, `@6c = 0` (no bias),
+  `@6a = 7f`. The per-sample output (`cc63..cc7b`) ends `@27 ^= @23`. Since
+  µ-law stores `~field` and A-law `field ^ 55`, A = µ ^ `7f` ^ `55` = µ ^ `2a`:
+  the same level coded in A-law. The banks themselves do not change (`CFF4`
+  with `ffd9` bit 0 gives identical banks). `x2.c`'s "final output XOR (0 or
+  0x2a)" is exactly this.
+
+**Neither supervisor sends `6b`.** In Ie030002 and in IM020104:
+- the 62 (respectively 56) calls to the command sender carry 36 immediate tags,
+  none of them `6b`;
+- the deferred-command routine `7992e` is called 34 times, with tags `5e 63 01
+  5f 60 0f 61 5b 5d 0a`.
+
+S58 bit 4 is read in one place (`b2801`). It sets capability bit 9 (`or bx,
+0200`), which advertises A-law in INFO0 and feeds the availability check at
+`b27cc` (S58 & 6 == 6 turns x2 off). Unexplored: the host writing DSP data
+memory directly, and other server products (Total Control).
+
+**With `6b` delivered, the I-modem runs A-law x2.** This was a DIAGNOSTIC: the
+client probe's `--inject-alaw` hands the DSP host command `6b` once, right after
+the supervisor's tag `70`; the firmware is not modified. The bearer was A-law
+(NET3 profile, `90 90 a3`). Then:
+- `039f` gained bit 11 and `ffd9` became `8001`;
+- V.8 and Phase 2 decoded as true A-law at our end (no `ME_X2_CONTROL_LAW`);
+- without an XOR our client never found B. With every received octet XORed by
+  `2a` it found B, J, the record and data: `CONNECT 57333/x2/NONE` at the
+  I-modem, `CONNECT 56000` here, and the I-modem's text arrived.
+
+So A-law x2 transforms everything downstream, scripted training included, by
+`0x2a`. Open: our upstream text did not reach the I-modem's DTE in that run,
+although its DSP replies matched a µ-law run's and the call stayed in data to
+the end. Before this, an "A-law" call between Ie030002 and our client was
+µ-law-coded throughout: the codec was never switched, and the emulator passes
+octets unchanged.
