@@ -3499,3 +3499,27 @@ it. Against our server with INFO1a projecting 31200:
   neither receiver sees any at 28800. Two independent receivers agreeing
   points at the native client's 31200 transmitter, so this is not pursued
   here.
+
+### Our engine pair at 56000 and 60000 downstream
+
+Both rates now pass over **both A-law and mu-law**, with both engines
+reporting the requested CONNECT rate and 128 printable payload lines arriving
+intact in each direction with default LAPM/V.42bis. All four cases connect at
+about 29.1 s. These are closed-loop tests, not hardware qualification or
+sustained throughput measurements.
+
+The default 52000 was the client's MP downstream request (code 11), not a
+measured line ceiling. Code 13 requests 56000; code 15 requests 60000.
+56000 already worked with that request. 60000 failed before probing because
+`K56FLEX_RATE_MAX_BPS` still limited the training sequencer to 56000, although
+the mapper and client already supported the unadjusted 58000/60000 tables.
+The sequencer now accepts the same 60000 maximum (Draft 0.23 4.12); unavailable
+pad-group/rate combinations remain rejected by the mapper.
+
+For 60000, use `ME_K56FLEX_RATE=60000` on the server and
+`ME_K56FLEX_CLIENT_MP_DOWN_CODE=15` on the client, with `AT+MS=K56` on both.
+For 56000, use 56000 and code 13 respectively. Hardware-tested defaults
+remain unchanged. `tests/fast.list` covers all four high-rate pairs;
+`k56flex_train_test` also exercises 58000/60000 handover in both laws.
+The existing default 52000 engine pairs and mapper firmware-vector tests
+still pass.

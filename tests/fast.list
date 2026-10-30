@@ -59,6 +59,11 @@ python3 tools/mt5634mu_diag_test.py
 ./engine_pair_test --both-at 'AT+MS=X2' --both-at AT+ES=1 --call-env ME_X2_CLIENT_RENEG_AFTER_MS=3100 --call-env ME_X2_CLIENT_RENEG_INDEX=1 --call-log 'X2 client rate change complete: index=1' --answer-log 'X2 rate change complete: index=1' --payload-printable RR --payload-reps 128 --hold-seconds 3 --expect X2 --seconds 40
 ./engine_pair_test --alaw --both-at 'AT+MS=K56' --expect-connect 52000 --both-expect 'CONNECT 52000' --payload-printable X --payload-reps 128 --seconds 60
 ./engine_pair_test --both-at 'AT+MS=K56' --both-at 'AT+ES=1' --expect-connect 52000 --seconds 45
+# K56flex Draft 0.23 4.12: high-rate PCM handover, both laws; require intact duplex payload.
+./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=13 --answer-env ME_K56FLEX_RATE=56000 --expect-connect 56000 --both-expect 'CONNECT 56000' --payload-printable X --payload-reps 128 --seconds 60
+./engine_pair_test --alaw --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=13 --answer-env ME_K56FLEX_RATE=56000 --expect-connect 56000 --both-expect 'CONNECT 56000' --payload-printable X --payload-reps 128 --seconds 60
+./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=15 --answer-env ME_K56FLEX_RATE=60000 --expect-connect 60000 --both-expect 'CONNECT 60000' --payload-printable X --payload-reps 128 --seconds 60
+./engine_pair_test --alaw --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=15 --answer-env ME_K56FLEX_RATE=60000 --expect-connect 60000 --both-expect 'CONNECT 60000' --payload-printable X --payload-reps 128 --seconds 60
 ./engine_pair_test --call-at 'AT+MS=V34' --answer-at 'AT+MS=K56' --expect V34 --seconds 40
 ./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=7 --expect-connect 44000 --both-expect 'CONNECT 44000' --payload-printable X --payload-reps 64 --seconds 50
 ./k56flex_test

@@ -74,7 +74,8 @@ static void to_data(k56flex_law_t law, int rate)
     memset(&cfg, 0, sizeof(cfg));
     cfg.law = law;
     cfg.rate_bps = rate;
-    cfg.report_field = k56flex_report_field(0x03, 0x8880);
+    /* Draft 0.23 4.12: 58/60k tables exist only without pad adjustment. */
+    cfg.report_field = rate > 56000 ? 0 : k56flex_report_field(0x03, 0x8880);
     cfg.training_word = 0xffff;
     cfg.gate_timeout_pairs = 5000;
     CHECK(k56flex_train_init(&t, &cfg) == 0, "init 56k");
@@ -125,6 +126,10 @@ static void test_to_data(void)
 {
     to_data(K56FLEX_LAW_MU, 56000);
     to_data(K56FLEX_LAW_A, 56000);
+    to_data(K56FLEX_LAW_MU, 58000);
+    to_data(K56FLEX_LAW_A, 58000);
+    to_data(K56FLEX_LAW_MU, 60000);
+    to_data(K56FLEX_LAW_A, 60000);
     to_data(K56FLEX_LAW_MU, 32000);
     to_data(K56FLEX_LAW_A, 40000);
 }

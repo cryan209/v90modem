@@ -21,7 +21,9 @@
 typedef enum { K56FLEX_LAW_MU = 0, K56FLEX_LAW_A = 1 } k56flex_law_t;
 
 #define K56FLEX_RATE_MIN_BPS 32000
-#define K56FLEX_RATE_MAX_BPS 56000
+/* Draft 0.23 4.12: include the unadjusted 58/60k mapper tables.
+ * The mapper still rejects rates without a table for the reported pad group. */
+#define K56FLEX_RATE_MAX_BPS 60000
 #define K56FLEX_FRAME_SAMPLES 8
 #define K56FLEX_MAX_FRAME_BITS 64
 
