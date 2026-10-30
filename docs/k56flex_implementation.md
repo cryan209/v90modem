@@ -3603,3 +3603,26 @@ An isolated mu-law 60000 LAPM run delivered 65536 bytes downstream in
 (**25625 payload bit/s**), including the overhead described above.
 No new live hardware calls were made. Receiver acquisition/noise/clock-error
 matrices, automatic retraining and rate renegotiation remain future work.
+
+### Every downstream rate: 60/60 closed-loop pairs
+
+`tools/test_k56flex_rates.py` tests **32000 through 60000 in 2000 bit/s
+steps** (15 rates), each over A-law and mu-law and with default LAPM/V.42bis
+and raw V.14: **60 pairs, all passed**. Each requires the exact requested
+CONNECT rate at both ends, **32768 byte-exact pseudorandom octets in each
+direction**, and a final DATA state. The complete sweep transferred
+**3932160 payload bytes (3.75 MiB)** without an integrity failure and took
+187 s wall time with four workers on this run.
+
+Every case uses exact AT downstream bounds, with an upstream ceiling of
+31200, and no diagnostic rate overrides. This sweep covers the unadjusted
+constellation family; it is not a full upstream-rate/pad-group cross-product
+or hardware/noise/clock-error qualification.
+
+Reproduce with `python3 tools/test_k56flex_rates.py` (optionally `-j N` and
+`--logdir PATH`, a dedicated directory which the runner clears), or use
+`python3 tools/run_tests.py --group k56flex-rates tests/slow.list`.
+The matrix is included in `make test-slow`; every pair runs through the
+normal runner in its own scratch directory, with failures reported
+individually. Inner logs live under the enclosing test's dump directory
+and are retained on failure.
