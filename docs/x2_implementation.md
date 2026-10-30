@@ -1653,3 +1653,42 @@ Total Control equipment.
 - byte-exact both ways (0 of 718400 changed, constant 200/180 ms);
 - on the wire the server's B was 100% `9b`/`1b` (`b1`/`31` ^ `2a`) and 0%
   `b1`/`31`: A-law-coded x2, not µ-law relabelled.
+
+## Who sends command 6b? Nothing in the I-modem (30 October 2026)
+
+`6b` is the only way into A-law. Every DSP instruction that writes `039f` or
+`ffd9`, and every handler in the resident's dispatch table (base `88d5`,
+tags `00..75`), was checked. Only `82d7` (tag `6b`) sets `039f` bit 11, and
+only it and the tag-`70` handler set `ffd9` bit 0. The boot clear at `8053`
+zeroes it.
+
+The DSP treats A-law as a **persistent setting**, not a per-call one:
+- tag `51` (`9260`), sent at every call setup, clears `ffd9` outright;
+- tag `70` (`926d`) restores `ffd9` bit 0, and capability bit 9 in `ffdc`,
+  from `039f` bit 11;
+- nothing clears `039f` bit 11.
+
+So one `6b` at configuration time would make every later call A-law. That
+is consistent with the probe's single injection after tag `70`.
+
+**No supervisor sends it.** Seven I-modem releases were searched, from
+`IM020009` (2.0.9) to `Ie030002` (3.0.2), including `IE/IM020104` (the first
+x2), `IE020405`/`IM020406` (V.90) and `IE020706`:
+- **command sender:** 56 to 62 calls per release. The immediate tags never
+  include `6b`, and no `ax`/`al` arithmetic before a call computes one.
+- **deferred sender** (Ie030002 `7992e`): 34 calls, tags `5e 63 01 5f 60 0f 61
+  5b 5d 0a`.
+- **raw mailbox port writes** (`out 58..5e`, `out 1c`): five copies of the
+  sender body, which take the tag from their caller; and the DSP download
+  stream (`c9b2..c9f2`, `lodsw`).
+- **encodings:** no `mov ax, 006b` in any release. Every `push 6b` is either
+  an argument to the allocator at `40b2f` (with `0x300`) or data
+  mis-decoded as code. The only `006b` word near other tags is in a level
+  table (`d888e`).
+
+S58 bit 4 is read once (`b2801`) and only advertises A-law in INFO0. So the
+DSP's A-law x2 mode, a complete and working path, is never commanded by any
+I-modem release we have. A host for it would have to be another product
+sharing this DSP code, or a path that static search cannot see (a tag
+loaded from a runtime structure). Running Ie030002 on an A-law NET3 profile
+with S58 = 52 sends the same command set as µ-law, with no `6b`.
