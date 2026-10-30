@@ -512,7 +512,7 @@ void x2_client_rx_codewords(x2_client_t *c, const uint8_t *codewords, size_t cou
 {
     if(!c||!codewords)return;
     for(size_t k=0;k<count;++k,++c->dn_samples) {
-        uint8_t code=codewords[k];
+        uint8_t code=codewords[k]^c->law_xor;
         if(c->dn==X2C_DN_DATA || c->dn==X2C_DN_RR_RECORD)tone_b_sample(c,code);
         if(c->rr && c->dn!=X2C_DN_FAILED
            && (++c->rr_samples>RR_DEADLINE || (c->dn==X2C_DN_DATA && c->rr_samples>RR_ALIGN_DEADLINE)))
@@ -574,6 +574,10 @@ void x2_client_rx_codewords(x2_client_t *c, const uint8_t *codewords, size_t cou
             break;
         }
     }
+}
+void x2_client_set_alaw(x2_client_t *c)
+{
+    if(c)c->law_xor=X2_ALAW_XOR;
 }
 unsigned x2_client_downstream_rate(const x2_client_t *c)
 {

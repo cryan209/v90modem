@@ -13,6 +13,11 @@ x2_role_t x2_info_role_select(uint32_t local_body, uint32_t peer_body);
 #define X2_BANK_MAX 128
 #define X2_MP_BITS 104
 
+/* Asymmetric x2 on A-law: every µ-law-domain octet XOR this (Ie030002 DSP
+ * command 6b -> 82d7 -> ffd9 bit 0; cc7a; A-law = µ-law ^ 0x2a for the same
+ * level). */
+#define X2_ALAW_XOR 0x2a
+
 typedef struct {
     uint8_t amplitude_bits; /* B: 19..37 in recovered allocation tables */
     uint8_t independent_signs; /* MD: 0..6 */

@@ -113,6 +113,10 @@ int x2_session_init_symmetric(x2_session_t *session, unsigned alaw, unsigned ans
  * pcm_mask: downstream indices we accept; upstream_mask: V.34 N mask. */
 int x2_session_init_client(x2_session_t *session, uint16_t pcm_mask,
                            uint16_t upstream_mask, unsigned md);
+/* Asymmetric x2 on an A-law bearer (either role, after init): Phase 2 is
+ * coded in A-law and every PCM octet carries X2_ALAW_XOR; the server also
+ * advertises A-law, INFO0 body bit 9 (the I-modem's S58 4). */
+void x2_session_set_alaw(x2_session_t *session);
 void x2_session_rx(x2_session_t *session, const int16_t *samples, size_t count);
 void x2_session_set_payload_source(x2_session_t *session, x2_get_bit_func_t get_bit, void *context);
 void x2_session_receive_mp(x2_session_t *session, const x2_mp_t *mp);

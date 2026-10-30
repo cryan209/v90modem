@@ -5,7 +5,8 @@ execution. `x2_session.c` now connects capability exchange and downstream
 training to the modem engine's raw-G.711 path. Select `--mode x2` (or
 `ME_MODE=x2` in the engine replay tool). An answering call runs the digital
 server; a call we place runs the analogue client (`x2_client.c`, see "The
-analogue client, 19 October 2026"). Both use PCMU, a 3200-baud high-carrier
+analogue client, 19 October 2026"). Both use PCMU or A-law (see "A-law
+asymmetric x2, implemented"), a 3200-baud high-carrier
 upstream and the recovered low-level training alphabet.
 
 The supported short-record path receives MP, transmits its three-word response,
@@ -966,7 +967,8 @@ trip it.
 
 We can now be the other end: the analogue x2 client that dials a server, as
 the Courier 403 does. `AT+MS=X2` (or `--mode x2`) on a call we place selects
-it; answering still selects the server. PCMU only, like the server.
+it; answering still selects the server. (PCMU only when written; A-law since
+30 October.)
 
 **What it sends**, from the Courier's own line output (Draft 0.33 3.3-3.4 and
 `../courier-emu/docs/x2-v90-protocol-selection.md`):
@@ -1598,3 +1600,44 @@ although its DSP replies matched a µ-law run's and the call stayed in data to
 the end. Before this, an "A-law" call between Ie030002 and our client was
 µ-law-coded throughout: the codec was never switched, and the emulator passes
 octets unchanged.
+
+## A-law asymmetric x2, implemented (30 October 2026)
+
+Following the firmware (previous section), on an A-law bearer:
+- **Server:** Phase 2 (INFO0, tones, probe) is coded in A-law. Every other
+  octet gets `^ 0x2a`: zero, pattern A, B, J, C, D, E, the alignment word,
+  the record, data and silence. The INFO0 body adds bit 9, which advertises
+  A-law as the I-modem's capability word does for S58 4. `x2_session.c` marks
+  which octets came from `linear_code()`; everything else is µ-law-domain
+  and gets the XOR. The mapper keeps `format_xor = 0`, so nothing is
+  converted twice.
+- **Client:** Phase 2 in A-law. `x2_client_rx_codewords()` XORs each received
+  octet with `0x2a` before anything else (B detection, training, record,
+  data, the Tone B detector), so every table stays µ-law-domain. A retrain
+  re-initialises the client, and the engine sets A-law again after it.
+- **Engine:** `me_x2_start_locked()` no longer refuses asymmetric x2 on A-law.
+  It calls `x2_session_set_alaw()` in both roles, and logs `x2 ... startup
+  (A-law, PCM ^ 2a)`. Symmetric x2 is unchanged: its control law is still
+  `ME_X2_CONTROL_LAW`.
+
+**Checks:**
+- `x2_client_test` runs a µ-law and an A-law server side by side through a
+  whole startup. Each of the 89800 octets outside Phase 2 is exactly the
+  µ-law one `^ 0x2a`. An A-law client decodes the A-law server's 336000
+  payload bits exactly, and the probe's A-law levels match the µ-law ones.
+- Engine pair on A-law (fast tier): `CONNECT 56000` both ends, V.42 text both
+  ways. V.14 with `--payload-on-connect` passes too.
+- **Against Ie030002 in its A-law mode** (NET3 A-law bearer, `--inject-alaw`
+  diagnostic):
+  - LAPM: `CONNECT 57333/ARQ/x2/LAPM/V42BIS` there, `56000/ARQ/X2/LAPM/V42BIS`
+    here, all ten of our lines at its DTE, its line at ours (slow tier);
+  - V.14: `CONNECT 57333/x2/NONE`, lines both ways (5 of the probe's
+    wall-paced 10 were sent; a µ-law V.14 run sent 6);
+  - control, the same bearer without `6b`: NO CARRIER. Without `6b` the
+    I-modem sends µ-law octets, so the test separates the two.
+- The earlier "upstream text did not arrive" was not reproduced without the
+  experimental instrumentation (`--trace-gate`, two probes at once, a
+  scratch XOR knob). All of those runs delivered upstream.
+
+Not covered: a real A-law x2 server (no supervisor we have sends `6b`), and
+Total Control equipment. Not yet tried live.

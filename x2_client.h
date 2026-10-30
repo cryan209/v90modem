@@ -110,6 +110,9 @@ typedef struct {
        Consecutive data frames outside the banks; dn_lost once there have
        been X2_CLIENT_LOSS_FRAMES of them. */
     unsigned bad_frames, dn_lost;
+    /* A-law bearer: received octets XOR this first (X2_ALAW_XOR), back to
+       the µ-law domain every table here is in. */
+    uint8_t law_xor;
     /* Results. */
     unsigned j_seen, record_valid, final_seen, e_sent;
     unsigned selected_index, upstream_n;
@@ -122,6 +125,9 @@ typedef struct {
  * upstream_mask: V.34 N mask for W2 (bit 0 = 2400). Returns -1 if empty. */
 int x2_client_init(x2_client_t *c, uint16_t pcm_mask, uint16_t upstream_mask, unsigned md);
 void x2_client_set_put_bit(x2_client_t *c, x2_client_put_bit_t put_bit, void *context);
+/* A-law bearer: undo the server's 0x2a on every received octet. x2_client_init
+ * clears it, so a retrain's re-init must set it again. */
+void x2_client_set_alaw(x2_client_t *c);
 /* v34_tx_external_symbol_func_t: one symbol per baud, constellation steps. */
 void x2_client_get_symbol(void *user_data, float *re, float *im);
 /* done_fn for v34_v90_arm_tx_data(): E has gone out. */

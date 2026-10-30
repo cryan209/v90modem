@@ -106,6 +106,16 @@ int x2_session_init_client(x2_session_t *s,uint16_t pcm_mask,uint16_t upstream_m
     if(x2_info_encode(0x4d,7,s->marker_bits+2)!=39)return -1;
     return x2_client_init(&s->cl,pcm_mask,upstream_mask,md);
 }
+void x2_session_set_alaw(x2_session_t *s)
+{
+    if(!s || s->symmetric)return;
+    s->alaw=1;
+    if(s->client){x2_client_set_alaw(&s->cl);return;}
+    /* The I-modem's tag-70 capability word carries bit 9 for S58 4 ("Force
+       x2 A-law mode", supervisor b2801), and its INFO0 body is that word. */
+    s->info_body|=0x200;
+    x2_info_encode(s->info_body,17,s->info_bits);
+}
 static void mp_received(void *context,const x2_mp_t *mp)
 {
     x2_session_receive_mp(context,mp);
@@ -558,6 +568,9 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
     for(k=0;k<count;++k,++s->tx_samples) {
         if(s->rt_silence){--s->rt_silence;octets[k]=linear_code(s,0);continue;}
         unsigned n=s->stage_samples;uint8_t code=0x7f;
+        /* Set where the octet comes from linear_code(), already in the
+           call's law; every other octet is a µ-law-domain codeword. */
+        unsigned coded=0;
         x2_session_stage_t old_stage=s->stage;
         if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD && !(s->stage==X2_SYMMETRIC && s->sym.tx_data && s->sym.rx_data)){fail(s,X2_FAILURE_STAGE_TIMEOUT);old_stage=s->stage;n=0;}
         switch(s->stage) {
@@ -573,7 +586,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                 }
             }
             if(s->stage==X2_INFO0 && s->info_clock<600 && s->info_bits[s->info_position])s->sign^=1;
-            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->answering?2400:1200)*(double)(s->tx_samples%20)/8000)));
+            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->answering?2400:1200)*(double)(s->tx_samples%20)/8000)));coded=1;
             if(s->stage==X2_INFO0) {
                 s->info_clock+=600;
                 if(s->info_clock>=8000) {
@@ -587,7 +600,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                 if(s->server_rt && s->a_reversals==1 && s->tx_samples>=s->second_a_tx_sample+80) {
                     /* 9.2.1.1.3: Tone B ends 10 ms after its reversal; silent
                        until the probe is due. */
-                    code=linear_code(s,0);
+                    code=linear_code(s,0);coded=1;
                     if(s->a_second_seen && s->tx_samples>=s->probe_tx_sample){s->server_rt=0;stage(s,X2_PROBE);}
                 } else if(!s->server_rt && s->a_reversals==(s->answering?2u:1u) && s->tx_samples>=s->second_a_tx_sample+79)
                     stage(s,s->symmetric?X2_SYMMETRIC:s->client?X2_CLIENT_PROBE:X2_PROBE);
@@ -598,7 +611,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
          * caller's marker (5.01 s vs 5.27 s). Holding A in MARKER_WAIT
          * prevents the real caller from leaving Phase 2. */
         case X2_PROBE:
-            code=linear_ulaw(s->probe[n%160]);
+            code=linear_code(s,s->probe[n%160]);coded=1;
             if(n==1279)stage(s,X2_MARKER_WAIT);
             break;
         case X2_SYMMETRIC:
@@ -612,7 +625,7 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             /* Clause 5.1: the marker is framed like INFO0 and sent the same
              * way, 600 bit/s DPSK on our 1200 Hz carrier (V.34 10.1.2.2). */
             if(s->info_clock<600 && s->marker_bits[s->info_position])s->sign^=1;
-            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->marker_carrier?s->marker_carrier:1200)*(double)(s->tx_samples%20)/8000)));
+            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->marker_carrier?s->marker_carrier:1200)*(double)(s->tx_samples%20)/8000)));coded=1;
             s->info_clock+=600;
             if(s->info_clock>=8000) {
                 s->info_clock-=8000;
@@ -700,6 +713,13 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             break;
         case X2_FAILED:break;
         }
+        /* Asymmetric x2 on A-law: Ie030002's host command 6b (DSP 82d7)
+         * sets ffd9 bit 0, and d1c4/cc7a then XOR every output octet with
+         * 0x2a -- µ-law stores ~field and A-law field^0x55, so A = µ^0x2a:
+         * the same level in A-law. It covers the training script and the
+         * record as well as data (an A-law I-modem's B is b1/31 ^ 2a). The
+         * banks are unchanged. docs/x2_implementation.md, 30 Oct. */
+        if(s->alaw && !s->symmetric && !coded)code^=X2_ALAW_XOR;
         octets[k]=code;
         /* A transition resets the next stage's counter to zero. */
         if(s->stage==old_stage)++s->stage_samples;

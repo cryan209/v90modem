@@ -415,6 +415,59 @@ static void server_retrain(void)
     printf("  Tone A in data: answered with a retrain while one is left, else the call ends\n");
 }
 
+/* A-law (Ie030002 DSP command 6b): the A-law server's every octet outside
+ * the Phase 2 tones is exactly the µ-law server's ^ 0x2a, through B, J, C,
+ * D, E, the record and data; and an A-law client decodes it bit-exact. */
+static void alaw_downstream(void)
+{
+    static x2_session_t mu, al;
+    static x2_client_t client;
+    source_t s1={0xace1,malloc(1<<20),0,1<<20}, s2={0xace1,malloc(1<<20),0,1<<20};
+    sink_t sink={malloc(1<<20),0,1<<20};
+    CHECK(!x2_session_init(&mu) && !x2_session_init(&al));
+    x2_session_set_alaw(&al);
+    CHECK(al.alaw && (al.info_body&0x200) && !(mu.info_body&0x200));
+    CHECK(!x2_client_init(&client,0x7fff,0x1ffe,5));
+    x2_client_set_alaw(&client);
+    x2_client_set_put_bit(&client,sink_bit,&sink);
+    x2_session_set_payload_source(&mu,source_bit,&s1);
+    x2_session_set_payload_source(&al,source_bit,&s2);
+    mu.stage=al.stage=X2_UPSTREAM_WAIT;
+    x2_session_upstream_j(&mu);x2_session_upstream_j(&al);
+    unsigned n,mp_given=0,payload=0,compared=0;
+    for(n=0;n<200000 && payload<48000;++n) {
+        uint8_t a,b;
+        CHECK(x2_session_tx(&mu,&a,1)==1 && x2_session_tx(&al,&b,1)==1);
+        CHECK(mu.stage==al.stage);
+        CHECK(b==(uint8_t)(a^X2_ALAW_XOR));++compared;
+        x2_client_rx_codewords(&client,&b,1);
+        if(client.j_seen && mu.stage==X2_J){x2_session_upstream_s_bar(&mu);x2_session_upstream_s_bar(&al);}
+        if(!mp_given && mu.stage==X2_TRAIN_C){x2_session_receive_mp(&mu,&client.mp);x2_session_receive_mp(&al,&client.mp);mp_given=1;}
+        if(client.record_valid && !client.e_sent){client.e_sent=1;mu.mp_rx.e_detected=al.mp_rx.e_detected=1;}
+        if(al.stage==X2_PAYLOAD)++payload;
+        CHECK(al.stage!=X2_FAILED && client.dn!=X2C_DN_FAILED);
+    }
+    while(al.training_mapper.output_position!=6) {
+        uint8_t b;CHECK(x2_session_tx(&al,&b,1)==1);x2_client_rx_codewords(&client,&b,1);
+    }
+    CHECK(client.dn==X2C_DN_DATA && client.decode_errors==0 && client.selected_index==15);
+    CHECK(s2.count>1000 && sink.count>=s2.count);
+    size_t offset=sink.count-s2.count;
+    for(size_t i=0;i<s2.count;++i)CHECK(sink.bits[offset+i]==s2.bits[i]);
+    /* The Phase 2 probe is coded in A-law, not XORed: its level matches. */
+    static x2_session_t pm, pa;
+    CHECK(!x2_session_init(&pm) && !x2_session_init(&pa));x2_session_set_alaw(&pa);
+    pm.stage=pa.stage=X2_PROBE;
+    for(unsigned k=0;k<160;++k) {
+        uint8_t a,b;x2_session_tx(&pm,&a,1);x2_session_tx(&pa,&b,1);
+        int x=ulaw_to_linear(a),y=alaw_to_linear(b);
+        CHECK(abs(x-y)<=abs(x)/16+16);
+    }
+    printf("  A-law server: %u octets, all µ-law ^ 0x2a (zero, A, B, J, C, D, E, record, data); A-law client %zu payload bits exact; probe coded in A-law\n",
+           compared,s2.count);
+    free(s1.bits);free(s2.bits);free(sink.bits);
+}
+
 int main(void)
 {
     downstream(0x0001,1,13,0);
@@ -430,6 +483,7 @@ int main(void)
     tone_b();
     retrain_answer();
     server_retrain();
+    alaw_downstream();
     printf("x2 client: downstream record/final/payload at four ceilings, upstream MP/E and in-data rate changes passed\n");
     return 0;
 }

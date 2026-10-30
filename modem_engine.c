@@ -11996,6 +11996,7 @@ static void me_x2_client_progress_locked(void)
         g_x2_client_pad=0;g_x2_client_rr_open=false;
         x2_client_init(c,pcm,up,md);
         x2_client_set_put_bit(c,me_x2_client_put_bit,NULL);
+        if(g_x2.alaw)x2_client_set_alaw(c);
         g_state=ME_TRAINING;g_x2_client_retraining=true;g_x2_client_retrain_ours=ours;
         return;
     }
@@ -12211,11 +12212,6 @@ static void me_x2_start_locked(void)
     const char *sym=getenv("ME_X2_SYMMETRIC");
     bool symmetric=sym ? atoi(sym)!=0 : g_enable_x2_symmetric;
     bool client = !symmetric && g_calling_party;
-    if (!symmetric && g_law != ME_LAW_ULAW) {
-        ME_LOG("[ME] asymmetric x2 requires PCMU\n");
-        g_state = ME_HANGUP;
-        return;
-    }
     if (g_v34) { v34_free(g_v34); g_v34 = NULL; }
     if(symmetric)x2_session_init_symmetric(&g_x2,g_law==ME_LAW_ALAW && !g_x2_mu_control,!g_calling_party);
     else if(client) {
@@ -12230,6 +12226,9 @@ static void me_x2_start_locked(void)
             g_state=ME_HANGUP;return;
         }
         x2_client_set_put_bit(&g_x2.cl,me_x2_client_put_bit,NULL);
+        /* x2 on A-law (Ie030002's DSP command 6b): Phase 2 in A-law, every
+           PCM octet ^ 0x2a (docs/x2_implementation.md, 30 Oct). */
+        if(g_law==ME_LAW_ALAW)x2_session_set_alaw(&g_x2);
         trace_phase("X2 client: PCM index mask %04x, upstream mask %04x, MP %04x/%04x/%04x/%04x",
                     pcm,up,g_x2.cl.mp.words[0],g_x2.cl.mp.words[1],g_x2.cl.mp.words[2],g_x2.cl.mp.words[3]);
     } else {
@@ -12268,6 +12267,7 @@ static void me_x2_start_locked(void)
            data) rather than hang up, as many times as the client answers
            ours. */
         g_x2.max_retrains=ME_X2_SERVER_MAX_RETRAINS;
+        if(g_law==ME_LAW_ALAW)x2_session_set_alaw(&g_x2);
     }
     x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
@@ -12301,8 +12301,10 @@ static void me_x2_start_locked(void)
             x2_session_rx(&g_x2,history,(size_t)n);offset+=n;
         }
     }
-    ME_LOG("[ME] x2 %s startup: INFO0=%05x; waiting for %s (RX sample %llu)\n",
-           client?"analogue client":"digital",(unsigned)g_x2.info_body,
+    ME_LOG("[ME] x2 %s startup (%s): INFO0=%05x; waiting for %s (RX sample %llu)\n",
+           client?"analogue client":"digital",
+           symmetric ? (g_law==ME_LAW_ALAW ? "A-law" : "u-law")
+                     : (g_x2.alaw ? "A-law, PCM ^ 2a" : "u-law"),(unsigned)g_x2.info_body,
            symmetric?"symmetric INFO0/tone exchange":client?"the server's INFO0 and tone exchange":"CRC-valid peer marker",
            (unsigned long long)g_rx_audio_samples);
     me_x2_progress_locked();

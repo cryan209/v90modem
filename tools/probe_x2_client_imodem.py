@@ -18,6 +18,13 @@ Ie030002.nac is not tracked; link it in), for example:
       --engine-at 'AT\\N0' --engine-send 'OUR-X2-CLIENT-0123456789!' \\
       --answer-send 'IMODEM-X2-SERVER-0123456789'
 
+--law alaw puts the I-modem on an A-law ISDN bearer (NET3 profile, S58 bit 4
+"Force x2 A-law mode"). No supervisor command reaches its DSP's A-law x2 mode,
+though: --inject-alaw is a DIAGNOSTIC that delivers host command 6b (DSP
+82d7: G.711 codec A-law, x2 output XOR 0x2a) once, right after the
+supervisor's tag 70. The firmware is not modified. --trace-gate records the
+Phase 2 gate (9596..965c) and the INFO0/ffd9 cells (docs/x2_implementation.md).
+
 Until its echo canceller settles, this I-modem's ANSam carries an impairment
 8-10 dB below the tone; V.8's ANSam detector accepts that (notch ratio 3, in
 v8.c), so no ME_ANS_NOTCH_RATIO is needed (docs/x2_implementation.md).
@@ -48,6 +55,13 @@ def main():
     p.add_argument('--imodem-settings', default='S54=0S58=48&A3&B1Q0',
                    help='I-modem AT settings: S58=48 keeps x2, server and symmetric enabled, V.90 off')
     p.add_argument('--engine-at', default='', help='AT command sent to our PTY before the call')
+    p.add_argument('--inject-alaw', action='store_true',
+                   help='DIAGNOSTIC: deliver host command 6b (DSP 82d7: 039f bit 11, ffd9 bit 0, '
+                        'A-law) once, right after the supervisor\'s tag 70; firmware unmodified')
+    p.add_argument('--trace-gate', action='store_true',
+                   help='record the Phase 2 gate (9596..965c) and its INFO0/ffd9 cells')
+    p.add_argument('--law', choices=['ulaw', 'alaw'], default='ulaw',
+                   help='alaw: A-law ISDN bearer, NET3 profile, S58 bit 4 (force x2 A-law)')
     p.add_argument('--engine-send', default='', help='line our DTE sends after CONNECT')
     p.add_argument('--answer-send', default='', help='line the I-modem DTE sends after CONNECT')
     p.add_argument('--fast', action='store_true', help='do not pace the engine to 8000 samples/s')
@@ -73,7 +87,8 @@ def main():
             # Unique per process: two probes (tests/slow.list runs them in
             # parallel) with the same output name crossed DTEs.
             pty = '/private/tmp/%s-%d-pty' % (self.output.name, os.getpid())
-            self.process = subprocess.Popen([str(self.engine), pty, '--call'],
+            self.process = subprocess.Popen([str(self.engine), pty, '--call']
+                                            + (['--alaw'] if a.law == 'alaw' else []),
                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=self.log, env=env)
             for _ in range(200):
@@ -107,22 +122,82 @@ def main():
                     os.write(fd, a.engine_send.encode()); last = time.monotonic(); left -= 1
 
     a.output.mkdir(parents=True, exist_ok=False)
+    nvram = a.emu / 'artifacts/imodem-pair-x2-full-rate-routed-20261002/nvram-230400-switch2.sav'
+    if a.law == 'alaw':
+        # S58 bit 4 forces x2 A-law (I-modem S58 help text); NET3 is the
+        # A-law switch protocol. A derivative profile, never the source.
+        a.imodem_settings = a.imodem_settings.replace('S58=48', 'S58=52')
+        from courier_emu.bri import audio_bearer, LAW_A
+        pair.audio_bearer = lambda capability: audio_bearer(capability, LAW_A)
+        from courier_emu import imodem_config as config
+        profile = bytearray(nvram.read_bytes())
+        for pos in range(0, len(profile), config.SECTOR_SIZE):
+            sector = bytes(profile[pos:pos + config.SECTOR_SIZE])
+            if any(config.page_is_sealed(sector[q:q + config.PAGE_SIZE])
+                   for q in range(0, len(sector), config.PAGE_SIZE)):
+                profile[pos:pos + config.SECTOR_SIZE] = config.seal(config.set_switch_protocol(sector, 4))
+        nvram = a.output / 'native-profile-net3.sav'
+        nvram.write_bytes(profile)
     peer = CallingPeer(a.output, a.engine.resolve(), a.fast)
     pair.G711Peer = lambda path, listen: peer
     saved = sys.argv
     sys.argv = ['probe_x2_client_imodem', '--worker', 'answer', '--socket', 'unused',
                 '--result', str(a.output / 'imodem-result.json'), '--protocol', 'x2',
                 '--instructions', str(a.instructions), '--settings', a.imodem_settings,
-                '--nvram', str(a.emu / 'artifacts/imodem-pair-x2-full-rate-routed-20261002/nvram-230400-switch2.sav'),
+                '--nvram', str(nvram),
                 '--trace-negotiation']
     if a.answer_send:
         sys.argv += ['--answer-send', a.answer_send]
     sys.argv += a.imodem_arg
+    trace = {'addresses': ['039f', 'f6a0', 'f6a1', 'fef0', 'fef1', 'ffd9', 'ffdc', 'ffde'],
+             'samples': [], 'writes': [], 'gate_captures': [], 'gate_pcs': []}
+    original_machine = pair.IsdnMachine
+    injected = {'done': False}
+    if a.trace_gate or a.inject_alaw:
+        seen, next_at = None, 0
+        def machine(*args, **kw):
+            prior = kw['serial_pump']
+            def pump(current):
+                nonlocal seen, next_at
+                prior(current)
+                mb = current.mailbox
+                if (a.inject_alaw and not injected['done']
+                        and any(t == 0x70 for t, _ in mb.commands)
+                        and mb.tx_ready and getattr(mb, 'core', None) is not None):
+                    mb._command(0x6b, 0)
+                    injected['done'] = True
+                    trace['injected_6b_at'] = current.instructions
+                if not a.trace_gate:
+                    return
+                core = current.mailbox.core
+                if core is None:
+                    return
+                if core is not seen:
+                    core.set_data_trace_range(0xf6a0, 0xf6c0)
+                    core.set_pc_capture(0x9596, [int(x, 16) for x in trace['addresses']])
+                    core.set_pc_trace_range(0x958f, 0x965c)
+                    core.set_data_event_limit(4000)
+                    core.trace_data_writes(clear=True)
+                    seen = core
+                if current.instructions < next_at:
+                    return
+                next_at = current.instructions + 250000
+                trace['gate_pcs'].extend(core.pc_trace()); core.clear_pc_trace()
+                trace['gate_captures'].extend(core.pc_captures()); core.clear_pc_captures()
+                trace['writes'].extend(core.data_events()); core.trace_data_writes(clear=True)
+                trace['samples'].append({'instructions': current.instructions,
+                    'cells': {x: core.data(int(x, 16)) for x in trace['addresses']}})
+            kw['serial_pump'] = pump
+            return original_machine(*args, **kw)
+        pair.IsdnMachine = machine
     try:
         pair.run_side(pair.arguments())
     finally:
         sys.argv = saved
         peer.stop()
+        pair.IsdnMachine = original_machine
+        if a.trace_gate or a.inject_alaw:
+            (a.output / 'gate-trace.json').write_text(json.dumps(trace, default=str, indent=1) + '\n')
     result = json.loads((a.output / 'imodem-result.json').read_text())
     imodem = ''.join(s['text'] for s in result['serial_session'] if s['direction'].startswith('received'))
     ours = (a.output / 'engine-dte.bin').read_bytes()
