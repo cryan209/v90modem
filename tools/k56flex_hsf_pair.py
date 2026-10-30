@@ -54,6 +54,15 @@ def main():
                     help="check actual native RX statistic without changing its configured bounds")
     ap.add_argument("--dac-taps", type=int, default=129,
                     help="analogue peer reconstruction FIR length (DS0 remains unchanged)")
+    ap.add_argument("--rx-noise-dbfs", type=float,
+                    help="test-only AWGN RMS dBFS after 16 kHz analogue reconstruction")
+    ap.add_argument("--rx-gain-db", type=float, default=0,
+                    help="test-only downstream analogue gain, -40..6 dB")
+    ap.add_argument("--rx-clock-ppm", type=float, default=0,
+                    help="test-only RX sampling-clock error, +/-200 ppm; upstream unchanged")
+    ap.add_argument("--rx-delay-samples", type=int, default=0,
+                    help="test-only causal delay at 16 kHz; 32 matches +/-10 ppm controls over 40 s")
+    ap.add_argument("--rx-seed", type=int, default=1)
     ap.add_argument("--require-startup", action="store_true",
                     help="fail unless native K56 reaches Phase 3 through real V.8/INFO1")
     ap.add_argument("--require-audio-gates", action="store_true",
@@ -72,6 +81,18 @@ def main():
         ap.error("--dac-taps must be 4n+1 in 9..513")
     if not 0 <= args.payload_bytes <= 65536 or (args.require_payload and not args.payload_bytes):
         ap.error("--payload-bytes must be 0..65536, and nonzero with --require-payload")
+    from analogue_rx_channel import AnalogueRxChannel, ImpairedDAC
+    rx_channel = None
+    if (args.rx_noise_dbfs is not None or args.rx_gain_db or args.rx_clock_ppm
+            or args.rx_delay_samples):
+        try:
+            rx_channel = AnalogueRxChannel(gain_db=args.rx_gain_db, noise_dbfs=args.rx_noise_dbfs,
+                clock_ppm=args.rx_clock_ppm, delay_samples=args.rx_delay_samples, seed=args.rx_seed)
+        except ValueError as exc:
+            ap.error(str(exc))
+        drift = args.seconds*16000*abs(rx_channel.step-1)
+        if args.rx_clock_ppm and drift+16 >= args.rx_delay_samples:
+            ap.error("RX delay must exceed the maximum clock drift plus 16 interpolation samples")
     cruft = args.cruft.resolve()
     sys.path.insert(0, str(cruft))
     from native.hsf.k56_client import K56Client, PCMUStream
@@ -92,6 +113,8 @@ def main():
         env["ME_K56FLEX_RATE"] = str(args.downstream_rate)
     client = K56Client(modulation="flex", max_upstream_rate=args.max_upstream_rate,
                        dac_taps=args.dac_taps, **native_rates)
+    if rx_channel is not None:
+        client.dac = ImpairedDAC(client.dac, rx_channel)
     phase2_events = []
     symbol_events = []
     probe_clock_events = []
@@ -335,6 +358,8 @@ def main():
             "transport": "lockstep 8 kHz PCMU, whole audio_sock_modem engine",
             "peer": "cruft native legacy HSF, Flex-only (no V.90/V.34 fallback)",
             "dac_taps": args.dac_taps,
+            "analogue_rx_channel": rx_channel.statistics() if rx_channel else None,
+            "analogue_rx_scope": "K56 pump only (Phase 2 onwards); V.8bis/V.8 unchanged",
             "audio_seconds": frames / 50, "end_reason": end_reason,
             "wall_seconds": time.monotonic() - start_wall,
             "flex_agreed": client.flex_agreed,
@@ -364,6 +389,10 @@ def main():
             "client_framing_errors": serial_decoder.framing_errors,
             "upstream_payload_exact": bool(args.payload_bytes and server_serial == expected_up),
             "downstream_payload_exact": bool(args.payload_bytes and client_serial == expected_down),
+            "downstream_payload_offset": (bytes(client_serial).find(expected_down)
+                                          if args.payload_bytes else None),
+            "downstream_extra_octets": (len(client_serial)-len(expected_down)
+                                         if args.payload_bytes and expected_down in client_serial else None),
             "client_tx_training_completed": any(n[0] == 1000 for n in notices),
             "client_rx_training_completed": any(n[0] == 1001 for n in notices),
             "server_dte_connect": b"CONNECT" in dte,

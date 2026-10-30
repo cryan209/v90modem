@@ -87,6 +87,7 @@ python3 tools/mt5634mu_diag_test.py
 ./k56flex_upstream_pcm_test
 ./k56flex_client_tx_test
 python3 tools/test_k56flex_probe_timeout.py
+python3 tools/test_analogue_rx_channel.py
 ./mica_qam_test
 ./k56flex_probe_test
 python3 tools/k56flex_hsf_probe_check.py reference-data/k56flex-hsf/downstream-probes-ulaw.g711

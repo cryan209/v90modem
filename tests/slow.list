@@ -22,6 +22,10 @@ python3 tools/test_k56flex_rates.py
 # Independent native HSF receiver: exact 32..56k, plus 58/60k server caps
 # which must negotiate 52k (not claim a high-rate connection). Needs ../cruft.
 python3 tools/test_k56flex_rates.py --peer native-hsf -j3
+@group k56flex-hsf-impairments
+# Test-only post-DAC analogue RX impairments, matched 2 ms delay, seed 1:
+# clean, -85 dBFS noise, -6 dB gain, +/-10 ppm RX clock, at 44/52/56k.
+python3 tools/test_k56flex_hsf_impairments.py --profile clean --profile noise-85 --profile gain-6 --profile clock-10 --profile clock+10
 @group
 
 @group fax-v34-test fax-v34-engine-test

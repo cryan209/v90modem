@@ -3661,3 +3661,75 @@ python3 tools/test_k56flex_rates.py --peer native-hsf -j3
 The matrix is in `tests/slow.list`, group `k56flex-hsf-rates`, and needs
 `../cruft`. The HSF harness remains PCMU-only; no new hardware calls or
 A-law native HSF qualification are implied.
+
+### Native HSF analogue RX impairment measurements
+
+`tools/analogue_rx_channel.py` decorates the native client's existing DAC:
+noise, gain and RX-clock error act on **16 kHz reconstructed linear samples**,
+not the G.711 bearer. The legacy adapter calls this DAC from common Phase 2
+onwards (Draft 0.23 4.10–4.12); V.8bis/V.8 and the upstream converter are
+unchanged. This is a test-only downstream receive-clock model, **not a
+coupled client TX/RX oscillator or an end-to-end physical line model**.
+Positive ppm means a faster RX sampling clock, hence lower apparent server
+frequencies. A bounded fractional delay samples the waveform with a 32-tap
+Blackman-windowed sinc and 4096 phases; no samples are dropped/duplicated to
+correct a queue. Every call reports equal input/output sample counts,
+waveform drift, signal/noise RMS and clipping. At +/-50 ppm, a separate
+3000 Hz tone check measures about **0.61 integer-sample units RMS error**
+against the continuous reference, under a 1-unit test limit.
+
+The scored matrix uses the same **32-sample (2 ms) extra analogue delay**
+for clean/noise/gain/clock arms. Every call is PCMU, raw V.14, exact fixed
+44/52/56k downstream and 28.8k upstream, with **8192 pseudorandom bytes each
+way over 40 simulated seconds**. Noise is independent Gaussian, seed **1**;
+`dBFS RMS = 20 log10(noise_rms / 32768)`. These single-seed results are
+observations, not statistical BER curves or guaranteed operating limits.
+
+| Downstream | Noisiest tested exact stream | Next tested failed strict check |
+|---|---|---|
+| 44000 | -60 dBFS RMS (32.77 linear units) | -50 dBFS RMS |
+| 52000 | -70 dBFS RMS (10.36 units) | -65 dBFS RMS |
+| 56000 | -85 dBFS RMS (1.84 units) | -80 dBFS RMS (3.28 units) |
+
+At **56000 / -80 dBFS**, all 8192 payload bytes were contiguous and exact
+at offset zero, but **two stray trailing octets** made the stream fail.
+There were no framing errors or carrier interruptions in that case. At
+56000 / -70 dBFS, the payload itself was no longer intact and there were
+211 framing errors. At 52000 / -65 dBFS the downstream payload was corrupt
+while the upstream remained exact. Thus CONNECT/carrier alone is not an
+integrity qualification. Whole-call signal/noise RMS includes training and
+silence; do not interpret its ratio as settled DATA decision SNR.
+
+**All three rates pass -3 and -6 dB gain and both -10/+10 ppm RX clock
+errors**, independently, with exact duplex payloads and no carrier/framing
+failures. The initial matched-delay 30-case matrix had **20 passes and 10
+failures**; nine fine-noise cases (-90/-85/-65 dBFS at each rate) added
+**7 passes and 2 failures**. Failed characterization cases remain failures;
+they are not converted into green regression results.
+
+Latency confounder: an initial 256-sample (16 ms) extra-delay control failed
+Phase 2 without noise or clock offset, invalidating that entire first sweep
+as a noise/clock measurement. At 52000, zero and 32 extra samples passed;
+64/96/128/256 failed Phase 2. With 48 samples, downstream data was exact but
+upstream had extraneous output. The DAC is introduced at native pump creation,
+so this added delay is **not a validated continuous network-latency model**.
+Do not attribute those failures to the peer or claim a production latency
+limit. +/-50 ppm integration remains unqualified: the conservative causal
+buffer budget needs more delay than our passing matched control allows.
+No production DSP constants or native firmware were changed.
+
+Reproduce the exploratory matrix (returns nonzero when any stream fails):
+
+```
+python3 tools/test_k56flex_hsf_impairments.py --logdir /tmp/flex-rx-margin
+```
+
+Use `--profile NAME` repeatedly for narrower experiments; -90/-85/-65 dBFS
+and delay4ms/delay16ms are supplemental profiles. JSON summaries preserve
+the native rates, exactness checks, error counts, impairment statistics and
+per-case logs. A qualified **15-case** subset (clean, -85 dBFS, -6 dB gain,
+-10/+10 ppm at all three rates) was rerun and passed in the slow tier,
+group `k56flex-hsf-impairments`. Seven numerical/accounting unit tests are
+in the fast tier; both original native-HSF controls also still pass.
+These measurements do not qualify A-law, LAPM recovery, automatic rate
+selection, retraining, hardware, or a combined/coupled oscillator model.
