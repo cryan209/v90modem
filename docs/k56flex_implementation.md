@@ -3523,3 +3523,25 @@ remain unchanged. `tests/fast.list` covers all four high-rate pairs;
 `k56flex_train_test` also exercises 58000/60000 handover in both laws.
 The existing default 52000 engine pairs and mapper firmware-vector tests
 still pass.
+
+### Attempting 62000/64000 through the rate controls
+
+A follow-up engine-pair sweep over both laws used server rates 60000, 62000
+and 64000 with client MP downstream code 15, plus 64000 with code 17. Both
+60000 controls delivered 128 printable lines intact each way. All six
+higher-rate attempts failed with NO CARRIER; the server rejected the rate
+before PCM probing. Code 17 also fails client transmitter initialisation:
+MP's downstream field is four bits (bits 24:27), and our interpretation
+`(code + 15) * 2000` tops out at 60000 for code 15.
+
+To distinguish another stale numeric ceiling from missing mapping support,
+a scratch copy of the mapper raised only its numeric guard to 64000.
+With report field zero (unadjusted), both laws still initialise at 60000
+with 60 bits/frame, but 62000 and 64000 both fail with no matching table
+and zero frame bits. The shipped tables stop at index 33 (60000); 62000
+and 64000 would need indices 34 and 35. No production limit was changed.
+
+Thus **64000 is not reachable by changing the existing variables**. A new
+mapper and a negotiation extension would be required, not merely a raised
+cap. This tests the implementation's limits, not the physical possibility
+of a nonstandard PCM scheme (Draft 0.23 4.12 remains the existing mapper).
