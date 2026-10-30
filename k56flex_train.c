@@ -179,7 +179,16 @@ int k56flex_train_accept_mp(k56flex_train_t *t, unsigned up, unsigned down, unsi
     /* Original HSF 12023dc0 uses the K56 PCM ladder in MP bits 24:27.
      * Preserve a stricter local downstream cap; never exceed the peer. */
     int downstream = (int)(down + 15)*2000;
-    if (t->cfg.rate_bps > downstream) t->cfg.rate_bps = downstream;
+    if (t->cfg.rate_bps < downstream) downstream = t->cfg.rate_bps;
+    /* Draft 0.23 4.12: 58/60k have no pad-adjusted tables. Select a
+     * supported constellation after receiving the report, not a rate
+     * which will fail only when PRIME creates the data mapper. */
+    for (; downstream >= K56FLEX_RATE_MIN_BPS; downstream -= 2000) {
+        k56flex_pcm_config_t pc = {t->cfg.law, downstream, t->cfg.report_field};
+        if (k56flex_pcm_frame_bits(&pc)) break;
+    }
+    if (downstream < K56FLEX_RATE_MIN_BPS) return -1;
+    t->cfg.rate_bps = downstream;
     t->cfg.param.extra = selected;
     t->cfg.param.control = mask;
     t->cfg.param.bit = 1; /* V.34 Table 20 bit 50: asymmetric rates */

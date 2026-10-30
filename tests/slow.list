@@ -7,6 +7,13 @@
 # the FSE adapts; no LAPM hides bit errors (docs/v90_upstream_data_path.md).
 ./v90_upstream_hold_test
 
+# K56flex Draft 0.23 4.12: 64 KiB random binary each way at 60k, then
+# hold DATA for another 20 s. Both laws, LAPM/V.42bis and raw V.14.
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 65536 --seconds 120 --hold-seconds 20
+./engine_pair_test --alaw --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 65536 --seconds 120 --hold-seconds 20
+./engine_pair_test --both-at AT+ES=1 --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 65536 --seconds 120 --hold-seconds 20
+./engine_pair_test --alaw --both-at AT+ES=1 --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 65536 --seconds 120 --hold-seconds 20
+
 @group fax-v34-test fax-v34-engine-test
 # Full pages through two production engines.  One row per class and callback
 # size, with law and paper alternated so each class still sees A4 and Letter,

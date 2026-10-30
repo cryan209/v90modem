@@ -178,12 +178,37 @@ static void test_mp_limits(void)
     }
 }
 
+static void test_mp_pad_tables(void)
+{
+    for (int law = 0; law < 2; ++law)
+    for (unsigned pad = 0x40; pad <= 0x80; pad += 0x40) {
+        k56flex_train_cfg_t cfg = {0};
+        k56flex_train_t t;
+        cfg.law = (k56flex_law_t)law;
+        cfg.rate_bps = 60000;
+        cfg.report_field = pad;
+        CHECK(k56flex_train_init(&t, &cfg) == 0, "pad MP init");
+        CHECK(k56flex_train_accept_mp(&t, 13, 15, 0x1fff) == 31200,
+              "pad MP accepted");
+        CHECK(t.cfg.rate_bps == 56000, "pad report selects highest available table");
+        k56flex_pcm_config_t pc = {cfg.law, t.cfg.rate_bps, cfg.report_field};
+        CHECK(k56flex_pcm_frame_bits(&pc) == 56, "selected pad constellation exists");
+        cfg.report_field = 0xc0; /* no such pad-group table */
+        CHECK(k56flex_train_init(&t, &cfg) == 0, "invalid report deferred until MP");
+        k56flex_train_cfg_t before = t.cfg;
+        CHECK(k56flex_train_accept_mp(&t, 13, 15, 0x1fff) < 0,
+              "missing constellation rejected before priming");
+        CHECK(!memcmp(&t.cfg, &before, sizeof(before)), "failed table selection is atomic");
+    }
+}
+
 int main(void)
 {
     test_composite();
     test_to_data();
     test_gate_timeout();
     test_mp_limits();
+    test_mp_pad_tables();
     printf(failures ? "k56flex_train_test: %d FAILURES\n" : "k56flex_train_test: all passed\n", failures);
     return failures != 0;
 }

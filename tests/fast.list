@@ -59,11 +59,23 @@ python3 tools/mt5634mu_diag_test.py
 ./engine_pair_test --both-at 'AT+MS=X2' --both-at AT+ES=1 --call-env ME_X2_CLIENT_RENEG_AFTER_MS=3100 --call-env ME_X2_CLIENT_RENEG_INDEX=1 --call-log 'X2 client rate change complete: index=1' --answer-log 'X2 rate change complete: index=1' --payload-printable RR --payload-reps 128 --hold-seconds 3 --expect X2 --seconds 40
 ./engine_pair_test --alaw --both-at 'AT+MS=K56' --expect-connect 52000 --both-expect 'CONNECT 52000' --payload-printable X --payload-reps 128 --seconds 60
 ./engine_pair_test --both-at 'AT+MS=K56' --both-at 'AT+ES=1' --expect-connect 52000 --seconds 45
-# K56flex Draft 0.23 4.12: high-rate PCM handover, both laws; require intact duplex payload.
-./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=13 --answer-env ME_K56FLEX_RATE=56000 --expect-connect 56000 --both-expect 'CONNECT 56000' --payload-printable X --payload-reps 128 --seconds 60
-./engine_pair_test --alaw --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=13 --answer-env ME_K56FLEX_RATE=56000 --expect-connect 56000 --both-expect 'CONNECT 56000' --payload-printable X --payload-reps 128 --seconds 60
-./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=15 --answer-env ME_K56FLEX_RATE=60000 --expect-connect 60000 --both-expect 'CONNECT 60000' --payload-printable X --payload-reps 128 --seconds 60
-./engine_pair_test --alaw --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=15 --answer-env ME_K56FLEX_RATE=60000 --expect-connect 60000 --both-expect 'CONNECT 60000' --payload-printable X --payload-reps 128 --seconds 60
+# K56flex Draft 0.23 4.12 / V.250 6.4.1: AT-only 56/58/60k, both laws,
+# 32 KiB of full-octet pseudorandom payload each way, with default LAPM/V.42bis.
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,56000,56000' --answer-at 'AT+MS=K56,1,56000,56000,0,31200' --both-at ATS2=255 --expect-connect 56000 --payload-random-bytes 32768 --seconds 90
+./engine_pair_test --alaw --call-at 'AT+MS=K56,1,0,31200,56000,56000' --answer-at 'AT+MS=K56,1,56000,56000,0,31200' --both-at ATS2=255 --expect-connect 56000 --payload-random-bytes 32768 --seconds 90
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,58000,58000' --answer-at 'AT+MS=K56,1,58000,58000,0,31200' --both-at ATS2=255 --expect-connect 58000 --payload-random-bytes 32768 --seconds 90
+./engine_pair_test --alaw --call-at 'AT+MS=K56,1,0,31200,58000,58000' --answer-at 'AT+MS=K56,1,58000,58000,0,31200' --both-at ATS2=255 --expect-connect 58000 --payload-random-bytes 32768 --seconds 90
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 32768 --seconds 90
+./engine_pair_test --alaw --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --both-at ATS2=255 --expect-connect 60000 --payload-random-bytes 32768 --seconds 90
+# Either end's downstream cap wins, even over diagnostic overrides.
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,32000,48000' --answer-at 'AT+MS=K56,1,32000,60000,0,31200' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=15 --answer-env ME_K56FLEX_RATE=60000 --expect-connect 48000 --seconds 60
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,32000,60000' --answer-at 'AT+MS=K56,1,32000,48000,0,31200' --answer-env ME_K56FLEX_RATE=60000 --expect-connect 48000 --seconds 60
+# Neither end may CONNECT outside its minimum downstream rate.
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,60000,60000' --answer-at 'AT+MS=K56,1,32000,56000,0,31200' --expect-no-connect --seconds 60
+./engine_pair_test --call-at 'AT+MS=K56,1,0,31200,32000,56000' --answer-at 'AT+MS=K56,1,60000,60000,0,31200' --expect-no-connect --seconds 60
+# Pad-adjusted tables stop at 56k: downshift rather than fail at priming.
+./engine_pair_test --both-at 'AT+MS=K56,1,0,60000' --call-env ME_K56FLEX_CLIENT_REPORT=4089b0 --expect-connect 56000 --seconds 60
+./engine_pair_test --alaw --both-at 'AT+MS=K56,1,0,60000' --call-env ME_K56FLEX_CLIENT_REPORT=8089b0 --expect-connect 56000 --seconds 60
 ./engine_pair_test --call-at 'AT+MS=V34' --answer-at 'AT+MS=K56' --expect V34 --seconds 40
 ./engine_pair_test --both-at 'AT+MS=K56' --call-env ME_K56FLEX_CLIENT_MP_DOWN_CODE=7 --expect-connect 44000 --both-expect 'CONNECT 44000' --payload-printable X --payload-reps 64 --seconds 50
 ./k56flex_test

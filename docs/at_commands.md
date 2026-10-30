@@ -187,7 +187,7 @@ power-on offer. The automode column is what `AT+MS=<carrier>,0` offers.
 | `V32`      | as V32B, rates capped at 9600/4800                      | V.32 alone        |
 | `HST`, `V32TERBO` (`TERBO`), `VFC` (`V.FC`) | V.32bis + V.22bis (no datapump for these; V.250 fallback) | ERROR |
 | `V34` (`V34+`, `V34B`, `V34BIS`) | V.34 + V.22bis                     | V.34 alone        |
-| `K56` (`56`, `56K`, `K56FLEX`) | K56flex V.8bis, then V.8 offering V.90/V.34/V.22 (no K56flex data mode) | ERROR |
+| `K56` (`56`, `56K`, `K56FLEX`) | K56flex client when calling, server when answering; V.8 fallback if K56flex is not agreed | ERROR |
 | `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
 | `V92`      | as V90, with V.92                                        | V.92 + V.34       |
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
@@ -210,8 +210,19 @@ power-on offer. The automode column is what `AT+MS=<carrier>,0` offers.
   `...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
   maximum: 14400 for V32B, 33600 for V34, 56000 for V90/V92, 60000 for K56
   (the K56flex firmware tables run to 60000), and 64000 for V91 and X2/X2S.
-- The bounds are stored and reported but not enforced: rates come from
-  training. The exception is `V32`'s 9600 cap, since V.32 has no higher rate.
+- Bounds constrain the next-call offer and negotiated rates; a connection
+  outside the bounds is refused (V.250 6.4.1). Training still determines
+  which permitted rate can be used.
+- For K56flex, downstream is RX when calling and TX when answering. Explicit
+  downstream bounds select the highest permitted 2000 bit/s ladder rate
+  (32000–60000); the accepted report can lower it to an available pad-group
+  table. With no downstream bounds, the hardware-qualified defaults remain
+  unchanged (client requests 52000, server ceiling 56000).
+  For a 60000-down/31200-up engine pair, set the calling client to
+  `AT+MS=K56,1,0,31200,60000,60000` and the answering server to
+  `AT+MS=K56,1,60000,60000,0,31200`. No rate environment variables are needed.
+  58000/60000 require unadjusted mapper tables; these rates are verified in
+  closed loop, not qualified against hardware.
 - `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
 
 CLEAR and V120 need the bearer byte-exact end to end and both ends set alike;

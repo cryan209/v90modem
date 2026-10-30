@@ -348,6 +348,16 @@ static int test_engine(void)
     expect("AT+MS=K56,0", "ERROR");
     expect_describe("V90|V34|V32|V22|+K56");
 
+    /* V.250 6.4.1: K56's 2k ladder and call-direction-dependent PCM
+     * role, not V.90's 1333 bit/s ladder. Either role may be the next call. */
+    expect("AT+MS=K56,1,0,31200,60000,60000", "OK");
+    expect("AT+MS?", "+MS: K56,1,0,31200,60000,60000");
+    expect("AT+MS=K56,1,58000,60000,0,31200", "OK");
+    expect("AT+MS?", "+MS: K56,1,58000,60000,0,31200");
+    expect("AT+MS=K56,1,57001,57999,0,31200", "ERROR");
+    expect("AT+MS?", "+MS: K56,1,58000,60000,0,31200");
+    expect("AT+MS=K56", "OK");
+
     /* V.91: on top of V.90 with automode, with only V.34 beside it without. */
     expect("AT+MS=V91", "OK");
     expect_describe("V90|V34|V32|V22|+V91");

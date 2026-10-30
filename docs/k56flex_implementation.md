@@ -3545,3 +3545,61 @@ Thus **64000 is not reachable by changing the existing variables**. A new
 mapper and a negotiation extension would be required, not merely a raised
 cap. This tests the implementation's limits, not the physical possibility
 of a nonstandard PCM scheme (Draft 0.23 4.12 remains the existing mapper).
+
+### AT-controlled downstream rates and binary-transfer qualification
+
+The earlier high-rate engine pairs needed diagnostic rate overrides. They
+now work through `AT+MS` alone (V.250 6.4.1, K56flex Draft 0.23 4.12):
+
+| End | Exact 60000 downstream, upstream ceiling 31200 |
+|---|---|
+| Calling client | `AT+MS=K56,1,0,31200,60000,60000` |
+| Answering server | `AT+MS=K56,1,60000,60000,0,31200` |
+
+Replace the two 60000 fields at each end with 56000 or 58000 to test those
+rates. With explicit downstream bounds, choose the highest permitted 2000
+bit/s ladder rate. With no downstream bounds, retain the client request of
+52000 and server ceiling of 56000. This is bound-driven selection, **not a
+new receiver-SNR-driven rate adaptation algorithm**.
+
+Three fixes make this possible:
+
+1. Offer pruning used V.90's downstream ladder and digital-role direction
+   for K56flex too, withdrawing legitimate 58000/60000 offers and client
+   receive bounds. K56flex now has its own ladder and client/server role.
+2. Client MP and server PCM setup now apply the local downstream bounds;
+   client upstream MP masks apply its TX bounds. The server refuses an MP
+   outside its TX/RX bounds, and the client refuses an acquired downstream
+   outside its RX bounds before opening the data stack. Diagnostic rate
+   overrides cannot bypass these bounds.
+3. At MP acceptance, the server chooses an existing table for the accepted
+   report, rate cap and law. Both pad-adjusted groups stop at 56000, so a
+   60000 request now downshifts to 56000 rather than failing at priming.
+   A minimum of 58000/60000 still requires refusal rather than violating
+   the user's limit. This does not add dynamic impairment measurement.
+
+`engine_pair_test --payload-random-bytes N` generates independent,
+deterministic full-octet pseudorandom streams (including NUL) in each
+direction, up to 65536 bytes. Completion uses length-aware matching rather
+than C-string matching, and random-transfer cases must finish in DATA,
+including after any `--hold-seconds`. Use `ATS2=255` to disable the Hayes
+escape sequence for arbitrary binary data. The harness reports each
+transfer's payload goodput using simulated sample time; this includes
+framing, establishment after CONNECT, and host scheduling effects, and is
+not a raw line-rate benchmark or a LAPM retransmission measurement.
+
+Qualification: **36 focused tests passed**, including the existing native
+HSF pairs, default 52000 pairs, client/mapper/training tests, AT tests and
+V.34 fallback. New coverage includes:
+- 56000, 58000 and 60000 in both laws, **32768 exact bytes each way** with
+  default LAPM/V.42bis and no rate environment overrides.
+- 60000 in both laws, LAPM/V.42bis and V.14, **65536 exact bytes each way**
+  followed by another **20 simulated seconds in DATA**.
+- Either end's downstream cap at 48000, despite diagnostic overrides;
+  disjoint downstream limits refused; both pad groups downshift to 56000.
+
+An isolated mu-law 60000 LAPM run delivered 65536 bytes downstream in
+9.40 simulated seconds (**55775 payload bit/s**) and upstream in 20.46 s
+(**25625 payload bit/s**), including the overhead described above.
+No new live hardware calls were made. Receiver acquisition/noise/clock-error
+matrices, automatic retraining and rate renegotiation remain future work.

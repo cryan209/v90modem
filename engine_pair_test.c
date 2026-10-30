@@ -18,6 +18,7 @@
  *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
  *                    [--expect-hangup] [--expect-no-connect] [--payload-lines N]
  *                    [--payload-printable PREFIX] [--payload-reps N]
+ *                    [--payload-random-bytes N]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
  * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
@@ -258,13 +259,14 @@ typedef struct {
     int n_log_has;
     const char *log_not[MAX_ENV];    /* --X-nolog: must not */
     int n_log_not;
-    char dte[65536];    /* everything read from the DTE side */
+    char dte[131072];    /* everything read from the DTE side */
     size_t dte_len;
-    char payload[16384];
+    char payload[65537];
     size_t payload_len;
     int connect_frame;  /* frame index CONNECT was seen, -1 if not */
     int sent;
     size_t sent_len;    /* payload octets the PTY has accepted so far */
+    int payload_received_frame; /* peer's whole payload received, -1 until then */
     int linear;         /* --fdm-call-linear: an analogue modem's converters */
 } side_t;
 
@@ -445,6 +447,8 @@ int main(int argc, char **argv)
     int payload_lines = 12;
     const char *payload_printable = NULL;
     int payload_reps = 4;
+    int payload_random_bytes = 0;
+    int payload_start_frame = -1;
     int fax_hdlc = 0;
     int fdm_slot = -1, fdm_rate = 96000, fdm_taps = 96, fdm_bank_slots = 0;
     float fdm_level = -20.0f;
@@ -523,6 +527,14 @@ int main(int argc, char **argv)
             payload_lines = atoi(argv[++i]);
             if (payload_lines < 1 || payload_lines > 12)
                 payload_lines = 12;
+        } else if (!strcmp(argv[i], "--payload-random-bytes") && i + 1 < argc) {
+            char *end;
+            long n = strtol(argv[++i], &end, 10);
+            if (*end || n < 1 || n > 65536) {
+                fprintf(stderr, "--payload-random-bytes must be 1..65536\n");
+                return 2;
+            }
+            payload_random_bytes = (int)n;
         } else if (!strcmp(argv[i], "--payload-printable") && i + 1 < argc) {
             payload_printable = argv[++i];
         } else if (!strcmp(argv[i], "--payload-reps") && i + 1 < argc) {
@@ -630,7 +642,22 @@ int main(int argc, char **argv)
             }
             s->payload[s->payload_len] = '\0';
         }
+        if (payload_random_bytes) {
+            /* Independent deterministic full-octet streams, including NUL,
+             * rather than repeated text which V.42bis can compress away.
+             * Use ATS2=255 in tests to disable Hayes escape recognition. */
+            uint32_t rng = k ? 0x9e3779b9u : 0x12345678u;
+            s->payload_len = (size_t)payload_random_bytes;
+            for (size_t i = 0; i < s->payload_len; ++i) {
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                s->payload[i] = (char)(rng >> 24);
+            }
+            s->payload[s->payload_len] = '\0';
+        }
         if (fax_hdlc) { s->payload_len = snprintf(s->payload,sizeof(s->payload),"%c Class 1 duplex HDLC payload",k ? 'A' : 'C'); }
+        s->payload_received_frame = -1;
         s->connect_frame = -1;
         if (spawn(s, alaw) != 0 || open_pty(s) != 0) {
             fprintf(stderr, "could not start the %s side\n", s->name);
@@ -692,6 +719,8 @@ int main(int argc, char **argv)
             if (!s->sent && (payload_on_connect ? s->connect_frame >= 0
                              : (side[0].connect_frame >= 0 && side[1].connect_frame >= 0
                                 && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25))) {
+                if (payload_start_frame < 0)
+                    payload_start_frame = f;
                 if (stall_until < 0)
                     stall_until = f + (int) (dte_stall_seconds*8000.0/FRAME);
                 if (gap_ms > 0.0 && gap_start < 0) {
@@ -719,8 +748,11 @@ int main(int argc, char **argv)
             done_frame = f;
             break;
         }
-        if (side[0].sent && side[1].sent
-            && strstr(side[0].dte, side[1].payload) && strstr(side[1].dte, side[0].payload)) {
+        for (int k = 0; k < 2; ++k)
+            if (side[1-k].sent && side[k].payload_received_frame < 0
+                && memmem(side[k].dte, side[k].dte_len, side[1-k].payload, side[1-k].payload_len))
+                side[k].payload_received_frame = f;
+        if (side[0].payload_received_frame >= 0 && side[1].payload_received_frame >= 0) {
             done_frame = f;
             break;
         }
@@ -732,6 +764,17 @@ int main(int argc, char **argv)
             usleep(2000);
         else if ((f & 7) == 0)
             usleep(1000);
+    }
+
+    if (payload_random_bytes && payload_start_frame >= 0) {
+        for (int k = 0; k < 2; ++k) {
+            if (side[1-k].payload_received_frame < 0) continue;
+            double elapsed = (side[1-k].payload_received_frame - payload_start_frame + 1)*FRAME/8000.0;
+            printf("  random binary %s -> %s: %d bytes in %.2f simulated seconds "
+                   "(%.0f payload bit/s, including framing/startup overhead)\n",
+                   side[k].name, side[1-k].name, payload_random_bytes, elapsed,
+                   payload_random_bytes*8.0/elapsed);
+        }
     }
 
     /* --hold-seconds: stay in data mode before grading, so a bit dump
@@ -834,6 +877,11 @@ int main(int argc, char **argv)
         }
         if (!expect_hangup && !no_connect && s->connect_frame < 0)
             failed = 1;
+        if (payload_random_bytes && !expect_hangup && !no_connect
+            && !strstr(fin, "state=DATA ")) {
+            printf("  %-6s FAIL: binary transfer did not finish in DATA\n", s->name);
+            failed = 1;
+        }
         for (int q = 0; q < s->n_absent; q++) {
             if (strstr(s->dte, s->absent[q])) {
                 printf("  %-6s FAIL: DTE stream contains \"%s\"\n", s->name, s->absent[q]);

@@ -3858,16 +3858,21 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
 
         return lim_symmetric(r, 1, l);
     }
-    if ((o->v90 || o->x2 || o->k56)
+    /* K56flex has its own 2000 bit/s ladder, including 58/60k; it must
+     * not be pruned using V.90 Table 13 (V.250 6.4.1, Draft 0.23 4.12). */
+    if (o->k56 && !(lim_ladder(32000, 60000, 2000, 1, dmin, dmax)
+                   && lim_v34(umin, umax)))
+        o->k56 = false;
+    if ((o->v90 || o->x2)
         && !(lim_pcm_downstream(dmin, dmax)
              && (lim_v34(umin, umax)
                  /* V.92 PCM upstream: up to 48000, same 8000/6 steps */
                  || (o->v92 && lim_ladder(24000, 48000, 8000, 6, umin, umax)))))
-        o->v90 = o->v92 = o->x2 = o->k56 = false;
+        o->v90 = o->v92 = o->x2 = false;
     /* A PCM offer keeps V.8's V.34 bit whatever the bounds: V.90's upstream
      * is V.34 (and so is its fallback), so the bit is part of offering V.90
      * at all.  A V.34 fallback outside the bounds is refused at CONNECT. */
-    if (o->v34 && !o->v90 && !o->x2
+    if (o->v34 && !o->v90 && !o->x2 && !o->k56
         && !(lim_v34(l[LIM_MIN_TX], l[LIM_MAX_TX]) && lim_v34(l[LIM_MIN_RX], l[LIM_MAX_RX])))
         o->v34 = false;
     if (o->v32bis_ok && !(strcmp(o->name, "v32") == 0
@@ -3876,7 +3881,7 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
         o->v32bis_ok = o->v32 = false;
     if (o->v22 && !lim_symmetric(lim_v22_rates, strcmp(o->name, "v22-1200") == 0 ? 1 : 2, l))
         o->v22 = false;
-    return o->v90 || o->x2 || o->v34 || o->v32bis_ok || o->v22 || o->v91;
+    return o->v90 || o->x2 || o->k56 || o->v34 || o->v32bis_ok || o->v22 || o->v91;
 }
 
 bool me_mode_name_valid(const char *mode)
@@ -3886,12 +3891,17 @@ bool me_mode_name_valid(const char *mode)
     return mode && *mode && me_offer_from_mode(mode, true, &o);
 }
 
-/* Whether this end receives the PCM direction: the V.90 analogue role, or
- * the asymmetric x2 client, which is the end that dials (Draft 0.33 3.3). */
+/* Whether this end receives PCM: V.90's analogue role, or the asymmetric
+ * x2/K56flex client, normally the end that dials (Draft 0.33 3.3 and
+ * K56flex Draft 0.23 4.1). K56flex's explicit diagnostic role wins. */
 static bool me_offer_pcm_received(const me_offer_t *o, bool calling)
 {
     const char *role = getenv("ME_V90_ROLE");
+    const char *kr = getenv("ME_K56FLEX_ROLE");
 
+    if (o->k56)
+        return kr && strcmp(kr, "client") == 0
+            ? true : kr && strcmp(kr, "server") == 0 ? false : calling;
     return (o->v90 && role && strcmp(role, "analogue") == 0)
         || (o->x2 && !o->x2_symmetric && calling);
 }
@@ -3961,11 +3971,12 @@ int me_set_modulation_limits(const char *mode, bool automode,
     if (!me_offer_from_mode(mode, automode, &o))
         return -1;
     /* V.250 5.4.4.2: a setting this DCE cannot honour is ERROR, not an OK
-     * that leaves the next call unable to connect.  Asymmetric x2's PCM
-     * direction depends on whether the next call dials or answers. */
+     * that leaves the next call unable to connect. Asymmetric x2/K56flex
+     * PCM direction depends on whether the next call dials or answers. */
     if (!me_offer_apply_limits(&o, l, me_offer_pcm_received(&o, false))) {
         me_offer_from_mode(mode, automode, &o);
-        if (!(o.x2 && !o.x2_symmetric && me_offer_apply_limits(&o, l, true)))
+        if (!(((o.x2 && !o.x2_symmetric) || o.k56)
+              && me_offer_apply_limits(&o, l, true)))
             return -1;
     }
     me_offer_from_mode(mode, automode, &o);     /* the name, unpruned */
@@ -5324,11 +5335,41 @@ static void me_k56c_up_init_locked(void)
                 cfg.mp_up_code = (unsigned) n;
         }
     }
+    /* V.250 6.4.1: RX is the downstream in a K56flex client call.
+     * Explicit bounds select the highest permitted PCM rate; retain the
+     * hardware-qualified 52000 request when no bounds were supplied. */
+    if (me_k56c_call() && (g_lim[LIM_MIN_RX] || g_lim[LIM_MAX_RX])) {
+        int down;
+        for (down = 60000; down >= 32000; down -= 2000)
+            if (lim_admits(down, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) break;
+        if (down < 32000) {
+            g_state = ME_HANGUP;
+            return;
+        }
+        cfg.mp_down_code = (unsigned)(down/2000 - 15);
+    }
     cfg.mp_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_REPEATS", (int) cfg.mp_repeats);
     cfg.mp_ack_repeats = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_ACK_REPEATS", (int) cfg.mp_ack_repeats);
     cfg.mp_up_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_UP_CODE", (int) cfg.mp_up_code);
     cfg.mp_down_code = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_DOWN_CODE", (int) cfg.mp_down_code);
     cfg.mp_mask = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_MASK", (int) cfg.mp_mask);
+    if (me_k56c_call()) {
+        /* Diagnostic overrides cannot escape the AT bounds (V.250 6.4.1).
+         * Do not turn an invalid four-bit MP code into a valid request. */
+        if (cfg.mp_down_code >= 1 && cfg.mp_down_code <= 15) {
+            int down = (int)(cfg.mp_down_code + 15)*2000;
+            while (down >= 32000
+                   && !lim_admits(down, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) down -= 2000;
+            if (down < 32000) { g_state = ME_HANGUP; return; }
+            cfg.mp_down_code = (unsigned)(down/2000 - 15);
+        }
+        for (unsigned n = 1; n <= 14; ++n)
+            if (!lim_admits((int)n*2400, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX]))
+                cfg.mp_mask &= ~(1u << (n-1));
+        while (cfg.mp_up_code > 0 && cfg.mp_up_code <= 14
+               && !(cfg.mp_mask & (1u << (cfg.mp_up_code-1)))) --cfg.mp_up_code;
+        if (!cfg.mp_up_code) { g_state = ME_HANGUP; return; }
+    }
     cfg.mp_extra_fill = (unsigned) parse_env_int("ME_K56FLEX_CLIENT_MP_FILL", (int) cfg.mp_extra_fill);
     g_k56c_trn16_forced = parse_env_int("ME_K56FLEX_CLIENT_TRN16", -1);
     g_k56c_data_on = parse_env_int("ME_K56FLEX_CLIENT_DATA", me_k56c_call()) != 0;
@@ -5577,6 +5618,10 @@ static void me_k56c_data_progress_locked(void)
     if (!g_k56c_ds_started) {
         int rate = g_k56c[g_k56c_data_law]->rate_bps;
 
+        if (!lim_admits(rate, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) {
+            me_k56c_stop_locked("downstream outside AT+MS bounds");
+            return;
+        }
         if (data_stack_start_online(rate, true)) {
             me_k56c_stop_locked("data stack would not start");
             return;
@@ -5838,7 +5883,16 @@ static bool me_k56_probe_start_locked(void)
     const char *rate = getenv("ME_K56FLEX_RATE"), *gate = getenv("ME_K56FLEX_GATE_MS");
     memset(&tc, 0, sizeof(tc));
     tc.law = g_law == ME_LAW_ULAW ? K56FLEX_LAW_MU : K56FLEX_LAW_A;
-    tc.rate_bps = rate ? atoi(rate) : 56000;
+    tc.rate_bps = rate ? atoi(rate) :
+        ((me_k56s_call() && (g_lim[LIM_MIN_TX] || g_lim[LIM_MAX_TX])) ? 60000 : 56000);
+    /* Draft 0.23 4.12 / V.250 6.4.1: the server transmits PCM. Bounds
+     * are hard limits even when a diagnostic rate override is present. */
+    if (me_k56s_call() && tc.rate_bps >= 32000 && tc.rate_bps <= 60000
+        && tc.rate_bps % 2000 == 0) {
+        while (tc.rate_bps >= 32000
+               && !lim_admits(tc.rate_bps, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX]))
+            tc.rate_bps -= 2000;
+    }
     /* K56flex Draft 0.23 4.10: DBA8 appends B31D's Jd word after
      * probing. Request four-point upstream training (V.34 10.1.3.3,
      * Table 18). Original HSF 120236a0/12035bf0 waits for 0x8990 or
@@ -15531,8 +15585,10 @@ void me_rx_audio(const int16_t *amp, int len)
             if (events & K56U_MP) {
                 int upstream = k56flex_train_accept_mp(g_k56_train, result.mp_up,
                                                        result.mp_down, result.mp_mask);
-                if (upstream < 0) {
-                    trace_phase("K56flex unsupported upstream MP from audio");
+                if (upstream < 0
+                    || !lim_admits(g_k56_train->cfg.rate_bps, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX])
+                    || !lim_admits(upstream, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) {
+                    trace_phase("K56flex unsupported or out-of-bounds MP from audio");
                     g_state = ME_HANGUP;
                 } else {
                     g_k56_upstream_bps = upstream;
