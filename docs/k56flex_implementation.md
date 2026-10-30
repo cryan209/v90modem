@@ -3897,3 +3897,59 @@ SHA-256 `f924e0e873ccb446787714c4f9bbc897c6ae204f78beb4e88f76b32202463ef0`
 and upstream `cba75eb4b8f7ddee355a93c2442c157be1d4c083bbc469df5af90393871c9f69`.
 No permanent regression fixture or production code change resulted from
 this qualification.
+
+## MT5634MU above 46k — 30 October 2026
+
+Six further bounded PCMU calls used the same **393cfecc** CT117 answerer
+and Lucent 8.18j caller, with a **262144-byte each-way verification
+requirement**. **None passed or reached payload verification**. The caller
+can request higher rates in audio MP, but that is not a usable data link:
+
+| Caller experiment | Actual audio MP / upstream-B1 DATA gate | End-to-end outcome |
+|---|---|---|
+| S38=17, S42=0 | No MP/DATA | Phase 2 failed with no usable measured INFO1 selection |
+| S38=17, S42=1, normal error control | **56000 down / 31200 up** | Server error-control detection fell back to `CONNECT 56000/K56`; no usable caller session |
+| S38=10, S42=1, normal error control | **48000 down / 31200 up** | Server fell back to `CONNECT 48000/K56`; no usable caller session |
+| S38=12, S42=1, normal error control | **52000 down / 31200 up** | Server `CONNECT 52000/ARQ/K56/LAPM/V42BIS`, but physical caller **`CONNECT 52000 NoEC`**; no application handshake |
+| S38=14, S42=1, normal error control | **56000 down / 31200 up** | Server fell back to `CONNECT 56000/K56`; no usable caller session |
+| S38=12, S42=1, caller `AT\\N0`, server `AT+ES=1` | **52000 down / 31200 up** | Raw-V.14 diagnostic: server `CONNECT 52000/K56`, but the first application request was not `DOWNLOAD`; stopped before payload |
+
+Every server used `AT+MS=K56,1,0,56000,0,31200`; S109 remained **1**.
+Higher rates were selected by volatile caller settings, not by changing
+firmware/training gates or relabeling an offer ceiling. The normal
+error-control tests required an actual K56/LAPM server CONNECT before
+sending data. Their buffered fallback was rejected, so the resulting
+hangup means **the required interoperable session failed**, not proof that
+the caller could never acquire raw modulation. In the 52k case the server
+waited for an application request while the physical modem eventually
+reported NoEC, a directly observed **error-control framing disagreement**.
+The raw diagnostic also stopped at the application handshake; it supplies
+no 256 KiB BER/integrity result. Do not infer a physical 46k ceiling from
+these harness failures.
+
+**S38 encoding trap:** the available MultiTech 5634-family guide
+**S000272E pp. 28–29** documents the S38 maximum-rate, S42 autorate and S109
+mode controls, but its S38 rate table is on the V.90 ladder and does **not**
+identify the observed legacy Flex rate of this 1999 MU firmware. Its cover
+lists newer 5634 variants, not this exact MU. The initial S38=17 trial was
+intended as 48k from that table; with autorate enabled it actually requested
+**56k**, not 48k. Subsequent audio MP confirms **S38=10 → 48k, 12 → 52k,
+14 → 56k** in these calls. Accepted AT commands and guide labels are not
+rate qualification; use received MP, both ends' CONNECT, and exact data
+(K56flex Draft 0.23 4.10–4.12; V.34 10.1.3.9).
+
+Consequently **46k remains the highest long-transfer-qualified rate** from
+this session, with the earlier two exact 256 KiB each-way calls under the
+56k offer. The next investigation above it is downstream/EC interoperability
+and the actual transmitted stream, not merely raising the server's rate
+constant. No cause has been assigned to the physical modem, and no DSP,
+gateway audio or production-default change was made.
+
+The original **S109=1, S38=1, S42=1**, automatic V.42/MNP/buffered error
+control (`AT\\N3`), and command echo were restored and read back in the
+active profile. AT/ATH worked, the test bridge was stopped, no isolated
+answerer remained, and the unrelated local SIP process was left running.
+Disposable evidence is `artifacts/mt5634mu-high-rates-20261030/`: six per-call
+archives with raw G.711/RTP/DTE logs, settings/readback records, paginated
+ATI11, benchmark variants and a cross-checked `summary.json` (**0/6 full
+passes**). There is no new permanent regression fixture.
