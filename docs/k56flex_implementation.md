@@ -3805,3 +3805,95 @@ client events and payload digests, paginated ATI11, a structured
 raw RX/TX G.711 and RTP timing for all five calls. These paths are provenance,
 not permanent regression fixtures. No production DSP changes resulted from
 this hardware check.
+
+## MT5634MU long transfers at multiple rates — 30 October 2026
+
+The follow-up used the same **393cfecc** clean CT117 answerer, PCMU and
+Lucent **8.18j** caller, with **262144 pseudorandom bytes (256 KiB) in each
+direction per DATA call**. Download and upload were sequential, not a
+simultaneous saturation test. Each receiver compared the entire byte array
+against its independently generated reference; SHA-256 plus explicit peer
+acknowledgements checked the transfer protocol as well. The two directions
+use different `random.Random(...).randbytes(...)` seeds, 9234001 and
+9234002. All successful calls negotiated **31200 upstream, LAPM/V.42bis**.
+No DSP, firmware, gateway settings or saved modem profiles were changed.
+
+The answerer's rate settings and complete outcomes were:
+
+| Actual downstream | Answerer `AT+MS` | Complete 256 KiB each-way passes | Passing payload goodput, down / up (kbit/s) |
+|---|---|---|---|
+| **32000** | `K56,1,32000,32000,0,31200` | **2/3** | **29.809–29.818 / 20.495–22.888** |
+| **40000** | `K56,1,40000,40000,0,31200` | **2/3** | **37.220–37.235 / 18.357–20.011** |
+| **46000** | `K56,1,0,56000,0,31200` | **2/2** | **42.785–42.787 / 20.971–22.551** |
+| No DATA | `K56,1,46000,46000,0,31200` | **0/1**, correctly refused a 44000 peer selection | — |
+
+Thus **nine attempts produced eight DATA calls and six fully passing long
+transfers**: **3 MiB byte-exact across the six passing pairs**. All eight
+DATA calls delivered the complete 256 KiB downstream exactly, including the
+two whose uploads failed. Counting those extra downloads, receiver-verified
+data totals **3.5 MiB**; do not count the corrupt/incomplete uploads as
+verified. The six full passes each have matching answerer K56flex DATA,
+CONNECT, and physical ATI11 initial/final rates. Their ATI11 reports show
+**zero retrains, zero rate renegotiations and zero receive-frame errors**.
+Transmit-frame errors were **14 and 32** at 32k, **32 and 43** at 40k, and
+**18 and 29** at 46k, each out of **2165 transmit frames**; each physical
+receive-frame count was 2062. Exact LAPM delivery is not evidence of a
+zero-error raw upstream.
+
+**Failures are part of the qualification, not discarded retries:**
+
+- **32k, second call:** download was exact, but the server received a full
+  **262144-byte upload that failed the byte comparison**. Its benchmark
+  stopped with `upstream payload differs`; this is an integrity failure,
+  not a successful connection or a mere hangup issue. This version of the
+  benchmark did not retain the corrupt bytes, so an offset/duplication
+  diagnosis cannot be recovered from its assertion alone. Failure capture
+  was then added to the disposable harness; the third 32k call passed.
+- **40k, first call:** download was exact; during upload the engine latched
+  **upstream decoder loss at +131.025 s after answer** and ended the call.
+  The upload never reached verified completion. This latch is based on
+  persistent V.34 upstream decision error, not proof that analogue power
+  disappeared. The final complete one-second RX tap window (130–131 s)
+  measured **3952 linear RMS**, while our TX measured **3872 RMS**: both
+  waveforms still had substantial energy. Check our upstream receiver and
+  transmit waveform before attributing this to the caller. Both following
+  40k calls passed.
+- **Exact 46k bounds:** an offline audio-only decode of that call's raw RX
+  tap recovered the two matching CRC-valid MP records: upstream code **13**
+  (**31200**), downstream code **7** (**44000**), mask **0x1fff**. Rejecting
+  44000 below the configured 46000 minimum was correct. This is not a
+  failed 46k DATA transfer or proof that its constellation is unsupported
+  (V.34 10.1.3.9 / K56flex MP downstream field). Restoring the original
+  **56000 ceiling** allowed the caller to choose **46000**, and two fresh
+  calls then passed the long test. Do not relabel those as 56k successes.
+
+The vendor-endpoint bridge logged bulk-OUT timeouts in some runs, including
+the failing upload and a successful 40k upload. Those are a **DTE transport
+confounder**, not proof of their cause or of a modem/DSP defect. The live
+USB timeout/retry path and the suspect upstream receiver need separate,
+alternated controls; no untested timeout or DSP change was introduced to
+make this matrix pass. In particular, the 32k/40k failures prevent a claim
+of reliable operation across the rate ladder. **46k has two clean long
+calls under the existing 56k-ceiling offer**, a bounded qualification, not
+an exhaustive BER, clock-error or repeatability result. No rates above
+46k, A-law, in-call retraining or downshifting were qualified here.
+
+For these runs, the primary physical-modem hangup was the documented
+**last-PTY-close bridge escape/ATH**, rather than waiting for the previously
+unqualified remote `NO CARRIER` path. After allowing the bridge to finish,
+the harness reopened the port, confirmed AT and ATH, and collected the full
+paginated ATI11. All six passing payload calls completed this cleanup and
+exited zero. This does not retroactively qualify remote hangup indication.
+Final checks read back **S109=1, S38=1**, restored command echo, and confirmed
+AT responsiveness. The test bridge was stopped, no test answerer remained,
+and the unrelated pre-existing local SIP process was left running.
+
+Disposable evidence: `artifacts/mt5634mu-rate-qualification-20261030/` contains
+all nine result JSON files and per-call server archives (RX/TX G.711, RTP
+CSV, server log and DTE events), client payload digests/ATI11, the bridge
+log, a cross-checked `summary.json`, the exact bounded driver/benchmark, and
+the rejected-MP audio replay. All passing calls compare against downstream
+SHA-256 `f924e0e873ccb446787714c4f9bbc897c6ae204f78beb4e88f76b32202463ef0`
+and upstream `cba75eb4b8f7ddee355a93c2442c157be1d4c083bbc469df5af90393871c9f69`.
+No permanent regression fixture or production code change resulted from
+this qualification.
