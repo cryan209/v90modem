@@ -3733,3 +3733,75 @@ group `k56flex-hsf-impairments`. Seven numerical/accounting unit tests are
 in the fast tier; both original native-HSF controls also still pass.
 These measurements do not qualify A-law, LAPM recovery, automatic rate
 selection, retraining, hardware, or a combined/coupled oscillator model.
+
+## MultiTech USB hardware check — 30 October 2026
+
+Five bounded live calls used an isolated, clean build of **393cfecc** on
+wired CT117, with its own SIP/RTP ports and extension 2904. The Mac's
+uncommitted SpanDSP changes were excluded. The answerer used `AT+MS=K56`,
+its normal downstream ceiling (56000), and PCMU; no rate/timing experiments,
+firmware patches, gateway audio changes or AT profile saves were made. The two
+USB bridges were started only for these tests and stopped afterwards.
+
+| Physical caller | Configuration | K56flex result | Verified user data |
+|---|---|---|---|
+| MT5634MU, Lucent 8.18j | Existing automatic profile, S109=1 | **2/3 starts reached K56flex DATA**, both **46000 down / 31200 up**, LAPM/V.42bis | One 8192-byte and one 32768-byte pseudorandom transfer **each way**, exact at both receivers |
+| MT9234ZBA-USB, Agere 1.02e | Original `+MS: V92,1,0,31200,0,56000`, S109=18 | No V.8bis CRd; V.90 attempts then V.34 fallback | 8192 bytes exact each way, **V.34 only** |
+| Same MT9234ZBA-USB | Explicit `AT+MS=K56,0`, read back as `K56,0,0,31200,0,56000`, S109=1 | Still no V.8bis CRd and still V.34 fallback | Another 8192 bytes exact each way, **not Flex** |
+
+For the MT5634MU, both successful calls have received audio MP selections
+of **31200 up / 46000 down**, acquired upstream MP/MP'/B1, and answerer
+`CONNECT 46000/ARQ/K56/LAPM/V42BIS`. The longer call's physical ATI11 agrees:
+initial and final TX **31200**, RX **46000**, last connection `56K`, LAPM,
+V.42bis, **zero retrains and zero rate renegotiations**. The answerer trace,
+not the ambiguous `56K` label alone, identifies K56flex (Draft 0.23 clauses
+4.10–4.12). This adds **40 KiB exact in each direction** over two fresh calls.
+It is not a 52/56/58/60k hardware qualification or an A-law result.
+
+The 32768-byte call measured **40.934 kbit/s downstream** (request to final
+byte, 6.404 s) and **18.464 kbit/s upstream** (first write to verified peer
+acknowledgement, 14.198 s). These are wall-clock payload goodputs, not
+carrier rates or simultaneous full-duplex saturation measurements. ATI11
+reports **9 transmit-frame errors / 278 transmit frames**, **0 receive-frame
+errors / 262 receive frames**; LAPM nevertheless delivered the exact
+payload. Neither a zero-error physical channel nor successful retraining
+has been demonstrated.
+
+The failed MT5634MU start did agree K56flex in V.8bis. In the common Phase-2
+prelude (V.34 clause 10.1.2), its first received INFO0 was bad, our sender
+retried INFO0, a later INFO0 was valid, and our transmitter advanced to
+`FIRST_NOT_A`. INFO1a/c never completed; startup timed out at **40.82 s**
+after answer, without DATA or a data fallback. The two following starts
+passed. Thus this check is **2/3 for startup**, not a replacement for the
+previous repeatability measurements, and does not establish which side
+caused the Phase-2 stall. Preserve the bad-INFO0 recovery case for analysis
+of our own transmit tap before attributing it to the caller.
+
+**Teardown is a separate failure.** On the 8192-byte Flex call, the explicit
+physical-modem `+++` escape was not confirmed. On the 32768-byte Flex call,
+the answerer's guarded escape/ATH returned OK and SIP disconnected, but the
+physical caller did not deliver `NO CARRIER` within the 30-second wait.
+Both client harness invocations therefore exited nonzero **despite the
+verified payloads**. Closing the MT5634MU PTY triggered the bridge's guarded
+escape/ATH; its carrier poll then showed off (2.385 s after close on the
+longer call). AT and paginated ATI11 subsequently worked; its final
+termination cause was 0. Do not count these as fully passing call-lifecycle
+tests or hide the cleanup failure in a payload-only success flag.
+
+The MT9234's `+MS=?` list omits K56 but its setter accepts it and changes
+S109; neither fact alone establishes legacy modem support. Both tested
+settings failed the actual V.8bis exchange. The original-setting V.34
+control reported answerer CONNECT 24000; the explicit-K56 control reported
+answerer CONNECT 16800 and caller RX7200/final TX16800, LAPM/V.42bis. Its
+second call completed the verified server-initiated hangup normally. Its
+original V.92 `+MS` tuple and S109=18 were restored and read back. Both
+modems were confirmed idle and their command echo restored before the
+bridges were stopped. No test answerer remained running; the pre-existing
+local SIP process was left alone.
+
+Disposable evidence is under `artifacts/multitech-k56-20261030/`: per-call
+client events and payload digests, paginated ATI11, a structured
+`summary.json`, and `server-evidence.tar.gz` containing the answerer logs,
+raw RX/TX G.711 and RTP timing for all five calls. These paths are provenance,
+not permanent regression fixtures. No production DSP changes resulted from
+this hardware check.
