@@ -1573,7 +1573,9 @@ prints true bit numbers; inverting them again sends you the wrong way.
   with `ffd9` bit 0 gives identical banks). `x2.c`'s "final output XOR (0 or
   0x2a)" is exactly this.
 
-**Neither supervisor sends `6b`.** In Ie030002 and in IM020104:
+**Neither supervisor sends `6b`** (WRONG, corrected below: `AT*W=4a` makes
+Ie030002 send it; this static search missed the send). In Ie030002 and in
+IM020104:
 - the 62 (respectively 56) calls to the command sender carry 36 immediate tags,
   none of them `6b`;
 - the deferred-command routine `7992e` is called 34 times, with tags `5e 63 01
@@ -1654,7 +1656,30 @@ Total Control equipment.
 - on the wire the server's B was 100% `9b`/`1b` (`b1`/`31` ^ `2a`) and 0%
   `b1`/`31`: A-law-coded x2, not µ-law relabelled.
 
-## Who sends command 6b? Nothing in the I-modem (30 October 2026)
+## Who sends command 6b? `AT*W=nc` with `c = a` (30 October 2026)
+
+**Correction to the static result below.** The supervisor sends `6b` when
+`*W` selects A-law companding. Its help text reads `*W=nc  Sets switch
+type & companding method ... c Selects companding (a=A-Law, u=Mu-Law)`
+(`bfad9`, `bfb18`). Every earlier A-law run set only the switch digit (NVRAM
+`*W`) and S58 bit 4. Run against Ie030002 (A-law bearer, S58=52, nothing
+injected):
+- `AT*W=4a` (NET3, A-law): the supervisor sends `006b:003f`; `039f` gains bit
+  11 and `ffd9` bit 0. Our client connects (`CONNECT 57333/ARQ/x2/LAPM/V42BIS`
+  there) and all ten lines arrive. That run is now the slow-tier row, with no
+  diagnostic.
+- `AT*W=4u` (NET3, µ-law): no `6b`, the I-modem stays µ-law, and our A-law
+  client fails, as it should.
+- The switch digit alone (4 NET3, 5 1TR6, 6 VNx, 8 TS.013, with S58=52)
+  sends the same 26 tags and no `6b`.
+
+So the real configuration is the companding suffix. S58 bit 4 only
+advertises A-law in INFO0. The static search below did not find the send
+site: the tag never reaches a sender as an immediate, so it is built from
+runtime data. Where exactly is still to be traced. The DSP-side analysis
+below stands. The "no supervisor sends it" conclusion does not.
+
+### The static search, as first written
 
 `6b` is the only way into A-law. Every DSP instruction that writes `039f` or
 `ffd9`, and every handler in the resident's dispatch table (base `88d5`,
@@ -1686,9 +1711,9 @@ x2), `IE020405`/`IM020406` (V.90) and `IE020706`:
   mis-decoded as code. The only `006b` word near other tags is in a level
   table (`d888e`).
 
-S58 bit 4 is read once (`b2801`) and only advertises A-law in INFO0. So the
-DSP's A-law x2 mode, a complete and working path, is never commanded by any
-I-modem release we have. A host for it would have to be another product
+S58 bit 4 is read once (`b2801`) and only advertises A-law in INFO0. (The
+conclusion first drawn here, that no I-modem release commands the A-law mode,
+is wrong; see the correction above.) A host for it would have to be another product
 sharing this DSP code, or a path that static search cannot see (a tag
 loaded from a runtime structure). Running Ie030002 on an A-law NET3 profile
 with S58 = 52 sends the same command set as µ-law, with no `6b`.

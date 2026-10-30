@@ -48,12 +48,11 @@ python3 tools/multi_line_test.py --lines 8 --mode v90 --payload-rounds 32 --recy
 # peers to finish their original exact payloads while it trains and reconnects.
 python3 tools/multi_line_test.py --lines 3 --mode v90 --payload-rounds 64 --restart-line 0 --io-schedule
 @group
-# Our client against Ie030002 in its A-law x2 mode, on an A-law (NET3)
-# bearer. DIAGNOSTIC: no supervisor sends DSP command 6b, so the probe
-# delivers it (firmware unmodified); the I-modem then XORs every downstream
-# octet with 0x2a and codes Phase 2 in A-law. LAPM, all ten lines, no
-# NO CARRIER.
-sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ln -s "$PWD/../courier-emu/Ie030002.nac" "$TMPDIR/" && ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py --emu "$TMPDIR" --output "$TMPDIR/out" --law alaw --inject-alaw --fast --engine-at "AT&A3" --engine-send OUR-X2-CLIENT-0123456789! --answer-send IMODEM-X2-SERVER-0123456789 && grep -q "client startup (A-law, PCM ^ 2a)" "$TMPDIR/out/engine.log" && python3 -c "import json,sys; r=json.load(open(sys.argv[1])); t=\"\".join(s[\"text\"] for s in r[\"serial_session\"] if s[\"direction\"].startswith(\"received\")); sys.exit(0 if t.count(\"OUR-X2-CLIENT-0123456789!\")==10 and \"NO CARRIER\" not in t else 1)" "$TMPDIR/out/imodem-result.json"'
+# Our client against Ie030002 configured for an A-law network: AT*W=4a
+# (ETSI NET3, A-law companding) makes its own supervisor send DSP command
+# 006b:003f, and the I-modem then XORs every downstream octet with 0x2a and
+# codes Phase 2 in A-law. A-law bearer, LAPM, all ten lines, no NO CARRIER.
+sh -c 'git -C ../courier-emu archive f1ccd92 | tar -x -C "$TMPDIR" && ln -s "$PWD/../courier-emu/Ie030002.nac" "$TMPDIR/" && ../courier-emu/.venv/bin/python tools/probe_x2_client_imodem.py --emu "$TMPDIR" --output "$TMPDIR/out" --law alaw --imodem-settings "S54=0S58=52&A3&B1Q0*W=4a" --fast --engine-at "AT&A3" --engine-send OUR-X2-CLIENT-0123456789! --answer-send IMODEM-X2-SERVER-0123456789 && grep -q "client startup (A-law, PCM ^ 2a)" "$TMPDIR/out/engine.log" && python3 -c "import json,sys; r=json.load(open(sys.argv[1])); t=\"\".join(s[\"text\"] for s in r[\"serial_session\"] if s[\"direction\"].startswith(\"received\")); sys.exit(0 if t.count(\"OUR-X2-CLIENT-0123456789!\")==10 and \"NO CARRIER\" not in t else 1)" "$TMPDIR/out/imodem-result.json"'
 # Our client retrains itself (V.90 9.5.2.1) when its downstream is lost
 # for 1 s; Ie030002 answers our Tone A (9.5.1.2), data resumes, and all ten
 # of our lines reach its DTE with no NO CARRIER.

@@ -18,11 +18,13 @@ Ie030002.nac is not tracked; link it in), for example:
       --engine-at 'AT\\N0' --engine-send 'OUR-X2-CLIENT-0123456789!' \\
       --answer-send 'IMODEM-X2-SERVER-0123456789'
 
---law alaw puts the I-modem on an A-law ISDN bearer (NET3 profile, S58 bit 4
-"Force x2 A-law mode"). No supervisor command reaches its DSP's A-law x2 mode,
-though: --inject-alaw is a DIAGNOSTIC that delivers host command 6b (DSP
-82d7: G.711 codec A-law, x2 output XOR 0x2a) once, right after the
-supervisor's tag 70. The firmware is not modified. --trace-gate records the
+--law alaw puts the I-modem on an A-law ISDN bearer (NVRAM *W switch from
+--switch-protocol, default 4 NET3; S58 bit 4 "Force x2 A-law mode"). Its DSP
+goes into A-law x2 only when the supervisor sends host command 6b, which it
+does for A-law companding: add '*W=4a' to --imodem-settings. --inject-alaw is
+a DIAGNOSTIC that delivers 6b instead (DSP 82d7: G.711 codec A-law, x2
+output XOR 0x2a), once, right after the supervisor's tag 70; the firmware
+is not modified. --trace-gate records the
 Phase 2 gate (9596..965c) and the INFO0/ffd9 cells (docs/x2_implementation.md).
 
 Until its echo canceller settles, this I-modem's ANSam carries an impairment
@@ -55,6 +57,9 @@ def main():
     p.add_argument('--imodem-settings', default='S54=0S58=48&A3&B1Q0',
                    help='I-modem AT settings: S58=48 keeps x2, server and symmetric enabled, V.90 off')
     p.add_argument('--engine-at', default='', help='AT command sent to our PTY before the call')
+    p.add_argument('--switch-protocol', type=int, default=4,
+                   help='with --law alaw, the I-modem *W switch: 4 ETSI NET3 (default), '
+                        '5 Germany 1TR6, 6 France VNx, 8 Australia TS.013')
     p.add_argument('--inject-alaw', action='store_true',
                    help='DIAGNOSTIC: deliver host command 6b (DSP 82d7: 039f bit 11, ffd9 bit 0, '
                         'A-law) once, right after the supervisor\'s tag 70; firmware unmodified')
@@ -135,8 +140,9 @@ def main():
             sector = bytes(profile[pos:pos + config.SECTOR_SIZE])
             if any(config.page_is_sealed(sector[q:q + config.PAGE_SIZE])
                    for q in range(0, len(sector), config.PAGE_SIZE)):
-                profile[pos:pos + config.SECTOR_SIZE] = config.seal(config.set_switch_protocol(sector, 4))
-        nvram = a.output / 'native-profile-net3.sav'
+                profile[pos:pos + config.SECTOR_SIZE] = config.seal(
+                    config.set_switch_protocol(sector, a.switch_protocol))
+        nvram = a.output / ('native-profile-switch%d.sav' % a.switch_protocol)
         nvram.write_bytes(profile)
     peer = CallingPeer(a.output, a.engine.resolve(), a.fast)
     pair.G711Peer = lambda path, listen: peer
@@ -185,6 +191,9 @@ def main():
                 trace['gate_pcs'].extend(core.pc_trace()); core.clear_pc_trace()
                 trace['gate_captures'].extend(core.pc_captures()); core.clear_pc_captures()
                 trace['writes'].extend(core.data_events()); core.trace_data_writes(clear=True)
+                seen_cmds = trace.setdefault('commands_seen', {})
+                for c in mb.commands:
+                    seen_cmds.setdefault('%04x' % c[0], set()).add('%04x' % c[1])
                 trace['samples'].append({'instructions': current.instructions,
                     'cells': {x: core.data(int(x, 16)) for x in trace['addresses']}})
             kw['serial_pump'] = pump
@@ -197,6 +206,7 @@ def main():
         peer.stop()
         pair.IsdnMachine = original_machine
         if a.trace_gate or a.inject_alaw:
+            trace['commands_seen'] = {k: sorted(v) for k, v in trace.get('commands_seen', {}).items()}
             (a.output / 'gate-trace.json').write_text(json.dumps(trace, default=str, indent=1) + '\n')
     result = json.loads((a.output / 'imodem-result.json').read_text())
     imodem = ''.join(s['text'] for s in result['serial_session'] if s['direction'].startswith('received'))
