@@ -67,6 +67,7 @@ static void enter(k56flex_train_t *t, k56flex_train_phase_t ph)
         break;
     case K56T_ID_A: case K56T_ID_B: case K56T_ID2_A: case K56T_ID2_B:
         if (ph == K56T_ID_A) t->id_a_pair = t->pairs_total;
+        if (ph == K56T_ID2_A) t->id2_a_pair = t->pairs_total;
         enter_ident(t, ph);
         break;
     case K56T_P1:
@@ -121,19 +122,24 @@ static void enter(k56flex_train_t *t, k56flex_train_phase_t ph)
         t->pairs_left = bit8(t) ? 8 : 16;      /* DA56: halved by report bit 8 */
         break;
     }
-    case K56T_TAIL:
+    case K56T_TAIL: {
         k56flex_probe_append(&t->probe, 0xffff);
         t->pairs_left = bit8(t) ? 1 : 2;       /* DA75 */
-        /* Start priming an even number of pairs (a multiple of 24 samples,
-         * three 8-sample data frames) after ID_A began. The gates before
-         * this run until the client's audio events, so otherwise the parity
-         * is chance: against the MT5634MU (Lucent) every call that primed
-         * on the other parity got no further than marks (7 of 7), every one
-         * on this parity reached V.42 (4 of 4;
-         * mt5634mu-k56-20261027/server-*). One more FFFF tail pair moves it. */
-        if ((t->pairs_total + t->pairs_left - t->id_a_pair) % 2)
+        /* Draft 0.23 4.10-4.12: parameter training follows the SECOND
+         * identification; DATA uses eight-sample frames, probe pairs twelve.
+         * On the MT5634MU the working PRIME boundary is four samples modulo
+         * eight after ID2_A (an odd number of pairs), not a fixed parity from
+         * the first ID_A. Audio-driven gates can move ID2 by one pair: the
+         * old first-ID anchor then selected the wrong grid and the peer
+         * stayed in marks or fell back from V.42. Select the boundary before
+         * PRIME by extending FFFF at most one pair. Never splice RX samples
+         * or change the mapper tables. See the measured taps in the topic
+         * doc; four samples is observed receiver alignment, not a new ITU
+         * timing constant. */
+        if (((t->pairs_total + t->pairs_left - t->id2_a_pair) % 2) != 1u)
             ++t->pairs_left;
         break;
+    }
     case K56T_PRIME: {
         k56flex_pcm_config_t pc;
         pc.law = t->cfg.law;

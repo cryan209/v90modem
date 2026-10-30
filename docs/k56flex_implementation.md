@@ -3377,7 +3377,10 @@ the failures into three causes, all ours:
    gates before it run until the client's audio events, so the parity was
    chance. `k56flex_train.c` now adds one FFFF tail pair when needed. Timing
    was not the cause: priming came 117-124 ms after the client's 4-point
-   signal on good and bad calls alike.
+   signal on good and bad calls alike. **Correction, 30 October:** the first
+   ID_A was an incomplete reference. The second identification can move by
+   one pair; the later USB/48k investigation below anchors PRIME to ID2_A
+   instead. The observations here describe this earlier batch.
 2. **Our echo moved under the fixed canceller.** Creating and preparing the
    V.34 upstream receiver at MP took ~15 ms of one media callback on CT 117
    and held our downstream back 29-40 ms on every call. On call n the
@@ -3953,3 +3956,138 @@ Disposable evidence is `artifacts/mt5634mu-high-rates-20261030/`: six per-call
 archives with raw G.711/RTP/DTE logs, settings/readback records, paginated
 ATI11, benchmark variants and a cross-checked `summary.json` (**0/6 full
 passes**). There is no new permanent regression fixture.
+
+## MT5634MU improvements: ID2 grid and packet-safe USB — 30 October 2026
+
+**48k is now long-transfer-qualified**, superseding the previous session's
+46k result, but not establishing reliable 50–56k operation. Nine further
+bounded calls used the same Lucent 8.18j MU, PCMU, 31200 upstream, a 56000
+server ceiling, and **262144 pseudorandom bytes each direction**. The six
+failed high-rate calls above remain failures; they are not replaced by these
+successes. No gateway audio, firmware, saved modem profile or mapper table
+was changed. The answerer was an isolated CT117 build of `393cfecc` plus the
+scoped trainer changes below, not the Mac's unrelated dirty V.34 tree.
+
+### Frame-grid reference is the second identification, not a rate switch
+
+Increasing the priming delay from 120 to 240 ms did not fix 48k. An opposite
+pair-parity prototype did reach LAPM/V.42bis and delivered a complete 256 KiB
+48k download, but a later unchanged-grid call also worked. Therefore the
+initial hypothesis of a rate-specific four-sample switch was rejected.
+
+The **transmit** G.711 taps supply a better reference: match the 264-sample
+unscrambled E4E4 identification runs and locate PRIME from the sequencer's
+completed-pair count. A probe pair is 12 samples; Draft 0.23 4.10–4.12 DATA
+frames contain eight. Exact offsets modulo eight were:
+
+| Call | PRIME minus first ID_A | PRIME minus ID2_A | Outcome |
+|---|---:|---:|---|
+| Earlier `h48000-c` | 0 | 0 | No usable caller EC/session |
+| `s38-10-p240` | 0 | 0 | No usable caller EC/session |
+| Opposite-grid `s38-10-grid4` | 4 | 4 | 256 KiB exact downstream; corrupt upload |
+| USB-fixed `fixed-usb-grid0` | 0 | 4 | 256 KiB exact each way |
+| Clean production `clean-id2-48` | 0 | 4 | 256 KiB exact each way |
+
+The gates between the two IDs can move ID2 by an odd number of pairs. The
+old first-ID anchor then chooses the wrong grid. `k56flex_train.c` now
+records **ID2_A** and makes the FFFF tail end an **odd number of pairs after
+it**, adding at most one pair before PRIME. Four samples is an observed
+receiver alignment, not a newly invented ITU constant. No received samples
+are inserted/deleted. This is not a blanket high-rate parity reversal, and
+it does not explain every high-rate failure: earlier failed 52/56k calls
+also used the four-sample ID2 grid. A larger alternated matrix is still
+needed to measure startup reliability.
+
+The unit test covers **240 combinations** of law, accepted rate, parameter
+width, independently moving ID2, and tail-gate parity. All **56 composite
+training-segment hashes** still match the original generator.
+
+### A corrupt upload was an exact repeated 48-byte block
+
+The opposite-grid call's captured 262144-byte upload first differs at byte
+**13537**. It is explained exactly by inserting expected bytes
+**13489..13536** again at that point: the remaining captured bytes match the
+expected stream shifted by **48 bytes**. The fixed-length receive buffer
+therefore ends 48 expected bytes early; this is not evidence that those
+bytes disappeared from the wire. A bulk-OUT timeout occurred in the same
+call. This is a strong transport-duplication signature, not random upstream
+symbol errors, although no USB transaction trace establishes the exact
+accepted prefix at the timeout.
+
+The bridge had submitted up to **64 bytes** to an OUT endpoint whose actual
+maximum packet size is **16 bytes**. `WritePipeTO` does not return a partial
+byte count: accepting three packets and timing out on the fourth makes a
+whole-request retry duplicate 48 bytes. The bridge now submits **at most one
+packet**, additionally bounded by the reported endpoint packet size, and
+retries without `ClearPipeStallBothEnds`. NAK/backpressure is not STALL;
+USB 2.0 **8.6** data-toggle synchronization must survive retries, while
+**9.4.5** endpoint-halt clearing resets it. Cancellation is checked between
+requests, so a timeout retry cannot trap process shutdown indefinitely.
+
+`mt5634mu_bulk_write_test` tests 256 KiB full-octet transfers with repeated
+backpressure, short writes, an oversized/smaller descriptor, cancellation,
+hard errors and a modeled lost ACK without duplicate delivery. It is
+portable, runs in the fast tier, and passes ASan/UBSan on CT117. This does
+**not** retrospectively assign the earlier uncaptured 32k corruption or
+40k decoder loss to USB, nor implement retraining.
+
+### Actual live results, including build-control failures
+
+Volatile caller **S38=9/10/11/12** produced measured MP rates
+**46000/48000/50000/52000**, respectively; S42=1 and automatic EC remained
+in use. These legacy MU encodings are measured, not the newer guide's
+labels. The MU has no `AT+MS`; server bounds remained `AT+MS=K56,1,0,56000,0,31200`.
+
+| Attempt | Trainer / USB | Downstream | 256 KiB download / upload |
+|---|---|---:|---|
+| `s38-9-p120` | Original / 64-byte requests | 46000 | exact / exact |
+| `s38-10-p240` | Original, 240 ms / original USB | 48000 | no usable EC session |
+| `s38-10-grid4` | Opposite-grid prototype / original USB | 48000 | exact / 48-byte duplication |
+| `fixed-usb-grid0` | Original / packet-safe USB | 48000 | exact / exact |
+| `id2-48` | Untrusted trainer rebuild / packet-safe USB | 48000 | exact / exact |
+| `id2-50` | Same rebuild / packet-safe USB | 50000 | exact / decoder loss |
+| `id2-52` | Same rebuild / packet-safe USB | 52000 MP/B1 | no caller CONNECT/payload |
+| `id2-46` | Same rebuild / packet-safe USB | 46000 | exact / exact |
+| `clean-id2-48` | Clean second-ID anchor / packet-safe USB | 48000 | exact / exact |
+
+The `id2-*` names are **not** proof of the intended trainer binary. Restoring
+the baseline for a native-HSF control preserved source timestamps and left
+stale objects; a subsequent test exposed incompatible trainer objects.
+Those live payloads remain valid evidence for their recorded executable,
+but are **withheld from qualification of the new trainer**. A full clean
+rebuild resolved it. The final physical test used `k56_id2_clean`, SHA256
+`ea198912f3e105bdbfb2325f72cf14e525a3317d1b4c0c64ae9e983f793621ba`.
+Its 48k call passed both 256 KiB hashes at **39.065 kbit/s down** and
+**21.213 kbit/s up** request/ACK goodput. ATI11 retained **48000/31200**, with
+**zero retrains/renegotiations**, **11 RX-frame errors / 2192 RX frames** and
+**36 TX-frame errors / 2165 TX frames**. LAPM corrected errors; payload-exact
+is not a zero-physical-error claim. Guarded bridge-close cleanup, then
+reopened AT/ATH, succeeded separately from payload verification.
+
+Across the nine varied attempts there are **five complete passing pairs**
+(two at 46k, three at 48k), **seven exact downloads and five exact uploads**:
+**3 MiB verified total**. This is not an A/B pass-rate estimate. The 50k
+call's upload ended with upstream carrier loss at **+187.041 s**, and ATI11
+reported **one local retrain**. The 52k call ended on upstream quality
+**1.847 > 0.707 for 0.5 s** at **+33.985 s**, also with one local retrain.
+Neither qualifies a complete higher-rate connection. Automatic K56
+retraining remains unimplemented.
+
+Software checks: **60/60** rate/law/framing engine pairs passed, with
+32 KiB exact each way. Native HSF on CT117 passed **14/15 checks** (12/13
+exact 32–56k rates plus both 58/60k-ceiling fallback checks). The 56k strict
+failure has **four leading and twenty trailing octets** around its exact
+8192-byte downstream body. An unchanged-source control produced an
+**identical received serial buffer**; it is not a newly qualified 56k pass
+or evidence of a new-trainer regression. The clean audio-socket executable
+hash matches the one used for that native matrix. **33/33 focused fast
+checks passed on the final clean rerun**; a missing replay helper was built
+rather than treating its earlier launcher failure as a DSP result.
+
+Original **S109=1/S38=1/S42=1**, `AT\\N3`, and echo were restored and read
+back; AT/ATH succeeded. Only the owned bridge/isolated answerers were
+stopped. Production rate defaults and the unrelated local SIP process were
+left untouched. Disposable evidence, including failed uploads, raw taps,
+RTP/DTE logs, binary/build records and all failed attempts, is under
+`artifacts/mt5634mu-improve-20261030/`. No new permanent capture fixture is
+needed: the regression tests generate their input.

@@ -202,6 +202,46 @@ static void test_mp_pad_tables(void)
     }
 }
 
+/* A twelve-sample pair moves an eight-sample DATA grid by four samples.
+ * Exercise independently moving first/second IDs, both event-driven tail
+ * parities, and both parameter widths, including an MP below the ceiling. */
+static void test_prime_grid(void)
+{
+    for (unsigned law = 0; law < 2; ++law)
+    for (unsigned bit8 = 0; bit8 < 2; ++bit8)
+    for (int rate = 32000; rate <= 60000; rate += 2000)
+    for (unsigned gate_parity = 0; gate_parity < 2; ++gate_parity)
+    for (unsigned id2_parity = 0; id2_parity < 2; ++id2_parity) {
+        k56flex_train_cfg_t cfg = {0};
+        k56flex_train_t t;
+        cfg.law = (k56flex_law_t)law;
+        cfg.rate_bps = 60000;
+        cfg.report_field = bit8 << 8;
+        CHECK(k56flex_train_init(&t, &cfg) == 0, "grid init");
+        CHECK(k56flex_train_accept_mp(&t, 13, (unsigned)(rate/2000-15), 0x1fff) == 31200,
+              "grid accepted MP %d", rate);
+        t.pairs_total = 47;
+        k56flex_train_force_phase(&t, K56T_ID_A);
+        CHECK(t.id_a_pair == 47, "first identification captured");
+        t.pairs_total = 4000 + id2_parity;
+        k56flex_train_force_phase(&t, K56T_ID2_A);
+        CHECK(t.id2_a_pair == 4000 + id2_parity, "second identification captured independently");
+        t.pairs_total = 7240 + gate_parity;
+        k56flex_train_force_phase(&t, K56T_PARAM_2);
+        k56flex_train_force_phase(&t, K56T_TAIL);
+        unsigned pairs = t.pairs_left;
+        CHECK(((t.pairs_total + pairs - t.id2_a_pair)*12) % 8 == 4,
+              "grid law=%u bit8=%u rate=%d gate=%u id2=%u", law, bit8, rate, gate_parity, id2_parity);
+        CHECK(pairs >= (bit8 ? 1u : 2u) && pairs <= (bit8 ? 2u : 3u), "tail adds at most one pair");
+        int16_t samples[36];
+        CHECK(k56flex_train_samples(&t, samples, pairs*12) == pairs*12, "whole tail emitted");
+        CHECK(t.phase == K56T_PRIME && t.prime_left == 6 && t.data_ready,
+              "tail hands off once to six prime frames");
+        CHECK(t.pairs_total*12 % 8 == (t.id2_a_pair*12 + 4) % 8,
+              "emitted grid matches planned grid");
+    }
+}
+
 int main(void)
 {
     test_composite();
@@ -209,6 +249,7 @@ int main(void)
     test_gate_timeout();
     test_mp_limits();
     test_mp_pad_tables();
+    test_prime_grid();
     printf(failures ? "k56flex_train_test: %d FAILURES\n" : "k56flex_train_test: all passed\n", failures);
     return failures != 0;
 }

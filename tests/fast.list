@@ -20,6 +20,8 @@ python3 tools/test_training_pcm_capture.py
 
 # MT5634MU diagnostic transport only; does not require or qualify hardware.
 python3 tools/mt5634mu_diag_test.py
+# USB 2.0 8.6: one-packet retries must not duplicate a timed-out prefix.
+./mt5634mu_bulk_write_test
 
 # Proprietary V.FC c749..c788 mapper, against original Courier firmware vectors.
 # This qualifies symbol coding only, not training or a V.FC modem connection.

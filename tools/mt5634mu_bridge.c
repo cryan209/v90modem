@@ -43,6 +43,8 @@
  * The interrupt pipe is read with a blocking ReadPipe on its own thread:
  * ReadPipeTO returns kIOReturnBadArgument (e00002c2) on interrupt pipes.
  */
+#include "mt5634mu_bulk_write.h"
+
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -69,7 +71,6 @@
 #define MT_EP_OUT 0x02
 #define MT_EP_IN 0x84
 #define MT_IN_PACKET 64
-#define MT_OUT_CHUNK 64
 #define MT_STATUS_IDLE 0xc0
 
 typedef IOUSBDeviceInterface650 **usb_dev_t;
@@ -78,6 +79,7 @@ typedef IOUSBInterfaceInterface650 **usb_intf_t;
 static usb_dev_t g_dev;
 static usb_intf_t g_intf;
 static UInt8 g_pipe_out, g_pipe_in;
+static UInt16 g_out_packet_size;
 static int g_master = -1;
 static volatile sig_atomic_t g_quit;
 /* Set while some process has the slave open.  Modem output that arrives with
@@ -217,12 +219,13 @@ static IOReturn open_device(void)
         UInt8 addr = (UInt8) (num | (dir == kUSBIn ? 0x80 : 0));
         if (g_verbose)
             logmsg("pipe %u: EP 0x%02x type %u mps %u", p, addr, type, mps);
-        if (addr == MT_EP_OUT)
+        if (addr == MT_EP_OUT) {
             g_pipe_out = p;
-        else if (addr == MT_EP_IN)
+            g_out_packet_size = mps;
+        } else if (addr == MT_EP_IN)
             g_pipe_in = p;
     }
-    if (!g_pipe_out || !g_pipe_in) {
+    if (!g_pipe_out || !g_pipe_in || !g_out_packet_size) {
         logmsg("interface 1 lacks EP 0x%02x / 0x%02x", MT_EP_OUT, MT_EP_IN);
         return kIOReturnNotFound;
     }
@@ -243,29 +246,31 @@ static void close_device(void)
     }
 }
 
+static int usb_write_packet(void *ctx, const uint8_t *p, size_t n)
+{
+    (void)ctx;
+    /* One packet only: a timeout must not hide an accepted prefix. Keep
+     * USB 2.0 8.6's data toggle on retry; NAK is flow control, not STALL. */
+    IOReturn kr = (*g_intf)->WritePipeTO(g_intf, g_pipe_out, (void *)p,
+                                      (UInt32)n, 0, 5000);
+    if (kr == kIOReturnTimeout || kr == kIOUSBTransactionTimeout) {
+        logmsg("bulk-OUT packet timed out; retrying without clearing endpoint halt");
+        return MT5634MU_WRITE_RETRY;
+    }
+    if (kr) {
+        logmsg("bulk-OUT: %08x", kr);
+        return MT5634MU_WRITE_ERROR;
+    }
+    if (g_verbose > 1)
+        hexdump("->", p, (UInt32)n);
+    g_bytes_to_modem += n;
+    return MT5634MU_WRITE_OK;
+}
+
 static int usb_write(const UInt8 *p, UInt32 n)
 {
-    while (n) {
-        UInt32 k = n > MT_OUT_CHUNK ? MT_OUT_CHUNK : n;
-        /* The modem NAKs while its buffer is full; that is the flow control. */
-        IOReturn kr = (*g_intf)->WritePipeTO(g_intf, g_pipe_out, (void *) p, k,
-            0, 5000);
-        if (kr == kIOReturnTimeout || kr == kIOUSBTransactionTimeout) {
-            logmsg("bulk-OUT timed out (modem not accepting data)");
-            (*g_intf)->ClearPipeStallBothEnds(g_intf, g_pipe_out);
-            continue;
-        }
-        if (kr) {
-            logmsg("bulk-OUT: %08x", kr);
-            return -1;
-        }
-        if (g_verbose > 1)
-            hexdump("->", p, k);
-        g_bytes_to_modem += k;
-        p += k;
-        n -= k;
-    }
-    return 0;
+    return mt5634mu_write_packets(p, n, g_out_packet_size,
+                                 usb_write_packet, NULL, &g_quit);
 }
 
 static void sleep_ms(int ms)
