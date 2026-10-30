@@ -1640,4 +1640,16 @@ Following the firmware (previous section), on an A-law bearer:
   scratch XOR knob). All of those runs delivered upstream.
 
 Not covered: a real A-law x2 server (no supervisor we have sends `6b`), and
-Total Control equipment. Not yet tried live.
+Total Control equipment.
+
+**Live** (`1fdd65d4`, vmhost CT 117 through Asterisk, A-law accounts
+2906/2907, `MODE=x2 LAW=alaw tools/soak/x2_live_pair.sh`):
+- both ends negotiated `PCMA (A-law passthrough)` and logged `startup (A-law,
+  PCM ^ 2a)`; the server's INFO0 was `3fff`;
+- three LAPM calls: `CONNECT 56000/ARQ/X2/LAPM/V42BIS` both ends, 100/100 lines
+  each way;
+- one V.14 call, with the client's first line 0.1 s after its CONNECT: 300/300
+  each way;
+- byte-exact both ways (0 of 718400 changed, constant 200/180 ms);
+- on the wire the server's B was 100% `9b`/`1b` (`b1`/`31` ^ `2a`) and 0%
+  `b1`/`31`: A-law-coded x2, not µ-law relabelled.
