@@ -48,6 +48,10 @@ def main():
     ap.add_argument("--engine", type=Path, default=ROOT / "audio_sock_modem")
     ap.add_argument("--max-upstream-rate", type=int, default=9600,
                     help="native client's upstream ceiling (bit/s, multiple of 2400)")
+    ap.add_argument("--downstream-rate", type=int, choices=range(32000, 56001, 2000),
+                    help="require this exact native RX rate; set native min/max and server ceiling")
+    ap.add_argument("--expect-downstream-rate", type=int, choices=range(32000, 60001, 2000),
+                    help="check actual native RX statistic without changing its configured bounds")
     ap.add_argument("--dac-taps", type=int, default=129,
                     help="analogue peer reconstruction FIR length (DS0 remains unchanged)")
     ap.add_argument("--require-startup", action="store_true",
@@ -58,6 +62,10 @@ def main():
                     help="check this many raw 8N1 host bytes in each direction after carrier")
     ap.add_argument("--require-payload", action="store_true")
     args = ap.parse_args()
+    if (args.downstream_rate is not None and args.expect_downstream_rate is not None
+            and args.downstream_rate != args.expect_downstream_rate):
+        ap.error("--downstream-rate and --expect-downstream-rate disagree")
+    expected_rate = args.expect_downstream_rate or args.downstream_rate
     if not 1 <= args.seconds <= 120:
         ap.error("--seconds must be 1..120")
     if not 9 <= args.dac_taps <= 513 or args.dac_taps % 4 != 1:
@@ -75,7 +83,15 @@ def main():
     executable = args.engine.resolve()
     env = dict(os.environ, ME_K56FLEX="probe", ME_MODE="k56", ME_V8="1",
                ME_MEDIA_CLOCK="1", VPCM_G711_TAP_DIR=str(out))
-    client = K56Client(modulation="flex", max_upstream_rate=args.max_upstream_rate, dac_taps=args.dac_taps)
+    native_rates = {}
+    if args.downstream_rate is not None:
+        # The native wrapper qualifies RX limits only through 56000. Do
+        # not patch its configuration/state to manufacture a higher rate.
+        native_rates = dict(min_downstream_rate=args.downstream_rate,
+                            max_downstream_rate=args.downstream_rate)
+        env["ME_K56FLEX_RATE"] = str(args.downstream_rate)
+    client = K56Client(modulation="flex", max_upstream_rate=args.max_upstream_rate,
+                       dac_taps=args.dac_taps, **native_rates)
     phase2_events = []
     symbol_events = []
     probe_clock_events = []
@@ -305,7 +321,10 @@ def main():
         end_from_audio = "K56flex upstream 899F from audio" in server_log
         connect = re.search(rb"\r\nCONNECT[^\r\n]*\r\n", dte)
         server_serial = bytes(dte[connect.end():]) if connect else b""
-        payload_ok = bool(args.payload_bytes and connect and final_state and final_state["data"]
+        negotiated_rates = client.pump.negotiated_rates() if client.pump else None
+        rate_ok = (expected_rate is None or bool(negotiated_rates
+                   and negotiated_rates["downstream"] == expected_rate))
+        payload_ok = bool(rate_ok and args.payload_bytes and connect and final_state and final_state["data"]
                           and client.pump.env.datapump_carrier == 3
                           and carrier_seen and carrier_interruptions == 0
                           and sent_up == len(packed_up) and sent_down == len(expected_down)
@@ -332,7 +351,11 @@ def main():
             "server_jtag_from_audio": end_from_audio,
             "final_client_state": final_state, "failure": client.failure,
             "client_carrier": client.pump.env.datapump_carrier if client.pump else 0,
-            "client_rates": client.pump.negotiated_rates() if client.pump else None,
+            "client_rates": negotiated_rates,
+            "requested_downstream_rate": args.downstream_rate,
+            "expected_downstream_rate": expected_rate,
+            "downstream_rate_exact": rate_ok if expected_rate is not None else None,
+            "server_downstream_ceiling": env.get("ME_K56FLEX_RATE", "56000"),
             "client_carrier_interruptions": carrier_interruptions,
             "client_received_packed_bytes": len(client_received),
             "payload_bytes_requested": args.payload_bytes,
@@ -352,6 +375,8 @@ def main():
         }
         (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2))
+        if expected_rate is not None and not rate_ok:
+            raise SystemExit("K56flex actual native downstream rate requirement failed")
         if args.require_startup and not phase2_handoff:
             raise SystemExit("K56flex V.8/Phase-2 startup requirement failed")
         if args.require_audio_gates and not (phase2_handoff and native_phase4

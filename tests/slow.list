@@ -18,6 +18,10 @@
 # Draft 0.23 4.12 / V.250 6.4.1: all 15 downstream rates, both laws,
 # LAPM/V.42bis and V.14, 32 KiB random binary each way (60 engine pairs).
 python3 tools/test_k56flex_rates.py
+@group k56flex-hsf-rates
+# Independent native HSF receiver: exact 32..56k, plus 58/60k server caps
+# which must negotiate 52k (not claim a high-rate connection). Needs ../cruft.
+python3 tools/test_k56flex_rates.py --peer native-hsf -j3
 @group
 
 @group fax-v34-test fax-v34-engine-test

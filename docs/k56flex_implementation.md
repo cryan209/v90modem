@@ -3626,3 +3626,38 @@ The matrix is included in `make test-slow`; every pair runs through the
 normal runner in its own scratch directory, with failures reported
 individually. Inner logs live under the enclosing test's dump directory
 and are retained on failure.
+
+### Native HSF downstream-rate sweep: exact 32000–56000
+
+The independent cruft legacy HSF client now passes at **every 2000 bit/s
+step from 32000 through 56000** (13 rates), with **28800 upstream**, over
+PCMU and raw V.14/8N1. Each 40-second call transfers **8192 byte-exact
+pseudorandom octets each way**, with zero serial framing errors and **zero
+carrier interruptions**. Native statistic 5 reports the exact requested
+RX rate in every case; statistic 4 reports 28800 TX. These are not merely
+server CONNECT strings or our own client's interpretation.
+
+The harness's `--downstream-rate RATE` sets the native wrapper's ordinary
+minimum/maximum RX configuration and the server's PCM ceiling; no native
+firmware, training state, gates or mapping tables are patched. Setting the
+native bounds to 54000 or 56000 yields actual 54000/56000; the historical
+unconstrained 52000 was a rate-selection result, not a demonstrated decoder
+ceiling. The wrapper currently permits configured RX limits only through
+56000, so this sweep does not qualify native reception at 58000/60000.
+
+Two additional calls raised only the server ceiling to **58000 and 60000**,
+leaving the native client's default bounds. Both passed the same duplex
+payload checks but negotiated **52000/28800**, with no carrier interruptions.
+They are fallback checks, **not successful 58/60k HSF connections**.
+`--expect-downstream-rate` checks this using the native rate statistic and
+fails if it differs, even when payloads are intact.
+
+All **15 cases passed**, in 123 s wall time with three workers. Reproduce:
+
+```
+python3 tools/test_k56flex_rates.py --peer native-hsf -j3
+```
+
+The matrix is in `tests/slow.list`, group `k56flex-hsf-rates`, and needs
+`../cruft`. The HSF harness remains PCMU-only; no new hardware calls or
+A-law native HSF qualification are implied.
