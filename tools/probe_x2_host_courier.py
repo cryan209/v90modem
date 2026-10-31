@@ -73,7 +73,11 @@ def main():
                         help='read-only capture of Courier upstream mapper points')
     parser.add_argument('--capture-receiver', action='store_true',
                         help='read-only capture of Courier PCM receive frame state')
+    parser.add_argument('--capture-rate', action='store_true',
+                        help='read-only capture of Courier 403 rate metric and ceilings')
     args = parser.parse_args()
+    if args.capture_rate and (args.capture_native or args.capture_receiver):
+        parser.error('--capture-rate cannot be combined with other capture modes')
     if args.host_after_rate_change and not args.pty_source:
         parser.error('--host-after-rate-change requires --pty-source')
     if args.engine_at and not args.pty_source:
@@ -86,7 +90,8 @@ def main():
     source.write_bytes(args.host_message.encode('ascii'))
     os.environ['ME_V90_UPSTREAM_BIT_DUMP'] = str(output / 'upstream.bits')
     os.environ['ME_V90_UPSTREAM_SYM_DUMP'] = str(output / 'upstream-symbols.txt')
-    if args.capture_native or args.capture_receiver:
+    if args.capture_native or args.capture_receiver or args.capture_rate:
+        os.environ['X2_HOST_CAPTURE_RATE'] = '1' if args.capture_rate else '0'
         os.environ['X2_HOST_NATIVE_CAPTURE'] = str(output / 'native-symbols.json')
         os.environ['X2_HOST_CAPTURE_RECEIVER'] = '1' if args.capture_receiver else '0'
         os.environ['COURIER_DSP_DUMP'] = str(output / 'native-dump')
@@ -208,7 +213,7 @@ def main():
             if args.dsp_watch and '--dsp-write-watch' in command:
                 command[command.index('--dsp-write-watch') + 1] = args.dsp_watch
             command += ['--send-after-connect', args.message, *args.native_arg]
-            if args.capture_native or args.capture_receiver:
+            if args.capture_native or args.capture_receiver or args.capture_rate:
                 assert command[1:3] == ['-m', 'courier_emu']
                 command = [command[0], str(ROOT / 'tools/x2_courier_capture.py'),
                            'cli', *command[3:]]

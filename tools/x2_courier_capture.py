@@ -65,6 +65,15 @@ if tx_writes:
     if gain_capture:
         addresses += [0x3c7, 0x392, 0x3fb, 0x39f, 0x214]
 capture_pc = 0xe11c if receiver else 0xb08c
+rate_capture = os.environ.get('X2_HOST_CAPTURE_RATE') == '1'
+if rate_capture:
+    # Courier 403 E2DD..E2EC, x2 Draft 0.33 clause 22 rate handoff.
+    # At E2EC ACC is the adjusted metric, before the descending threshold
+    # search. Keep the original metric, MD, margin, masks and thresholds;
+    # observing these cells neither advances the DSP nor changes its choice.
+    capture_pc = 0xe2ec
+    addresses = [0x39f, 0xfff3, 0xfff4, 0xfffb, 0x364, 0x37b, 0x37d,
+                 0x31c, *range(0x940, 0x944), *range(0xcf2c, 0xcf3b)]
 if os.environ.get('X2_HOST_CAPTURE_PC'):
     capture_pc = int(os.environ['X2_HOST_CAPTURE_PC'], 16)
 if tx_writes:
@@ -122,8 +131,21 @@ def capture_step(original):
     def wrapped(self, *a, **kw):
         return step(self, *a, _original=original, **kw)
     return wrapped
-for method in ('step', 'step_cycles', 'service_step'):
-    setattr(NativeC5x, method, capture_step(getattr(NativeC5x, method)))
+if rate_capture:
+    # The native recorder already retains the last 64 hits. This low-frequency
+    # selector needs no per-service Python hook (including during ROM boot).
+    original_init, original_close = NativeC5x.__init__, NativeC5x.close
+    def rate_init(self, *a, **kw):
+        original_init(self, *a, **kw)
+        self.set_pc_capture(capture_pc, addresses)
+    def rate_close(self):
+        if getattr(self, '_handle', None):
+            rows.extend(self.pc_captures())
+        original_close(self)
+    NativeC5x.__init__, NativeC5x.close = rate_init, rate_close
+else:
+    for method in ('step', 'step_cycles', 'service_step'):
+        setattr(NativeC5x, method, capture_step(getattr(NativeC5x, method)))
 @atexit.register
 def save():
     Path(os.environ['X2_HOST_NATIVE_CAPTURE']).write_text(

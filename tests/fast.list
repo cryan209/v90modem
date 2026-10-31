@@ -36,6 +36,7 @@ python3 tools/mt5634mu_diag_test.py
 ./x2_session_test
 ./x2_client_test
 ./x2_sym_test
+python3 tools/test_x2_rate_capture.py
 # x2 analogue client dialling our x2 server, whole engines both ends: open
 # rates (56000/31200), a downstream cap and an upstream-only cap.
 ./engine_pair_test --both-at 'AT+MS=X2' --expect X2 --seconds 25

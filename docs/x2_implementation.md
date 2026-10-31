@@ -894,6 +894,43 @@ X2_HOST_EMU_ROOT=$EMU ../courier-emu/.venv/bin/python tools/probe_x2_host_courie
 
 `--engine-at` sends DTE commands to our PTY before the call starts.
 
+## Index-15 / actual 56000 investigation, 31 October 2026
+
+**56000 to the emulated Courier is not yet qualified.** Its allowed PCM mask
+is already **7FFF**, with **MD=5**. A new read-only `--capture-rate` observer
+in `tools/probe_x2_host_courier.py` captures original Courier 403 E2EC's adjusted
+ACC metric, allowed mask, MD, margin, indices, MP and fifteen rate thresholds.
+The index-15 threshold is **0x4680 (18048)**. Late metrics in the baseline
+average **17775.625** over the last eight captured observations; the ceiling
+is therefore a receiver-quality decision, not an absent advertised rate bit.
+At index 15, B=37 and MD=5 would carry exactly **56000 source bits/s**
+(x2 Draft 0.33 clauses 10/11/22).
+
+A numerical correction in the local sibling emulator interpolates adjacent
+ADC phase kernels instead of rounding to one of 1024 phases. With unchanged
+128 taps, cutoff, FIR delay, clocks and FIFO accounting, fixed-offset tone SNR
+improves **63.95 -> 94.32 dB at 3000 Hz**, and **61.90 -> 80.27 dB at 3800 Hz**.
+**75 focused emulator tests pass**. The corrected call still selects index 14,
+actual **54666/31200**, despite improving late rate metrics to a mean **17932.5**
+and maximum **18023**. Both it and a longer call deliver **5200/5200 downstream
+plus 28/28 upstream bytes exactly**. The longer call withholds host payload
+until bearer sample **1000000 (125 s)** and still does not reach index 15.
+
+A longer-filter experiment improves 3900-Hz tone SNR **26.87 -> 76.03 dB**
+but negotiates only **52000**; a scaled-PCM rounding experiment remains at
+**54666**. Both remain isolated, not promoted. Several explicit Courier AT
+rate-clamp commands are rejected with **ERROR before dialing**, and are not
+channel-rate evidence. No quality threshold, firmware decision, gain or
+CONNECT result was changed to force 56000.
+
+The observer and capture-mode validation have two firmware-free unit tests;
+they and the existing x2 session/client/symmetric tests pass through the fast
+runner (**4 commands, 0 failures**). Full measured outcomes, scope and local
+emulator file changes are documented in
+`../courier-emu/docs/courier-x2-adc-phase-20261031.md`. Provenance is
+`artifacts/x2-56000-20261031/`. The blocker remains the original receiver's
+index-15 quality decision; the ADC correction is not a completed 56000 fix.
+
 ## Courier emulator frame-service correction, 31 October 2026
 
 The local sibling emulator now defaults ROM-backed 302/403 DSP calls to its
