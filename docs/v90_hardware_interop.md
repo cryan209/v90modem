@@ -62,6 +62,66 @@ Do not promote a combination to interoperable until two consecutive fresh
 calls reach the same negotiated rate and transfer the deterministic payload
 without unexplained errors.
 
+## slmodemd and physical MultiTech repeats, 31 October–1 November 2026
+
+The tested Linux binary is SHA-256
+`8f56027bdfce716e4a28050bf040395166c41574bf38a072fe3406bf144d6a7c`:
+local source `c9b70f21` plus the then-uncommitted four SpanDSP source/header
+changes, clean-built separately in CT117. This is **not** the older corrected
+baseline used for the 28 October MT5634 result. No production DSP edits,
+AT&W commands or gateway configuration changes were made during these tests.
+All peers originated calls to our V.90 digital server over PCMU; no historical
+Ja timing overrides or USB benchmark rate caps were added.
+
+**SmartLink slmodemd: 3/3 additional calls passed**, each at 54666 down /
+31200 up, V.90 DATA at approximately 24.14 s, followed by LAPM. Received
+numbered lines down/up were **11650/11700, 11450/11500, 11500/11550**;
+each sequence starts at zero and is ordered without missing/duplicate lines.
+The rig used its prescribed sinc interpolation and headroom 0.25. Payload
+started after CONNECT in each recorded call, not during training.
+
+Physical USB identification and current route matter: MT5634MU is
+`06e0:f103`, Lucent firmware **8.18j**, arriving as **6314 / AudioCodes 1.4**;
+MT9234ZBA-USB is `06e0:0319`, TI serial bridge with Agere OCM firmware
+**1.02e**, arriving as **6009**. These are not the historical 6004/6005 paths,
+and the MT9234 must not use the MT5634's vendor USB protocol.
+
+Eight actual USB calls used **32768 deterministic pseudorandom bytes each
+way**, independent seeds, full comparison/SHA-256, and a verified peer upload
+acknowledgement. V.90 Phase 4/DATA (§9.4) and retraining (§9.5) were recorded
+separately from DTE payload success:
+
+| Modem | Observed results, four calls each |
+|---|---|
+| MT5634MU | **3/4 exact bidirectional V.90 payload passes**. Two fresh-server passes at **49333/31200**, unchanged rates and zero retrains; their download payload rates were **43.750 and 41.337 kbit/s**, uploads **22.964 and 22.722 kbit/s**. One call retrained/fell back and ended NO CARRIER. A shared-server pass began **50666/31200**, ended **48000/26400**, reported local=1/remote=1 retrains, and delivered only **4.719 kbit/s** downstream. |
+| MT9234ZBA | **1/4 exact bidirectional V.90 payload passes**, at **45333/26400**, zero retrains/frame errors, measured **38.118 down / 23.652 up kbit/s**. The others were exact data only after **V.34** fallback (4800 down), V.90 CONNECT followed by a **downstream binary mismatch**, and a fresh-server **100 s dial timeout** with V.34 fallback. |
+
+The two 49333 MT5634 passes each reported one transmit-frame error; the later
+also one receive-frame error. Exact LAPM-delivered bytes do not imply a
+zero-error physical link. Neither USB modem meets the two-consecutive,
+same-rate, unexplained-error-free qualification rule above.
+
+**Harness caveat:** after a failed call, the initial benchmark's termination
+left an emulator child alive. Three subsequent calls used that same server
+process; their replacement server logs show bind failures and are **not**
+the actual media logs. The live server's combined log/taps were recovered.
+These outcomes remain evidence of shared-server calls, not independent
+fresh-server runs. The first mismatching buffer was not saved, so its byte
+corruption mechanism is unknown. Do not attribute it to the peer or USB.
+The scratch runner was corrected to handle termination/child cleanup, reject
+an exited server, use unique PTYs, and save raw DTE bytes. A further MT9234
+timeout and MT5634 exact pass were then collected with confirmed new servers.
+One bind failure detected **before dialling** is excluded from call counts.
+
+Both physical modems were finally confirmed idle with AT/ATH; the MT9234's
+original volatile `+MS=V92,1,0,31200,0,56000` policy and initial command echo
+were restored. Both USB bridges and rig modem processes were stopped.
+Local provenance: `artifacts/v90-repeat-usb-20261031/RESULTS.md`,
+`usb-detailed-summary.json`, `slm-summary.json`, per-call ATI11 and captures,
+and `shared-server-after-r3/` for the reused process. No new retained waveform
+fixture was created. Next diagnosis must inspect our own transmit tap and
+per-call reset, not infer hardware reliability from the slmodemd passes.
+
 ## CX93001 USB serial → Eicon, 28 October 2026
 
 The currently attached `/dev/cu.usbmodem246802461` is USB `0572:1349`,
