@@ -894,6 +894,40 @@ X2_HOST_EMU_ROOT=$EMU ../courier-emu/.venv/bin/python tools/probe_x2_host_courie
 
 `--engine-at` sends DTE commands to our PTY before the call starts.
 
+## Courier emulator frame-service correction, 31 October 2026
+
+The local sibling emulator now defaults ROM-backed 302/403 DSP calls to its
+existing **DSP-XF frame source with 64-instruction IRQ recognition**, rather
+than the fixed periodic source. Its x2 firmware produces about 3200 XF edges/s
+while the old source services about 2400 IRQs/s. Prior valid-input/shortened-DSP-
+output captures and six-lane exhaustion motivated this correction; see
+`../courier-emu/docs/courier-x2-frame-default-20261031.md` and that note's
+clock-phase/first-full-bank references. This promotes the combined existing
+source/latency profile, not a source-only hardware-wiring proof. No change to
+our mapper, firmware, samples, oscillator ratios or bank capacity was needed
+(x2 Draft 0.33 clause 22 gives the rate-handoff context).
+
+A fresh same-snapshot A/B at the 56000 cap reproduces incomplete downstream
+delivery with explicit periodic servicing and **5200/5200 downstream plus
+28/28 upstream bytes exactly** with DSP-XF servicing. The patched default,
+without source selectors, passes the same exact checks at **54666/31200**
+(index 14), **48000/31200** (index 9), and a separate **54666/31200 repeat**.
+The 40000 control also passes exact delivery, but its requested silence hook
+did not yield an observed retrain completion: no retrain-pass claim.
+
+An original I-modem/Courier V.34 14400 offline 20-second control passes with
+46 downstream / 27 upstream complete records in-window and maximum gaps
+0.5 / 0.8 seconds. **61 focused emulator tests pass**. These are bounded
+ASCII/offline tests, not arbitrary-binary, sustained wall-clock/SIP or hardware
+qualification. Provenance: `artifacts/x2-speed-20261031/{irq,fixed}`.
+
+The changes are in `../courier-emu/courier_emu/{machine,cli}.py`, with new
+`../courier-emu/tests/test_courier_rom_frame_default.py`. They are on top of
+pre-existing local emulator changes. The clean **f1ccd92** export used by our
+existing slow regressions still contains the old servicing and must not be
+confused with this patched emulator tree. The capped results below describe
+that old export and are superseded only for the corrected local tree.
+
 ## Higher Courier rate recheck, 31 October 2026
 
 A fresh rate sweep against the clean `courier-emu` `f1ccd92` export raises
