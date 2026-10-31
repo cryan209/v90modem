@@ -894,6 +894,34 @@ X2_HOST_EMU_ROOT=$EMU ../courier-emu/.venv/bin/python tools/probe_x2_host_courie
 
 `--engine-at` sends DTE commands to our PTY before the call starts.
 
+## Higher Courier rate recheck, 31 October 2026
+
+A fresh rate sweep against the clean `courier-emu` `f1ccd92` export raises
+our bounded exact-delivery result to **44000 downstream / 31200 upstream**
+(index 6). Both the sweep and a separate 44000 repeat delivered **5200/5200
+host bytes** (100 numbered ASCII lines) and **28/28 Courier bytes**, with
+both exact-after-CONNECT checks passing. Each call received 1,248,320 engine
+bearer octets (156.04 s). Settings were `S39=8&M5&K0` at the Courier and
+`AT+MS=X2,0,0,44000` at our PTY; no DSP or bearer changes were needed.
+
+The matched 40000 control also delivered 5200/5200 bytes. At the 48000 cap
+(index 9), the Courier received 81 complete lines and a partial line; at the
+56000 cap (selected index 14, actual 54666), it received two complete lines
+and a partial line. Both higher-rate calls failed exact downstream delivery,
+while their Courier-to-host payload remained exact. These are bounded payload
+checks, **not measurements of increased application throughput or arbitrary
+binary/sustained hardware qualification**. The earlier 44000 failure above
+remains valid evidence for its different payload/window; two new passing
+calls do not establish universally reliable 44000 operation.
+
+Reproduction uses `tools/probe_x2_host_courier.py` with `--fast --pty-source
+--host-pace-samples 16 --instructions 600000000 --host-at 220000` and the AT
+settings above. The host source is 100 lines of
+`X2-SPEED-{i:04d}-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n`, for `i=0..99`.
+Provenance: `artifacts/x2-speed-20261031/{unique-pty,repeat-44000}/44000`.
+Concurrent probes must have different output-directory **basenames**: the
+engine PTY link is derived from that basename, not its parent directory.
+
 ## Bounding an unanswered rate change, 19 October 2026
 
 Only the Courier's E released `X2_RECORD_TX`. When the Courier gave up on a
