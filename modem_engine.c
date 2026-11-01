@@ -9073,7 +9073,11 @@ static bool restart_v90_phase2_locked(const char *reason)
     if (g_mod != ME_MOD_V90 || !g_v34)
         return false;
 
-    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(3200);
+    /* V.90 9.5.1.1-.2 omits INFO0, not the configured receive ceiling.
+     * Keep retrain INFO1d, MP and B1 consistent just as at initial startup
+     * (V.250 6.4.1; V.90 8.2.3.2/Table 9). */
+    bps = me_v90_upstream_cap(g_v34_start_bps ? g_v34_start_bps
+                                             : max_v34_bps_for_baud(3200));
     if (v34_restart(g_v34, 3200, bps, true) != 0) {
         ME_LOG("[ME] V.90 Phase 2 restart failed (%d baud, %d bps)\n", 3200, bps);
         trace_phase("V90 Phase2 restart failed");

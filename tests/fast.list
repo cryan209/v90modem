@@ -967,6 +967,12 @@ sh -c 'F=reference-data/artifacts/cx93001-ja-crc-fails-20261023/live-rx.g711; ME
 ./engine_pair_test --seconds 60 --expect V90 --both-env ME_MODE=v90 --both-env VPCM_ME_VERBOSE=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_UPSTREAM_MAX_BPS=21600 --call-at "AT+MS=V90,1,21600,21600,28000,56000" --answer-at "AT+MS=V90,1,28000,56000,4800,24000" --answer-log "ceiling capped 31200 -> 21600 bps at Phase 2" --answer-log "3200=9" --call-log "max bit rate code 9"
 ./engine_pair_test --seconds 60 --expect V90 --both-env ME_MODE=v90 --both-env VPCM_ME_VERBOSE=1 --answer-env ME_V90_ROLE=analogue --call-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-at "AT+MS=V90,1,24000,24000,28000,56000" --call-at "AT+MS=V90,1,28000,56000,4800,24000" --call-log "ceiling capped 31200 -> 24000 bps at Phase 2" --call-log "3200=10" --answer-log "max bit rate code 10"
 
+# V.90 9.5.1.1-.2 / V.250 6.4.1: a retrain must not silently restore
+# 31200 after an explicitly lower startup ceiling. Force the same retrain
+# in both laws, then check INFO1d never advertises 3200-baud N=13 again.
+./engine_pair_test --seconds 60 --hold-seconds 40 --expect V90 --both-env ME_MODE=v90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_RETRAIN_AFTER_MS=100 --call-at "AT+MS=V90,1,24000,24000,28000,56000" --answer-at "AT+MS=V90,1,28000,56000,4800,24000" --answer-log "restarting Phase 2 (1, 3200 baud / 24000 bps)" --answer-nolog "3200=13"
+./engine_pair_test --alaw --seconds 60 --hold-seconds 40 --expect V90 --both-env ME_MODE=v90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_RETRAIN_AFTER_MS=100 --answer-env ME_V90_UPSTREAM_MAX_BPS=26400 --answer-log "restarting Phase 2 (1, 3200 baud / 26400 bps)" --answer-nolog "3200=13"
+
 # V.90 9.4.1.4/.6: a batch CP must not qualify E on an unvalidated live tap.
 sh -c 'ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 ./v90_engine_replay reference-data/artifacts/cx93001-unqualified-e-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/cxe.log" 2>&1 && grep -q "CP_VALID source=batch kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && grep -q "CP_VALID source=spandsp kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && ! grep -q "upstream E detected\|V90 enter DATA" "$TMPDIR/cxe.log"'
 

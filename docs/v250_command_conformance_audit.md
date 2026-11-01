@@ -104,6 +104,20 @@ pass. These are software conformance checks. The separate MT5634 A/B in
 `docs/v90_hardware_interop.md` does **not** qualify a lower upstream default
 or establish a hardware-connect improvement.
 
+The first correction missed the separate V.90 retrain entry point:
+`restart_v90_phase2_locked()` called `v34_restart()` with the original
+31200 ceiling. Live 26400 diagnostic-cap trials consequently restarted at
+31200 even though MP/B1 retained 26400. Retrains now apply the same ceiling
+helper before `v34_restart()` (V.90 9.5.1.1-.2; V.250 6.4.1). Two new
+forced-retrain engine pairs cover a 24000 AT bound in µ-law and a 26400
+diagnostic bound in A-law, require the restarted profile and reject any
+3200-baud N=13 advertisement. The old binary fails both assertions in the
+24000 case; the corrected binary passes all **53 selected V.90/V.92 pairs**.
+A new isolated Linux build also retains **26400 on all three retrains** in
+an MNP-only hardware attempt, but that attempt still falls back to V.34.
+This proves the configuration survives a real retry, not that retries now
+connect reliably. Default rates and loss/recovery thresholds are unchanged.
+
 ## V.92 controls, AT-6 (2026-10-06)
 
 The 6.8 `+P` commands were stubs that answered OK and stored nothing.  Now:

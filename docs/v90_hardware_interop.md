@@ -1242,3 +1242,93 @@ Local provenance: `artifacts/usb-endurance/connect-{a1,b1,b2,a2}-mt5634/`,
 `test-logs/v90-connect-{ceiling-final,ceiling-wire,fast-complete}/`.
 The isolated hardware binary does not contain the pending local DSP work;
 that work was left untouched.
+
+### Insertion audit beyond the compressor (1 November 2026)
+
+The MT9234 corruption is not limited to an inserted `c6`: another checked
+stream inserts **`be` at downstream offset 8482**. A receiver-side comparison
+of actual recorded **transmitted G.711 codewords**, not just the compressor
+callback, reconstructs B1/data with the accepted CP, unstuffs/checks HDLC and
+compares the in-sequence LAPM information with the source dump. Decoding the
+reconstructed information produces the exact seeded DTE prefix in both
+examined calls:
+
+| Call | Complete CRC-valid frames / CRC failures | Accepted I-frames / duplicates | Reconstructed information bytes | Exact decoded seeded-prefix bytes |
+|---|---:|---:|---:|---:|
+| Earlier `c6` insertion | 2399 / 0 | 2336 / 0 | 298891 | 297706 |
+| Offset-8482 `be` insertion | 1442 / 0 | 1382 / 14 | 176779 | 176083 |
+
+There are zero aborted segments in either extracted data interval. The
+inverse mapper shares our mapper implementation; this is not an independent
+ITU mapper-conformance oracle or a recording at the peer's input. It does
+establish that these inserted DTE bytes are absent from the reconstructed
+LAPM payload of our recorded DS0, well beyond the earlier compressor-only
+check. Network, analogue receive/decompression and USB/UART delivery remain
+outside that check.
+
+Both examined insertion positions fall at **decoded offset 64 within a
+LAPM information field**. A scratch same-binary callback cap of 64 information
+octets does **not** cure it: default-sized frames fail after **159744 verified
+downstream bytes / 42.94 s**, and 64-octet frames fail after **40960 bytes /
+23.43 s**. Their extra bytes are `c6` and `be`; the latter is at decoded
+**offset 0** of its 64-octet information field. A further forced-compressed
+V.42bis DATA attempt fails after **81920 verified bytes / 28.37 s**, again
+with an inserted `be`. Neither frame shortening nor always-compressed transfer
+is a qualified workaround; no production default was changed.
+
+Local provenance: `artifacts/usb-endurance/cp-probe/{c6,be}/`,
+`frame64-{a1,b1}/` and `compwire2-b2/`.
+
+### First MNP5 checked hardware traffic, not an insertion cure
+
+An isolated Linux build from committed main plus the retrain-ceiling fix
+(SHA256 **1ad4f0c1aed8ad300b5d6fb24e3ec921354485c7bdc957601b62ca9498f7a305**)
+was clean-rebuilt with the vendored SpanDSP, without the unrelated local
+DSP edits. Its Linux MNP5 reference test and all **111 stress runs** pass.
+`AT+MS` now supplies the coherent 26400 upstream ceiling on the live rig;
+no diagnostic rate override is needed. One unsuccessful MNP-only attempt
+still falls back to V.34, but all three restarted Phase-2 profiles correctly
+remain **26400**, rather than silently restoring 31200.
+
+Both endpoints use `AT+ES=4,4,6` and `AT%C1`. One actual V.90/MNP5 attempt
+completes the **120-second bounded traffic hold**: **430080 downstream and
+98304 upstream bytes are receiver-verified**, with zero application errors.
+The endpoint elapsed times are **141.047 / 120.682 s** (client/server);
+queued DTE bytes are not counted. Final ATI11 reports **V90**, unchanged
+**46666/26400**, **MNP/MNP5**, zero transmit frame errors, **four receive
+frame errors and one local retrain**, no rate renegotiations and termination
+cause zero. The unsolicited NO CARRIER wait times out; subsequent AT/ATH
+return OK and the complete paged ATI11 is obtained. This is bounded hardware
+MNP5 interoperability, not a flawless physical link or fully warning-free
+cleanup.
+
+The repeat is **not** an insertion-free success: it verifies **311296
+bytes downstream** before an inserted **`be` at offset 313132**, ending the
+checked stream at **87.163 s**. Independently executing HSF's original MNP5
+decoder on the in-sequence LT payload from our transmitted data-stack bit
+dump reconstructs **329534 exact seeded DTE-prefix bytes** through and beyond
+that position: **1460 accepted LTs, 15 duplicates, zero CRC failures** in the
+examined prefix. This latter check is before PCM mapping, unlike the LAPM
+DS0 check above. The same inserted byte across two codecs makes their shared
+post-codec/receive/USB path important to investigate; it does not itself prove
+a peer or USB defect. **No long hold was promoted.**
+
+Two attempted same-build LAPM controls did not dial: the MT9234 rejects
+`AT%C3` (our server supports it, the hardware does not). They are **setup
+rejections, not training failures**. Future hardware controls use the accepted
+`AT+DS=3`; the MNP5 attempts' `AT%C1` was accepted.
+
+Local provenance: `artifacts/usb-endurance/mnp5-ti-{1,2,3,4}/`,
+`mnp-physical/reference-check.json`, and `test-logs/v90-retrain-ceiling/`.
+
+A subsequent matched-DTE-rate probe also rejects a simple baud workaround:
+at **57600 DTE baud**, with RTS/CTS retained and the G.711 clock untouched,
+V.90/LAPM/V.42bis verifies **282624 downstream / 225280 upstream bytes**
+before another inserted **`c6` at downstream offset 285512**, at **72.894 s**.
+The later 115200 arm has a different failure: the USB reader exits with
+**`e00002e8` (`kIOReturnOverrun`)**, then the PTY and AT cleanup fail. Dialling
+stops; USB recovery and successful idle AT/ATH/profile readback precede any
+new call. Do not classify that arm as merely another compression insertion
+or retry an uncertain bulk-OUT prefix. Further probes isolate USB read sizes
+and retain a raw pre-PTY bulk-IN tap; they are not yet qualified fixes.
+Local provenance: `artifacts/usb-endurance/uart4-{b1,a1,a2}/`.

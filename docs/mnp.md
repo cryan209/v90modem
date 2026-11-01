@@ -225,7 +225,9 @@ results, **not hardware MNP5 qualification**. Four V.22bis engine-pair tests
 also verify CONNECT/`+DR` and bidirectional payloads for MNP5 selection, peer
 refusal, the environment's no-compression default and an explicit DTE override.
 The focused regression run passes **12 suites / zero failures**, including
-console parsing and profile-file restart. No hardware MNP5 call is claimed.
+console parsing and profile-file restart. These figures describe software
+validation; the subsequent bounded hardware result and failed repetition are
+recorded below.
 
 ## Tests
 
@@ -248,6 +250,25 @@ console parsing and profile-file restart. No hardware MNP5 call is claimed.
   `+ER: ALT` and `CONNECT .../MNP` on both sides and the payload both ways.
 
 ## Live calls
+
+### MT9234 V.90/MNP5, 1 November 2026
+
+With `AT+ES=4,4,6` and `AT%C1` at both ends, the new codec negotiates mode 3,
+k=7, N401=256 and optimisation mask 3 against the real USB modem. One
+**120-second capped** V.90 call at **46666/26400** verifies **430080 DTE
+bytes downstream / 98304 upstream**, with no application mismatches. Final
+ATI11 confirms MNP/MNP5 and V90, but also four recovered receive-frame errors
+and one local retrain. AT/ATH and the paged diagnostics succeed after an
+unsolicited-carrier-notification timeout.
+
+The repetition verifies **311296 downstream bytes** before inserting one
+`be`, the same symptom seen with V.42bis. Original-HSF decoding of our emitted
+LT prefix independently verifies **329534 exact seeded DTE bytes** across that
+position (1460 in-sequence LTs, 15 retransmissions, zero CRC failures). Thus
+MNP5 has bounded checked-traffic hardware interoperability, **not qualification
+as a reliable insertion workaround or a long-hold pass**. Full measurements,
+build identity and the distinction between PCM and pre-mapper checks are in
+[`v90_hardware_interop.md`](v90_hardware_interop.md#first-mnp5-checked-hardware-traffic-not-an-insertion-cure).
 
 ### RasFinder, 21 October 2026
 
