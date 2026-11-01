@@ -1135,7 +1135,7 @@ Using the same `8f56027b…` CT117 binary documented above, simultaneous
 32768-byte transfers did not qualify:
 
 - MT5634MU V.90 initially connected at **49333/31200**, verified **8192
-  bytes each way**, then stalled. Its final diagnostics report V.34 at
+  downstream / 4096 upstream bytes at the receiving endpoints**, then stalled. Its final diagnostics report V.34 at
   **4800 downstream**. The 32-second harness endpoint is a traffic timeout,
   not a measured spontaneous carrier-loss time.
 - MT9234 V.90 at **46666/26400** twice inserted exactly **one `0xc6` byte**
@@ -1158,7 +1158,7 @@ Using the same `8f56027b…` CT117 binary documented above, simultaneous
 MT9234 compression-on arm failed at **33.488 seconds** with the extra `0xc6`;
 turning compression off using **`AT+DS=0` and `AT+DS44=0` on the answerer**
 then reached a **180-second checked full-duplex cap**, receiving **733184
-exact downstream bytes**. ATI11 confirms **V90, 46666/26400, LAPM, NONE**,
+exact downstream / 552960 exact upstream bytes at the receiving endpoints**. ATI11 confirms **V90, 46666/26400, LAPM, NONE**,
 unchanged initial/final rates, **one local retrain**, and TX/RX frame-error
 counts **2/1**. This is an initial diagnostic contrast, not a proven fix or
 error-free qualification; alternated repeats and longer holds are required
@@ -1176,6 +1176,9 @@ separately. Both arms of the contrast above used this candidate. The earlier
 batch stopped at its K56 setup error rather than completing three rounds.
 A zero process exit from the scratch stream helper is not a payload pass:
 check both endpoints' `summary.json`, final modulation, errors and diagnostics.
+`tx_blocks` counts bytes queued at the DTE, not acknowledged peer delivery;
+only the other endpoint's `rx_blocks` counts verified delivery. The earlier
+status description of 8192 MT5634 bytes "each way" conflated these counts.
 
 Local provenance: `artifacts/usb-endurance/`, including raw mismatching
 buffers, AT/stream events, server taps, `tx-frames.txt`, independent decoder
