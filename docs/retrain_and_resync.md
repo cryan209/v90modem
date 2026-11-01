@@ -1660,3 +1660,54 @@ confirm nor rule out the 250 ms wait as its cause. One 250 ms call (`call-2-d250
 had a different failure: 3 s into DATA our receiver reported "data mode has stopped
 decoding", the 7910 answered our §11.6 renegotiation with no E, and the §11.5 retrain
 recovered the call at 9600. That is the `final-cap9600` failure, and here it was recovered.
+
+## Current-main SmartLink binary recovery checks (2 November 2026)
+
+Committed main `2aa59757` was exported without the Mac's pending SpanDSP
+edits and clean-built in an isolated CT117 directory using the vendored
+libraries. Tested executable SHA-256:
+`b0cc93f5f4136eb2d787f31abaf6e81a26f1f211f0ecaab329ae7d39df6c0b23`.
+SmartLink slmodemd in vmhost CT100 originated to our digital server in CT117
+(accounts 6003/6002). Both SIP legs used PCMU; the rig used its sinc resamplers
+and 0.25 downstream headroom. No historical Ja/Sd overrides were applied.
+
+Each fresh call transferred **262144 deterministic pseudorandom bytes in
+both directions simultaneously**. Each receiver compared every byte and
+SHA-256, then exchanged a verification acknowledgement. Counts below are
+receiver-verified delivery, not bytes queued to a PTY. Escape recognition was
+disabled during binary traffic; termination of the owned server ended the
+call, after which SmartLink confirmed AT/ATH. Calls were paced and ran
+without concurrent builds or replays.
+
+| Trial | Verified bytes downstream / upstream | Transfer elapsed, client / server | Result |
+|---|---:|---:|---|
+| Fresh baseline 1 | 262144 / 262144 | 72.756 / 72.336 s | V.90 54666/31200, no recovery events |
+| Fresh baseline 2 | 262144 / 262144 | 72.756 / 72.337 s | Same rates, no recovery events |
+| Digital-initiated §9.6 renegotiation at DATA +20 s | 262144 / 262144 | 75.659 / 75.237 s | New E/B1, same rates, exact stream preserved |
+| Digital-initiated §9.5.1.1 retrain at DATA +20 s | 262144 / 262144 | 92.318 / 91.903 s | Phase 2–4 completed, existing LAPM/V.42bis link retained, same rates |
+| Same retrain, AT receive ceiling 26400 | 262144 / 262144 | 103.957 / 103.537 s | 54666/26400 before and after retrain, exact stream preserved |
+
+The §9.6 test used only `ME_V90_RENEG_AFTER_MS=20000`. Independent inspection
+of our transmitted codewords with `tools/v90_rd_verify.py` finds **384T Rd
+at 44.140 s followed by 24T barred Rd**, matching V.90 §9.6.1.1.1. Our TRACE
+reports the request at +44.142 s and fresh upstream E at +46.719 s; the
+exchange then completes after B1d. Both complete payload comparisons pass.
+
+The §9.5 test used only `ME_V90_RETRAIN_AFTER_MS=20000`. Our TRACE reports
+Phase-2 restart at +43.242 s and DATA re-entry at +61.020 s: **17.778 s**.
+CP/MP negotiates 31200 upstream before and after retraining. There is one
+initial XID exchange; the re-entry explicitly resumes the existing link.
+The final call additionally set `AT+MS=V90,0,0,56000,0,26400` (V.250
+§6.4.1). Initial CP/MP, the restart profile and retrained CP/MP all retain
+**26400 upstream**; restart at +43.241 s and DATA at +61.021 s give
+**17.780 s**. This checks the receive-ceiling fix through a live retrain
+(V.90 §8.2.3.2/Table 9, §9.4.2.4 and §9.5).
+
+All five receive RTP observer traces contain **zero missing packets at the
+end**, with 4961/4961/5150/5939/6521 packets respectively. This is bounded
+SmartLink interoperability, not physical-modem qualification, loss-injection
+coverage, a long soak, or repeated calls within one server process.
+
+Local provenance: `artifacts/slm-recovery-20261102/`; host results under
+`/root/slm-recovery-20261102-results/` on vmhost, with per-endpoint events,
+raw DTE bytes, verified payloads, server/peer logs and G.711/RTP taps.

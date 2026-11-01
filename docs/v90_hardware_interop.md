@@ -62,6 +62,21 @@ Do not promote a combination to interoperable until two consecutive fresh
 calls reach the same negotiated rate and transfer the deterministic payload
 without unexplained errors.
 
+## SmartLink current-main recovery checks, 2 November 2026
+
+Isolated committed main `2aa59757` on vmhost CT117 against slmodemd CT100:
+**5/5 calls pass**, each with **262144 receiver-verified binary bytes in each
+direction**, mutual acknowledgements and confirmed AT/ATH after teardown.
+Two fresh baselines use 54666/31200. One §9.6 renegotiation preserves the
+exact stream at those rates; two §9.5 retrains preserve it at 54666/31200
+and AT-capped 54666/26400. Retrain-to-DATA times are **17.778/17.780 s**.
+All five receive RTP traces have zero missing packets at the end. No pending
+local DSP edits or physical USB modems were included. This does not resolve
+the physical USB insertion or RasFinder continuity failures below.
+
+See [recovery measurements and test limits](retrain_and_resync.md#current-main-smartlink-binary-recovery-checks-2-november-2026)
+for the binary identity, exact transfer times, transmitted Rd check and knobs.
+
 ## slmodemd and physical MultiTech repeats, 31 October–1 November 2026
 
 The tested Linux binary is SHA-256
