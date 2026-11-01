@@ -66,7 +66,7 @@ The six +MS rates now bind the next call.  Where each one acts:
 | V.22bis | Held at 1200 when 2400 does not fit both ways. |
 | V.32bis | The R1/R2/R3 rate mask carries only rates that fit both ways (6: one rate both directions). |
 | V.34 | Our MP's rate fields are capped per direction and its rate mask (shared by both directions, Table 20) loses rates below the lower minimum, so 11.4.1.1.4 settles inside the bounds or on nothing.  The receive back-off never steps below the receive minimum. |
-| V.90 | Jd's downstream mask offers only rates between the transmit bounds; the MP upstream mask is capped at the receive maximum and floored at the receive minimum. |
+| V.90 | Jd's downstream mask offers only rates between the transmit bounds; the digital modem's receive maximum caps the upstream engine before Phase 2/INFO1d as well as MP and the B1 receive template. The MP upstream mask is also floored at the receive minimum. |
 | CONNECT | Backstop for what a peer can still choose (V.22bis falling to 1200, a downstream the analogue modem picks, V.91): a call outside the bounds is not reported CONNECT, it is hung up, and the DTE gets NO CARRIER. |
 
 Tests: `at_ms_test` (feasibility and the pruned offer, through the real
@@ -78,6 +78,31 @@ rows: V.32bis capped at 9600, and a 2400 minimum against a V.22 peer ending in
 NO CARRIER.  A V.34 pair with no common rate never reaches data mode (checked
 once; 60 s, so not in `make test`).  Nothing here is verified against a
 foreign modem.
+
+### V.90 Phase-2 ceiling correction (2026-11-01)
+
+The earlier implementation applied `+MS`'s local receive maximum to MP, but
+not to the initial upstream `v34_init()` ceiling. A hardware trial with
+`AT+MS=V90,1,0,56000,0,21600` still advertised **INFO1d 3200-baud N=13
+(31200 bit/s)** and trained up to 31200, then prepared the receiver at 21600.
+This repeated the inconsistency already corrected for the diagnostic
+`ME_V90_UPSTREAM_MAX_BPS` path (V.90 8.2.3.2/Table 9; V.250 6.4.1).
+
+`me_v90_upstream_cap()` now uses the per-call **local RX** maximum before
+Phase 2 as well as at its later MP/receiver consumers. It is independent of
+who dialled; digital local TX remains PCM downstream. Non-ladder maxima are
+rounded down to 2400-bit/s units, and the diagnostic cap can lower, not raise,
+the DTE maximum. Default ceilings are unchanged.
+
+Four new engine-pair rows exchange payload and check both our INFO1d log and
+the peer's decoded rate code: exact 24000, an A-law 25000 bound advertising
+24000, an additional 21600 diagnostic cap, and the digital-originator role.
+The pre-change binary fails the Phase-2 assertion and advertises N=13 under
+a 24000 receive bound; the corrected pair advertises/decodes N=10. All **51
+selected V.90/V.92 engine-pair rows** and the complete **685-row fast tier**
+pass. These are software conformance checks. The separate MT5634 A/B in
+`docs/v90_hardware_interop.md` does **not** qualify a lower upstream default
+or establish a hardware-connect improvement.
 
 ## V.92 controls, AT-6 (2026-10-06)
 

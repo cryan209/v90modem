@@ -1197,3 +1197,48 @@ receiver diagnostic with independently fitted echo cancellation, not a live
 counterfactual; it does not justify weakening loss/recovery thresholds.
 The existing V.42bis and data-stack binaries pass, as do **79 independent
 V.42bis interop cases**. Those codec checks do not qualify the physical link.
+
+### Phase-2-consistent upstream cap, alternated MT5634 trials (1 November 2026)
+
+An AT-controlled ceiling was not equivalent to the existing diagnostic
+ceiling: the earlier **21600** `+MS` trial still trained at **31200** and sent
+**INFO1d N=13 at 3200 baud**, while its MP/B1 receiver expected 21600. The
+engine now applies the digital modem's local RX maximum at Phase 2 as well
+(V.250 6.4.1; V.90 8.2.3.2/Table 9). Four new software pairs check the actual
+peer-decoded advertisement, both call directions, non-ladder rounding and
+an additional diagnostic cap. **51 selected V.90/V.92 engine pairs and all
+685 fast-tier rows pass.** This corrects the configured-rate negotiation
+path, not the subsequent physical discontinuity.
+
+Before changing hardware defaults, an **A/B/B/A** used the same isolated
+`8f56027b…` Linux binary, MT5634 bridge and compression-off setup throughout.
+A left the upstream ceiling at 31200; B used
+`ME_V90_UPSTREAM_MAX_BPS=24000`, which already binds Phase 2/INFO1d/MP/B1.
+This tests the existing coherent cap, **not a new Linux build of the AT fix**.
+Both B calls advertise N=10 and reach V.90 DATA at 24000; neither is a
+verified-traffic success:
+
+| Arm, in order | Receiver-verified downstream / upstream bytes | Classification |
+|---|---:|---|
+| A1, 31200 | 327680 / 167936 | Both endpoints reach the 60-second cap. ATI11 confirms V.90, unchanged 49333/31200, zero local retrains and one remote retrain. |
+| B1, 24000 | 0 / 0 complete checked blocks | No verified stream; upstream resynchronization 1.145 s after DATA, later V.34 fallback. Client reports NoEC rather than a qualifying LAPM connection. |
+| B2, 24000 | 0 / 0 complete checked blocks | Server reports V.90/LAPM CONNECT but both streams time out with partial blocks; upstream resynchronization 2.683 s after DATA, final ATI11 V.34 at 4800 downstream. |
+| A2, 31200 | 315392 / 155648 | Both endpoints reach the 60-second traffic cap, but USB/AT cleanup times out and no final ATI11 is obtained. Not a fully qualified V.90 pass. |
+
+The MT5634 bridge logs bulk-OUT timeouts during A2 cleanup. That transport
+failure is distinct from its completed traffic hold; do not count the latter
+as a clean end-to-end second pass. The runner stops further dialling on the
+cleanup error. **No 30-minute hold was promoted.**
+
+The B1/B2 receive observers contain **5502/2855 RTP packets, zero packets
+missing at the end**, respectively. This does not locate the impairment or
+clear the entire network. Both later log echo-delay changes; log interleaving
+and a later delay estimate do not prove such a change caused the original
+collapse. Neither loss/recovery thresholds nor default rates are changed:
+**this comparison argues against shipping a lower default**, not for it.
+
+Local provenance: `artifacts/usb-endurance/connect-{a1,b1,b2,a2}-mt5634/`,
+`connects.log`, the two `connect-b*-gap-audit.json` reports and
+`test-logs/v90-connect-{ceiling-final,ceiling-wire,fast-complete}/`.
+The isolated hardware binary does not contain the pending local DSP work;
+that work was left untouched.

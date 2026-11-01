@@ -412,19 +412,9 @@ static int me_span_flow_level(void);
 /* In-place Sd retries already used on the current Phase-3 attempt. */
 static unsigned g_v90_jd_resync_retries = 0;
 
-/* ME_V90_UPSTREAM_MAX_BPS caps the upstream rate we offer in MP.  It has to
- * reach the receiver's own preparation as well: cap the MP mask alone and the
- * peer transmits at the capped rate while our B1 template is still built for
- * the uncapped one, so acquisition never correlates and the upstream is dead
- * for the whole call. */
-static int me_v90_upstream_cap(int rate)
-{
-    const char *cap = getenv("ME_V90_UPSTREAM_MAX_BPS");
-
-    if (cap && atoi(cap) > 0 && atoi(cap) < rate)
-        return atoi(cap);
-    return rate;
-}
+/* One upstream ceiling for Phase 2, MP and the receive template. Definition
+ * follows the per-call V.250 limits; an MP-only cap is too late. */
+static int me_v90_upstream_cap(int rate);
 
 /* Received G.711 samples since the process started, never reset.  With
  * ME_MEDIA_CLOCK set, trace_now_ms() runs on this instead of the host's
@@ -3772,6 +3762,24 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
 enum { LIM_MIN_TX, LIM_MAX_TX, LIM_MIN_RX, LIM_MAX_RX };
 static int g_cfg_lim[4];
 static int g_lim[4];
+
+static int me_v90_upstream_cap(int rate)
+{
+    /* V.250 6.4.1: +MS bounds are local TX/RX, not caller/answerer.
+     * Here we are the V.90 DIGITAL modem, so upstream is always local RX.
+     * V.90 8.2.3.2/Table 9 advertises projected rates in 2400-bit/s units.
+     * Apply the same ceiling before v34_init(), not just to the later MP
+     * mask: otherwise INFO1d can advertise 31200 while MP/B1 expect 21600. */
+    int dte_cap = g_lim[LIM_MAX_RX];
+    const char *cap = getenv("ME_V90_UPSTREAM_MAX_BPS");
+
+    if (dte_cap > 0 && dte_cap < rate)
+        rate = (dte_cap / 2400) * 2400;
+    if (cap && atoi(cap) > 0 && atoi(cap) < rate)
+        rate = atoi(cap);
+    return rate;
+}
+
 /* The call settled outside g_lim: me_get_state() tears it down. */
 static bool g_lim_refused = false;
 static const char *g_hangup_cause = NULL;
@@ -11716,7 +11724,8 @@ static void start_v34_training(void)
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven. */
     int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
 
-    /* ME_V90_UPSTREAM_MAX_BPS has to bind HERE, not at MP.
+    /* The +MS local receive ceiling and ME_V90_UPSTREAM_MAX_BPS have to
+     * bind HERE, not at MP.
      *
      * Capping only the MP upstream-rate mask does not work against the
      * SmartLink rig: measured 2026-08-23, at a 24000 cap it replied to none
@@ -11737,7 +11746,7 @@ static void start_v34_training(void)
 
         if (capped != bps) {
             ME_LOG("[ME] V.90 upstream: V.34 ceiling capped %d -> %d bps at "
-                   "Phase 2 (ME_V90_UPSTREAM_MAX_BPS)\n", bps, capped);
+                   "Phase 2 (+MS / ME_V90_UPSTREAM_MAX_BPS)\n", bps, capped);
             bps = capped;
         }
         /*endif*/
