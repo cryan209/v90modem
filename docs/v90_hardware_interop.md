@@ -1127,3 +1127,70 @@ pre-update sources/binary and logs remain in
 `/root/cx-b1-states-20261023-2c572237/`. The CX93001 is still disconnected,
 so a new physical exchange and sustained bidirectional payload remain
 required before hardware qualification.
+
+## USB full-duplex endurance investigation, 1 November 2026
+
+Using the same `8f56027b…` CT117 binary documented above, simultaneous
+4096-byte pseudorandom streams exposed failures that the earlier sequential
+32768-byte transfers did not qualify:
+
+- MT5634MU V.90 initially connected at **49333/31200**, verified **8192
+  bytes each way**, then stalled. Its final diagnostics report V.34 at
+  **4800 downstream**. The 32-second harness endpoint is a traffic timeout,
+  not a measured spontaneous carrier-loss time.
+- MT9234 V.90 at **46666/26400** twice inserted exactly **one `0xc6` byte**
+  downstream: at stream offsets **134588** and **128850**, after about
+  **36 and 33 seconds**. Following bytes remain correctly aligned after
+  removing that insertion. The second call's saved outgoing LAPM information
+  stream independently decodes through the Python V.42bis reference to
+  **297962 exact DTE-prefix bytes**. This clears that captured compressor
+  boundary, not the complete transmit/mapping path or physical peer.
+- MT5634MU V.34 traffic lasted **1338 seconds** before the harness's receive
+  timeout, with **1249280 verified downstream bytes**. ATI11 reports **60
+  local retrains**; this is not a stable 22-minute physical link.
+- The corrected K56 server setup is **`AT+MS=K56`**, not `K56,0`, which this
+  implementation rejects. The MT5634 connected **44000/31200**, but our own
+  server logged upstream carrier loss **4.565 seconds after DATA entry**.
+  Its subsequent DTE `NO CARRIER`/command responses contaminated the pending
+  receive buffer; that buffer is not evidence of independent payload corruption.
+
+**First compression control:** with the TI bridge held constant, the
+MT9234 compression-on arm failed at **33.488 seconds** with the extra `0xc6`;
+turning compression off using **`AT+DS=0` and `AT+DS44=0` on the answerer**
+then reached a **180-second checked full-duplex cap**, receiving **733184
+exact downstream bytes**. ATI11 confirms **V90, 46666/26400, LAPM, NONE**,
+unchanged initial/final rates, **one local retrain**, and TX/RX frame-error
+counts **2/1**. This is an initial diagnostic contrast, not a proven fix or
+error-free qualification; alternated repeats and longer holds are required
+(V.42bis 5.1/Annex A; V.90 9.4/9.5). The next compression-on start ended
+`NO CARRIER`; the next compression-off start connected **4800 V.34**, so
+neither supplies a second V.90 endurance contrast. Follow-up holds must
+reject a `/V34/` CONNECT rather than count it as V.90.
+
+**Transport/harness limits:** a separate MT9234 call ended when the TI USB
+bridge exited on a **5000 ms bulk-OUT timeout**, closing its PTY. An isolated
+bridge candidate raises only that completion deadline to **120000 ms**;
+it does not retry an uncertain write, change G.711, or change sample timing.
+USB backpressure/retrain timeouts and modem carrier loss must be reported
+separately. Both arms of the contrast above used this candidate. The earlier
+batch stopped at its K56 setup error rather than completing three rounds.
+A zero process exit from the scratch stream helper is not a payload pass:
+check both endpoints' `summary.json`, final modulation, errors and diagnostics.
+
+Local provenance: `artifacts/usb-endurance/`, including raw mismatching
+buffers, AT/stream events, server taps, `tx-frames.txt`, independent decoder
+output and ATI11. These runs use an isolated known binary, not the Mac's
+pending DSP edits. Do not lower carrier-loss thresholds or blame peer/USB
+hardware on these observations alone.
+
+The MT5634 V.90 capture's **28.88-second prefix**, ending before the first
+logged 28.884-second resynchronization request, reproduces the receiver's
+three failed local timing searches offline. Its fast window error rises
+**0.333 → 0.436 → 0.542** despite the last slow average being **0.193**.
+Thus that slow average is not evidence that recovery was unnecessary.
+The 28.8-second prefix emits **65 CRC-valid HDLC frames**, with **one bad
+complete frame and four aborted segments**. This is a fixed-recording
+receiver diagnostic with independently fitted echo cancellation, not a live
+counterfactual; it does not justify weakening loss/recovery thresholds.
+The existing V.42bis and data-stack binaries pass, as do **79 independent
+V.42bis interop cases**. Those codec checks do not qualify the physical link.
