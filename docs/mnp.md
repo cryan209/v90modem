@@ -19,8 +19,8 @@ protocol frame ends the answerer's detection phase), and 7.9 (disconnect or
 V.14 only once "any alternative error-correcting capability has also failed").
 The +ES values are V.250 (07/2003) Table 20.
 
-MNP 5 data compression is not in any V.42 edition, and is not implemented (see
-below).
+MNP 5 data compression is not in any V.42 edition. It is implemented in
+`mnp5.c` and negotiated as a proprietary LR extension (see below).
 
 ## When MNP runs
 
@@ -107,23 +107,125 @@ says which protocol actually came up.
   its length and N(S): the peer may already hold it with its LA lost, so a
   256-octet frame at 2400 that keeps being hit can never be cut down.  Before
   the ceiling, `mnp-slow-2400-bursts` stalled for 20-30 s.
-* **LTs are accepted while we advertise credit 0.**  A.7.3.2.3 says discard
-  them; we have the room (busy is asserted with half the ring free), and
-  keeping them costs the peer nothing.
+* **Receive credit 0 discards LTs, without advancing V(R) or the decoder**
+  (A.7.3.2.3). Previously we accepted them, assuming half the DTE ring was
+  enough room for an in-flight window. That is not true with compression.
+  T401 does not consume N400 while the peer advertises zero credit:
+  A.7.3.5 forbids sending those retransmissions and A.7.3.6 counts actual
+  retries, not time spent waiting for a busy DTE.
 * **An async frame after mode-3 frames starts with 20 marks.**  Found by the
   stress test: when the confirming LA was lost and had to be resent from the
   data phase, the far start-stop receiver was mid-"character" in our flags
   and never found the SYN, and establishment failed.
 
-## MNP 5: not done, deliberately
+## MNP 5 compression (1 November 2026)
 
-MNP 5 (adaptive frequency encoding plus run-length coding) has no
-specification in `ITU Docs/`, and nothing checks the data after
-decompression: an encoder that is not bit-exact with the peer's delivers wrong
-octets to the DTE with no error anywhere.  We never offer it (we send no LR
-parameter for it, and the response LR drops parameters we did not understand,
-A.7.1.5.6), so a peer cannot switch it on.  Do it only with a reference
-implementation or captures to be bit-exact against.
+`mnp5.c` implements adaptive frequency encoding (AFE) plus run-length coding.
+There is still no MNP5 specification in `ITU Docs/`; do not attribute this
+proprietary wire format to an ITU clause. The independent reference is the
+original Conexant HSF i386 modem implementation, executed under Unicorn,
+not a second copy of our algorithm. No firmware code or firmware tables are
+linked into the modem or distributed with the tests.
+
+### Negotiation and AT controls
+
+LR parameter 9 is a capability mask: bit 0 offers MNP5; bits 2-5 describe
+V.42bis dictionary sizes. The CX93001's captured `09 01 05` therefore offers
+both MNP5 and V.42bis/512. We offer `09 01 01` and a responder selects
+**only** `01`, not the initiator's whole mask. A peer without bit 0 gets
+uncompressed MNP. An originator rejects a response that selects an unoffered
+algorithm or multiple alternatives. V.42bis over MNP is not implemented;
+V.42bis remains available over LAPM. The framing negotiation and the rule
+for omitting unagreed response parameters remain V.42 A.7.1.5.6.
+
+Factory settings allow V.42bis over LAPM and MNP5 over MNP. Controls for the
+next call (no AT setting resets a live dictionary):
+
+| Command | Compression offer |
+|---|---|
+| `AT%C0` or `AT&K0` | none (also disables V.44) |
+| `AT%C1` | MNP5 only; use `AT+ES=4,4,6` to require MNP error control |
+| `AT%C2` | V.42bis only |
+| `AT%C3` | V.42bis and MNP5, V.44 off |
+| `AT+DS=0` | disables V.42bis and the MNP5 offer |
+| `AT+DS=3` | enables V.42bis and the MNP5 offer |
+| `AT+DS=1/2` | directional V.42bis, no MNP5 (MNP5 is bidirectional) |
+| `AT+MNP5=0/1` | independently disable/enable MNP5; vendor extension, not V.250 |
+
+`+MNP5?`/`=?`, stored profiles (including restart from a profile file), ATI4,
+ATI6, `+DR: MNP5` and the `/MNP/MNP5` CONNECT suffix expose the actual
+selection. `ME_DATA_COMPRESSION=none` suppresses the power-on MNP5 offer too;
+an explicit DTE compression selection takes precedence as for V.42bis.
+The old `%C1` alias incorrectly selected V.42bis, and `%C3` returned ERROR;
+both are corrected.
+
+### Stream and backpressure rules
+
+* Independent TX/RX states per call; both reset on a fresh MNP establishment.
+  A retransmitted LT never re-enters the encoder, and a discarded, duplicate
+  or out-of-sequence LT never enters the decoder.
+* Three literal copies introduce a run; the extra count (0-250) is itself
+  rank-coded, without adapting the frequency table. Split a 253-octet run
+  and restart run counting. AFE promotes a symbol ahead of all equal-frequency
+  symbols **stably**, preserving their order; halve frequencies, rounding
+  down, before updating when the leading frequency reaches 255.
+* Rank codes are MSB-first. Marker 256 ends an octet-aligned segment, padded
+  with ones; it resets bit/run assembly, **not** the adaptive table. Idle
+  flushes are silent. Arbitrarily fragmented LTs retain stream state.
+* Decoder failures stop the link. There is no integrity check after
+  decompression, so passing a self-round-trip is not enough to trust a codec.
+
+Compression made an existing receive-credit deviation unsafe. In a regression
+with a 64 KB DTE ring, 500 ms delay **each way**, a 5 s blocked DTE, then
+40 KB/s draining, disabling just the A.7.3.2.3 discard guard lost **57,346
+bytes** to ring overrun and verified only **204,798 of 262,144** bytes
+(139,262 subsequent mismatches). With the guard, all **262,144 bytes** are
+verified, with zero overruns or mismatches, and retries preserve dictionary
+state. The related T401 fix keeps indefinitely busy peers connected without
+spending N400 on retransmissions prohibited by zero credit; N400 stays 12.
+
+### Independent reference and tests
+
+`reference-data/mnp5/hsf-vectors.txt` contains **284 segments / 73,080
+plaintext bytes**, generated by executing HSF's original encoder and checked
+with its original decoder. It covers all 256 byte values, run lengths 0-255
+and the 252/253/254/505/506/507 boundaries, random binary, repeated frequency
+rescaling, idle flushes and persistent dictionaries across segments.
+`mnp5_test` compares exact wire bytes and decodes the fixtures one byte at a
+time; it also exercises fragmented 64 KB streams, restart and 2,000 malformed
+inputs. macOS UBSan and Linux ASan/UBSan pass. The macOS ASan run timed out
+without output; it is not counted as a pass.
+
+Regenerate with a **locally supplied** reference object (optional Python
+packages `unicorn` and `pyelftools`):
+
+```sh
+python3 tools/hsf_compression_oracle.py \
+  --object /path/to/hsfengine-i386.O \
+  --vectors reference-data/mnp5/hsf-vectors.txt
+make mnp5_test data_stack_test v42_stress_test console_test v250_ctl_test
+./mnp5_test
+./v42_stress_test 3
+```
+
+The tool checks reference SHA256
+`bfc77118f2fcd8349b83ad2174d1fc3be660a87526d7e3c744e436cc1404e9b8`.
+Reference symbols `hsfengine1344_`, `1342_` and `1341_` initialize, encode and
+decode MNP5; `hsfengine2014_`/`1718_` generate/parse LR capabilities. The
+harness substitutes memory/byte-queue callbacks and skips the pure table
+assertion routine, but executes the original codec instructions unchanged.
+Production and routine native tests need neither Python nor this object.
+
+`data_stack_test` checks mode 2 and mode 3, all combinations of local/peer
+refusal, the captured capability mask, response selection and the expansion
+backpressure regression. All **111 stress runs (37 scenarios x 3 seeds)**
+pass, including **18 MNP5 runs** covering mode 2, mode 3, bit errors/bursts,
+stalled DTEs and both V.42-detection-to-MNP paths. These are software/reference
+results, **not hardware MNP5 qualification**. Four V.22bis engine-pair tests
+also verify CONNECT/`+DR` and bidirectional payloads for MNP5 selection, peer
+refusal, the environment's no-compression default and an explicit DTE override.
+The focused regression run passes **12 suites / zero failures**, including
+console parsing and profile-file restart. No hardware MNP5 call is claimed.
 
 ## Tests
 

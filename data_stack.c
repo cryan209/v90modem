@@ -1,11 +1,12 @@
 /*
- * data_stack.c — V.14 async framing / raw shuttle between DTE bytes and the
- * datapump bit stream. See data_stack.h for the layer contract.
+ * data_stack.c — V.14/raw, LAPM/MNP and compression between DTE bytes and
+ * the datapump bit stream. See data_stack.h for the layer contract.
  */
 
 #include <stdio.h>
 #include "data_stack.h"
 #include "mnp.h"
+#include "mnp5.h"
 #include "v44.h"
 
 #include <spandsp.h>
@@ -37,6 +38,9 @@ static void ds_compression_release(data_stack_t *s)
     if (s->v42bis)
         v42bis_free(s->v42bis);
     s->v42bis = NULL;
+    mnp5_free(s->mnp5_encoder);
+    mnp5_free(s->mnp5_decoder);
+    s->mnp5_encoder = s->mnp5_decoder = NULL;
     v44_encoder_free(s->v44_encoder);
     v44_decoder_free(s->v44_decoder);
     s->v44_encoder = NULL;
@@ -55,6 +59,8 @@ static void ds_compression_error(data_stack_t *s)
         s->link_event(s->link_event_ctx, DS_LINK_ERROR);
     if (s->v42)
         v42_stop(s->v42);
+    if (s->mnp)
+        mnp_stop(s->mnp);
 }
 
 static void ds_compressed_output(void *user_data, const uint8_t *msg, int len)
@@ -89,7 +95,7 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
     int len = 0;
     if (s->compression_failed || max_len <= 0)
         return 0;
-    if (s->v42bis || s->v44_encoder)
+    if (s->v42bis || s->v44_encoder || s->mnp5_encoder)
     {
         /* Compress each byte once. LAPM retains the resulting I-frame for
            retransmission; it must never re-enter the dictionary on retry.
@@ -134,8 +140,9 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
             {
                 if (s->compressed_tx_unflushed)
                 {
-                    rc = s->v44_encoder ? v44_encoder_flush(s->v44_encoder)
-                                        : v42bis_compress_flush(s->v42bis);
+                    rc = s->mnp5_encoder ? mnp5_flush(s->mnp5_encoder)
+                         : s->v44_encoder ? v44_encoder_flush(s->v44_encoder)
+                                          : v42bis_compress_flush(s->v42bis);
                     s->compressed_tx_unflushed = false;
                     if (rc != 0)
                         ds_compression_error(s);
@@ -144,7 +151,8 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
             }
             ds_dump_tx_bytes("DTE", input, len);
             s->tx_chars += len;
-            rc = s->v44_encoder ? v44_encoder_feed(s->v44_encoder, input, (size_t)len)
+            rc = s->mnp5_encoder ? mnp5_encode(s->mnp5_encoder, input, (size_t)len)
+               : s->v44_encoder ? v44_encoder_feed(s->v44_encoder, input, (size_t)len)
                                 : v42bis_compress(s->v42bis, input, len);
             s->compressed_tx_unflushed = true;
             if (rc != 0)
@@ -217,7 +225,12 @@ static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
     if (!msg || len <= 0 || s->compression_failed)
         return;
     s->v42_rx_wire_bytes += len;
-    if (s->v44_decoder)
+    if (s->mnp5_decoder)
+    {
+        if (mnp5_decode(s->mnp5_decoder, msg, (size_t)len) != 0)
+            ds_compression_error(s);
+    }
+    else if (s->v44_decoder)
     {
         if (v44_decoder_feed(s->v44_decoder, msg, (size_t)len) != 0)
             ds_compression_error(s);
@@ -528,7 +541,11 @@ void ds_compression_state(const data_stack_t *s, int *scheme, bool *tx, bool *rx
 {
     *scheme = 0;
     *tx = *rx = false;
-    if (s->v44_encoder || s->v44_decoder) {
+    if (s->mnp5_encoder || s->mnp5_decoder) {
+        *scheme = 3;
+        *tx = s->mnp5_encoder != NULL;
+        *rx = s->mnp5_decoder != NULL;
+    } else if (s->v44_encoder || s->v44_decoder) {
         *scheme = 2;
         *tx = s->v44_encoder != NULL;
         *rx = s->v44_decoder != NULL;
@@ -571,13 +588,26 @@ static void ds_mnp_status(void *user_data, int status)
             s->demote_to_mnp = true;
         }
         return;
-    case MNP_STATUS_CONNECTED:
+    case MNP_STATUS_CONNECTED: {
+        mnp_stats_t st;
+        mnp_get_stats(s->mnp, &st);
+        ds_compression_release(s);
+        s->compression_failed = false;
+        if (st.compression == 5) {
+            s->mnp5_encoder = mnp5_init(ds_compressed_output, s);
+            s->mnp5_decoder = mnp5_init(ds_decoded_output, s);
+            if (!s->mnp5_encoder || !s->mnp5_decoder) {
+                ds_compression_error(s);
+                return;
+            }
+        }
         s->link_ready = true;
         /* As for LAPM: a successful establishment delivers none of the
          * detection-phase characters (V.42 Appendix I.3). */
         s->detect_rx_len = 0;
         event = DS_LINK_CONNECTED;
         break;
+    }
     case MNP_STATUS_ESTABLISH_FAILED:
         s->link_ready = false;
         if (s->fallback_buffered) {
@@ -605,8 +635,10 @@ static mnp_t *ds_mnp_new(data_stack_t *s, int lr_tries, int answer_wait_ms)
                         s->line_bit_rate,
                         ds_v42_get_frame, ds_v42_put_frame, ds_mnp_status, s);
 
-    if (m)
+    if (m) {
         mnp_set_establish_limit(m, lr_tries, answer_wait_ms);
+        mnp_set_compression(m, s->mnp5_offer);
+    }
     return m;
 }
 
@@ -623,6 +655,14 @@ int ds_init_mnp(data_stack_t *s, bool calling_party, int line_bit_rate, int answ
     s->mnp = ds_mnp_new(s, DS_MNP_LR_TRIES_DIRECT,
                         answer_wait_ms > 0  ?  answer_wait_ms  :  DS_MNP_ANSWER_WAIT_MS);
     return s->mnp  ?  0  :  -1;
+}
+
+int ds_set_mnp5(data_stack_t *s, bool enable)
+{
+    if (!s || s->link_ready) return -1;
+    if (s->mnp && mnp_set_compression(s->mnp, enable) != 0) return -1;
+    s->mnp5_offer = enable;
+    return 0;
 }
 
 void ds_set_alternative(data_stack_t *s, bool enable)

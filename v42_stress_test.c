@@ -38,7 +38,7 @@ typedef struct {
     const char *name;
     int rate;               /* line bit rate, both directions */
     int delay_ms;           /* one way */
-    int compression;        /* 0 none, 1 V.42bis, 2 V.44 */
+    int compression;        /* 0 none, 1 V.42bis, 2 V.44, 3 MNP5 */
     double ber;             /* independent bit errors */
     int burst_every_ms;     /* mean spacing of error bursts, 0 none */
     int burst_bits;         /* random bits per burst */
@@ -81,6 +81,12 @@ static const scenario_t scenarios[] = {
     {"slow-dte-v44", 31200, 60, 2, 0, 0, 0, 0, 0, 0, 60, 7, 0, 16384, 1000},
     {"slow-dte-plain-ber", 14400, 20, 0, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 8192, 1000},
     {"stalled-dte-v42bis", 31200, 60, 1, 0, 0, 0, 0, 0, 0, 60, 0, 30.0, 16384, 1},
+    {"mnp5-clean-9600", 9600, 10, 3, 0, 0, 0, 0, 0, 0, 30, 6, 0, 0, 0, 1},
+    {"mnp5-octet-errors", 9600, 10, 3, 1e-5, 0, 0, 0, 0, 0, 60, 6, 0, 0, 0, 2},
+    {"mnp5-bursts-31200", 31200, 100, 3, 0, 500, 64, 0, 0, 0, 60, 10, 0, 0, 0, 1},
+    {"mnp5-stalled-dte", 31200, 60, 3, 0, 0, 0, 0, 0, 0, 60, 0, 30.0, 65536, 1, 1},
+    {"mnp5-from-v42-caller", 14400, 20, 3, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 0, 0, 3},
+    {"mnp5-from-v42-answerer", 14400, 20, 3, 1e-5, 0, 0, 0, 0, 0, 60, 7, 0, 0, 0, 4},
     {"mnp-clean-9600", 9600, 10, 0, 0, 0, 0, 0, 0, 0, 30, 6, 0, 0, 0, 1},
     {"mnp-octet-clean-9600", 9600, 10, 0, 0, 0, 0, 0, 0, 0, 30, 6, 0, 0, 0, 2},
     {"mnp-ber1e-4-14400", 14400, 20, 0, 1e-4, 0, 0, 0, 0, 0, 60, 2, 0, 0, 0, 1},
@@ -345,13 +351,14 @@ static int init_end(data_stack_t *ds, end_t *e, const scenario_t *sc, bool calle
             return -1;
         if (sc->mnp == 2)
             ds_set_mnp_framing_mode(ds, 2);
-        return 0;
+        return ds_set_mnp5(ds, sc->compression == 3);
     }
     if (sc->mnp)
     {
         if (ds_init_v42_ex(ds, caller, true, sc->rate, 0, 1024, 32,
                            end_pull, e, end_push, e, end_event, e) != 0)
             return -1;
+        if (ds_set_mnp5(ds, sc->compression == 3) != 0) return -1;
         ds_set_alternative(ds, true);
         return 0;
     }
@@ -464,6 +471,13 @@ static result_t run(const scenario_t *sc, uint64_t seed, bool verbose)
              &&  r.kbps[0] >= sc->min_kbps  &&  r.kbps[1] >= sc->min_kbps
              &&  ds_link_is_ready(&ds[0])  &&  ds_link_is_ready(&ds[1])
              &&  (!sc->mnp  ||  (ds[0].framing == DS_FRAMING_MNP  &&  ds[1].framing == DS_FRAMING_MNP));
+    if (sc->compression == 3) {
+        for (int i = 0; i < 2; i++) {
+            int scheme; bool tx, rx;
+            ds_compression_state(&ds[i], &scheme, &tx, &rx);
+            r.pass &= scheme == 3 && tx && rx;
+        }
+    }
     if (verbose)
     {
         for (int i = 0; i < 2; i++)

@@ -4056,6 +4056,13 @@ static const char *at_cmd_plus_DS(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_plus_MNP5(at_state_t *s, const char *t)
+{
+    /* Vendor extension: proprietary MNP5 offer (not part of ITU-T V.250). */
+    return at_forward_parameter(s, t);
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_plus_DS44(at_state_t *s, const char *t)
 {
     /* V.250 6.6.2 - V.44 data compression */

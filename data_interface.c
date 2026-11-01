@@ -814,7 +814,7 @@ static void profile_apply(const di_profile_t *sp)
 static void profile_settings(const di_profile_t *sp, pf_profile_t *out)
 {
     static const char *const params[] = {
-        "MR", "ER", "DR", "ES", "DS", "DS44", "EB", "EFCS", "ETBM", "EWIND", "EFRAM",
+        "MR", "ER", "DR", "ES", "DS", "DS44", "MNP5", "EB", "EFCS", "ETBM", "EWIND", "EFRAM",
         "IPR", "ICF", "IFC", "ILRR", "MSC", "PCW", "PMH", "PMHT", "PIG", "PQC", "PSS"
     };
     static const int sregs[] = { 0, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
@@ -1196,7 +1196,7 @@ static void info_settings(page_t *pg)
     static const int sregs[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     static const char *const v250_reads[] = {
         "MR?", "ER?", "DR?", "ES?", "DS?", "EWIND?", "EFRAM?", "ETBM?", "IPR?", "ICF?", "IFC?", "MSC?",
-        "PCW?", "PMH?", "PMHT?", "PIG?", "PQC?", "PSS?"
+        "PCW?", "PMH?", "PMHT?", "PIG?", "PQC?", "PSS?", "MNP5?"
     };
     char line[160];
     v250_ctl_t cfg;
@@ -1271,7 +1271,7 @@ static void info_link(page_t *pg)
         if (l.dc_scheme == 0 || (!l.dc_tx && !l.dc_rx))
             page_put(pg, "Compression        None\r\n");
         else
-            page_put(pg, "Compression        %s%s%s\r\n", l.dc_scheme == 2 ? "V.44" : "V.42bis",
+            page_put(pg, "Compression        %s%s%s\r\n", l.dc_scheme == 3 ? "MNP5" : l.dc_scheme == 2 ? "V.44" : "V.42bis",
                      l.dc_tx ? " TX" : "", l.dc_rx ? " RX" : "");
         page_put(pg, "Octets to line     %llu\r\n", (unsigned long long) l.to_line);
         page_put(pg, "Octets to DTE      %llu\r\n", (unsigned long long) l.to_dte);
@@ -1305,7 +1305,7 @@ static void info_config(page_t *pg)
     at_ms_format_test(line, sizeof(line));
     page_put(pg, "Modulations        %s\r\n", line);
     page_put(pg, "Error control      V.42 LAPM, buffered (V.14)\r\n");
-    page_put(pg, "Compression        V.42bis (+DS); V.44 by ME_DATA_COMPRESSION=v44\r\n");
+    page_put(pg, "Compression        V.42bis (+DS), MNP5 (+MNP5); V.44 (+DS44)\r\n");
     page_put(pg, "Fax                Class 1, 1.0 (T.31), 2.0 (T.32)\r\n");
     page_put(pg, "Diagnostics        +TLDL loop, +TTER/+TNUM error test, +TSELF\r\n");
     page_put(pg, "Console            %s\r\n", console_desc(line, sizeof(line)));

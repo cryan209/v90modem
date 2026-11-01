@@ -101,6 +101,7 @@ struct mnp_s {
 
     /* Negotiated (A.7.1.5). */
     int svc, k, n401, opt;
+    bool offer_mnp5;
 
     /* Sender (A.6.3.2, A.6.3.12). */
     uint8_t vs;                     /* V(S) */
@@ -360,6 +361,12 @@ static void send_lr(mnp_t *m, bool response)
     {
         h[n++] = 8; h[n++] = 1; h[n++] = (uint8_t)(response ? m->opt : (OPT_256 | OPT_FIXED));
     }
+    /* Proprietary compression-capability mask: bit 0 is MNP5; bits 2-5
+       describe V.42bis dictionaries (not supported over MNP here). A response
+       selects ONE algorithm, never echoes the offer mask. See docs/mnp.md. */
+    if (response ? m->st.compression : m->offer_mnp5) {
+        h[n++] = 9; h[n++] = 1; h[n++] = 1;
+    }
     h[0] = (uint8_t)(n - 1);
     /* A.6.4: the establishment exchange is always start-stop octet-oriented. */
     build_frame(m, false, h, n, NULL, 0);
@@ -490,8 +497,8 @@ static void go_back(mnp_t *m)
     m->clean_run = 0;
 }
 
-/* T401 runs from the oldest LT's last transmission, or from its last expiry
-   when a closed window kept the go-back from sending anything. */
+/* T401 runs from the oldest LT's last transmission, or its last expiry
+   while a retransmission was being scheduled. */
 static uint64_t oldest_timer_start(const mnp_t *m)
 {
     uint64_t t = m->out[(uint8_t)(m->acked + 1) & 15].sent_at;
@@ -616,8 +623,11 @@ static bool next_frame(mnp_t *m)
         send_la(m, false);
         return true;
     }
-    /* A.7.3.5 b): T401. */
-    if (outstanding(m) > 0  &&  m->now - oldest_timer_start(m) >= t401(m))
+    /* A.7.3.5 b): T401. A.7.3.5 forbids retransmission with zero
+       credit; A.7.3.6 counts retransmissions, not time spent waiting for a
+       busy DTE. Do not spend N400 on attempts we cannot actually send. */
+    if (outstanding(m) > 0  &&  window(m) > 0
+        &&  m->now - oldest_timer_start(m) >= t401(m))
     {
         m->timer_at = m->now;
         /* A.7.3.6 / A.7.2.4: N400 attempts, then LD. */
@@ -680,7 +690,7 @@ int mnp_tx_bit(mnp_t *m)
 /* ---- receiver ------------------------------------------------------------- */
 
 typedef struct {
-    int svc, k, n401, opt;
+    int svc, k, n401, opt, compression;
     bool has_opt;
 } lr_params_t;
 
@@ -727,6 +737,10 @@ static bool parse_lr(const uint8_t *f, int li, lr_params_t *p, int *ld)
             p->opt = v[0];
             p->has_opt = true;
         }
+        else if (type == 9) {
+            if (len != 1) return false;
+            p->compression = v[0];
+        }
         /* A.7.1.5.6: anything else is ignored. */
         i += 2 + len;
     }
@@ -743,6 +757,11 @@ static bool negotiate(mnp_t *m, const lr_params_t *p)
 {
     int svc = (p->svc < m->offer_class)  ?  p->svc  :  m->offer_class;     /* A.7.1.5.3 */
 
+    /* A response must not enable an unoffered algorithm or select a mask
+       of alternatives. Otherwise the peers could silently decode differently. */
+    if (m->originator && p->compression
+        && (!m->offer_mnp5 || p->compression != 1))
+        return false;
     if (svc < 2)
         return false;           /* mode 1 is not a two-way mode */
     m->svc = svc;
@@ -757,6 +776,7 @@ static bool negotiate(mnp_t *m, const lr_params_t *p)
     m->st.k = m->k;
     m->st.n401 = m->n401;
     m->st.optimisation = m->opt;
+    m->st.compression = m->offer_mnp5 && (p->compression & 1) ? 5 : 0;
     return true;
 }
 
@@ -853,6 +873,14 @@ static void rx_la(mnp_t *m, uint8_t nr, int credit)
 /* A.7.3.2. */
 static void rx_lt(mnp_t *m, uint8_t ns, const uint8_t *data, int len)
 {
+    /* A.7.3.2.3: discard while receive credit is zero. Compressed frames can
+       expand to tens of KB: accepting the rest of a window after asserting
+       busy overflows the DTE ring and silently loses decompressed bytes.
+       Keep V(R) and the decoder untouched; the peer will retransmit. */
+    if (m->busy) {
+        m->ack_due = true;
+        return;
+    }
     if (ns == (uint8_t)(m->vr + 1))
     {
         m->vr = ns;
@@ -890,6 +918,13 @@ static int field(const uint8_t *f, int li, int want_type)
         i += 2 + len;
     }
     return -1;
+}
+
+int mnp_set_compression(mnp_t *m, bool enable)
+{
+    if (!m || m->now || m->st.lr_rx) return -1;
+    m->offer_mnp5 = enable;
+    return 0;
 }
 
 static void rx_lr(mnp_t *m, const uint8_t *f, int li)

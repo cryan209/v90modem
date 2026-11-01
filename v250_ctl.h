@@ -48,6 +48,8 @@ typedef struct {
     int dr;                 /* +DR: report +DR before CONNECT */
     int es[3];              /* +ES: orig_rqst, orig_fbk, ans_fbk */
     int ds[4];              /* +DS: direction, negotiation, max_dict, max_string */
+    int mnp5;               /* vendor +MNP5: proprietary MNP5 offer, 0/1 */
+    bool mnp5_set;          /* explicit +MNP5 overrides its power-on policy */
     bool es_set;            /* the DTE has issued +ES since the last reset */
     bool ds_set;            /* the DTE has issued +DS since the last reset */
     /* 6.5.2-6.5.8.  Only the values this DCE can honour are accepted; see the
@@ -110,7 +112,8 @@ v250_ctl_result_t v250_ctl_command(v250_ctl_t *c, const char *text,
  *   &M5 / \N2       +ES=3,2,4   error control required
  *   \N4             +ES=3,3,5   LAPM required
  *   &K0 / %C0        +DS=0, +DS44=0          no compression
- *   &K1-3 / %C1-2    +DS=3                   V.42bis both ways
+ *   &K1-3           +DS=3                   V.42bis and MNP5
+ *   %C0/1/2/3       none / MNP5 / V.42bis / both (V.44 off)
  *   &H0 / &H1        +IFC=,0 / +IFC=,2       DTE flow-controlled by the DCE
  *   &R1 / &R2        +IFC=0 / +IFC=2         DCE flow-controlled by the DTE
  *   &I0              software flow control off (it always is)
@@ -172,7 +175,7 @@ typedef struct {
     int tx_rate;            /* +MRR; 0 = negotiation failed */
     int rx_rate;            /* 0 = same as tx_rate, not reported separately */
     const char *ec;         /* +ER: "NONE", "LAPM" or "ALT" (MNP; "/MNP" after CONNECT) */
-    int dc_scheme;          /* +DR: 0 none, 1 V.42bis, 2 V.44 */
+    int dc_scheme;          /* +DR: 0 none, 1 V.42bis, 2 V.44, 3 MNP5 */
     bool dc_tx;
     bool dc_rx;
     int dte_rate;           /* +ILRR: the DTE-DCE rate; 0 = not reported */

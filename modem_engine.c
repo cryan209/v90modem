@@ -1031,6 +1031,11 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                              data_stack_pull_dte_byte, NULL,
                              data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0) {
+            v250_ctl_t cfg;
+            const char *compression = getenv("ME_DATA_COMPRESSION");
+            di_get_v250_settings(&cfg);
+            result = ds_set_mnp5(&g_data_stack, cfg.mnp5
+                                 && (cfg.ds_set || cfg.mnp5_set || !compression || strcmp(compression, "none")));
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
             ds_set_rx_room(&g_data_stack, data_stack_rx_room_v42, NULL,
                            DATA_RING_SIZE/2, DATA_RING_SIZE*3/4);
@@ -1069,6 +1074,8 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0) {
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+            result = ds_set_mnp5(&g_data_stack, cfg.mnp5
+                                 && (cfg.ds_set || cfg.mnp5_set || !compression || strcmp(compression, "none")));
             /* V.42 7.2.1.2/7.2.1.3, Annex A: MNP when detection finds no
                LAPM peer, before the +ES fallback. */
             ds_set_alternative(&g_data_stack, g_ec_alt_ok);

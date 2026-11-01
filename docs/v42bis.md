@@ -59,6 +59,34 @@ The 79 checks cover 16-bit codewords, dictionary reuse, all supported string
 limits, automatic and forced mode transitions, RESET, C-INIT recovery and
 aligned/fragmented/idle flushes. Native UBSan and Linux ASan/UBSan also pass.
 
+## USB-call compression investigation (1 November 2026)
+
+The repeated downstream `0xc6` insertion on the MT9234 call is **not yet a
+proven V.42bis encoder defect**. Concatenating the captured compressor-to-LAPM
+information bytes and executing the **original Conexant HSF V.42bis decoder**
+reconstructs **297,962 byte-exact DTE-prefix bytes**, with no mismatch. The
+independent Python decoder agrees. This validates the captured compressor
+output, not its later LAPM transmission, the physical link, the USB bridge or
+the receiving modem. It does not establish that the live insertion is fixed.
+No DSP constants or carrier-recovery thresholds were changed for this work.
+
+Optional reproduction (the object and call dump are local evidence, not
+production dependencies; capture only test credentials):
+
+```sh
+python3 tools/hsf_compression_oracle.py \
+  --object /path/to/hsfengine-i386.O \
+  --v42bis-dump /path/to/tx-frames.txt --p1 1024 --p2 32
+```
+
+The tool consumes `DS_TX_FRAME_DUMP` records (`DTE` and `LAPM`). Reference
+object SHA256 and optional Python dependencies are documented in [mnp.md](mnp.md).
+The routine 79-case independent interop suite and native V.42bis tests still
+pass. The control-path changes correct `%C1`/`%C3`, add explicit MNP5 policy,
+and preserve `+DS=0` as a no-compression policy. MNP5 is a separate codec, not
+a replacement for V.42bis; see [mnp.md](mnp.md) for its wire validation and the
+compressed-output backpressure fix.
+
 Hardware application interoperability is a separate measurement. The earlier
 RasFinder capture negotiated P0=3/P1=1024/P2=32 but delivered opaque bytes with
 no initial ECM; interpreting them as a fresh compressed stream referenced an

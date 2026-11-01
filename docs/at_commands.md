@@ -119,7 +119,7 @@ keep them in.
 | `&F0`/`&F1` | Factory defaults (not the `&W` profile); `&F2` is ERROR |
 | `&H0`/`&H1` | Transmit flow control none/CTS (`+IFC` DTE-by-DCE) |
 | `&I0` | Software flow control off; XON/XOFF (`&I1-5`) is ERROR |
-| `&K0-3` | Compression: `&K0` none, `&K1-3` V.42bis (`+DS`, `+DS44`) |
+| `&K0-3` | Compression: `&K0` none, `&K1-3` V.42bis over LAPM and MNP5 over MNP |
 | `&M0`/`&M4`/`&M5` | Error control: none / V.42 or buffered / required (`+ES`) |
 | `&R1`/`&R2` | Receive flow control: ignore RTS / RTS (`+IFC` DCE-by-DTE) |
 | `&V` | View the active configuration and stored profiles |
@@ -127,7 +127,7 @@ keep them in.
 | `&Yn` | Profile restored at power-on (0-1; kept in the `--profile` file) |
 | `&Zn=s` | Store number *s* in slot *n* (0-9); `&Zn?` shows it |
 | `\N0`/`\N2-4` | Rockwell error control: 0 none, 2 required, 3 auto, 4 LAPM |
-| `%C0-2` | Rockwell compression: 0 none, 1/2 V.42bis (MNP 5 is ERROR) |
+| `%C0-3` | Compression: 0 none, 1 MNP5, 2 V.42bis, 3 both (V.44 off) |
 
 ## Extended commands (`AT+$`)
 
@@ -154,6 +154,7 @@ Each takes the V.250 `=`, `?` and `=?` forms.
 | `+EB=0,0,0` | Break handling: none (a pty carries no break) |
 | `+DS=d,n,s,l` | V.42bis: direction, required, dictionary size, string length |
 | `+DS44=d,n,...` | V.44 offer (with V.42bis) |
+| `+MNP5=0/1` | Vendor extension: disable/offer bidirectional MNP5 over MNP, independently of LAPM codecs |
 | `+DR=0/1` | Report `+DR` before CONNECT |
 | `+TLDL=0/1` | Local digital loop of the DTE data, during a call |
 | `+TTER=t,l,n,p` | Bit/block error test on that loop |
@@ -171,6 +172,14 @@ Each takes the V.250 `=`, `?` and `=?` forms.
 | `+PIG=0/1` | V.92 PCM upstream: 0 offered, 1 not (factory) |
 | `+PCW=1/2` | A second call arriving mid-call: 1 hang up for it, 2 busy (SIP 486) |
 | `+PQC=0-3`, `+PSS` | Quick Connect: 0 short Phase 1 and 2, 1 Phase 1 only, 2 Phase 2 only, 3 off (factory); `+PSS=2` forces the full startup |
+
+`+DS=0` also suppresses MNP5; `+DS=3` allows it. Directional `+DS=1/2`
+leaves MNP5 off because it has no directional negotiation. `+MNP5` can override
+that policy explicitly. Factory settings allow MNP5, but it is used only if
+both peers agree in MNP's LR exchange. `AT+ES=4,4,6` selects MNP-only error
+control; `AT%C1` then selects MNP5-only compression. These configure the next
+call, not a dictionary already in use. See [mnp.md](mnp.md) for the independent
+wire checks and the limits of the current hardware qualification.
 
 `+MA` and `+PMHF` are not implemented (ERROR: there is no line to flash).
 

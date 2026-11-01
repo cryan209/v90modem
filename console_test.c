@@ -502,6 +502,17 @@ static void test_v250_parameters(void)
     expect(dte, "AT\\N3%C2", "OK");
     expect(dte, "AT+ES?", "+ES: 3,0,2");
     expect(dte, "AT+DS?", "+DS: 3,");
+    expect(dte, "AT+MNP5?", "+MNP5: 0");
+    expect(dte, "AT%C1", "OK");
+    expect(dte, "AT+DS?", "+DS: 0,");
+    expect(dte, "AT+MNP5?", "+MNP5: 1");
+    expect(dte, "AT%C3", "OK");
+    expect(dte, "AT+DS?", "+DS: 3,");
+    expect(dte, "AT+MNP5?", "+MNP5: 1");
+    expect(dte, "AT+MNP5=2", "ERROR");
+    expect(dte, "AT+MNP5=0", "OK");
+    expect(dte, "AT+MNP5?", "+MNP5: 0");
+    expect(dte, "AT%C2", "OK");
     expect(dte, "AT&M1", "ERROR");
     expect(dte, "AT\\N5", "ERROR");
     expect(dte, "AT&F2", "ERROR");
@@ -1263,16 +1274,17 @@ static void test_profile(void)
     expect(dte, "ATE0", "OK");
     expect(dte, "AT&V", "none: ATZ restores the factory settings");
     expect(dte, "ATS0=3X2+ES=1,0,1;+VCID=1;+EWIND=6;+MS=V34;+ASTO=2,555", "OK");
-    expect(dte, "AT&A2", "OK");
+    expect(dte, "AT&A2%C2", "OK");
     expect(dte, "AT&W", "OK");                      /* &W is &W0 */
     check(access(file, R_OK) == 0, "&W writes the --profile file");
     read_file(file, buf, sizeof(buf));
     check(strstr(buf, "profile 0\n no echo\n") && strstr(buf, " s-register 0 3\n")
           && strstr(buf, " +ES 1,0,1\n") && strstr(buf, "number 2 \"555\"\n")
           && strstr(buf, "power-on-profile 0\n") && strstr(buf, "\nend\n")
-          && strstr(buf, " connect-suffix 2\n"),
+          && strstr(buf, " connect-suffix 2\n") && strstr(buf, " +MNP5 0\n"),
           "  ...in the Cisco-style syntax");
     expect(dte, "ATS0=5X3+MS=V90", "OK");
+    expect(dte, "AT%C1", "OK");
     expect(dte, "AT&W1", "OK");
     expect(dte, "AT&W2", "ERROR");                  /* profiles are 0 and 1 */
     expect(dte, "ATS0=0X4+ES=3,0,2;+VCID=0;+EWIND=15;+ASTO=2,1", "OK");
@@ -1308,9 +1320,13 @@ static void test_profile(void)
         return;
     }
     expect(dte, "ATS0?", "005");                    /* E0 is stored too: no echo */
+    expect(dte, "AT+DS?", "+DS: 0,");
+    expect(dte, "AT+MNP5?", "+MNP5: 1");
     expect(dte, "AT+MS?", "+MS: V90");
     expect(dte, "AT+ASTO?", "+ASTO: 2,1");
     expect(dte, "ATZ0", "OK");
+    expect(dte, "AT+DS?", "+DS: 3,");
+    expect(dte, "AT+MNP5?", "+MNP5: 0");
     expect(dte, "AT+ES?;+EWIND?", "+EWIND: 6,0");
     close(dte);
     di_close();

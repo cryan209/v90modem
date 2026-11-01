@@ -427,8 +427,28 @@ static void test_courier_aliases(void)
     c.ds44[0] = 3;
     check(v250_ctl_alias(&c, "&K0") == V250_CTL_OK && c.ds[0] == 0 && c.ds44[0] == 0 && c.ds_set,
           "&K0 turns off V.42bis and V.44");
-    check(v250_ctl_alias(&c, "%C2") == V250_CTL_OK && c.ds[0] == 3 && c.ds[2] == 1024, "%C2 is +DS=3, rest kept");
-    check(v250_ctl_alias(&c, "%C3") == V250_CTL_ERROR, "%C3 (MNP5 only) is ERROR");
+    check(v250_ctl_alias(&c, "%C2") == V250_CTL_OK && c.ds[0] == 3 && c.ds[2] == 1024 && !c.mnp5,
+          "%C2 offers V.42bis, not MNP5");
+    check(v250_ctl_alias(&c, "%C3") == V250_CTL_OK && c.ds[0] == 3 && c.mnp5,
+          "%C3 offers V.42bis and MNP5");
+    check(v250_ctl_alias(&c, "%C1") == V250_CTL_OK && c.ds[0] == 0 && c.mnp5 && !c.ds44[0],
+          "%C1 offers only MNP5");
+    check(v250_ctl_alias(&c, "%C0") == V250_CTL_OK && !c.ds[0] && !c.mnp5 && !c.ds44[0],
+          "%C0 disables all compression");
+    check(v250_ctl_command(&c,"DS=3",out,sizeof(out))==V250_CTL_OK && c.mnp5,
+          "+DS=3 enables both-way MNP5 policy");
+    check(v250_ctl_command(&c,"DS=1",out,sizeof(out))==V250_CTL_OK && !c.mnp5,
+          "directional +DS must not silently enable bidirectional MNP5");
+    check(v250_ctl_command(&c,"DS=0",out,sizeof(out))==V250_CTL_OK && !c.mnp5,
+          "+DS=0 disables MNP5 as well as V.42bis");
+    v250_ctl_reset(&c);
+    check(!c.mnp5_set, "factory MNP5 policy is not a DTE override");
+    check(v250_ctl_command(&c,"MNP5=1",out,sizeof(out))==V250_CTL_OK && c.mnp5 && c.mnp5_set && !c.ds_set,
+          "vendor +MNP5 independently overrides its power-on policy, without changing +DS");
+    check(v250_ctl_command(&c,"MNP5?",out,sizeof(out))==V250_CTL_OK && !strcmp(out,"+MNP5: 1"),
+          "vendor +MNP5 readback");
+    check(v250_ctl_command(&c,"MNP5=2",out,sizeof(out))==V250_CTL_ERROR && c.mnp5,
+          "invalid +MNP5 changes nothing");
     check(v250_ctl_alias(&c, "&H0") == V250_CTL_OK && c.ifc[0] == 2 && c.ifc[1] == 0, "&H0 is +IFC=,0");
     check(v250_ctl_alias(&c, "&R1") == V250_CTL_OK && c.ifc[0] == 0 && c.ifc[1] == 0, "&R1 is +IFC=0");
     check(v250_ctl_alias(&c, "&H2") == V250_CTL_ERROR && v250_ctl_alias(&c, "&I1") == V250_CTL_ERROR
@@ -447,6 +467,10 @@ static void test_courier_aliases(void)
     v250_ctl_alias(&c, "&A3");
     v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
     check(!strcmp(out, "/ARQ/V34/LAPM/V42BIS"), "&A3: /ARQ/V34/LAPM/V42BIS");
+    r.ec = "ALT"; r.dc_scheme = 3;
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "/ARQ/V34/MNP/MNP5"), "&A3 reports actual MNP5, not V.42bis");
+    r.dc_scheme = 1;
     r.ec = "NONE";
     v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
     check(!strcmp(out, "/V34"), "&A3 without error control: modulation only");

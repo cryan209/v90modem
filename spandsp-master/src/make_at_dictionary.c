@@ -309,6 +309,7 @@ const char *wordlist[] =
     "+IRTS",    /* V.250 6.2.17 - Select synchronous mode RTS option */
     "+ITF",     /* V.80 8.4 - Transmit flow control thresholds */
     "+MA",      /* V.250 6.4.2 - Modulation automode control */
+    "+MNP5",    /* Vendor extension - proprietary MNP5 compression offer */
     "+MR",      /* V.250 6.4.3 - Modulation reporting control */
     "+MS",      /* V.250 6.4.1 - Modulation selection */
     "+MSC",     /* V.250 6.4.8 - Seamless rate change enable */

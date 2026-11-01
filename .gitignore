@@ -42,6 +42,7 @@ v92_trn2u_replay
 v92_b1u_lock_test
 v92_slm_chain_test
 data_stack_test
+mnp5_test
 v42_link_test
 v42_throughput_test
 v44_test

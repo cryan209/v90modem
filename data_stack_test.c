@@ -857,6 +857,157 @@ static void test_mnp_lr_encoding(void)
     mnp_free(m);
 }
 
+static void mnp_async_octet(mnp_t *m, uint8_t byte)
+{
+    mnp_rx_bit(m, 0);
+    for (int i = 0; i < 8; i++) mnp_rx_bit(m, (byte >> i) & 1);
+    mnp_rx_bit(m, 1);
+}
+
+static void test_mnp5_lr_selection(void)
+{
+    /* The CX93001's live offer is 09 01 05: MNP5 plus V.42bis/512.
+       Select 01, not 05. Unknown algorithms alone must not enable MNP5. */
+    uint8_t body[] = {26,1,2,1,6,1,0,0,0,0,255,2,1,3,3,1,8,4,2,64,0,8,1,3,9,1,5};
+    for (int enabled = 0; enabled <= 1; enabled++) {
+        for (int mask = 4; mask <= 5; mask++) {
+            mnp_t *m = mnp_init(false, 3, 9600, NULL, NULL, NULL, NULL);
+            CHECK(m && mnp_set_compression(m, enabled) == 0, "MNP5 offer configured before establishment");
+            body[26] = (uint8_t)mask;
+            uint8_t etx = 3;
+            uint16_t crc = mnp_crc16(mnp_crc16(0, body, sizeof(body)), &etx, 1);
+            uint8_t frame[sizeof(body)+7];
+            frame[0]=0x16; frame[1]=0x10; frame[2]=2;
+            memcpy(frame+3, body, sizeof(body));
+            frame[30]=0x10; frame[31]=3; frame[32]=(uint8_t)crc; frame[33]=(uint8_t)(crc>>8);
+            for (int i=0;i<20;i++) mnp_rx_bit(m,1);
+            for (size_t i=0;i<sizeof(frame);i++) {
+                mnp_async_octet(m,frame[i]);
+                /* DLE doubling in body and FCS, not the delimiters. */
+                if ((i>=3 && i<30) || i>=32)
+                    if (frame[i]==0x10) mnp_async_octet(m,0x10);
+            }
+            mnp_stats_t st;
+            mnp_get_stats(m,&st);
+            bool agreed = enabled && mask == 5;
+            CHECK(st.lr_rx == 1 && st.compression == (agreed ? 5 : 0),
+                  "MNP5: LR capability-mask intersection, disabled and unknown-algorithm refusal");
+            uint8_t response[34];
+            int n=collect_async(mnp_bit,m,response,sizeof(response),9600);
+            CHECK(n>=31 && (agreed ? response[3]==26 && response[27]==9 && response[28]==1 && response[29]==1
+                                 : response[3]==23 && response[27]==0x10 && response[28]==3),
+                  "MNP5: response selects only algorithm 01, or omits parameter 9");
+            CHECK(mnp_set_compression(m,!enabled) == -1, "MNP5: cannot change offer during establishment");
+            mnp_free(m);
+        }
+    }
+}
+
+static void test_mnp5_data_path(void)
+{
+    static uint8_t payload[4096];
+    for (size_t i=0;i<sizeof(payload);i++) payload[i]=(uint8_t)(i/7);
+    for (int mode=2;mode<=3;mode++) {
+        for (int offers=0;offers<4;offers++) {
+            data_stack_t a,b;
+            CHECK(ds_init_mnp(&a,true,9600,0,pull_byte,NULL,NULL,NULL,NULL,NULL)==0
+                  && ds_init_mnp(&b,false,9600,0,NULL,NULL,push_byte,NULL,NULL,NULL)==0,
+                  "MNP5 data path: initialize both link roles");
+            load_tx(payload,0);
+            ds_set_mnp_framing_mode(&a,mode); ds_set_mnp_framing_mode(&b,mode);
+            CHECK(ds_set_mnp5(&a,(offers&1)!=0)==0 && ds_set_mnp5(&b,(offers&2)!=0)==0,
+                  "MNP5 data path: independent offers configured");
+            for (int i=0;i<9600*5 && !(ds_link_is_ready(&a)&&ds_link_is_ready(&b));i++) {
+                ds_rx_put_bit(&b,ds_tx_get_bit(&a)); ds_rx_put_bit(&a,ds_tx_get_bit(&b));
+            }
+            int scheme; bool tx,rx;
+            ds_compression_state(&a,&scheme,&tx,&rx);
+            CHECK(ds_link_is_ready(&a)&&ds_link_is_ready(&b)
+                  && scheme==(offers==3?3:0) && tx==(offers==3) && rx==(offers==3),
+                  "MNP5 negotiated only with mutual consent (mode 2 and 3)");
+            load_tx(payload,sizeof(payload));
+            for (int i=0;i<9600*12 && rx_sink_len<(int)sizeof(payload);i++) {
+                ds_rx_put_bit(&b,ds_tx_get_bit(&a)); ds_rx_put_bit(&a,ds_tx_get_bit(&b));
+            }
+            CHECK(rx_sink_len==sizeof(payload) && !memcmp(rx_sink,payload,sizeof(payload)),
+                  "MNP5 and declined-compression MNP deliver byte-exact binary payloads");
+            CHECK(ds_set_mnp5(&a,false)==-1, "MNP5 active dictionary cannot be disabled mid-call");
+            ds_release(&a); ds_release(&b);
+        }
+    }
+}
+
+typedef struct {
+    uint8_t ring[65536];
+    int head, used, tx_pos, tx_len, delivered, bad, overruns;
+} mnp5_flow_t;
+
+static int mnp5_flow_pull(void *user)
+{
+    mnp5_flow_t *e=user;
+    if (e->tx_pos==e->tx_len) return -1;
+    return (e->tx_pos++/4096)&255;
+}
+static void mnp5_flow_push(void *user, uint8_t byte)
+{
+    mnp5_flow_t *e=user;
+    if (e->used==sizeof(e->ring)) { e->overruns++; return; }
+    e->ring[(e->head+e->used++)%sizeof(e->ring)]=byte;
+}
+static int mnp5_flow_room(void *user)
+{
+    mnp5_flow_t *e=user;
+    return (int)sizeof(e->ring)-e->used;
+}
+typedef struct { uint8_t bits[2][4800]; int pos; } mnp5_delay_t;
+static void mnp5_delayed_tick(data_stack_t *tx, data_stack_t *rx, mnp5_delay_t *delay)
+{
+    int a=ds_tx_get_bit(tx), b=ds_tx_get_bit(rx);
+    ds_rx_put_bit(rx,delay->bits[0][delay->pos]);
+    ds_rx_put_bit(tx,delay->bits[1][delay->pos]);
+    delay->bits[0][delay->pos]=(uint8_t)a;
+    delay->bits[1][delay->pos]=(uint8_t)b;
+    delay->pos=(delay->pos+1)%4800;
+}
+static void test_mnp5_expansion_busy(void)
+{
+    static mnp5_flow_t a,b;
+    data_stack_t tx,rx;
+    mnp5_delay_t delay;
+    memset(delay.bits,1,sizeof(delay.bits)); delay.pos=0;
+    memset(&a,0,sizeof(a)); memset(&b,0,sizeof(b));
+    CHECK(ds_init_mnp(&tx,true,9600,0,mnp5_flow_pull,&a,NULL,NULL,NULL,NULL)==0
+          && ds_init_mnp(&rx,false,9600,0,NULL,NULL,mnp5_flow_push,&b,NULL,NULL)==0,
+          "MNP5 expansion: initialize link");
+    CHECK(ds_set_mnp5(&tx,true)==0 && ds_set_mnp5(&rx,true)==0,
+          "MNP5 expansion: enable codecs");
+    ds_set_rx_room(&rx,mnp5_flow_room,&b,32768,49152);
+    for (int i=0;i<9600*5 && !(ds_link_is_ready(&tx)&&ds_link_is_ready(&rx));i++)
+        mnp5_delayed_tick(&tx,&rx,&delay);
+    a.tx_len=262144;
+    /* A blocked PTY for 5 s, then drain 40 KB/s. With 500 ms EACH WAY the
+       sender has multiple highly compressed, full-size LTs already in flight
+       when the receiver advertises zero credit. */
+    for (int i=0;i<9600*30 && b.delivered<a.tx_len;i++) {
+        if (i>=9600*5 && i%24==0) {
+            for (int n=0;n<100 && b.used;n++) {
+                b.bad += b.ring[b.head] != ((b.delivered/4096)&255);
+                b.head=(b.head+1)%sizeof(b.ring); b.used--; b.delivered++;
+            }
+        }
+        mnp5_delayed_tick(&tx,&rx,&delay);
+    }
+    mnp_stats_t st;
+    mnp_get_stats(tx.mnp,&st);
+    if (b.delivered!=a.tx_len || b.bad || b.overruns)
+        printf("MNP5 expansion: delivered %d/%d, bad %d, overruns %d\n",
+               b.delivered,a.tx_len,b.bad,b.overruns);
+    CHECK(b.delivered==a.tx_len && !b.bad && !b.overruns && rx.rx_busy_spells>0 && st.retransmitted>0
+          && ds_link_is_ready(&tx) && ds_link_is_ready(&rx),
+          "MNP5: 256 KB verified after stalled DTE, no overrun or dictionary drift on busy retries");
+    ds_release(&tx); ds_release(&rx);
+}
+
 /* LR parameter 8 bit 1 (A.6.4.1.8) agreed: our LTs carry up to 256 octets.
  * Live against the RasFinder a 72-octet LT is delivered whole (docs/mnp.md);
  * its login field, not MNP, is what stops at 64 characters. */
@@ -1081,6 +1232,9 @@ int main(void)
     test_detection_fallback_forwards_early_data();
     test_mnp_fcs_check_values();
     test_mnp_lr_encoding();
+    test_mnp5_lr_selection();
+    test_mnp5_data_path();
+    test_mnp5_expansion_busy();
     test_mnp_n401_facility();
     test_v42_answerer_t400_on_received_bits();
     test_mnp_alternative_then_v14_fallback();

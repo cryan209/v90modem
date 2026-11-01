@@ -108,6 +108,12 @@ sh -c 'python3 tools/k56flex_hsf_pair.py --max-upstream-rate 28800 --seconds 40 
 ./data_stack_test
 ./v44_test
 ./v42bis_test
+./mnp5_test
+# MNP5 engine negotiation: explicit codec choices, refusal, environment default and DTE override.
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_DATA_COMPRESSION=none --both-at 'AT+MS=V22B' --both-at 'AT+ES=4,4,6' --both-at 'AT+MNP5=1' --both-at 'AT&A3' --both-at 'AT+DR=1' --both-expect '+DR: MNP5|CONNECT 2400/ARQ/V22B/MNP/MNP5' --payload-printable X --payload-reps 16 --seconds 40
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_DATA_COMPRESSION=none --both-at 'AT+MS=V22B' --both-at 'AT+ES=4,4,6' --both-at 'AT&A3' --both-at 'AT+DR=1' --both-expect '+DR: NONE|CONNECT 2400/ARQ/V22B/MNP' --both-absent '/MNP/MNP5' --payload-printable X --payload-reps 16 --seconds 40
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at 'AT+MS=V22B' --both-at 'AT+ES=4,4,6' --both-at 'AT%C1' --both-at 'AT&A3' --both-at 'AT+DR=1' --both-expect '+DR: MNP5|CONNECT 2400/ARQ/V22B/MNP/MNP5' --payload-printable X --payload-reps 16 --seconds 40
+./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at 'AT+MS=V22B' --both-at 'AT+ES=4,4,6' --call-at 'AT%C1' --answer-at 'AT%C0' --both-at 'AT&A3' --both-at 'AT+DR=1' --both-expect '+DR: NONE|CONNECT 2400/ARQ/V22B/MNP' --both-absent '/MNP/MNP5' --payload-printable X --payload-reps 16 --seconds 40
 ./v42_link_test
 ./v42_throughput_test
 # docs/v42_reliability.md: LAPM/V.42bis/V.44 across impaired lines and a slow DTE.

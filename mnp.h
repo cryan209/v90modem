@@ -19,13 +19,11 @@
  *     rules, go-back retransmission (A.7.3.5), T401 by the A.7.5.1 formula,
  *     T402, T404, N400 = 12; LD (A.6.5); LN answered with LNA (A.7.4).
  *
- * Not implemented: sending LN (no break signal on the DTE side here), MNP 4
- * adaptive packet assembly (an LT carries what the DTE has queued, up to
- * N401), and MNP 5 compression.  MNP 5 is not in V.42 at all, and has no check
- * after decompression, so an encoder that is not bit-exact with a peer's
- * corrupts user data silently; there is no reference here to be exact with.
- *
- * No foreign MNP DCE has been run against this: see docs/mnp.md.
+ * MNP5 is a proprietary extension, not part of Annex A. LR parameter 9
+ * negotiates it; data_stack.c attaches the independent TX/RX mnp5.c codecs
+ * outside LT buffering, so retransmissions never update codec state twice.
+ * Sending LN (no DTE break signal) is not implemented. See docs/mnp.md for
+ * adaptive packet assembly, independent codec validation and live calls.
  *
  * Timers run on the transmit bit clock, as SpanDSP's V.42 does: call
  * mnp_tx_bit() and mnp_rx_bit() once per line bit each.
@@ -63,6 +61,7 @@ typedef struct {
     int k;                  /* negotiated credit (window) */
     int n401;               /* negotiated maximum LT user data */
     int optimisation;       /* LR parameter 8 bits agreed by both */
+    int compression;        /* 0 none, 5 MNP5 (parameter 9, selected bit 0) */
     uint64_t lt_tx, lt_rx;
     uint64_t la_tx, la_rx;
     uint64_t lr_tx, lr_rx;
@@ -79,6 +78,9 @@ mnp_t *mnp_init(bool originator, int service_class, int bit_rate,
                 mnp_get_data_fn get, mnp_put_data_fn put,
                 mnp_status_fn status, void *user);
 void mnp_free(mnp_t *m);
+/* Optional MNP5 offer, disabled by default. Call before the first line bit.
+ * Returns -1 if establishment has already started. */
+int mnp_set_compression(mnp_t *m, bool enable);
 
 /* Originator: how many LRs before MNP_STATUS_ESTABLISH_FAILED.  Answerer:
  * the wait for an LR, in ms (0 = forever).  Both count from now. */

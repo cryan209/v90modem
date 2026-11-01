@@ -34,6 +34,7 @@ void v250_ctl_reset(v250_ctl_t *c)
     c->ds[1] = 0;
     c->ds[2] = 1024;
     c->ds[3] = 32;
+    c->mnp5 = 1;
     /* +EB, +EFCS: the only values supported.  +ETBM: 6.5.6 recommends 1,1,20;
      * a DTE-requested hang-up discards pending transmit data here, so TD is 0,
      * and received data is already in the DTE's port, so RD 1 is what
@@ -121,6 +122,8 @@ typedef struct {
 } range_param_t;
 
 static const range_param_t range_params[] = {
+    /* Vendor extension, not an ITU-T V.250 command. */
+    { "MNP5",  1, { 0 },        { 1 },           false, NULL, { 0 } },
     { "EB",    3, { 0, 0, 0 },  { 0, 0, 0 },     false, NULL, { 0 } },
     { "EFCS",  1, { 0 },        { 0 },           false, NULL, { 0 } },
     { "ETBM",  3, { 0, 1, 0 },  { 0, 2, 30 },    false, NULL, { 0 } },
@@ -150,6 +153,7 @@ static const range_param_t range_params[] = {
 
 static int *range_store(v250_ctl_t *c, const char *name)
 {
+    if (!strcmp(name, "MNP5"))  return &c->mnp5;
     if (!strcmp(name, "DS44"))  return c->ds44;
     if (!strcmp(name, "ICF"))   return c->icf;
     if (!strcmp(name, "IFC"))   return c->ifc;
@@ -208,6 +212,7 @@ static v250_ctl_result_t range_command(v250_ctl_t *c, const range_param_t *p,
     for (int i = 0; i < n; i++)
         if (present[i])
             store[i] = (int) vals[i];
+    if (!strcmp(p->name, "MNP5") && present[0]) c->mnp5_set = true;
     /* 6.5.7/6.5.8: value2 not included means value1 for both directions. */
     if (p->first_required && n == 1)
         store[1] = 0;
@@ -366,6 +371,9 @@ static v250_ctl_result_t ds_command(v250_ctl_t *c, const char *arg,
             c->ds[i] = (int) vals[i];
             c->ds_set = true;
         }
+    /* MNP5 has no directional negotiation: do not silently enable the other
+       direction under +DS=1/2. +MNP5 can explicitly override this policy. */
+    if (present[0]) c->mnp5 = c->ds[0] == 3;
     return V250_CTL_OK;
 }
 
@@ -552,7 +560,7 @@ size_t v250_ctl_format_report(const v250_ctl_t *c, const v250_connect_report_t *
     if (c->er)
         EMIT("+ER: %s\r\n", r->ec ? r->ec : "NONE");
     if (c->dr) {
-        const char *scheme = r->dc_scheme == 2 ? "V44" : "V42B";
+        const char *scheme = r->dc_scheme == 3 ? "MNP5" : r->dc_scheme == 2 ? "V44" : "V42B";
 
         if (r->dc_scheme == 0 || (!r->dc_tx && !r->dc_rx))
             EMIT("+DR: NONE\r\n");
@@ -590,8 +598,9 @@ v250_ctl_result_t v250_ctl_alias(v250_ctl_t *c, const char *text)
         { "&K", 2, { "DS=3", NULL } },
         { "&K", 3, { "DS=3", NULL } },
         { "%C", 0, { "DS=0", "DS44=0" } },
-        { "%C", 1, { "DS=3", NULL } },
-        { "%C", 2, { "DS=3", NULL } },
+        { "%C", 1, { "DS=0", "DS44=0" } },
+        { "%C", 2, { "DS=3", "DS44=0" } },
+        { "%C", 3, { "DS=3", "DS44=0" } },
         { "&H", 0, { "IFC=,0", NULL } },
         { "&H", 1, { "IFC=,2", NULL } },
         { "&R", 1, { "IFC=0", NULL } },
@@ -636,6 +645,7 @@ v250_ctl_result_t v250_ctl_alias(v250_ctl_t *c, const char *text)
         for (int k = 0; k < 2 && map[i].v250[k]; k++)
             if (v250_ctl_command(&trial, map[i].v250[k], info, sizeof(info)) != V250_CTL_OK)
                 return V250_CTL_ERROR;
+        if (!strcmp(name, "%C")) trial.mnp5 = ((int)v & 1) != 0;
         *c = trial;             /* all of it or none (5.4.4.2) */
         return V250_CTL_OK;
     }
@@ -660,6 +670,6 @@ void v250_ctl_connect_suffix(const v250_ctl_t *c, const v250_connect_report_t *r
         used += (size_t) snprintf(out + used, out_len - used, "/%s",
                                   strcmp(r->ec, "ALT") ? r->ec : "MNP");
         if (r->dc_scheme && used < out_len)
-            snprintf(out + used, out_len - used, "/%s", r->dc_scheme == 2 ? "V44" : "V42BIS");
+            snprintf(out + used, out_len - used, "/%s", r->dc_scheme == 3 ? "MNP5" : r->dc_scheme == 2 ? "V44" : "V42BIS");
     }
 }

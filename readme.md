@@ -69,7 +69,7 @@ evidence is.
 | **V.92** | slmodemd dialling us: 36000 up (V.92 6.4.2 precoder) / 53333 down, clean for 170 s; Quick Connect in engine tests | A hardware V.92 peer; Quick Connect against a real modem |
 | **V.34** | Eicon hardware both laws; 35-minute soaks to extension 7900 (400/400 lines) and PPP to 7910 (900/900 pings) | Sustained transfers as answerer; an occasional retrain against 7910 |
 | **V.32bis, V.22bis, V.21, V.23, Bell 103/212A** | Engine-pair payload tests; V.22bis rides out short carrier drops (found against a CX93001) | Broad hardware coverage |
-| **Error control** | V.42/LAPM, V.42bis, V.44; MNP 2-4 connected on 8 of 9 live calls | MNP 5 compression is not implemented |
+| **Error control** | V.42/LAPM, V.42bis, V.44; MNP 2-4 connected on 8 of 9 live calls; MNP5 codec matches 284 independent modem-reference wire segments | MNP5 hardware interoperability is not yet qualified ([details](docs/mnp.md)) |
 | **Fax** | Eicon pages both ways, both laws, up to 28800 bit/s | 33600 (class 2.1) on hardware |
 | **V.91, clear channel, V.110/V.120** | Two of our own endpoints over SIP | A foreign digital peer and a byte-exact bearer |
 | **x2** | Server and analogue client, with LAPM, against original Courier firmware in an emulator | Real hardware |

@@ -17,6 +17,8 @@
  *   DS_FRAMING_MNP  — MNP 2-4 (mnp.c), the V.42 (1988-1996) Annex A
  *                     alternative procedure: entered when V.42 detection finds
  *                     no LAPM peer and the alternative is allowed, or directly.
+ *                     Optional MNP5 compression (mnp5.c) is proprietary, not
+ *                     part of Annex A.
  *
  * Threading: all calls are expected from the engine/RTP clock domain. The
  * DTE-side pull/push callbacks are the boundary to other threads and must
@@ -35,6 +37,7 @@ typedef struct v44_encoder_s v44_encoder_t;
 typedef struct v44_decoder_s v44_decoder_t;
 typedef struct v42_v44_parameters_s v42_v44_parameters_t;
 typedef struct mnp_s mnp_t;
+typedef struct mnp5_s mnp5_t;
 
 typedef enum {
     DS_FRAMING_RAW = 0,
@@ -85,6 +88,8 @@ typedef struct {
     /* V.42 mode (opaque SpanDSP state). */
     v42_state_t *v42;
     v42bis_state_t *v42bis;
+    mnp5_t *mnp5_encoder, *mnp5_decoder;
+    bool mnp5_offer;
     v44_encoder_t *v44_encoder;
     v44_decoder_t *v44_decoder;
     bool calling_party;
@@ -198,6 +203,9 @@ void ds_set_alternative(data_stack_t *s, bool enable);
  * default) asks for the bit-oriented data phase, 2 for octet-oriented.  Call
  * before the line starts. */
 void ds_set_mnp_framing_mode(data_stack_t *s, int mode);
+/* Proprietary MNP5 compression, both directions or neither. Call immediately
+ * after init, before clocking any bits or allowing the alternative procedure. */
+int ds_set_mnp5(data_stack_t *s, bool enable);
 
 /* Release protocol resources. Safe after any successful ds_init call. */
 void ds_release(data_stack_t *s);
@@ -212,7 +220,7 @@ int ds_v42_t400_ms(void);
 void ds_set_fallback_buffered(data_stack_t *s, bool enable);
 
 /* What compression the negotiated link is using, from this side's point of
- * view: scheme 0 none, 1 V.42bis, 2 V.44.  False/false when none. */
+ * view: scheme 0 none, 1 V.42bis, 2 V.44, 3 MNP5. False/false when none. */
 void ds_compression_state(const data_stack_t *s, int *scheme, bool *tx, bool *rx);
 
 bool ds_link_is_ready(const data_stack_t *s);
