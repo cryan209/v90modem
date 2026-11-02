@@ -1711,3 +1711,78 @@ coverage, a long soak, or repeated calls within one server process.
 Local provenance: `artifacts/slm-recovery-20261102/`; host results under
 `/root/slm-recovery-20261102-results/` on vmhost, with per-endpoint events,
 raw DTE bytes, verified payloads, server/peer logs and G.711/RTP taps.
+
+### Longer SmartLink transfers and a late carrier loss (2 November 2026)
+
+The same isolated `2aa59757` executable was then tested with **2359296 bytes
+(2.25 MiB) per direction**, simultaneously, with incremental exact-byte
+comparison and final mutual SHA-256 acknowledgements. Two fresh baselines
+pass: client/server transfer times **647.668/647.254 s** and
+**649.709/649.288 s**. All four saved receiver files were independently
+compared with their deterministic source streams. Both calls retain
+54666/31200 V.90/LAPM/V.42bis and clean AT/ATH teardown; their receive RTP
+observers contain **33707/33809 packets, zero missing**.
+
+The first long §9.6 trial is a **failure**, despite completing the planned
+renegotiation: request at TRACE +323.241 s, fresh upstream E at +325.839 s,
+then further exact traffic. Late receive RTP gaps begin at relative
+**527.360 s**. The observer ultimately lacks **21 packets in 18 gaps**,
+including three consecutive packets at 533.600 s. The corresponding raw
+RX tap has law-correct silence runs; the tool's nominal 200 ms displacement
+is consistently 20 ms ahead of these runs on this capture, so use the
+measured **180 ms RTP-to-tap displacement**, not an assumed shared epoch.
+Our transmit RTP observer has **zero sequence gaps**.
+
+The receiver reports an upstream discontinuity at TRACE **+533.845 s** and
+requests another §9.6 exchange, lowering its offer to 28800. It receives
+CP/CP' and completes downstream B1d, but **never logs upstream E or DATA
+re-entry for that exchange**: at +551.541 s the receiver is still `V90_CP`
+when the retrain watcher fires. The peer log reports `EC UNLINK` and
+`NO CARRIER`. This leaves a recovery gap to investigate: transmitting B1d
+and reporting downstream completion did not establish a working upstream.
+The missing E watchdog after downstream completion needs review against
+V.90 §9.6.1; neither the packet-loss location nor a successful repair is
+established by this recording.
+
+The test initially labels the result as a mismatch at downstream offset
+**2126113**. Inspection shows that the suffix is exactly **`NO CARRIER\r\n`**;
+all **2126113** preceding downstream bytes match, and the server retains
+**1836110 exact upstream bytes**. This is a carrier-loss failure, **not** the
+physical MT9234 inserted-byte symptom. The harness now distinguishes this
+result from payload corruption and stops its owned server immediately when
+the client fails. The first batch stopped before its full-retrain case.
+
+Provenance: `artifacts/slm-long-20261102/`; the original three completed
+attempts are `baseline-long-1`, `baseline-long-2`, and `reneg-long` in
+vmhost `/root/slm-long-20261102-results/`. The failed call remains in the
+results; later retries do not replace it.
+
+The same long renegotiation was repeated with captures restricted to the
+client RTP port 4000 on vmhost `veth100i0` and server RTP port 14100 on
+`veth117i0`. **It passes 2359296 bytes each way**, independently rechecked
+from both saved receiver files, in **649.728/649.310 s** (client/server).
+The five-minute request is at TRACE +323.182 s, fresh upstream E at
++325.780 s, and traffic remains exact through and beyond the earlier failure
+window. Both captures report **zero kernel drops**. All four directional
+RTP sequences have **zero missing packets**; the server's receive observer
+has **33810 packets, zero missing**. This repeat establishes long payload
+continuity through a planned §9.6 exchange under the observed clean bearer;
+it does not erase or locate the preceding loss-associated failure.
+
+The final long §9.5 trial also **passes 2359296 bytes each way**, in
+**680.130/679.694 s** (client/server), with clean teardown. It is not a
+single-attempt retrain: the test starts Phase 2 at TRACE **+323.342 s**, the
+peer requests another restart at **+338.340 s**, and DATA returns at
+**+355.780 s**, with upstream E at +355.980 s. The total restart-to-DATA gap
+is **32.438 s**, retaining 54666/31200 and the existing LAPM/V.42bis link.
+The peer reports a Phase-4 retrain request on the first attempt; its cause is
+not resolved here. The final receive observer has **35339 packets, zero
+missing**. Both interface captures have zero kernel drops and no missing RTP
+sequence numbers in any direction. UDP error/buffer-drop counters do not
+increase in either container during either captured follow-up call.
+
+Thus this campaign is **four exact-payload passes and one carrier-loss
+failure**, not five passes: two long baselines, one successful long
+renegotiation repeat, and one successful long retrain with a retry. It does
+not yet qualify recovery under packet loss or a half-hour continuous call.
+No modem DSP/default change was made on the strength of these tests.

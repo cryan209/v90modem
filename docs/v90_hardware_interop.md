@@ -77,6 +77,24 @@ the physical USB insertion or RasFinder continuity failures below.
 See [recovery measurements and test limits](retrain_and_resync.md#current-main-smartlink-binary-recovery-checks-2-november-2026)
 for the binary identity, exact transfer times, transmitted Rd check and knobs.
 
+### Long-call follow-up
+
+Five longer attempts yield **four exact-payload passes and one carrier-loss
+failure**. Each pass delivers **2359296 bytes (2.25 MiB) each way**: two
+baselines last **647.668/649.709 s**, the successful §9.6 repeat **649.728 s**,
+and the §9.5 call **680.130 s** (client transfer times). The full retrain
+needs two Phase-2 attempts and **32.438 s** to regain DATA.
+
+The failed §9.6 call completes its planned five-minute exchange, then later
+has **21 missing receive RTP packets**, an upstream discontinuity and a
+second exchange that completes downstream but leaves upstream in `V90_CP`
+without E/B1. Its DTE suffix is **NO CARRIER**, after **2126113 exact
+downstream / 1836110 exact upstream bytes**, not an inserted data byte.
+The repeated §9.6 and final §9.5 calls have no RTP sequence gaps in captures
+at either container interface. Packet-loss location and the incomplete
+upstream-recovery watchdog remain open. Full measurements are in the
+[long-call recovery note](retrain_and_resync.md#longer-smartlink-transfers-and-a-late-carrier-loss-2-november-2026).
+
 ## slmodemd and physical MultiTech repeats, 31 October–1 November 2026
 
 The tested Linux binary is SHA-256
