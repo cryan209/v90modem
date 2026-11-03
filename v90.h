@@ -361,6 +361,8 @@ bool v90_training_complete(v90_state_t *s);
  */
 bool v90_request_rate_renegotiation(v90_state_t *s);
 bool v90_rate_renegotiation_pending(const v90_state_t *s);
+/* Includes a pending request and the upstream E wait after downstream DATA.
+ * Use v90_get_tx_phase() to decide whether to generate training or DATA. */
 bool v90_rate_renegotiation_active(const v90_state_t *s);
 bool v90_rate_renegotiation_start(v90_state_t *s);
 bool v90_rate_renegotiation_timed_out(const v90_state_t *s);

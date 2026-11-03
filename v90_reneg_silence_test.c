@@ -66,7 +66,9 @@ static void test_missing_e(v90_law_t law, int e_at)
     if (e_at == 2)
         assert(v90_handle_rx_event(s, V90_RX_EVENT_E));
     run_until(s, V90_TX_DATA, 12000);
-    assert(!v90_rate_renegotiation_active(s));
+    /* Engine recovery gates must remain closed while the receiver awaits E,
+     * even though the downstream transmitter is already in DATA. */
+    assert(v90_rate_renegotiation_active(s) == (e_at != 2));
     assert(!v90_rate_renegotiation_timed_out(s));
     if (e_at != 2)
         assert(!v90_request_rate_renegotiation(s));
@@ -74,6 +76,8 @@ static void test_missing_e(v90_law_t law, int e_at)
         assert(v90_handle_rx_event(s, V90_RX_EVENT_E));
         assert(s->tx_phase == V90_TX_DATA);
     }
+    if (e_at)
+        assert(!v90_rate_renegotiation_active(s));
     while (s->reneg_symbol_clock - s->reneg_rbar_symbol
            + V90_FRAME_LEN <= V90_RENEG_E_TIMEOUT_SYMBOLS) {
         assert(v90_tx_data_frame_codewords(s, cw, NULL, 0, NULL, true)

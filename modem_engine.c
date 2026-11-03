@@ -18810,10 +18810,13 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             v90_rate_renegotiation_note_answer(g_v90);
         }
 
-        /* While the renegotiation runs, the downstream is Rd/R̄d/TRN2d/MP/Ed/
-         * B1d, which is the Phase 4 transmitter, not the data mapper. */
+        /* During Rd/R̄d/TRN2d/MP/Ed/B1d use the Phase 4 transmitter.
+         * §9.6.1 keeps the exchange active while awaiting upstream E after
+         * downstream DATA begins. That wait must use the DATA mapper below,
+         * not recursively re-enter this training handoff with zero progress. */
         if (v90_rate_renegotiation_active(g_v90)
-            && !v90_rate_renegotiation_pending(g_v90)) {
+            && !v90_rate_renegotiation_pending(g_v90)
+            && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
                 if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                     return false;

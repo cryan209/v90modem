@@ -6243,7 +6243,10 @@ bool v90_rate_renegotiation_pending(const v90_state_t *s)
 
 bool v90_rate_renegotiation_active(const v90_state_t *s)
 {
-    return s && (s->reneg_pending || s->reneg_active);
+    /* §9.6.1: downstream DATA does not finish the receive side. Keep
+     * engine recovery/rate-step gates closed until fresh E, or retrain. */
+    return s && (s->reneg_pending || s->reneg_active
+                 || v90_rate_renegotiation_waiting_for_e(s));
 }
 
 bool v90_rate_renegotiation_waiting_for_e(const v90_state_t *s)

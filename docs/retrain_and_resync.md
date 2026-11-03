@@ -1830,3 +1830,23 @@ left untouched. The original packet-loss location and actual upstream-E miss
 remain unresolved. Next is an isolated-main wired SmartLink A/B, first clean
 planned §9.6 and then controlled upstream erasures, grading receiver-verified
 binary payload and the missing-E fallback rather than downstream B1d alone.
+
+### Keep engine recovery gates closed during the E wait
+
+A follow-up caller audit found that the controller rejected a second request
+while waiting for E, but `v90_rate_renegotiation_active()` still returned false
+as soon as downstream B1d ended. The engine's carrier-loss path could therefore
+lower its MP offer again **before** the controller rejected the request; the
+CONNECT gate and peer-S responder also mistook this window for an idle exchange.
+This is a source-level failure mechanism, not a new hardware measurement.
+
+The public active predicate now includes the upstream E wait (V.90 §9.6.1),
+while the private transmit-sequence flag retains its narrower meaning. The
+engine explicitly selects the DATA mapper after downstream DATA entry, even
+while the exchange is active; otherwise its recursive training-to-DATA handoff
+would make no progress. Both-law regressions now require active to stay true
+after B1d without E and become false when E arrives. The new assertion fails
+before the predicate fix. **5/5 focused rows pass**: deadline/CPs, V.92 startup,
+V.92 modem-on-hold/retrain and the two V.90 receive-ceiling retrain rows. The
+pre-existing pending SpanDSP changes remain in these local builds; no live
+qualification is claimed.
