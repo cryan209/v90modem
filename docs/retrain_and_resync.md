@@ -1850,3 +1850,31 @@ before the predicate fix. **5/5 focused rows pass**: deadline/CPs, V.92 startup,
 V.92 modem-on-hold/retrain and the two V.90 receive-ceiling retrain rows. The
 pre-existing pending SpanDSP changes remain in these local builds; no live
 qualification is claimed.
+
+### A full restart cancels the superseded renegotiation
+
+The reusable controller's two restart entry points also retained renegotiation
+state. `V90_RX_EVENT_RETRAIN` reset the mapper and moved to WAIT_JA but left
+pending/active flags, the E deadline, CPs/Rt state and `training_complete` behind.
+`v90_start_phase3()` cleared training state but likewise retained the old
+renegotiation. Under V.90 §9.5 and §9.6.1 a full retrain supersedes that exchange;
+it must not use the old E deadline or renegotiation-only training lengths.
+
+Both entry points now cancel the old exchange, including its latched timeout,
+without resetting `reneg_count` (the per-call recovery cap must survive a
+controller restart). Peer retrain also clears `training_complete` immediately.
+The both-law deadline cases now restart from a failed E wait or a pending
+request, verify the public state and retained count, and generate another
+56000 training symbols without reviving the old timeout. An additional case
+interrupts Rd and checks that the private transmit state is cleared and normal
+startup TRN2d length is restored. The restart assertions fail before the fix.
+The SIP engine normally frees/recreates the controller on full retrain, so
+this is a controller-reuse fix, not a demonstrated additional cause of the
+recorded SmartLink loss.
+
+Expanded local selection: **53/53 pass** — every `engine_pair_test --expect V90`
+row in `tests/fast.list`, the deadline/CPs regression, V.92 startup, and V.92
+modem-on-hold/retrain. This includes both laws, reversed roles, Quick Connect,
+short-phase fallback, negotiated-rate bounds and retrain-ceiling checks. Logs
+are under `test-logs/v90-recovery-matrix/`; the measured result is local engine
+and controller coverage, not packet-loss or physical-hardware qualification.

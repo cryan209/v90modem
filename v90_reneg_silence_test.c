@@ -95,6 +95,24 @@ static void test_missing_e(v90_law_t law, int e_at)
     assert(v90_rate_renegotiation_timed_out(s) == !e_at);
     if (e_at)
         assert(v90_request_rate_renegotiation(s));
+
+    /* §9.5/§9.6.1: a full restart supersedes both a pending request and a
+     * failed E wait. Exercise the two public restart entry points. */
+    if (law == V90_LAW_ULAW)
+        assert(v90_handle_rx_event(s, V90_RX_EVENT_RETRAIN));
+    else
+        v90_start_phase3(s, s->u_info);
+    assert(!v90_rate_renegotiation_active(s));
+    assert(!v90_rate_renegotiation_pending(s));
+    assert(!v90_rate_renegotiation_waiting_for_e(s));
+    assert(!v90_rate_renegotiation_timed_out(s));
+    assert(!v90_training_complete(s));
+    assert(v90_rate_renegotiation_count(s) == 1);  /* preserve per-call cap */
+    assert(s->reneg_rbar_symbol == -1);
+    assert(s->reneg_symbol_clock == 0);
+    for (int i = 0; i < V90_RENEG_E_TIMEOUT_SYMBOLS; i++)
+        (void)next_cw(s);
+    assert(!v90_rate_renegotiation_timed_out(s));
     v90_free(s);
 }
 
@@ -177,6 +195,20 @@ int main(void)
     run_until(s, V90_TX_B1D, 5000);
     run_until(s, V90_TX_DATA, 5000);
     assert(!s->reneg_active && s->training_complete);
+
+    /* A peer may retrain while our next Rd is still being sent (§9.6.1).
+     * Cancel the private transmit-sequence state as well as the E wait. */
+    assert(v90_handle_rx_event(s, V90_RX_EVENT_E));
+    assert(v90_request_rate_renegotiation(s));
+    assert(v90_rate_renegotiation_start(s));
+    (void)next_cw(s);
+    assert(s->reneg_active);
+    assert(v90_handle_rx_event(s, V90_RX_EVENT_RETRAIN));
+    assert(!s->reneg_active && !v90_rate_renegotiation_active(s));
+    assert(!s->reneg_silence_req && !s->reneg_rt_pending && !s->reneg_rt);
+    assert(!v90_training_complete(s));
+    assert(v90_rate_renegotiation_count(s) == 2);
+    assert(v90_trn2d_symbols_for(s) == v90_trn2d_symbols());
 
     v90_free(s);
     puts("PASS: V.90 9.6.1 upstream E deadline (both laws) and 9.6.1.2.3-.6 CPs silence procedure");

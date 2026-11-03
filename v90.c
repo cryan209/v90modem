@@ -4814,8 +4814,25 @@ bool v90_phase3_active(v90_state_t *s)
     return s->tx_phase >= V90_TX_WAIT_JA && s->tx_phase <= V90_TX_SCR;
 }
 
+/* §9.5/§9.6.1: full retraining supersedes the current renegotiation.
+ * Keep reneg_count: the engine's per-call recovery cap is not per attempt. */
+static void v90_cancel_rate_renegotiation(v90_state_t *s)
+{
+    s->reneg_pending = false;
+    s->reneg_active = false;
+    s->reneg_wait_e = false;
+    s->reneg_timed_out = false;
+    s->reneg_answer_seen = false;
+    s->reneg_rbar_symbol = -1;
+    s->reneg_symbol_clock = 0;
+    s->reneg_silence_req = false;
+    s->reneg_rt_pending = false;
+    s->reneg_rt = false;
+}
+
 void v90_start_phase3(v90_state_t *s, int u_info)
 {
+    v90_cancel_rate_renegotiation(s);
     if (u_info > 0 && u_info < 128)
         s->u_info = u_info;
     /* Diagnostic: ME_V90_P3_UINFO_DELTA lowers the Phase 3 Ucode below the
@@ -5195,6 +5212,8 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             fprintf(stderr,
                     "[V90] Peer retrained during tx_phase=%d; dropping to WAIT_JA\n",
                     (int) s->tx_phase);
+            v90_cancel_rate_renegotiation(s);
+            s->training_complete = false;
             s->tx_phase = V90_TX_WAIT_JA;
             s->sample_count = 0;
             s->rep_count = 0;
