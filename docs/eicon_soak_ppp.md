@@ -233,3 +233,39 @@ Evidence: `reference-data/artifacts/eicon-http-ppp-jb40-20261008/`.
 python3 tools/eicon_soak_test.py artifacts/lan-http \
   --test ppp --http-bytes 1048576 --jitter-buffer-ms 40
 ```
+
+## 4 November 2026: vmhost to new BRI spans 7920/7930
+
+Deployed CT117 build `d6859491`, analogue V.90 role, PCMA, reaches
+56000 downstream / 31200 upstream on both targets. The answerer is
+`bri-new-spans.service` on eicon420 (SSH user `scottcryan`), not
+`bri-test-answerer.service`: 7920 uses controller 8 / ttyds14–15 and
+7930 controller 7 / ttyds12–13.
+
+Three-minute simultaneous binary attempts receiver-check **891904 downstream
+bytes on 7920** and **890880 on 7930**, zero payload errors, with last received
+blocks around 197/195 seconds. Answerer progress independently checks
+**647168/646144 upstream bytes** through the 180-second checkpoints, zero
+errors. Neither duplex call completes its final exchange; these are not
+complete duplex passes.
+
+Separate upstream checks do complete with matching sender/receiver totals:
+
+| Target | Receiver-verified upstream bytes | Receive span | Result |
+|---|---:|---:|---|
+| 7920, unrestricted application writes | 737280 | 204.553 s | 720 blocks, zero sequence/CRC/exact-payload errors; final report received |
+| 7930, application paced at 2800 bytes/s | 503808 | 179.594 s | 492 blocks, zero errors; final report received |
+
+An unrestricted 7930 upload checks **726016 bytes**, zero errors, before
+carrier loss leaves **11264 queued payload bytes** unconfirmed. Pacing is an
+application diagnostic, not a modem/DS0 change or a proven fix. A paced 7920
+attempt is invalidated by overlapping scratch-driver cleanup; exclude it.
+Do not infer an error-free unrestricted duplex qualification from these
+separate upstream successes. End-marker/completion failure remains unresolved.
+
+Provenance on vmhost: `/root/bri-long-20261104.log`,
+`/root/bri-upload-20261104.log`, `/root/bri-paced-20261104.log`; modem logs/taps
+under `/root/slmx/bri-{long,upload,paced}-20261104/`. These scratch drivers use
+the deployed build, not the Mac's pending DSP changes. Receiver observations
+come from eicon420's `bri-new-spans` journal. No DSP constants, G.711 processing,
+thresholds or defaults changed.
