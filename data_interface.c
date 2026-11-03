@@ -136,6 +136,10 @@ typedef struct {
 
 static di_pty_t     ctrl_pty  = { .master_fd = -1, .slave_hold_fd = -1 };
 static di_pty_t     data_pty  = { .master_fd = -1, .slave_hold_fd = -1 };
+
+/* Defined with the other PTY helpers below; used by the reader thread. */
+static void di_pty_dte_attached(di_pty_t *p);
+static void di_pty_rehold(di_pty_t *p);
 static int          split_mode = 0;
 
 /*
@@ -1767,6 +1771,7 @@ static void *pty_reader_thread(void *arg)
             int n = (int)read(ctrl_pty.master_fd, buf, sizeof(buf));
 
             if (n > 0) {
+                di_pty_dte_attached(&ctrl_pty);
                 if (!split_mode && di_mode == 1)
                     handle_online_data_bytes(buf, n);
                 else
@@ -1781,14 +1786,20 @@ static void *pty_reader_thread(void *arg)
             int n = (int)read(data_pty.master_fd, buf, sizeof(buf));
 
             /* Payload only flows while the carrier is up. */
-            if (n > 0 && connected)
-                dte_payload(buf,n);
-            else if (n == 0 || (n < 0 && errno == EIO))
+            if (n > 0) {
+                di_pty_dte_attached(&data_pty);
+                if (connected)
+                    dte_payload(buf,n);
+            } else if (n == 0 || (n < 0 && errno == EIO))
                 idle_eof = true;
         }
 
-        if (idle_eof)
+        if (idle_eof) {
+            di_pty_rehold(&ctrl_pty);
+            if (split_mode)
+                di_pty_rehold(&data_pty);
             usleep(20000);
+        }
     }
     return NULL;
 }
@@ -1845,6 +1856,63 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
     fprintf(stderr, "[DI] %s PTY slave: %s (symlink: %s)\n",
             label, p->slave_name, p->symlink_path);
     return 0;
+}
+
+/* ME_PTY_RELEASE_SLAVE: hand the tty to the DTE once it is really there.
+ *
+ * di_pty_open() keeps the slave open for the life of the port, which stops
+ * the master seeing EOF/EIO with no DTE attached and keeps the raw termios on
+ * BSD.  A DTE that installs a line discipline -- pppd's TIOCSETD -- is then
+ * sharing the tty with us, and measured against the Diva's TTY profile 9 that
+ * came out intermittent: some calls carried PPP frames both ways and some
+ * carried none at all, in either direction, while a plain cat (which installs
+ * no discipline) always worked.  With this set, the hold is dropped as soon as
+ * the DTE writes something and taken again when the master goes quiet, so the
+ * reasons for the hold still apply whenever no DTE is attached.  Off by
+ * default: it changes who owns the tty. */
+static bool di_pty_release_slave(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("ME_PTY_RELEASE_SLAVE");
+
+        on = (v && atoi(v) != 0) ? 1 : 0;
+    }
+    return on == 1;
+}
+
+static void di_pty_dte_attached(di_pty_t *p)
+{
+    if (!di_pty_release_slave() || p->slave_hold_fd < 0)
+        return;
+    close(p->slave_hold_fd);
+    p->slave_hold_fd = -1;
+    fprintf(stderr, "[DI] %s: DTE attached, slave hold released "
+                    "(ME_PTY_RELEASE_SLAVE)\n", p->slave_name);
+}
+
+static void di_pty_rehold(di_pty_t *p)
+{
+    int fd;
+
+    if (!di_pty_release_slave() || p->slave_hold_fd >= 0 || !p->slave_name[0])
+        return;
+    fd = open(p->slave_name, O_RDWR | O_NOCTTY);
+    if (fd < 0)
+        return;
+    {
+        struct termios tio;
+
+        /* BSD reinitialises the slave's termios on open, so set it again. */
+        if (tcgetattr(fd, &tio) == 0) {
+            cfmakeraw(&tio);
+            tcsetattr(fd, TCSANOW, &tio);
+        }
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    p->slave_hold_fd = fd;
+    fprintf(stderr, "[DI] %s: no DTE, slave hold taken again\n", p->slave_name);
 }
 
 static void di_pty_close(di_pty_t *p)
