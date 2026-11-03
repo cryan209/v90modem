@@ -21125,6 +21125,22 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             }
         }
         cc_tx(&g_cc, codewords, count);
+        if (g_clear_ppp) {
+            /* One line per doubling: what the conversion has actually moved,
+               so a live call says whether frames reach the DTE at all. */
+            static uint64_t last;
+            uint64_t n = g_cc.ppp_rx_frames + g_cc.ppp_tx_frames;
+
+            if (n != last && (n & (n - 1)) == 0) {
+                last = n;
+                ME_LOG("[ME] PPP: %llu frame(s) to the DTE, %llu to the line, "
+                       "%llu bad off the line, %llu bad FCS from the DTE\n",
+                       (unsigned long long) g_cc.ppp_rx_frames,
+                       (unsigned long long) g_cc.ppp_tx_frames,
+                       (unsigned long long) g_cc.rx_bad_frames,
+                       (unsigned long long) g_cc.ppp_tx_bad_fcs);
+            }
+        }
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
