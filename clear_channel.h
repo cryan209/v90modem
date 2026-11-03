@@ -7,6 +7,14 @@
  * CLEARMODE and ISDN calls a B channel.  No modulation is needed: the octets
  * carry a synchronous bit stream directly.
  *
+ *   CC_TRANSPARENT  the DTE's octets ARE the DS0's octets, one for one, with
+ *             no framing of any kind: what the DTE writes is what the far end
+ *             reads off the B channel.  This is what carries a synchronous
+ *             protocol that frames itself -- PPP in HDLC framing (RFC 1662)
+ *             over an ISDN B channel is the case this exists for, where any
+ *             start/stop or LAPM layer of ours would corrupt the peer's own
+ *             framing.  64 kbit/s only: restricted 56k robs bit 1, so an
+ *             octet cannot survive it.
  *   CC_CLEAR  the bit stream belongs to the caller's data stack (V.14 async
  *             characters, or V.42 LAPM), exactly as a datapump's would.
  *   CC_V120   ITU-T V.120 rate adaption: async DTE characters carried in
@@ -58,7 +66,8 @@
 typedef enum {
     CC_CLEAR = 0,
     CC_V120  = 1,
-    CC_V110  = 2
+    CC_V110  = 2,
+    CC_TRANSPARENT = 3
 } cc_mode_t;
 
 /* CC_CLEAR: next line bit, or <0 for "nothing to send" (sent as mark, 1). */
@@ -237,6 +246,10 @@ typedef struct {
 
 int  cc_init_clear(clear_channel_t *cc, bool r56,
                    cc_get_bit_fn get_bit, cc_put_bit_fn put_bit, void *ctx);
+/* CC_TRANSPARENT: one DTE octet per DS0 octet.  Returns -1 for r56, which
+   robs bit 1 and so cannot carry a whole octet. */
+int  cc_init_transparent(clear_channel_t *cc, bool r56,
+                         cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 /* user_rate: one of cc_v110_rates[].  -1 for a rate V.110 does not carry,

@@ -706,6 +706,62 @@ static void test_v120_compress(void)
     free(eb);
 }
 
+/* CC_TRANSPARENT: every octet the DTE writes appears on the DS0 unchanged and
+ * arrives at the far DTE unchanged, so a protocol that frames itself keeps its
+ * own framing.  The PPP case: RFC 1662's flag (0x7e), its escape (0x7d) and
+ * the all-ones idle must all survive, and nothing of ours may be inserted. */
+static void test_transparent_pair(void)
+{
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b, z;
+    uint8_t octets[160];
+    size_t n;
+
+    ea->src = text_a; ea->src_len = sizeof(text_a);
+    eb->src = text_b; eb->src_len = sizeof(text_b);
+    check(cc_init_transparent(&a, false, end_pull, end_push, ea) == 0
+          && cc_init_transparent(&b, false, end_pull, end_push, eb) == 0,
+          "transparent init");
+    check(cc_init_transparent(&z, true, end_pull, end_push, ea) < 0,
+          "transparent: restricted 56k refused, bit 1 is robbed");
+    check(cc_line_rate(&a) == 64000, "transparent: 64000 bit/s");
+
+    run_pair(&a, &b, 8000, false, NULL, NULL);
+
+    check(eb->dst_len >= sizeof(text_a)
+          && !memcmp(eb->dst, text_a, sizeof(text_a)),
+          "transparent: A->B octets exact, in order, nothing inserted");
+    check(ea->dst_len >= sizeof(text_b)
+          && !memcmp(ea->dst, text_b, sizeof(text_b)),
+          "transparent: B->A octets exact");
+    /* Past the source, an idle DS0 is a mark: 0xFF, which RFC 1662 ignores
+     * between frames.  Everything after the pattern must be exactly that. */
+    n = 0;
+    for (size_t i = sizeof(text_a); i < eb->dst_len; i++)
+        n += eb->dst[i] == 0xFF;
+    check(n == eb->dst_len - sizeof(text_a) && eb->dst_len > sizeof(text_a),
+          "transparent: nothing left to send is sent as an all-ones mark");
+    /* One octet in, that same octet out, for every value including the PPP
+     * flag and escape -- the two a V.14 or LAPM layer would never pass. */
+    {
+        static const uint8_t ppp[] = { 0x7e, 0x7d, 0x5e, 0x5d, 0x00, 0xff, 0x03, 0xc0, 0x21 };
+        end_t *ec = calloc(1, sizeof(*ec)), *ed = calloc(1, sizeof(*ed));
+        clear_channel_t c, d;
+
+        ec->src = ppp; ec->src_len = sizeof(ppp);
+        cc_init_transparent(&c, false, end_pull, end_push, ec);
+        cc_init_transparent(&d, false, end_pull, end_push, ed);
+        cc_tx(&c, octets, (int) sizeof(ppp));
+        check(!memcmp(octets, ppp, sizeof(ppp)),
+              "transparent: the DTE's octets are the DS0's octets, flag and escape included");
+        cc_rx(&d, octets, (int) sizeof(ppp));
+        check(ed->dst_len == sizeof(ppp) && !memcmp(ed->dst, ppp, sizeof(ppp)),
+              "transparent: received octets reach the DTE unchanged");
+        free(ec); free(ed);
+    }
+    free(ea); free(eb);
+}
+
 static void test_v120_pair(bool r56)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -1848,6 +1904,7 @@ int main(void)
     printf("back to back:\n");
     test_clear_pair(false);
     test_clear_pair(true);
+    test_transparent_pair();
     test_v120_pair(false);
     test_v120_pair(true);
     test_v120_rx_variants();

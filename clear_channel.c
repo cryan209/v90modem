@@ -1528,6 +1528,19 @@ int cc_init_clear(clear_channel_t *cc, bool r56,
     return 0;
 }
 
+int cc_init_transparent(clear_channel_t *cc, bool r56,
+                        cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx)
+{
+    if (r56)
+        return -1;               /* bit 1 is robbed: no whole octet survives */
+    memset(cc, 0, sizeof(*cc));
+    cc->mode = CC_TRANSPARENT;
+    cc->pull = pull;
+    cc->push = push;
+    cc->ctx = ctx;
+    return 0;
+}
+
 void cc_v120_set_compression(clear_channel_t *cc, bool on)
 {
     cc->cz_enable = on;
@@ -1605,6 +1618,19 @@ void cc_tx(clear_channel_t *cc, uint8_t *octets, int n)
         return;
     }
 
+    if (cc->mode == CC_TRANSPARENT) {
+        /* The DTE's octet is the DS0's octet.  Nothing to send is sent as an
+         * all-ones mark, which is what an idle B channel carries and what
+         * RFC 1662's framing ignores between frames. */
+        for (int i = 0; i < n; i++) {
+            int ch = cc->pull ? cc->pull(cc->ctx) : -1;
+
+            octets[i] = (uint8_t) (ch < 0 ? 0xFF : (ch & 0xFF));
+        }
+        cc->tx_octets += (uint64_t) n;
+        return;
+    }
+
     if (cc->mode == CC_V120)
         v120_load_frame(cc);   /* also runs the acknowledged-mode timers */
     for (int i = 0; i < n; i++) {
@@ -1635,6 +1661,14 @@ void cc_rx(clear_channel_t *cc, const uint8_t *octets, int n)
         return;
     }
 
+    if (cc->mode == CC_TRANSPARENT) {
+        for (int i = 0; i < n; i++)
+            if (cc->push)
+                cc->push(cc->ctx, octets[i]);
+        cc->rx_octets += (uint64_t) n;
+        return;
+    }
+
     for (int i = 0; i < n; i++)
         for (int b = 0; b < nbits; b++)
             took_bit(cc, (octets[i] >> (7 - b)) & 1);
@@ -1653,7 +1687,8 @@ void cc_set_break_cb(clear_channel_t *cc, cc_break_fn fn)
 
 void cc_send_break(clear_channel_t *cc, int ms)
 {
-    if (cc->mode == CC_CLEAR || (cc->mode == CC_V110 && cc->v110_sync))
+    if (cc->mode == CC_CLEAR || cc->mode == CC_TRANSPARENT
+        || (cc->mode == CC_V110 && cc->v110_sync))
         return;                    /* a synchronous stream has no break */
     cc->brk_ms = ms < 1 ? 1 : ms;
     cc->brk_pending = true;

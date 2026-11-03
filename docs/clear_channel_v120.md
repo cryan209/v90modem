@@ -21,6 +21,13 @@ adaption), the `ME_MOD_CLEAR` hooks at the top of
   datapump's would: V.14 async characters (start, 8 data, stop, mark idle)
   by default, V.42 LAPM with `ME_DATA_FRAMING=lapm`. There is no V.8, so
   `auto` framing has no protocol octet to settle on and means V.14.
+  `ME_DATA_FRAMING=transparent` removes our framing altogether
+  (`CC_TRANSPARENT`): one DTE octet per DS0 octet, so a protocol that frames
+  itself keeps its own framing. That is what PPP in HDLC framing (RFC 1662)
+  over a B channel needs -- V.14's start and stop elements would otherwise be
+  read as part of the peer's frames, and a peer's flag would be sliced into
+  two characters. 64 kbit/s only: restricted 56k robs bit 1, so an octet
+  cannot survive it, and `cc_init_transparent()` refuses it.
 - **V120**: ITU-T V.120 rate adaption. DTE characters go into HDLC frames
   (flag, 2-octet address carrying the LLI, control, V.120 header octet,
   data, CRC-16 FCS) on the bit stream, via SpanDSP's `hdlc.c`. Each frame

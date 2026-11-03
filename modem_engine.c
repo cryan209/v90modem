@@ -344,6 +344,11 @@ static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static data_stack_t g_data_stack;
 static bool g_gui_enabled;
 static ds_framing_t g_data_framing = DS_FRAMING_V14;
+/* ME_DATA_FRAMING=transparent, clear channel only: no framing of ours at all,
+   one DTE octet per DS0 octet (CC_TRANSPARENT).  What a self-framing
+   synchronous protocol needs -- PPP in HDLC framing over a B channel -- where
+   V.14's start/stop elements would be read as part of the peer's frames. */
+static bool g_clear_transparent;
 /* ME_DATA_FRAMING unset or "auto": run V.42 LAPM (with V.42 detection)
    whenever V.8 agreed it -- our CM offers V8_PROTOCOL_LAPM_V42 and the peer's
    CM/JM protocol octet says whether it accepts -- and V.14 otherwise.  The
@@ -13691,7 +13696,12 @@ void me_init(void)
     {
         const char *framing = getenv("ME_DATA_FRAMING");
 
-        if (framing && strcmp(framing, "raw") == 0) {
+        if (framing && strcmp(framing, "transparent") == 0) {
+            /* The DTE bytes bypass the data stack's framing entirely; this
+               value is consulted only by the clear-channel path. */
+            g_clear_transparent = true;
+            g_data_framing = DS_FRAMING_V14;
+        } else if (framing && strcmp(framing, "raw") == 0) {
             g_data_framing = DS_FRAMING_RAW;
         } else if (framing && strcmp(framing, "lapm") == 0) {
             g_data_framing = DS_FRAMING_V42;
@@ -13710,6 +13720,7 @@ void me_init(void)
         if (framing && strcmp(framing, "auto") != 0 && strcmp(framing, "v14") != 0)
             g_data_framing_auto = false;
         ME_LOG("[ME] DTE framing: %s%s\n",
+               g_clear_transparent ? "transparent (clear channel: one DTE octet per DS0 octet)" :
                g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
                g_data_framing == DS_FRAMING_RAW ? "RAW" :
                g_data_lapm_detect ? "V.42 LAPM" : "V.42 LAPM (ODP/ADP bypass)",
@@ -14051,6 +14062,19 @@ static int me_clear_start_locked(void)
             cc_set_break_cb(&g_cc, me_cc_break_cb);
         }
         g_data_connect_rate = rate;   /* as for V.110 above */
+    } else if (g_clear_transparent) {
+        /* No framing of ours: the DTE's octets are the DS0's octets, so a
+         * protocol that frames itself keeps its own framing.  Like V.120 and
+         * V.110 this takes the DTE bytes directly and does not start the
+         * data stack's framing machinery. */
+        if (cc_init_transparent(&g_cc, g_offer_r56, data_stack_pull_dte_byte,
+                                data_stack_push_dte_byte, NULL) != 0) {
+            ME_LOG("[ME] clear channel: transparent framing needs the "
+                   "unrestricted 64 kbit/s bearer; restricted 56k robs bit 1 "
+                   "and no octet survives it\n");
+            return 0;
+        }
+        g_data_connect_rate = rate;   /* as for V.110 above */
     } else {
         /* The DS0 is the datapump; the data stack frames DTE characters on
          * it exactly as it would for a modem: V.14 unless LAPM was forced
@@ -14070,9 +14094,11 @@ static int me_clear_start_locked(void)
     g_phase_start_ms = 0;
     g_data_connect_reported = true;
     trace_phase("%s enter DATA: %d bit/s on the DS0, no V.8",
-                g_offer_v120 ? "V.120" : "clear channel", rate);
+                g_offer_v120 ? "V.120" :
+                g_clear_transparent ? "clear channel (transparent)" : "clear channel", rate);
     ME_LOG("[ME] %s: %d bit/s on the DS0 (%s), no V.8\n",
-           g_offer_v120 ? (g_cc.v120_ack ? "V.120 Q.922 acknowledged mode" : "V.120 UI frames") : "clear channel", rate,
+           g_offer_v120 ? (g_cc.v120_ack ? "V.120 Q.922 acknowledged mode" : "V.120 UI frames") :
+           g_clear_transparent ? "clear channel, transparent (one DTE octet per DS0 octet)" : "clear channel", rate,
            g_offer_r56 ? "restricted, bit 8 = 1" : "unrestricted");
     return rate;
 }
