@@ -8086,6 +8086,9 @@ static void v90_live_cp_bit(void *user_data, int bit)
         if (g_v90_upstream_e_run >= 20) {
             if (v34_begin_rx_data(g_v34) == 0) {
                 g_v34_upstream_data_started = true;
+                /* §9.6.1: discharge the upstream E deadline even when our
+                 * downstream transmitter already completed Ed/B1d. */
+                (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
                 ME_LOG("[ME] V.90 upstream E detected; V.34 RX entering data mode\n");
                 trace_phase("V90 upstream E -> V34 RX DATA");
             }
@@ -18616,6 +18619,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
          * only logging the failures hides that. */
         if (g_v90_reneg_cp_rx_marked
             && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_waiting_for_e(g_v90)
             && !v90_rate_renegotiation_timed_out(g_v90))
             v90_reneg_cp_report_locked("complete");
 

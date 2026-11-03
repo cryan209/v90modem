@@ -34,8 +34,72 @@ static vpcm_cp_frame_t make_cp(bool silence, bool ack)
     return cp;
 }
 
+/* §9.6.1: downstream B1d completion must not discharge the upstream-E
+ * deadline. Drive real mapped DATA frames after CP', without supplying E. */
+/* e_at: 0 = absent, 1 = after B1d, 2 = while still transmitting MP'. */
+static void test_missing_e(v90_law_t law, int e_at)
+{
+    v90_state_t *s = v90_init_data_pump(law);
+    vpcm_cp_frame_t cp = make_cp(false, false);
+    vpcm_cp_frame_t cpa = make_cp(false, true);
+    uint8_t cw[V90_FRAME_LEN];
+
+    assert(s);
+    {
+        vpcm_cp_frame_t cpt = make_cp(false, false);
+        cpt.v90_compatibility = false;
+        cpt.drn = 4;
+        assert(v90_set_phase4_cp(s, &cpt));
+        assert(v90_set_phase4_cp(s, &cp));
+    }
+    s->training_complete = true;
+    s->tx_phase = V90_TX_DATA;
+    /* Model the E latch retained from a successful preceding exchange. */
+    s->e_received = true;
+    assert(v90_request_rate_renegotiation(s));
+    assert(v90_rate_renegotiation_start(s));
+    assert(!s->e_received);
+    run_until(s, V90_TX_MP, 20000);
+    assert(v90_set_phase4_cp(s, &cp));
+    assert(v90_set_phase4_cp(s, &cpa));
+    v90_rate_renegotiation_note_answer(s);
+    if (e_at == 2)
+        assert(v90_handle_rx_event(s, V90_RX_EVENT_E));
+    run_until(s, V90_TX_DATA, 12000);
+    assert(!v90_rate_renegotiation_active(s));
+    assert(!v90_rate_renegotiation_timed_out(s));
+    if (e_at != 2)
+        assert(!v90_request_rate_renegotiation(s));
+    if (e_at == 1) {
+        assert(v90_handle_rx_event(s, V90_RX_EVENT_E));
+        assert(s->tx_phase == V90_TX_DATA);
+    }
+    while (s->reneg_symbol_clock - s->reneg_rbar_symbol
+           + V90_FRAME_LEN <= V90_RENEG_E_TIMEOUT_SYMBOLS) {
+        assert(v90_tx_data_frame_codewords(s, cw, NULL, 0, NULL, true)
+               == V90_FRAME_LEN);
+        assert(!v90_rate_renegotiation_timed_out(s));
+        if (e_at)
+            break;  /* E stops the deadline clock. */
+    }
+    assert(v90_tx_data_frame_codewords(s, cw, NULL, 0, NULL, true)
+           == V90_FRAME_LEN);
+    assert(v90_rate_renegotiation_timed_out(s) == !e_at);
+    for (int i = 0; i < V90_RENEG_E_TIMEOUT_SYMBOLS / V90_FRAME_LEN + 1; i++)
+        assert(v90_tx_data_frame_codewords(s, cw, NULL, 0, NULL, true)
+               == V90_FRAME_LEN);
+    assert(v90_rate_renegotiation_timed_out(s) == !e_at);
+    if (e_at)
+        assert(v90_request_rate_renegotiation(s));
+    v90_free(s);
+}
+
 int main(void)
 {
+    for (int e_at = 0; e_at < 3; e_at++) {
+        test_missing_e(V90_LAW_ULAW, e_at);
+        test_missing_e(V90_LAW_ALAW, e_at);
+    }
     v90_state_t *s = v90_init_data_pump(V90_LAW_ULAW);
     vpcm_cp_frame_t cpt, cp, cps, cpsa, cpa;
     const uint8_t silence = v90_pcm_signed_codeword(V90_LAW_ULAW, 0, 1);
@@ -111,6 +175,6 @@ int main(void)
     assert(!s->reneg_active && s->training_complete);
 
     v90_free(s);
-    puts("PASS: V.90 9.6.1.2.3-.6 CPs silence procedure");
+    puts("PASS: V.90 9.6.1 upstream E deadline (both laws) and 9.6.1.2.3-.6 CPs silence procedure");
     return 0;
 }

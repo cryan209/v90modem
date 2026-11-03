@@ -607,7 +607,8 @@ struct v90_state_s {
      * (docs/v90_upstream_data_path.md). */
     bool             reneg_pending;             /* asked for, waiting for a frame boundary */
     bool             reneg_active;              /* Rd sent, sequence running */
-    bool             reneg_timed_out;           /* §9.6.1: no Ed in time, retrain owed */
+    bool             reneg_wait_e;              /* §9.6.1 deadline outlives downstream B1d */
+    bool             reneg_timed_out;           /* §9.6.1: no upstream E in time, retrain owed */
     bool             reneg_answer_seen;         /* peer's S, or a CP frame, observed */
     int64_t          reneg_rbar_symbol;         /* symbol count at the Rd→R̄d transition */
     int64_t          reneg_symbol_clock;        /* symbols emitted since renegotiation began */
@@ -3887,16 +3888,13 @@ static int v90_trn2d_symbols_for(const v90_state_t *s)
                                   : v90_trn2d_symbols();
 }
 
-static uint8_t v90_phase3_codeword(v90_state_t *s)
+/* §9.6.1: the upstream E deadline survives downstream B1d completion.
+ * Both the training generator and the six-symbol DATA mapper advance this
+ * DS0 clock; neither wall time nor downstream completion proves receipt of E. */
+static void v90_reneg_clock_advance(v90_state_t *s, int symbols)
 {
-    int sign;
-
-    /* §9.6.1: the digital modem shall initiate a retrain if it does not
-     * receive an E sequence within 5000 ms plus two round-trip delays after
-     * transmitting the Rd→R̄d transition.  Run the clock here, where every
-     * transmitted symbol passes, and let the engine own the retrain itself. */
-    if (s->reneg_active) {
-        s->reneg_symbol_clock++;
+    if (v90_rate_renegotiation_waiting_for_e(s)) {
+        s->reneg_symbol_clock += symbols;
         if (!s->reneg_timed_out
             && s->reneg_rbar_symbol >= 0
             && !s->e_received
@@ -3929,7 +3927,13 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     s->reneg_count, V90_RENEG_ANSWER_TIMEOUT_SYMBOLS);
         }
     }
+}
 
+static uint8_t v90_phase3_codeword(v90_state_t *s)
+{
+    int sign;
+
+    v90_reneg_clock_advance(s, 1);
     switch (s->tx_phase) {
     case V90_TX_WAIT_JA: {
         int wait_limit = s->jd_resync_wait
@@ -4677,10 +4681,11 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->training_complete = true;
                 if (s->reneg_active) {
                     fprintf(stderr,
-                            "[V90] Rate renegotiation %d complete; data mode "
-                            "resumed after B1d\n", s->reneg_count);
+                            "[V90] Rate renegotiation %d: downstream data mode "
+                            "resumed after B1d%s\n", s->reneg_count,
+                            v90_rate_renegotiation_waiting_for_e(s)
+                                ? "; still awaiting upstream E" : "");
                     s->reneg_active = false;
-                    s->reneg_rbar_symbol = -1;
                 }
             }
             return codeword;
@@ -5133,6 +5138,14 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_E:
+        /* V.90 §9.6.1: E can arrive after our CP'-driven Ed/B1d handoff.
+         * A qualified upstream E discharges the deadline without rewinding
+         * the downstream transmitter or changing its frame position. */
+        if (!s->v92_mode && s->reneg_wait_e && s->cp_ack_received) {
+            s->e_received = true;
+            s->reneg_wait_e = false;
+            return true;
+        }
         if (s->v92_phase3 && s->dil_requested && s->tx_phase == V90_TX_RI
             && s->phase4_mapper_ready && !s->cp_ready) {
             /* V.92 9.5.1.1.12: nonzero DIL waits for E1u, not a second CPt. */
@@ -5396,6 +5409,7 @@ int v90_tx_data_frame_codewords(v90_state_t *s,
         return 0;
     memcpy(codewords, s->data_mapper_frame, V90_FRAME_LEN);
     s->data_mapper_frame_pos = V90_FRAME_LEN;
+    v90_reneg_clock_advance(s, V90_FRAME_LEN);
     return V90_FRAME_LEN;
 }
 
@@ -6212,7 +6226,8 @@ bool v90_request_rate_renegotiation(v90_state_t *s)
 {
     if (!s || !s->training_complete || s->tx_phase != V90_TX_DATA)
         return false;
-    if (s->reneg_pending || s->reneg_active)
+    if (s->reneg_pending || s->reneg_active
+        || v90_rate_renegotiation_waiting_for_e(s) || s->reneg_timed_out)
         return false;
     s->reneg_pending = true;
     fprintf(stderr,
@@ -6229,6 +6244,11 @@ bool v90_rate_renegotiation_pending(const v90_state_t *s)
 bool v90_rate_renegotiation_active(const v90_state_t *s)
 {
     return s && (s->reneg_pending || s->reneg_active);
+}
+
+bool v90_rate_renegotiation_waiting_for_e(const v90_state_t *s)
+{
+    return s && s->reneg_wait_e && !s->e_received;
 }
 
 int v90_rate_renegotiation_count(const v90_state_t *s)
@@ -6263,6 +6283,9 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
         return false;
     s->reneg_pending = false;
     s->reneg_active = true;
+    s->reneg_wait_e = true;
+    s->e_received = false;
+    s->b1_received = false;
     s->reneg_timed_out = false;
     s->reneg_answer_seen = false;
     s->reneg_rbar_symbol = -1;

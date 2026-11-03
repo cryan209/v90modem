@@ -1786,3 +1786,47 @@ failure**, not five passes: two long baselines, one successful long
 renegotiation repeat, and one successful long retrain with a retry. It does
 not yet qualify recovery under packet loss or a half-hour continuous call.
 No modem DSP/default change was made on the strength of these tests.
+
+### Upstream-E watchdog survives downstream completion (2 November 2026)
+
+Source inspection following the loss-associated long-call failure found two
+independent ways to bypass V.90 §9.6.1's mandatory missing-E retrain:
+
+- `v90_rate_renegotiation_start()` retained `e_received` from the previous
+  exchange. A previous E could therefore satisfy the new exchange's deadline.
+- Downstream B1d completion cleared `reneg_active` and the Rd-to-barred-Rd
+  timestamp. The watchdog advanced only inside the training generator while
+  `reneg_active` was true; mapped downstream DATA could run indefinitely
+  without upstream E. Downstream completion is not upstream completion.
+
+The new exchange clears the old E/B1 latches. A separate upstream-E wait
+survives downstream DATA entry, with its DS0-symbol deadline advanced by both
+training codewords and mapped six-symbol DATA frames. The existing 56000-symbol
+E bound is unchanged. Qualified streaming E is now reported to the controller
+even after downstream B1d; it cancels the E wait without rewinding the downstream
+transmitter. A second renegotiation cannot replace an outstanding E deadline,
+and the engine does not report the whole exchange complete while E is missing.
+The existing timeout path still initiates §9.5.1.1 Phase-2 retraining.
+
+`v90_reneg_silence_test` now checks **six E-deadline cases**: both G.711 laws,
+each with E absent, E during MP', or E after downstream DATA entry. Each starts
+with a stale E latch. Absent E remains below the timeout through 56000 generated
+symbols from the transition and owes a retrain on the next mapped frame;
+present E allows more than another 56000 symbols without timing out. The test
+failed on the old code at the retained-E assertion, and passes with the fix.
+The original CPs/silence/Rt waveform checks also pass.
+
+Focused runner: **6/6 pass** (E-deadline/CPs, V.90 B1 state, V.92 startup,
+V.92 modem-on-hold/retrain, and both-law Phase-2 receive-ceiling retrain rows).
+The B1 test was explicitly rebuilt and rerun. These local binaries include the
+checkout's pre-existing pending SpanDSP changes; this is not isolated-main or
+physical-hardware qualification. A stricter engine-pair §9.6 probe did **not**
+complete renegotiation: the analogue engine did not answer Rd, the answerer
+logged the existing 32000-symbol unanswered timeout, and Phase-2 recovery
+returned to DATA. That probe is not evidence for the late-E success path.
+
+No new wired call was made: CT117 already had a `sip_v90_modem` process and was
+left untouched. The original packet-loss location and actual upstream-E miss
+remain unresolved. Next is an isolated-main wired SmartLink A/B, first clean
+planned §9.6 and then controlled upstream erasures, grading receiver-verified
+binary payload and the missing-E fallback rather than downstream B1d alone.
