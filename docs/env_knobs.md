@@ -28,7 +28,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_MODE` | modem_engine.c | Power-on modulation offer (`--mode`); `AT+MS` overrides it per call. |
 | `ME_V90_ROLE` | modem_engine.c | `digital` (default) or `analogue` for V.90/V.92. |
 | `ME_V92_PCM_UPSTREAM` | modem_engine.c | Offer V.92 PCM upstream (Table 18). |
-| `ME_DATA_FRAMING` | modem_engine.c | Force `v14` or `lapm`; normally `AT+ES` decides. `transparent` is clear channel only: no framing of ours, one DTE octet per DS0 octet, for a protocol that frames itself (PPP in HDLC framing). 64k only. |
+| `ME_DATA_FRAMING` | modem_engine.c | Force `v14` or `lapm`; normally `AT+ES` decides. `transparent` is clear channel only: no framing of ours, one DTE octet per DS0 octet, for a protocol that frames itself. 64k only. `ppp` is the terminal-adaptor conversion: sync HDLC on the line, RFC 1662 async to the DTE. |
 | `ME_DATA_COMPRESSION` | modem_engine.c | Force a compressor; normally `AT+DS`/`AT+DS44` decide. |
 | `ME_V42_T400_MS` | data_stack.c | V.42 T400 (9.1.1). |
 | `ME_JB_MS` | sip_modem.c | Fixed RX jitter buffer depth in ms (default 200; 0 = pjmedia adaptive). |

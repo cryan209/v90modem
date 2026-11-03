@@ -7,6 +7,14 @@
  * CLEARMODE and ISDN calls a B channel.  No modulation is needed: the octets
  * carry a synchronous bit stream directly.
  *
+ *   CC_PPP    PPP in HDLC framing on the B channel, which is what an ISDN
+ *             terminal adaptor presents: synchronous HDLC on the line (flags,
+ *             bit stuffing, FCS-16) and RFC 1662's octet-stuffed asynchronous
+ *             framing towards the DTE, so an ordinary async pppd can drive an
+ *             ISDN PPP call.  Measured need: an Eicon Diva answering TTY
+ *             profile 9 puts a synchronous bit stream on the B channel, and
+ *             its flags land at every bit offset because of the stuffing, so
+ *             nothing that reads octets can find them.
  *   CC_TRANSPARENT  the DTE's octets ARE the DS0's octets, one for one, with
  *             no framing of any kind: what the DTE writes is what the far end
  *             reads off the B channel.  This is what carries a synchronous
@@ -67,7 +75,8 @@ typedef enum {
     CC_CLEAR = 0,
     CC_V120  = 1,
     CC_V110  = 2,
-    CC_TRANSPARENT = 3
+    CC_TRANSPARENT = 3,
+    CC_PPP   = 4
 } cc_mode_t;
 
 /* CC_CLEAR: next line bit, or <0 for "nothing to send" (sent as mark, 1). */
@@ -79,6 +88,13 @@ typedef void (*cc_push_byte_fn)(void *ctx, uint8_t byte);
 /* Free space (and total size) of the DTE-side receive buffer, for V.110 5.4.2. */
 typedef void (*cc_break_fn)(void *ctx, bool on);
 typedef void (*cc_room_fn)(void *ctx, int *free_bytes, int *size);
+
+/* RFC 1662: the asynchronous framing the DTE side speaks. */
+#define CC_PPP_FLAG           0x7e
+#define CC_PPP_ESC            0x7d
+#define CC_PPP_XOR            0x20
+/* 1500 of MRU plus address, control, protocol and FCS, with room to spare. */
+#define CC_PPP_MAX_FRAME      1600
 
 #define CC_V120_DEFAULT_LLI   256
 /* User octets per V.120 frame.  3.2.2: N2120 = N201 (Q.922 5.9.3, agreed
@@ -151,6 +167,14 @@ typedef struct {
 
     hdlc_tx_state_t *htx;
     hdlc_rx_state_t *hrx;
+
+    /* CC_PPP: the DTE-side asynchronous de-framer (RFC 1662 4.2).  A frame
+       arrives a byte at a time across many cc_tx() calls, so this persists. */
+    uint8_t ppp_buf[CC_PPP_MAX_FRAME];
+    int ppp_len;
+    bool ppp_in_frame, ppp_escaped;
+    uint64_t ppp_tx_frames, ppp_rx_frames;
+    uint64_t ppp_tx_bad_fcs, ppp_tx_overlong;
     bool tx_frame_queued;
     bool v120_peer_rr;           /* RR(R), 3.2.3.1: 1 until a CS says so */
 
@@ -250,6 +274,10 @@ int  cc_init_clear(clear_channel_t *cc, bool r56,
    robs bit 1 and so cannot carry a whole octet. */
 int  cc_init_transparent(clear_channel_t *cc, bool r56,
                          cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
+/* CC_PPP: synchronous HDLC on the B channel, RFC 1662 asynchronous framing to
+   the DTE.  Returns -1 if the HDLC state could not be built. */
+int  cc_init_ppp(clear_channel_t *cc, bool r56,
+                 cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 /* user_rate: one of cc_v110_rates[].  -1 for a rate V.110 does not carry,

@@ -349,6 +349,10 @@ static ds_framing_t g_data_framing = DS_FRAMING_V14;
    synchronous protocol needs -- PPP in HDLC framing over a B channel -- where
    V.14's start/stop elements would be read as part of the peer's frames. */
 static bool g_clear_transparent;
+/* ME_DATA_FRAMING=ppp, clear channel only: synchronous HDLC on the B channel
+   and RFC 1662 asynchronous framing to the DTE (CC_PPP), the conversion an
+   ISDN terminal adaptor does, so an ordinary async pppd can run the call. */
+static bool g_clear_ppp;
 /* ME_DATA_FRAMING unset or "auto": run V.42 LAPM (with V.42 detection)
    whenever V.8 agreed it -- our CM offers V8_PROTOCOL_LAPM_V42 and the peer's
    CM/JM protocol octet says whether it accepts -- and V.14 otherwise.  The
@@ -13699,7 +13703,12 @@ void me_init(void)
     {
         const char *framing = getenv("ME_DATA_FRAMING");
 
-        if (framing && strcmp(framing, "transparent") == 0) {
+        if (framing && strcmp(framing, "ppp") == 0) {
+            /* As for transparent: the DTE bytes bypass the data stack and
+               this is consulted only by the clear-channel path. */
+            g_clear_ppp = true;
+            g_data_framing = DS_FRAMING_V14;
+        } else if (framing && strcmp(framing, "transparent") == 0) {
             /* The DTE bytes bypass the data stack's framing entirely; this
                value is consulted only by the clear-channel path. */
             g_clear_transparent = true;
@@ -13723,6 +13732,7 @@ void me_init(void)
         if (framing && strcmp(framing, "auto") != 0 && strcmp(framing, "v14") != 0)
             g_data_framing_auto = false;
         ME_LOG("[ME] DTE framing: %s%s\n",
+               g_clear_ppp ? "PPP (clear channel: sync HDLC on the line, RFC 1662 async to the DTE)" :
                g_clear_transparent ? "transparent (clear channel: one DTE octet per DS0 octet)" :
                g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
                g_data_framing == DS_FRAMING_RAW ? "RAW" :
@@ -14065,6 +14075,14 @@ static int me_clear_start_locked(void)
             cc_set_break_cb(&g_cc, me_cc_break_cb);
         }
         g_data_connect_rate = rate;   /* as for V.110 above */
+    } else if (g_clear_ppp) {
+        /* The terminal-adaptor conversion: the line carries synchronous HDLC
+         * with its own flags, bit stuffing and FCS, while the DTE keeps the
+         * octet-stuffed framing an async pppd speaks. */
+        if (cc_init_ppp(&g_cc, g_offer_r56, data_stack_pull_dte_byte,
+                        data_stack_push_dte_byte, NULL) != 0)
+            return 0;
+        g_data_connect_rate = rate;   /* as for V.110 above */
     } else if (g_clear_transparent) {
         /* No framing of ours: the DTE's octets are the DS0's octets, so a
          * protocol that frames itself keeps its own framing.  Like V.120 and
@@ -14098,9 +14116,11 @@ static int me_clear_start_locked(void)
     g_data_connect_reported = true;
     trace_phase("%s enter DATA: %d bit/s on the DS0, no V.8",
                 g_offer_v120 ? "V.120" :
+                g_clear_ppp ? "clear channel (PPP in HDLC framing)" :
                 g_clear_transparent ? "clear channel (transparent)" : "clear channel", rate);
     ME_LOG("[ME] %s: %d bit/s on the DS0 (%s), no V.8\n",
            g_offer_v120 ? (g_cc.v120_ack ? "V.120 Q.922 acknowledged mode" : "V.120 UI frames") :
+           g_clear_ppp ? "clear channel, PPP in HDLC framing (sync on the line, RFC 1662 async to the DTE)" :
            g_clear_transparent ? "clear channel, transparent (one DTE octet per DS0 octet)" : "clear channel", rate,
            g_offer_r56 ? "restricted, bit 8 = 1" : "unrestricted");
     return rate;

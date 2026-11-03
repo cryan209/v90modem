@@ -42,6 +42,108 @@ static void took_bit(clear_channel_t *cc, int bit)
 }
 
 /* ---------------------------------------------------------------- */
+/* CC_PPP: synchronous HDLC on the line, RFC 1662 async to the DTE    */
+/* ---------------------------------------------------------------- */
+
+/* A frame off the line.  SpanDSP has already checked and removed the FCS, so
+ * RFC 1662 4.1's FCS has to be put back for the DTE's own check, and the
+ * result octet-stuffed between flags (4.2). */
+static void ppp_frame(void *user_data, const uint8_t *pkt, int len, int ok)
+{
+    clear_channel_t *cc = (clear_channel_t *) user_data;
+    uint8_t frame[CC_PPP_MAX_FRAME + 2];
+
+    if (len < 0)
+        return;                        /* a status report, not a frame */
+    if (!ok || len < 2 || len > CC_PPP_MAX_FRAME) {
+        cc->rx_bad_frames++;
+        return;
+    }
+    memcpy(frame, pkt, (size_t) len);
+    len = crc_itu16_append(frame, len);
+    if (!cc->push)
+        return;
+    cc->push(cc->ctx, CC_PPP_FLAG);
+    for (int i = 0; i < len; i++) {
+        /* 4.2: the flag and the escape always, and every control character
+         * as well.  A receiver's ACCM starts at 0xffffffff (RFC 1662 7.1:
+         * "the default is that all control characters are escaped") and is
+         * only negotiated down later, so anything less is discarded before
+         * the FCS is checked and the frame vanishes silently -- measured
+         * against Linux's ppp_async, which accepted nothing until the
+         * control field 0x03 itself was escaped. */
+        if (frame[i] == CC_PPP_FLAG || frame[i] == CC_PPP_ESC
+            || frame[i] < 0x20) {
+            cc->push(cc->ctx, CC_PPP_ESC);
+            cc->push(cc->ctx, (uint8_t) (frame[i] ^ CC_PPP_XOR));
+        } else {
+            cc->push(cc->ctx, frame[i]);
+        }
+    }
+    cc->push(cc->ctx, CC_PPP_FLAG);
+    cc->ppp_rx_frames++;
+}
+
+/* The DTE's octet-stuffed frames, de-framed and queued for the line.  Called
+ * with at most one frame queued at a time, like V.120's loader. */
+static void ppp_load_frame(clear_channel_t *cc)
+{
+    int ch;
+
+    while (!cc->tx_frame_queued && cc->pull
+           && (ch = cc->pull(cc->ctx)) >= 0) {
+        uint8_t b = (uint8_t) ch;
+
+        if (b == CC_PPP_FLAG) {
+            /* Closing flag: an empty or runt frame between flags is the
+             * idle case RFC 1662 allows, not an error. */
+            if (cc->ppp_in_frame && cc->ppp_len >= 4) {
+                if (crc_itu16_check(cc->ppp_buf, cc->ppp_len)) {
+                    /* Hand over the body; SpanDSP puts its own FCS on. */
+                    if (hdlc_tx_frame(cc->htx, cc->ppp_buf,
+                                      (size_t) cc->ppp_len - 2) == 0) {
+                        cc->tx_frame_queued = true;
+                        cc->tx_frames++;
+                        cc->ppp_tx_frames++;
+                    }
+                } else {
+                    cc->ppp_tx_bad_fcs++;   /* the DTE's own framing was bad */
+                }
+            }
+            cc->ppp_len = 0;
+            cc->ppp_in_frame = true;
+            cc->ppp_escaped = false;
+            continue;
+        }
+        if (!cc->ppp_in_frame)
+            continue;                  /* before the first flag */
+        if (b == CC_PPP_ESC) {
+            cc->ppp_escaped = true;
+            continue;
+        }
+        if (cc->ppp_escaped) {
+            b = (uint8_t) (b ^ CC_PPP_XOR);
+            cc->ppp_escaped = false;
+        }
+        if (cc->ppp_len >= CC_PPP_MAX_FRAME) {
+            cc->ppp_tx_overlong++;
+            cc->ppp_len = 0;
+            cc->ppp_in_frame = false;  /* resynchronise on the next flag */
+            continue;
+        }
+        cc->ppp_buf[cc->ppp_len++] = b;
+    }
+}
+
+static void ppp_underflow(void *user_data)
+{
+    clear_channel_t *cc = (clear_channel_t *) user_data;
+
+    cc->tx_frame_queued = false;
+    ppp_load_frame(cc);
+}
+
+/* ---------------------------------------------------------------- */
 /* V.120 framing                                                     */
 /* ---------------------------------------------------------------- */
 
@@ -1528,6 +1630,33 @@ int cc_init_clear(clear_channel_t *cc, bool r56,
     return 0;
 }
 
+int cc_init_ppp(clear_channel_t *cc, bool r56,
+                cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx)
+{
+    memset(cc, 0, sizeof(*cc));
+    cc->mode = CC_PPP;
+    cc->r56 = r56;
+    cc->pull = pull;
+    cc->push = push;
+    cc->ctx = ctx;
+    cc->ppp_in_frame = true;     /* a frame may start without a leading flag */
+    /* Address and control are not compressible here: the frames are the
+     * DTE's own, passed through whole. */
+    cc->htx = hdlc_tx_init(NULL, false, 1, false, ppp_underflow, cc);
+    cc->hrx = hdlc_rx_init(NULL, false, true, 1, ppp_frame, cc);
+    if (!cc->htx || !cc->hrx) {
+        cc_release(cc);
+        return -1;
+    }
+    hdlc_tx_set_max_frame_len(cc->htx, CC_PPP_MAX_FRAME);
+    /* As for V.120: SpanDSP's transmitter starts with no flag, so open with
+     * flags, the way a line idles before data, or the first frame has nothing
+     * to sync the far receiver to. */
+    hdlc_tx_flags(cc->htx, 2);
+    hdlc_rx_set_max_frame_len(cc->hrx, CC_PPP_MAX_FRAME + 16);
+    return 0;
+}
+
 int cc_init_transparent(clear_channel_t *cc, bool r56,
                         cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx)
 {
@@ -1633,6 +1762,8 @@ void cc_tx(clear_channel_t *cc, uint8_t *octets, int n)
 
     if (cc->mode == CC_V120)
         v120_load_frame(cc);   /* also runs the acknowledged-mode timers */
+    else if (cc->mode == CC_PPP)
+        ppp_load_frame(cc);
     for (int i = 0; i < n; i++) {
         uint8_t o = 0;
 

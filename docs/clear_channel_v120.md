@@ -28,6 +28,17 @@ adaption), the `ME_MOD_CLEAR` hooks at the top of
   read as part of the peer's frames, and a peer's flag would be sliced into
   two characters. 64 kbit/s only: restricted 56k robs bit 1, so an octet
   cannot survive it, and `cc_init_transparent()` refuses it.
+  `ME_DATA_FRAMING=ppp` goes one step further and does what an ISDN terminal
+  adaptor does (`CC_PPP`): synchronous HDLC on the B channel -- flags, bit
+  stuffing and FCS-16 through SpanDSP's `hdlc.c`, the same machinery V.120
+  uses -- with RFC 1662's octet-stuffed asynchronous framing towards the DTE,
+  so an ordinary async `pppd` can run an ISDN PPP call. Every control
+  character is escaped on the way to the DTE as well as the flag and the
+  escape: a receiver's ACCM starts at 0xffffffff (RFC 1662 7.1) and is only
+  negotiated down later, so anything less is stripped before the FCS is
+  checked and the frame vanishes without a word. Measured against Linux's
+  `ppp_async`, which accepted nothing until the control field 0x03 itself was
+  escaped.
 - **V120**: ITU-T V.120 rate adaption. DTE characters go into HDLC frames
   (flag, 2-octet address carrying the LLI, control, V.120 header octet,
   data, CRC-16 FCS) on the bit stream, via SpanDSP's `hdlc.c`. Each frame

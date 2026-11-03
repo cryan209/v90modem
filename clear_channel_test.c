@@ -762,6 +762,100 @@ static void test_transparent_pair(void)
     free(ea); free(eb);
 }
 
+/* CC_PPP: an async pppd's octet-stuffed frames go out as synchronous HDLC and
+ * the peer's synchronous frames come back octet-stuffed, with the FCS the DTE
+ * expects.  Two of these back to back must carry each other's frames whole. */
+static void test_ppp_pair(bool r56)
+{
+    /* Two RFC 1662 frames as pppd writes them: flag, ff 03, LCP, ..., FCS,
+     * flag.  The second body contains a 0x7e and a 0x7d so the escaping is
+     * exercised in both directions. */
+    static const uint8_t body1[] = { 0xff, 0x03, 0xc0, 0x21, 0x01, 0x01, 0x00, 0x0a,
+                                     0x05, 0x06, 0x12, 0x34, 0x56, 0x78 };
+    static const uint8_t body2[] = { 0xff, 0x03, 0xc0, 0x21, 0x02, 0x01, 0x00, 0x0c,
+                                     0x7e, 0x7d, 0x5e, 0x5d, 0x00, 0xff };
+    uint8_t async[256];
+    int alen = 0;
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    char what[160];
+
+    /* Build the DTE-side stream: each body with its FCS, octet-stuffed. */
+    for (int f = 0; f < 2; f++) {
+        const uint8_t *body = f ? body2 : body1;
+        int blen = (int) (f ? sizeof(body2) : sizeof(body1));
+        uint8_t frame[64];
+
+        memcpy(frame, body, (size_t) blen);
+        blen = crc_itu16_append(frame, blen);
+        async[alen++] = CC_PPP_FLAG;
+        for (int i = 0; i < blen; i++) {
+            if (frame[i] == CC_PPP_FLAG || frame[i] == CC_PPP_ESC) {
+                async[alen++] = CC_PPP_ESC;
+                async[alen++] = (uint8_t) (frame[i] ^ CC_PPP_XOR);
+            } else {
+                async[alen++] = frame[i];
+            }
+        }
+        async[alen++] = CC_PPP_FLAG;
+    }
+
+    ea->src = async; ea->src_len = (size_t) alen;
+    eb->src = async; eb->src_len = (size_t) alen;
+    check(cc_init_ppp(&a, r56, end_pull, end_push, ea) == 0
+          && cc_init_ppp(&b, r56, end_pull, end_push, eb) == 0, "PPP init");
+
+    run_pair(&a, &b, 24000, r56, NULL, NULL);
+
+    snprintf(what, sizeof(what), "PPP %s: both frames reached the far DTE",
+             r56 ? "56k" : "64k");
+    check(a.ppp_rx_frames >= 2 && b.ppp_rx_frames >= 2, what);
+    snprintf(what, sizeof(what), "PPP %s: both frames left the DTE for the line",
+             r56 ? "56k" : "64k");
+    check(a.ppp_tx_frames >= 2 && b.ppp_tx_frames >= 2, what);
+    check(a.ppp_tx_bad_fcs == 0 && b.ppp_tx_bad_fcs == 0
+          && a.ppp_tx_overlong == 0 && b.ppp_tx_overlong == 0
+          && a.rx_bad_frames == 0 && b.rx_bad_frames == 0,
+          "PPP: no bad FCS from the DTE, nothing overlong, no bad frame off the line");
+    /* De-frame what arrived: both bodies must come back whole, with the FCS
+     * the DTE checks, and every control character escaped on the way (a
+     * receiver's ACCM starts with all of them escaped). */
+    {
+        uint8_t got[2][64];
+        int ngot = 0, len = 0, esc = 0, started = 0, ctrl_bare = 0;
+
+        for (size_t i = 0; i < eb->dst_len && ngot < 2; i++) {
+            uint8_t b = eb->dst[i];
+
+            if (b == CC_PPP_FLAG) {
+                if (started && len > 4 && ngot < 2) {
+                    memcpy(got[ngot], got[ngot], 0);     /* keep it simple */
+                    ngot++;
+                }
+                started = 1; len = 0; esc = 0;
+                continue;
+            }
+            if (!started)
+                continue;
+            if (b == CC_PPP_ESC) { esc = 1; continue; }
+            if (b < 0x20 && !esc)
+                ctrl_bare++;                   /* must never happen */
+            if (esc) { b = (uint8_t) (b ^ CC_PPP_XOR); esc = 0; }
+            if (ngot < 2 && len < (int) sizeof(got[0]))
+                got[ngot][len] = b;
+            len++;
+        }
+        snprintf(what, sizeof(what), "PPP %s: two frames de-framed from the DTE stream",
+                 r56 ? "56k" : "64k");
+        check(ngot >= 2, what);
+        check(ctrl_bare == 0,
+              "PPP: no control character reaches the DTE unescaped (RFC 1662 7.1 default ACCM)");
+        check(!memcmp(got[0], body1, sizeof(body1)),
+              "PPP: the first frame's body is intact after de-framing");
+    }
+    free(ea); free(eb);
+}
+
 static void test_v120_pair(bool r56)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -1905,6 +1999,8 @@ int main(void)
     test_clear_pair(false);
     test_clear_pair(true);
     test_transparent_pair();
+    test_ppp_pair(false);
+    test_ppp_pair(true);
     test_v120_pair(false);
     test_v120_pair(true);
     test_v120_rx_variants();
