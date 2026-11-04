@@ -889,3 +889,51 @@ Also learned: a harness killed mid-batch leaves `qc_slm_pve.sh`'s payload loop t
 next call's PTY, and any keystroke before CONNECT aborts the answer (V.250 5.6.1); the 30 s
 "Asterisk hangups" at the start of this session were the same thing with PAY_DELAY 45 on a
 call that needs ~40 s to reach data. Use PAY_DELAY=80.
+
+## Wired downstream-rate checks: 42666, 48000 and 53333
+
+Using vmhost CT117 / CT100, the same slmodemd PCM-upstream configuration
+as the [spec-audit live checks](v92_spec_amendment_audit.md#wired-slmodemd-checks-of-f8d32c64-vmhost-ct117--ct100),
+and no forced upstream drn:
+
+| downstream at our engine | upstream selected in CPd and linked by slmodemd | numbered lines received down / up | receive RTP packets |
+|---|---:|---:|---:|
+| 42666 (peer displays 42667) | **36000** | 14100 / 14100 | 4865 |
+| 48000 | **36000** | 13800 / 13800 | 4833 |
+| 53333 (earlier baseline) | **36000** | 23300 / 23300 | 6840 |
+
+Every received stream starts at zero, has no sequence discontinuities and
+no malformed payload-prefixed lines. All three receive RTP traces have
+zero missing packets, nonunit sequence deltas and non-160 timestamp
+deltas. The two lower-rate calls log zero upstream rejected frames through
+50 s of data; nearest-level distance settles to **23.9 / 24.3 DS0** at
+42666 / 48000. The earlier 53333 baseline reports zero rejected frames
+through 90 s. All need one startup retrain, then reach DATA at about
+39.75 s. These are short, independently bounded numbered-line tests, not
+binary throughput measurements or an acquisition-reliability matrix.
+Lower downstream rate did **not** change the selected upload rate in these
+calls; this does not establish the same result on another analogue path.
+
+The lower rates use **peer-side** `AT+MS=92,0,300,42666` and
+`AT+MS=92,0,300,48000`, with explicit OK responses. This slmodemd fork's
+`process_plus_MS()` in `modem_at.c` implements **four fields only**.
+Six-field V.250 commands return ERROR *after partially applying the first
+four fields*; exploratory calls using that form are excluded from this
+table. Do not infer that an ERROR left this peer's settings unchanged.
+
+Server-only `AT+MS=V92,0,0,<down-cap>,0,56000` attempts did not establish
+in-range downstream negotiation with this peer: requested 42666 / 48000 /
+53333 settled at 49333 / 54666 / 56000 respectively and were correctly
+refused by the final +MS bound check. Their local Jd log says the mask was
+capped, but the transmitted descriptor and peer's interpretation still
+need checking before attributing that mismatch. These are failures, not
+payload passes or evidence that our own cap is working end to end.
+
+The two lower-rate calls use the MOH sample-clock correction in
+`417dc430` (Linux binary SHA-256
+`bcb49335cf86e2e57dfa24005f2b15f8730ad7cac506a4cadd6a1793ec87179e`),
+with MOH disabled; PCM training/data DSP is unchanged from the 53333
+baseline `f8d32c64`. No pending SpanDSP edits were included. Modem processes
+were confirmed stopped at the end. Disposable logs/taps and the grading
+report are in `artifacts/v92-spec-slm-f8d32c64/`, notably
+`spec-clean-down42666`, `spec-clean-down48000` and `rate-summary.json`.

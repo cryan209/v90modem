@@ -316,6 +316,24 @@ an early qualified peer RT cannot release our tone after 399 samples;
 This fixes a measured conformance defect; it does not by itself establish
 that the foreign peer accepts our MOH procedure.
 
+The patched Linux binary (SHA-256
+`bcb49335cf86e2e57dfa24005f2b15f8730ad7cac506a4cadd6a1793ec87179e`)
+was retried against slmodemd on the same wired rig. Its `spec-wirefixed-mhfrr`
+TX tap now measures **560 silent samples (70 ms)** at 477760..478319,
+versus the original 480. Nevertheless, **MHfrr reconnection still fails**:
+no ANSam, then retrain and V.34 fallback. A diagnostic receiver accepts
+**32 CRC-valid MHfrr frames from our DS0 tap**, and **33 CRC-valid MHfrr
+frames from the peer's actual 9600 Hz DSP-input tap**, using offline
+linear interpolation to the diagnostic receiver's 8 kHz clock. Thus
+transport through the resampler is not destroying all the control frames.
+This is our receiver grading both taps, not proof that slmodemd's receiver
+accepts their modulation, CRC or timing. The peer log reports `REMOTE
+RETRAIN - Energy Drop detected` and takes ordinary Phase 2 rather than
+logging an MH message. Its MH entry/configuration and native INFO receiver
+still need investigation; no peer patch was made to force acceptance.
+Provenance is in the same disposable artifact bundle, including
+`wirefixed-mh-tap-probes.log` and the saved native DSP taps.
+
 ## Follow-up: the R signals (2026-10-03)
 
 - **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki
