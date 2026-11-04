@@ -269,8 +269,50 @@ static void test_cleardown_during_cp_repetition(void)
     puts("PASS: 9.11 repeated acknowledged CPs do not postpone responder disconnect (both roles)");
 }
 
+static void test_silence_ack_before_e(void)
+{
+    for (int scenario = 0; scenario < 12; scenario++) {
+        int analogue = scenario / 6;
+        int request = (scenario / 2) % 3 + 1; /* local, peer, or both */
+        int peer_e = scenario % 2;
+        bool local_silence = (request & 1) != 0;
+        v92_rn_t rn;
+        v92_rn_unit_t u;
+        v92_rn_event_t ev = {0};
+        v92_rn_init(&rn, analogue ? V92_RN_ANALOGUE : V92_RN_DIGITAL, 2 * DELAY);
+        assert(v92_rn_initiate(&rn, V92_RN_RENEG, local_silence, false));
+        /* Reach the first unacknowledged SUV using actual TX units. */
+        int units = 0;
+        do {
+            assert(++units < 200);
+            v92_rn_next(&rn, &u);
+            assert(u.kind != V92_RN_TX_E && u.kind != V92_RN_TX_DATA);
+            v92_rn_tick(&rn, u.symbols);
+        } while (u.kind != V92_RN_TX_SUV);
+        assert(!u.ack);
+        ev.kind = V92_RN_EV_SUV;
+        ev.silence = (request & 2) != 0;
+        ev.ack = !peer_e;
+        v92_rn_rx(&rn, &ev);
+        if (peer_e) {
+            ev.kind = V92_RN_EV_E;
+            v92_rn_rx(&rn, &ev);
+        }
+        /* 9.8.1.1.3 / 9.8.2.1.4: even an early peer SUV' or E
+         * cannot replace sending our own SUV with bit 33 set. */
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_SUV && u.ack && u.silence == local_silence);
+        v92_rn_tick(&rn, u.symbols);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_E);
+        assert(rn.state == (analogue ? V92_RN_TRN_AFTER_E : V92_RN_SILENT));
+    }
+    puts("PASS: 9.8 sends SUV' before E (both roles, all silence requests, early peer SUV'/E)");
+}
+
 int main(void)
 {
+    test_silence_ack_before_e();
     test_cleardown_during_cp_repetition();
     /* Figure 15: digital-initiated, no silence. */
     setup();

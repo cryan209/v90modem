@@ -211,6 +211,25 @@ fix. The complete `v92_rn_test` and all three modem-on-hold suites pass
 through `tools/run_tests.py`. This procedure-level test does not establish
 live integration or external-modem interoperability.
 
+## Follow-up: silent renegotiation must send its own acknowledged SUV
+
+V.92 9.8.1.1.3 and 9.8.2.1.4 require transmitting SUV sequences with bit
+33 set before E and the silent interval / second TRN2u. If a peer SUV with
+bit 33 set, or a peer E, arrived before the local controller entered
+`SUV_ACK`, the controller skipped its own acknowledged SUV and sent E
+immediately. Entry into `SUV_ACK` now clears the phase-local `suv_sent`
+flag, and E requires a completed local SUV from that phase. Peer
+acknowledgements remain durable, so the correction does not wait for a
+second peer acknowledgement.
+
+`v92_rn_test` covers 12 cases: both roles, silence requested locally / by
+the peer / by both, and early acknowledgement by SUV or E. Each follows
+the transmitted R/bar/TRN/SUV units, requires a complete local SUV with
+bit 33 set and the correct local bit 32, then permits E. The regression
+fails on the original code. All existing rate-renegotiation figures and
+the three modem-on-hold suites still pass via `tools/run_tests.py`.
+These are procedure-level tests, not live or foreign-modem validation.
+
 ## Follow-up: the R signals (2026-10-03)
 
 - **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki

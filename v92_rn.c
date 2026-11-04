@@ -206,6 +206,7 @@ void v92_rn_next(v92_rn_t *rn, v92_rn_unit_t *u)
             } else {
                 rn->silence_mine = rn->want_silence;
                 rn->state = V92_RN_SUV_ACK;
+                rn->suv_sent = false; /* this phase must send its own SUV' */
             }
             v92_rn_next(rn, u);
             return;
@@ -216,7 +217,10 @@ void v92_rn_next(v92_rn_t *rn, v92_rn_unit_t *u)
     case V92_RN_SUV_ACK:
         /* 9.8.1.1.3 / 9.8.2.1.4: SUV with bit 33 until the peer's bit 33 or
          * its E, then E. */
-        if (rn->peer_suv_ack || rn->ack_rx) {
+        /* An early peer SUV' or E does not waive the local SUV' required
+         * by 9.8.1.1.3 / 9.8.2.1.4. next() is called only after the
+         * preceding unit has completed, so suv_sent also guards its end. */
+        if (rn->suv_sent && (rn->peer_suv_ack || rn->ack_rx)) {
             unit(u, V92_RN_TX_E, frame_symbols(rn, V92_RN_TX_E));
             rn->peer_suv = false;
             rn->peer_suv_ack = false;
