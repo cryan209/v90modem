@@ -192,6 +192,25 @@ Amd.1 item 3 TRN2u differential-encoder seed for the second TRN2u of a
 silent renegotiation, and any engine integration -- V.92 data mode itself is
 not reached live.
 
+## Follow-up: repeated CPs cannot renew the cleardown deadline
+
+Amd.1 item 6 (9.11) gives the cleardown responder a wait of 100 ms plus
+half the round-trip delay after its acknowledged CP. If the first received
+peer CP arrives late, 9.6.1.1.3 / 9.6.2.1.3 may already have put the local
+transmitter into repeated-CP mode. When that late CP carries drn=0, the
+controller used to move `disconnect_at` forward on every acknowledged CP:
+at the test's 80 ms round trip, each 300T digital / 450T analogue CP renewed
+a 1120T wait indefinitely. The deadline is now armed only once.
+
+`v92_rn_test` drives both roles through the FPE R/bar and SUV exchange,
+receives an unacknowledged SUV after the 100 ms + round-trip threshold,
+then receives a late drn=0 CP. It requires two subsequent acknowledged
+CPs to leave the deadline unchanged, no disconnect one symbol before it,
+and exactly one disconnect action at it. This assertion fails before the
+fix. The complete `v92_rn_test` and all three modem-on-hold suites pass
+through `tools/run_tests.py`. This procedure-level test does not establish
+live integration or external-modem interoperability.
+
 ## Follow-up: the R signals (2026-10-03)
 
 - **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki

@@ -296,7 +296,9 @@ void v92_rn_next(v92_rn_t *rn, v92_rn_unit_t *u)
              * plus half a round trip after its acknowledged CP. */
             if (rn->cleardown && rn->disconnect_at == 0)
                 rn->disconnect_at = rn->cp_end + MS100 + rn->rtd;
-            if (rn->peer_cleardown && rn->ack_tx)
+            /* Amd.1 9.11: the first acknowledged CP starts this wait.
+             * Repeated CPs (9.6.x.1.3) must not renew it indefinitely. */
+            if (rn->peer_cleardown && rn->ack_tx && rn->disconnect_at == 0)
                 rn->disconnect_at = rn->cp_end + MS100 + rn->rtd / 2;
             return;
         }

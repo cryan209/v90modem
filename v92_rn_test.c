@@ -211,8 +211,67 @@ static bool both_data(void)
         && !has(&D, V92_RN_ACT_DISCONNECT) && !has(&A, V92_RN_ACT_DISCONNECT);
 }
 
+/* A late first peer CP may arrive after 9.6.x.1.3 has already required
+ * repeated local CPs.  If it carries drn=0, repeating acknowledged CPs
+ * must not keep moving Amd.1 9.11's responder disconnect deadline. */
+static void test_cleardown_during_cp_repetition(void)
+{
+    for (int analogue = 0; analogue <= 1; analogue++) {
+        v92_rn_t rn;
+        v92_rn_unit_t u;
+        v92_rn_event_t ev = {0};
+        long deadline;
+        v92_rn_init(&rn, analogue ? V92_RN_ANALOGUE : V92_RN_DIGITAL, 2 * DELAY);
+        ev.kind = V92_RN_EV_R;
+        ev.r = analogue ? V92_R_RF : V92_R_RM;
+        v92_rn_rx(&rn, &ev);
+        ev.kind = V92_RN_EV_RBAR;
+        v92_rn_rx(&rn, &ev);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_R);
+        v92_rn_tick(&rn, u.symbols);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_RBAR);
+        v92_rn_tick(&rn, u.symbols);
+        ev.kind = V92_RN_EV_SUV;
+        v92_rn_rx(&rn, &ev);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_SUV);
+        v92_rn_tick(&rn, u.symbols);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_CP && !u.ack);
+        v92_rn_tick(&rn, u.symbols + 800 + rn.rtd);
+        v92_rn_rx(&rn, &ev);       /* complete, still-unacknowledged SUV */
+        assert(rn.cp_repeat);
+        ev.kind = V92_RN_EV_CP;
+        ev.drn = 0;
+        v92_rn_rx(&rn, &ev);
+        v92_rn_next(&rn, &u);
+        assert(u.kind == V92_RN_TX_CP && u.ack);
+        deadline = rn.now + u.symbols + 800 + rn.rtd / 2;
+        assert(rn.disconnect_at == deadline);
+        v92_rn_tick(&rn, u.symbols);
+        for (int i = 0; i < 2; i++) {
+            v92_rn_next(&rn, &u);
+            assert(u.kind == V92_RN_TX_CP && u.ack);
+            assert(rn.disconnect_at == deadline);
+            v92_rn_tick(&rn, u.symbols);
+        }
+        v92_rn_tick(&rn, (int)(deadline - rn.now - 1));
+        assert(rn.state == V92_RN_CORE);
+        while (v92_rn_take_action(&rn) != V92_RN_ACT_NONE) {}
+        v92_rn_tick(&rn, 1);
+        assert(rn.state == V92_RN_DONE);
+        assert(v92_rn_take_action(&rn) == V92_RN_ACT_DISCONNECT);
+        v92_rn_tick(&rn, 8000);
+        assert(v92_rn_take_action(&rn) == V92_RN_ACT_NONE);
+    }
+    puts("PASS: 9.11 repeated acknowledged CPs do not postpone responder disconnect (both roles)");
+}
+
 int main(void)
 {
+    test_cleardown_during_cp_repetition();
     /* Figure 15: digital-initiated, no silence. */
     setup();
     assert(v92_rn_initiate(&D.rn, V92_RN_RENEG, false, false));
