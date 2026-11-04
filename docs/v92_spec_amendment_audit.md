@@ -289,6 +289,33 @@ runner, transmit-tap probe and `summary.json`. No new regression fixture
 was retained. The runner gated payload on CONNECT, used PID/exact-name
 cleanup, and finished each call before grading it.
 
+## Follow-up: MOH silence and minimum RT must use the transmit clock
+
+The saved `spec-f8d-mhfrr` **transmit tap** contains exactly **480 silent
+samples (60 ms)** at samples 477760..478239, followed by Tone B. Cor.1
+9.10.1 requires 70 ± 5 ms. The MH controller counted the current RX block
+before that block's TX callback had emitted any silence, so its 70 ms
+receive-clock interval did not produce 70 ms on the wire. Controller-only
+and TX-before-RX loopbacks had not checked the emitted duration.
+
+The waveform front end now selects an explicit TX-sample clock for the
+initial silence and the minimum Tone RT duration. It emits exactly **560
+silent samples**, switches to RT within the TX callback at that boundary,
+and cannot finish the initial RT until **400 tone samples** have left.
+The receive clock continues to drive detector qualifications and response
+timeouts. This changes generated MH signalling only; DS0 byte counts,
+callback sizes and normal G.711 forwarding are unchanged. Controller-only
+users retain their tick-clock interface.
+
+`v92_mh_line_test` first fails on the original implementation, then checks
+both callback orders with chunks of **1, 37, 160 and 320 samples**. It
+asserts all first 560 samples are silent, sample 560 begins RT, and even
+an early qualified peer RT cannot release our tone after 399 samples;
+400 transmitted tone samples permit the transition. The four `v92_rn` /
+`v92_mh*` suites pass on macOS and on the isolated CT117 Linux build.
+This fixes a measured conformance defect; it does not by itself establish
+that the foreign peer accepts our MOH procedure.
+
 ## Follow-up: the R signals (2026-10-03)
 
 - **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki

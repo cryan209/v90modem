@@ -235,6 +235,8 @@ static void request_unanswered(v92_mh_ctrl_t *c)
 
 static void enter(v92_mh_ctrl_t *c, v92_mh_state_t s, v92_mh_tx_t tx)
 {
+    if (tx == V92_MH_TX_RT && c->tx != V92_MH_TX_RT)
+        c->tx_rt_samples = 0;
     c->state = s;
     c->tx = tx;
     c->ms = 0;
@@ -270,6 +272,30 @@ static void after_sequence(v92_mh_ctrl_t *c, v92_mh_state_t s, v92_mh_tx_t tx, v
     }
     enter(c, s, tx);
     push_action(c, a);
+}
+
+static void finish_init_silence(v92_mh_ctrl_t *c)
+{
+    if (c->skip_rt_if_peer_rt && c->peer_rt_during_silence) {
+        /* Cor.1 9.10.1 skips only the tone; MHfrr awaits ANSam (9.10.2.3). */
+        send_mh(c, c->initiated == V92_MH_FRR
+                   ? V92_MH_ST_INIT_AWAIT_ANSAM : V92_MH_ST_INIT_SEND,
+                c->initiated, c->tx_frame.info);
+    } else {
+        enter(c, V92_MH_ST_INIT_RT, V92_MH_TX_RT);
+    }
+}
+
+void v92_mh_ctrl_tx_advance(v92_mh_ctrl_t *c, int samples)
+{
+    c->tx_clocked = true;
+    if (c->state == V92_MH_ST_INIT_SILENCE) {
+        c->tx_silence_samples += samples;
+        if (c->tx_silence_samples >= 560) /* Cor.1 9.10.1: 70 ms at 8 kHz */
+            finish_init_silence(c);
+    } else if (c->tx == V92_MH_TX_RT && c->tx_rt_samples < 400) {
+        c->tx_rt_samples += samples;    /* 9.10.1: at least 50 ms */
+    }
 }
 
 int v92_mh_ctrl_tx_bit(v92_mh_ctrl_t *c)
@@ -310,6 +336,7 @@ bool v92_mh_ctrl_initiate(v92_mh_ctrl_t *c, v92_mh_signal_t s, uint8_t info)
     c->tx_frame.signal = s;
     c->tx_frame.info = info;
     c->total_ms = 0;
+    c->tx_silence_samples = c->tx_rt_samples = 0;
     c->peer_rt_during_silence = false;
     /* Cor.1 9.10.1: data -> 70 +/- 5 ms silence -> Tone RT -> MH. */
     enter(c, V92_MH_ST_INIT_SILENCE, V92_MH_TX_SILENCE);
@@ -321,7 +348,8 @@ bool v92_mh_ctrl_initiate(v92_mh_ctrl_t *c, v92_mh_signal_t s, uint8_t info)
  * (9.10.1); otherwise there is no lower bound. */
 static bool rt_long_enough(const v92_mh_ctrl_t *c)
 {
-    return c->tx != V92_MH_TX_RT || c->ms >= 50;
+    return c->tx != V92_MH_TX_RT
+        || (c->tx_clocked ? c->tx_rt_samples >= 400 : c->ms >= 50);
 }
 
 static void respond(v92_mh_ctrl_t *c, v92_mh_signal_t init)
@@ -466,22 +494,14 @@ void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
     case V92_MH_ST_INIT_SILENCE:
         if (l->rt)
             c->peer_rt_during_silence = true;
-        if (c->ms >= 70) {
-            if (c->skip_rt_if_peer_rt && c->peer_rt_during_silence) {
-                /* Cor.1 9.10.1 skips only the tone, not the transaction's
-                 * response: MHfrr still awaits ANSam per 9.10.2.3. */
-                send_mh(c, c->initiated == V92_MH_FRR
-                           ? V92_MH_ST_INIT_AWAIT_ANSAM : V92_MH_ST_INIT_SEND,
-                        c->initiated, c->tx_frame.info);
-            } else
-                enter(c, V92_MH_ST_INIT_RT, V92_MH_TX_RT);
-        }
+        if (!c->tx_clocked && c->ms >= 70)
+            finish_init_silence(c);
         break;
 
     case V92_MH_ST_INIT_RT:
         /* At least 50 ms of RT (9.10.1), and 9.10.1.1 lets the initiating
          * sequence go only once the far end's RT is received. */
-        if (c->ms >= 50 && (c->peer_rt_ms > 0 || c->peer_rt_during_silence)) {
+        if (rt_long_enough(c) && (c->peer_rt_ms > 0 || c->peer_rt_during_silence)) {
             if (c->initiated == V92_MH_FRR)
                 send_mh(c, V92_MH_ST_INIT_AWAIT_ANSAM, V92_MH_FRR, 0);
             else

@@ -78,6 +78,7 @@ int v92_mh_line_retrain_reply_fill(v92_mh_line_t *l, int16_t *out, int n)
 
 bool v92_mh_line_tx(v92_mh_line_t *l, v92_mh_ctrl_t *c, int16_t *out, int n)
 {
+    v92_mh_ctrl_tx_advance(c, 0);
     if (l->retrain_reply) {
         int k = v92_mh_line_retrain_reply_fill(l, out, n);
 
@@ -142,6 +143,11 @@ bool v92_mh_line_tx(v92_mh_line_t *l, v92_mh_ctrl_t *c, int16_t *out, int n)
         l->tx_phase += l->own_hz / FS;
         if (l->tx_phase >= 1.0) l->tx_phase -= 1.0;
         out[i] = clip16(v);
+        /* Receive callbacks may precede or follow this block.  Cor.1
+         * 9.10.1's silence and minimum RT refer to what went on the wire,
+         * not to detector time accrued before the first TX callback. */
+        if (tx == V92_MH_TX_SILENCE || tx == V92_MH_TX_RT)
+            v92_mh_ctrl_tx_advance(c, 1);
     }
     return true;
 }
@@ -223,6 +229,7 @@ void v92_mh_line_rx(v92_mh_line_t *l, v92_mh_ctrl_t *c, const int16_t *in, int n
     const int whole = (int)floor(sym);
     const double frac = sym - whole;
 
+    v92_mh_ctrl_tx_advance(c, 0);
     for (int i = 0; i < n; i++) {
         double x = in[i];
         double re;

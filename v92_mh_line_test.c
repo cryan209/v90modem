@@ -147,8 +147,48 @@ static void check(bool ok, const char *label)
     printf("PASS: %s\n", label);
 }
 
+static void test_initial_silence_on_wire(void)
+{
+    const int chunks[] = {1, 37, 160, 320};
+    for (int order = 0; order < 2; order++) {
+        for (size_t k = 0; k < sizeof(chunks)/sizeof(chunks[0]); k++) {
+            v92_mh_ctrl_t c;
+            v92_mh_line_t l;
+            int16_t out[800], quiet[320] = {0};
+            v92_mh_ctrl_init(&c, 120);
+            v92_mh_line_init(&l, false, -12.0);
+            assert(v92_mh_ctrl_initiate(&c, V92_MH_FRR, 0));
+            for (int pos = 0; pos < 800; ) {
+                int n = chunks[k] < 800 - pos ? chunks[k] : 800 - pos;
+                if (order == 0) v92_mh_line_rx(&l, &c, quiet, n);
+                assert(v92_mh_line_tx(&l, &c, out + pos, n));
+                if (order == 1) v92_mh_line_rx(&l, &c, quiet, n);
+                pos += n;
+            }
+            /* Cor.1 9.10.1: 70 ms is 560 emitted samples, independent
+             * of whether a media callback receives or transmits first. */
+            for (int i = 0; i < 560; i++) assert(out[i] == 0);
+            assert(out[560] != 0);
+            assert(c.state == V92_MH_ST_INIT_RT);
+            /* Only 240 samples of RT have actually left. Detector time
+             * cannot waive 9.10.1's 400-sample minimum on that tone. */
+            v92_mh_detect_t peer_rt = {.rt = true};
+            v92_mh_ctrl_tick(&c, 50, &peer_rt);
+            assert(c.state == V92_MH_ST_INIT_RT);
+            assert(v92_mh_line_tx(&l, &c, out, 159));
+            v92_mh_ctrl_tick(&c, 1, &peer_rt);
+            assert(c.state == V92_MH_ST_INIT_RT);
+            assert(v92_mh_line_tx(&l, &c, out, 1));
+            v92_mh_ctrl_tick(&c, 0, &peer_rt);
+            assert(c.state == V92_MH_ST_INIT_AWAIT_ANSAM);
+        }
+    }
+    puts("PASS: MH silence is 560 emitted samples and RT at least 400 across callback sizes/orders");
+}
+
 int main(void)
 {
+    test_initial_silence_on_wire();
     int t1, t2;
 
     /* Figure 20, both directions of initiative. */
