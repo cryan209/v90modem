@@ -230,6 +230,65 @@ fails on the original code. All existing rate-renegotiation figures and
 the three modem-on-hold suites still pass via `tools/run_tests.py`.
 These are procedure-level tests, not live or foreign-modem validation.
 
+## Wired slmodemd checks of f8d32c64 (vmhost CT117 / CT100)
+
+Built committed `f8d32c64` in an isolated CT117 worktree with its vendored
+SpanDSP and pjproject, without the pending Mac or CT117 DSP/engine edits.
+Linux `sip_v90_modem` SHA-256:
+`67d11b4a9f0c64122b3cb957c8d607ce93dac2934f87d0e7988ef0255c0b3b41`.
+The four `v92_rn_test` / `v92_mh*` suites pass on that Linux build too.
+CT100 used `slmodemd_map`, `SLM_V92_PCM_UPSTREAM=1`,
+`DM_V92EC_BYPASS=1`, frozen transmit timing 0, and the prescribed sinc
+resamplers / 0.25 headroom. Our server used `ME_V92_PCM_UPSTREAM=1`,
+PCMU and `AT+PQC=0`. Calls originated from slmodemd on wired vmhost,
+6003 to 6002; no modem processes were active before the runs or left after.
+
+Two fresh baseline calls (the second with `ME_V92_MH=1`) both selected
+V.92 PCM upstream and reached **53333 downstream / 36000 upstream**.
+Both needed one startup retrain: Tone A at **21.460 s**, then B1u and DATA
+at **39.751 / 39.748 s**. Thus these are data-path passes, not clean-start
+passes. Numbered payload began only after CONNECT, at the 80 s harness
+boundary:
+
+| call | received at slmodemd DTE | received at our DTE |
+|---|---:|---:|
+| baseline | 23300 lines, 0..23299 | 23300 lines, 0..23299 |
+| MH detection armed | 23100 lines, 0..23099 | 23150 lines, 0..23149 |
+
+All four received streams have zero sequence discontinuities and zero
+malformed payload-prefixed lines. Counts differ because the writers are
+independently wall-clock bounded; this is numbered-line validation, not a
+binary-throughput benchmark or proof of delivery of an unrecorded sender
+tail. Both calls log **zero upstream rejected frames** through 90 s of
+data, nearest-level RMS about **24 DS0** after settling. Receive RTP traces
+contain **6840 / 6830 packets**, no missing packets, nonunit sequence deltas
+or non-160 timestamp deltas.
+
+A third, payload-free call provoked `ME_V92_MH_INITIATE=frr` 20 s after
+DATA. MH engaged at **59.740 s**, suspended V.42 and transmitted MHfrr.
+Replaying **our own transmit tap** through the opposite-role MH receiver
+accepts **32 CRC-valid MHfrr frames**, first by tap time **60.280 s**.
+This confirms local frame emission, not foreign receiver acceptance.
+The peer did not return ANSam; our controller took its retrain path at
+**62.440 s**, and the peer eventually linked V.34 **21600/31200**, then
+**21600/21600**. **Fast reconnect failed**; no Phase-1 restart caused by
+received ANSam or retained-V.92 reconnect was established. This call's
+5620 received RTP packets also have no sequence/timestamp gaps. Do not
+attribute the failure to the peer without comparing the transmitted
+waveform at its DSP input and confirming its MH capability/configuration.
+
+The optional-tone-skip and T1 changes remain covered by offline regressions;
+this live MHfrr call did not exercise either special boundary. The §9.8 /
+§9.11 `v92_rn` controller is still not wired into the engine, so these calls
+cannot validate its new ordering/deadline fixes against slmodemd.
+
+Disposable provenance: `artifacts/v92-spec-slm-f8d32c64/` locally,
+`/root/qc/spec-f8d-*` in CT117 and `/tmp/qc-spec-f8d-*` on vmhost. The local
+bundle contains server/peer logs, DS0/RTP taps, DTE captures, the bounded
+runner, transmit-tap probe and `summary.json`. No new regression fixture
+was retained. The runner gated payload on CONNECT, used PID/exact-name
+cleanup, and finished each call before grading it.
+
 ## Follow-up: the R signals (2026-10-03)
 
 - **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki
