@@ -882,8 +882,9 @@ Forced with the precoder (`ME_V92_UP_DRN`, one call each, 120 s of data): 33333 
 for the feed-forward-only noise, where 32000 rejected 64-70 frames; the precoded design now
 uses 3.0 (`V92_UPSTREAM_MARGIN_PRECODED`), which designs 36000 here: above the 31200 V.34
 upstream a V.90 call gets from the same peer. (Lines delivered are the harness's paced
-payload, not a throughput measure.) slmodemd's ~55-63 downstream HDLC FCS errors per
-call are the same in both arms.
+payload, not a throughput measure.) The later [binary sweep](#receiver-verified-binary-upstream-sweep-5-november-2026)
+does **not** qualify 37333 for sustained upload throughput. slmodemd's ~55-63 downstream
+HDLC FCS errors per call are the same in both arms.
 
 Also learned: a harness killed mid-batch leaves `qc_slm_pve.sh`'s payload loop typing into the
 next call's PTY, and any keystroke before CONNECT aborts the answer (V.250 5.6.1); the 30 s
@@ -937,3 +938,83 @@ baseline `f8d32c64`. No pending SpanDSP edits were included. Modem processes
 were confirmed stopped at the end. Disposable logs/taps and the grading
 report are in `artifacts/v92-spec-slm-f8d32c64/`, notably
 `spec-clean-down42666`, `spec-clean-down48000` and `rate-summary.json`.
+
+## Receiver-verified binary upstream sweep (5 November 2026)
+
+**36000 is the highest tested rate that passed this binary-transfer criterion,
+not a V.92 specification limit.** V.92 §6.1 permits PCM upstream rates through
+48000 bit/s in increments of 8000/6 bit/s. Forcing higher nominal rates on this
+rig made useful upload throughput substantially worse, even when DATA linked
+at the requested rate.
+
+Nine fresh, sequential calls used vmhost CT117 (digital server) and CT100
+(slmodemd), with downstream fixed at **48000** by the peer's accepted four-field
+`AT+MS=92,0,300,48000`. The server used `AT+MS=V92,0`, `AT+PIG=0`,
+`AT+PQC=0`, `ME_V92_PCM_UPSTREAM=1`; the peer used
+`SLM_V92_PCM_UPSTREAM=1 DM_V92EC_BYPASS=1`, the sinc resamplers and 0.25
+headroom. `+PQC=0` permits short Phase 1/2, but this batch did not test
+profile-reuse Quick Connect; MOH was not enabled. Diagnostic
+`ME_V92_UP_DRN=10..13` selected the forced rates; a final **unforced** control
+(`ME_V92_UP_DRN=0`, the noise-selection rule) independently selected 36000.
+
+Each CONNECT-gated call sent simultaneous, deterministic pseudorandom binary
+streams in both directions. Each receiver compared every byte against its
+role-specific SHAKE-256 stream and required a final mutual SHA-256 verification
+acknowledgement before reporting success. The same stream prefixes were reused across fresh calls;
+these are repeatability tests, not independent random-seed coverage. Escape
+recognition was disabled during binary traffic. Passes require the requested
+upstream / 48000 downstream, complete mutual payload verification and no
+post-DATA retrain or fallback. Short calls had a **180 s payload deadline**;
+bytes below are **received and verified**, not queued to the PTY.
+
+| upstream bit/s | calls | requested bytes per direction per call | verified upload bytes per call | upload measurement | result |
+|---|---:|---:|---:|---|---|
+| 36000, short baseline / post-sweep control / unforced control | 3 | 262144 | 262144 | ~63.0 s, **33.29 kbit/s** | all pass |
+| 36000, long repeats | 2 | 1048576 | 1048576 | **250.489 / 250.011 s**, **33.49 / 33.55 kbit/s** | both pass |
+| 37333 | 2 | 262144 | **149160** | ~180.09 s, **6.63 kbit/s** | both time out |
+| 38666 | 1 | 262144 | **102351** | ~180.05 s, **4.55 kbit/s** | times out |
+| 40000 | 1 | 262144 | **27143** | ~180.06 s, **1.21 kbit/s** | times out |
+
+The five passing calls verify **2883584 bytes (2.75 MiB) in each direction**,
+with complete mutual SHA-256 acknowledgements. The two long calls carry
+binary payload for over four minutes each. All five report zero upstream
+rejected frames and have no post-DATA recovery. The unforced control's
+33.29 kbit/s upload agrees with the forced 36000 short controls; no rate-rule
+margin or production default was changed.
+
+The four failed calls **did negotiate their requested upstream rates**, kept
+48000 downstream, and their downstream receivers each matched all 262144 bytes.
+They failed because upload delivery remained incomplete at the deadline,
+not because a received application byte differed from the reference. Their
+saved upload prefixes independently match the expected binary stream. The
+harness then terminated its owned modem processes; these are bounded
+throughput failures, not claims that the peer spontaneously hung up.
+
+All nine calls have **zero missing receive RTP packets, nonunit sequence
+deltas and non-160 timestamp deltas**. All need one startup retrain near
+21.44–21.46 s and enter DATA at 39.59–39.75 s; none retrains or falls back after
+DATA. This rules out receive-RTP loss in these captures, not every possible
+DSP or peer interoperability defect. Periodic LAPM statistics in the 38666
+and 40000 calls show REJ transmissions and T401 expirations. The 37333
+and 38666 calls still report **zero upstream rejected frames**: that diagnostic
+counter is not proof of low BER or useful throughput. In particular, the
+older paced/numbered-line 37333 result above did not establish sustained
+incompressible-payload capacity.
+
+Rates 41333 through 48000 were not qualified in this batch after all three
+tested steps above 36000 degraded. These results establish the best-performing
+tested setting on this build/peer/path, not an absolute hardware or implementation
+ceiling; different constellation design, equalisation or interoperability fixes
+could change it. They do not qualify Quick Connect, live §9.8/§9.11 renegotiation
+or modem-on-hold.
+
+The isolated Linux executable is the same MOH-clock-fixed build documented
+above, SHA-256
+`bcb49335cf86e2e57dfa24005f2b15f8730ad7cac506a4cadd6a1793ec87179e`:
+`f8d32c64` plus the `417dc430` signalling correction, without the Mac's pending
+SpanDSP edits. Local disposable provenance is
+`artifacts/v92-upstream-sweep/` (`grading-report.json`, `grade_results.py`,
+endpoint/driver scripts and per-call server/client archives); vmhost keeps
+`/root/v92-upstream-sweep/`. Independent archive grading rechecks payload
+bytes, rates, recovery traces and RTP accounting. Server, peer, endpoint and
+host-driver processes were confirmed stopped after the final unforced control.
