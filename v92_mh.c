@@ -467,9 +467,13 @@ void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
         if (l->rt)
             c->peer_rt_during_silence = true;
         if (c->ms >= 70) {
-            if (c->skip_rt_if_peer_rt && c->peer_rt_during_silence)
-                send_mh(c, V92_MH_ST_INIT_SEND, c->initiated, c->tx_frame.info);
-            else
+            if (c->skip_rt_if_peer_rt && c->peer_rt_during_silence) {
+                /* Cor.1 9.10.1 skips only the tone, not the transaction's
+                 * response: MHfrr still awaits ANSam per 9.10.2.3. */
+                send_mh(c, c->initiated == V92_MH_FRR
+                           ? V92_MH_ST_INIT_AWAIT_ANSAM : V92_MH_ST_INIT_SEND,
+                        c->initiated, c->tx_frame.info);
+            } else
                 enter(c, V92_MH_ST_INIT_RT, V92_MH_TX_RT);
         }
         break;

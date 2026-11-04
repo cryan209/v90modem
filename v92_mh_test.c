@@ -316,13 +316,39 @@ static void test_cleardown(void)
 
 static void test_fast_reconnect(void)
 {
-    side_t a, b;
-    start(&a, &b);
-    assert(v92_mh_ctrl_initiate(&a.c, V92_MH_FRR, 0));
-    run(&a, &b, 3000);
-    assert(a.c.request_result == -1);    /* not an MHreq: nothing for +PMHR */
-    assert(has(&b, V92_MH_ACT_PHASE1_ANSWER, NULL) && has(&a, V92_MH_ACT_PHASE1_CALL, NULL));
-    puts("PASS: Figure 24 MHfrr/ANSam");
+    /* Cor.1 9.10.1 permits skipping RT for every initiating sequence,
+     * including MHfrr.  In either path 9.10.2.3 requires 1 s of ANSam,
+     * not an MH response or the initiating-sequence timeout. */
+    for (int early_rt = 0; early_rt <= 1; early_rt++) {
+        for (int skip_rt = 0; skip_rt <= 1; skip_rt++) {
+            side_t a, b;
+            int ta, tb;
+            start(&a, &b);
+            a.c.skip_rt_if_peer_rt = skip_rt;
+            if (early_rt) {
+                b.c.state = V92_MH_ST_RESP_RT;
+                b.c.tx = V92_MH_TX_RT;
+                run(&a, &b, 10);
+            }
+            assert(v92_mh_ctrl_initiate(&a.c, V92_MH_FRR, 0));
+            run(&a, &b, 70);
+            assert(a.c.peer_rt_during_silence == (bool)early_rt);
+            if (early_rt && skip_rt) {
+                assert(a.c.tx == V92_MH_TX_MH);
+                assert(a.c.state == V92_MH_ST_INIT_AWAIT_ANSAM);
+            } else {
+                assert(a.c.tx == V92_MH_TX_RT);
+                assert(a.c.state == V92_MH_ST_INIT_RT);
+            }
+            run(&a, &b, 2930);
+            assert(a.c.request_result == -1); /* no MHreq: nothing for +PMHR */
+            assert(has(&b, V92_MH_ACT_PHASE1_ANSWER, &tb));
+            assert(has(&a, V92_MH_ACT_PHASE1_CALL, &ta));
+            assert(ta - tb >= 1000 + DELAY_MS);
+            assert(!has(&a, V92_MH_ACT_RETRAIN, NULL));
+        }
+    }
+    puts("PASS: Figure 24 MHfrr/ANSam (early/normal peer RT, skip enabled/disabled)");
 }
 
 static void test_timeout_retrain(void)

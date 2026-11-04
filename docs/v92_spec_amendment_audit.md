@@ -138,6 +138,22 @@ reversal 40 ms later) before V.34 takes over at the 11.2.1.1.4 silence --
 `v92_mh_retrain_test`, 6/6, ~400 ms faster than the old hand-over.  Short Phase 1
 (QC) after a hold is not used; reconnection runs full V.8.
 
+## Follow-up: fast reconnect with the optional Tone RT skip
+
+Cor.1 9.10.1's optional RT skip applies to MHfrr as well as MHreq and
+MHclrd. The skip branch sent MHfrr in `INIT_SEND`, whose only exit was the
+2 s + round-trip timeout; it never accepted ANSam. It now enters
+`INIT_AWAIT_ANSAM`, like the normal RT-bearing path, and requires 1 s of
+ANSam before requesting Phase 1 per 9.10.2.3.
+
+`v92_mh_test` reproduces the wrong-state assertion before the fix and passes
+all four combinations of early/normal peer RT and skip enabled/disabled
+afterwards, over a 60 ms one-way delayed 600 bit/s line. Each case verifies
+Phase 1 at both endpoints, at least 1 s of received ANSam, no initiator
+retrain, and complete 40-bit transmitted sequences. `v92_mh_line_test` and
+all six law/delay cases of `v92_mh_retrain_test` also pass. These are offline
+controller/waveform checks, not external-modem interoperability evidence.
+
 ## Follow-up: 9.8 / 9.9 / 9.11 procedure controller (2026-10-03)
 
 `v92_rn.c` runs rate renegotiation, fast parameter exchange and cleardown
