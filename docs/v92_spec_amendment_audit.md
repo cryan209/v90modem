@@ -154,6 +154,23 @@ retrain, and complete 40-bit transmitted sequences. `v92_mh_line_test` and
 all six law/delay cases of `v92_mh_retrain_test` also pass. These are offline
 controller/waveform checks, not external-modem interoperability evidence.
 
+## Follow-up: T1 also bounds the repeated-MHack interval
+
+V.92 9.10.2.1 starts T1 at the end of the first MHack, not at entry into
+ANSam. The controller previously enforced expiry only in `ON_HOLD` (the
+ANSam state), so continued MHreq could keep it sending MHack indefinitely.
+It now checks T1 while sending MHack as well, and completes the open
+40-bit sequence before disconnecting, as required by Cor.1 9.10.1.
+
+`v92_mh_test` checks the 10 s, 20 s and 960 s grants one millisecond before
+and at expiry, including a repeated MHreq and a partially transmitted
+MHack. It also checks that the no-limit code remains active after 1000 s.
+A separate two-controller test keeps transmitting MHreq over the 60 ms
+one-way delayed 600 bit/s line: the responder disconnects within one
+sequence (67 ms) of its 10 s deadline, without ever entering ANSam. The
+new boundary test fails before the fix. All three `v92_mh*` tests pass via
+`tools/run_tests.py`; this remains offline, not hardware validation.
+
 ## Follow-up: 9.8 / 9.9 / 9.11 procedure controller (2026-10-03)
 
 `v92_rn.c` runs rate renegotiation, fast parameter exchange and cleardown

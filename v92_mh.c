@@ -526,9 +526,15 @@ void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
 
     case V92_MH_ST_RESP_SEND:
         if (c->last_response == V92_MH_ACK) {
-            /* 9.10.2.1: RT for 100 ms or silence for 2 s releases MHack;
+            /* 9.10.2.1: T1 runs from the first completed MHack, even
+             * while MHreq continues and MHack has not given way to ANSam.
+             * Complete any open sequence before disconnecting (Cor.1
+             * 9.10.1), just as for other departures from MH. */
+            if (c->first_mhack_sent && c->t1_ms > 0 && c->on_hold_ms >= c->t1_ms)
+                after_sequence(c, V92_MH_ST_DONE, V92_MH_TX_SILENCE, V92_MH_ACT_DISCONNECT);
+            /* RT for 100 ms or silence for 2 s releases MHack;
              * ANSam follows within 80 ms. */
-            if (c->peer_rt_ms >= 100 || c->silence_ms >= 2000)
+            else if (c->peer_rt_ms >= 100 || c->silence_ms >= 2000)
                 after_sequence(c, V92_MH_ST_ON_HOLD, V92_MH_TX_ANSAM, V92_MH_ACT_NONE);
         } else if (c->last_response == V92_MH_NACK) {
             if (c->since_init_seen_ms >= 10000 + c->round_trip_ms)

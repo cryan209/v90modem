@@ -380,6 +380,78 @@ static void test_retrain_discrimination(void)
     puts("PASS: 9.10.1.1 responder takes a Tone B reversal as a retrain");
 }
 
+static void test_persistent_request_t1(void)
+{
+    side_t a, b;
+    int first_ack_end, disconnected;
+    start(&a, &b);
+    b.c.t1_code = 0x1;              /* 10 s, shorter than the permitted
+                                    * 30 s continuation of MHreq. */
+    assert(v92_mh_ctrl_initiate(&a.c, V92_MH_REQ, 0));
+    run(&a, &b, 200);
+    assert(a.c.state == V92_MH_ST_INIT_SEND);
+    a.dumb = true;                 /* keep sending MHreq, ignoring MHack */
+    while (!b.c.first_mhack_sent && now < 1000)
+        run(&a, &b, 1);
+    assert(b.c.first_mhack_sent);
+    first_ack_end = now;
+    run(&a, &b, 11000);
+    assert(has(&b, V92_MH_ACT_DISCONNECT, &disconnected));
+    assert(disconnected - first_ack_end >= 10000);
+    assert(disconnected - first_ack_end <= 10000 + 67);
+    assert(b.ansam_start == -1);   /* MHreq never released MHack to ANSam */
+    assert(b.c.state == V92_MH_ST_DONE && b.c.tx == V92_MH_TX_SILENCE);
+    puts("PASS: delayed-line persistent MHreq cannot extend a 10 s T1 grant");
+}
+
+static void test_t1_while_sending_ack(void)
+{
+    static const uint8_t codes[] = {0x1, 0x2, 0xC, V92_MH_T1_NO_LIMIT};
+    const v92_mh_frame_t req = {V92_MH_REQ, V92_MH_REQ};
+
+    for (size_t k = 0; k < sizeof(codes)/sizeof(codes[0]); k++) {
+        v92_mh_ctrl_t c;
+        int seconds = v92_mh_t1_seconds(codes[k]);
+        v92_mh_ctrl_init(&c, 120);
+        c.t1_code = codes[k];
+        v92_mh_ctrl_rx_frame(&c, &req);
+        assert(c.state == V92_MH_ST_RESP_SEND && c.tx == V92_MH_TX_MH);
+        while (v92_mh_ctrl_take_action(&c) != V92_MH_ACT_NONE) {}
+
+        /* 9.10.2.1 anchors T1 to the END of the first MHack, not to
+         * receiving MHreq or beginning to transmit the acknowledgement. */
+        v92_mh_ctrl_tick(&c, 100, NULL);
+        assert(!c.first_mhack_sent && c.on_hold_ms == 0);
+        for (int i = 0; i < V92_MH_BITS; i++)
+            v92_mh_ctrl_tx_bit(&c);
+        assert(c.first_mhack_sent && c.on_hold_ms == 0);
+        v92_mh_ctrl_tick(&c, seconds > 0 ? seconds * 1000 - 1 : 1000000, NULL);
+        assert(c.state == V92_MH_ST_RESP_SEND);
+        assert(v92_mh_ctrl_take_action(&c) == V92_MH_ACT_NONE);
+
+        /* A repeated request must not renew the grant.  Expiry applies
+         * even without RT/silence releasing MHack into ANSam.  Cor.1
+         * 9.10.1 still requires completing the open 40-bit sequence. */
+        for (int i = 0; i < 7; i++)
+            v92_mh_ctrl_tx_bit(&c);
+        v92_mh_ctrl_rx_frame(&c, &req);
+        v92_mh_ctrl_tick(&c, 1, NULL);
+        assert(c.tx == V92_MH_TX_MH);
+        assert(c.deferred == (seconds > 0));
+        assert(v92_mh_ctrl_take_action(&c) == V92_MH_ACT_NONE);
+        for (int i = 7; i < V92_MH_BITS; i++)
+            v92_mh_ctrl_tx_bit(&c);
+        if (seconds > 0) {
+            assert(c.state == V92_MH_ST_DONE && c.tx == V92_MH_TX_SILENCE);
+            assert(v92_mh_ctrl_take_action(&c) == V92_MH_ACT_DISCONNECT);
+        } else {
+            assert(c.state == V92_MH_ST_RESP_SEND && c.tx == V92_MH_TX_MH);
+        }
+        assert(v92_mh_ctrl_take_action(&c) == V92_MH_ACT_NONE);
+    }
+    puts("PASS: 9.10.2.1 T1 expires while MHack repeats; no-limit grant stays active");
+}
+
 static void test_cor1_rt_skip(void)
 {
     side_t a, b;
@@ -410,6 +482,8 @@ int main(void)
     test_timeout_retrain();
     test_retrain_discrimination();
     test_cor1_rt_skip();
+    test_t1_while_sending_ack();
+    test_persistent_request_t1();
     puts("v92_mh_test: all passed");
     return 0;
 }
