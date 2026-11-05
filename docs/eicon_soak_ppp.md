@@ -269,3 +269,46 @@ under `/root/slmx/bri-{long,upload,paced}-20261104/`. These scratch drivers use
 the deployed build, not the Mac's pending DSP changes. Receiver observations
 come from eicon420's `bri-new-spans` journal. No DSP constants, G.711 processing,
 thresholds or defaults changed.
+
+## 6 November 2026: 7920/7930 modulation matrix
+
+Build `1662ce8a` (clean build in a CT117 tmpfs tree), PCMA leg, account 6002,
+our modem originating. The 7920/7930 answerers are now pppd bundle members
+(`eicon-79x0-*.service`, card init `AT+MS=V90,1`, `require-pap`), not the
+`bri-new-spans` echo menu. Grade per call: CONNECT, then an LCP probe
+(Configure exchange, then 190-byte Echo-Requests every 0.5 s with the echoed
+payload compared byte-exact). Two rounds × five arms × two targets = 20 calls,
+alternating targets.
+
+| Arm (`AT+MS`, role) | Card's V.8 offer | Trained | 7920 | 7930 |
+|---|---|---|---|---|
+| V90,0 analogue | V.34, V.90 | V.90 56000 down / 31200 up | 2/2 | 2/2 |
+| V90,0 digital | V.34 only | V.34 24000 | 2/2 | 2/2 |
+| V34,0 | V.34 | V.34 | 21600 2/2 | 24000 2/2 |
+| V92,0 analogue | V.34, V.90 (no V.92) | V.90 56000/31200 | 2/2 | 2/2 |
+| V32B,0 | V.32bis | V.32bis 14400 | 2/2 | 2/2 |
+
+All 20 calls connect, LCP opens, **zero FCS errors**, and 45–47 of 46–48
+echoes per call return byte-exact (the missing one is in flight at
+hang-up). Every call ends at about 37.5 s after CONNECT. The answerer's pppd
+sends `TermReq "Authentication failed"` 30 s after LCP opens, because the probe
+does not do PAP. This is the rig's grade limit, not a modem drop.
+
+- **V.90 digital role** cannot run PCM here. The Diva is itself the digital
+  end, so its V.8 menu omits V.90 and the call is plain V.34 (V.90 needs one
+  analogue end). Our digital role needs an analogue peer.
+- **V.92** is not offered by the card; the analogue role falls back to V.90.
+- **V.34 on 7920 retrains itself downward, 2/2.** The B1 estimate reads
+  30.9 dB as "about 21600", while the same span reads 31.3–32.1 dB as 24000 on
+  the V90-digital arm. We cap our TX, ask for 21600 and retrain per §11.5. The
+  retrained B1 then reads **20.4 / 22.2 dB** (16800/19200 class), about 10 dB
+  worse than before the retrain, and the call stays at 21600. 7930 stayed at
+  24000 (31.2–33.3 dB) and did not retrain. Data-mode SNR on these calls reads
+  32.7–33.5 dB while the rate estimate still says 24000, so 24000 at ~33 dB
+  is itself conservative. Open: why the §11.5 retrain lands 10 dB lower (compare
+  the 7910's §11.5 retrains, which also land lower: see
+  `docs/slmodemd_vs_hardware_20261029.md`).
+
+Provenance on vmhost: driver `/root/e79_matrix.py` (uses `/root/slm_targets.py`),
+batch log `/root/e79/m1.log`, per-call summaries `/root/e79/m1/`, server logs
+`/root/e79/m1-ct117-logs.tgz`.
