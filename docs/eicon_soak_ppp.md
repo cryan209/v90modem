@@ -328,7 +328,8 @@ Three defects remain open, all ours:
    S targets for the whole timeout. On first trainings TRN then pulls it back
    to 1828.6. On both retrains (the card's J asks us for 4-point TRN there)
    it stays 1.2 Hz low into MP, where tracking freezes.
-3. **The rate rule at 3200 baud** is still the uncalibrated (SNR+13)/6. With
+3. **The rate rule at 3200 baud** (FIXED the same day: calibrated table, live 26400
+   on 12 of 12 with no retrain; see `docs/v34_data_mode_rates.md`) was the uncalibrated (SNR+13)/6. With
    the 1.0 dB margin, 24000 needs B1 >= 31.0 dB, and 7920 reads 30.9 against
    Phase 4 TRN's 32.9. So its first B1 asks for a retrain to 21600 on a line
    DATA decodes at 33 dB (distance to grid 0.036).

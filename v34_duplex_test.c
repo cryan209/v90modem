@@ -806,6 +806,16 @@ static int run_case(int baud, int bps, bool alaw)
            caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits,
            caller.peak_sample, answer.peak_sample,
            caller.clipped_samples, answer.clipped_samples);
+    /* The reading the engine's B1 rate check (v34_b1_rate_check_locked())
+       grades the negotiated rate on; printed so its thresholds can be
+       calibrated against the bit errors above. */
+    {
+        float b1_snr[2] = {-99.0f, -99.0f};
+
+        (void) v34_get_b1_snr_db(call_modem, &b1_snr[0]);
+        (void) v34_get_b1_snr_db(answer_modem, &b1_snr[1]);
+        printf("  B1 SNR: caller %.1f dB, answer %.1f dB\n", b1_snr[0], b1_snr[1]);
+    }
     printf("  stages: caller rx=%d tx=%d event=%d; answer rx=%d tx=%d event=%d\n",
            v34_get_rx_stage(call_modem), v34_get_tx_stage(call_modem),
            v34_get_rx_event(call_modem),

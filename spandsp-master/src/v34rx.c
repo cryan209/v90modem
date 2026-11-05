@@ -3222,8 +3222,38 @@ SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
         if (snr_db >= 29.0f) return 28800;
         if (snr_db >= 26.5f) return 26400;
     }
+    if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3200)
+    {
+        /* (SNR+13)/6 asked 4.4 dB too much at 24000 and more above it, so
+           against the Eicon 7920 (B1 30.7-31.0 dB, DATA decoding at 33 dB)
+           the B1 check retrained one call in three to 21600.  Forced rates in
+           v34_duplex_test, 3200 baud, one million PRBS bits each way, both
+           laws, delays 0/7/23, injected noise 21-50 dB, 420 directions; B1
+           and Phase 4 TRN read the same on average (B1 - TRN 0.0 dB, -3.2
+           to +3.9).  Each threshold is 0.1 dB above the highest reading, B1
+           or TRN, at which any direction failed:
+             31200: fails to TRN 35.4 / B1 34.9      (old rule 45.5)
+             28800: fails to TRN 34.6 / B1 33.0      (old rule 41.0)
+             26400: fails to TRN 31.1 / B1 30.8      (old rule 36.5)
+             24000: fails to B1 28.3 / TRN 28.1      (old rule 32.0)
+             21600: fails to TRN 26.2 / B1 26.0      (old rule 27.5)
+             19200: fails to TRN 23.3 / B1 22.6      (old rule 23.0)
+           The loopback receiver tops out near 35 dB here, so 31200 is
+           marginal by construction.  Below the table the formula stands but
+           may not offer 19200. */
+        if (snr_db >= 35.5f) return 31200;
+        if (snr_db >= 34.7f) return 28800;
+        if (snr_db >= 31.2f) return 26400;
+        if (snr_db >= 28.4f) return 24000;
+        if (snr_db >= 26.3f) return 21600;
+        if (snr_db >= 23.4f) return 19200;
+    }
+    /*endif*/
     n = (int) floor((snr_db + 13.0)/6.0
                      *baud_rate_parameters[s->rx.baud_rate].baud_rate/2400.0);
+    if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3200  &&  n > 7)
+        n = 7;
+    /*endif*/
     if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3429)
     {
         /* Below the calibrated table the formula over-predicts for this

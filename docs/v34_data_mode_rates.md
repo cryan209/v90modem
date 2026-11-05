@@ -1053,3 +1053,39 @@ sits on the 31200 threshold, so expect the odd 28800.  To the RasFinder
 (6311), 33600 on 2 of 2 with every login probe echoed: its live reading
 (33.6-34.2) already asks 33600, and the larger-of rule keeps that although
 its refit alone (35.4-35.5) would ask 31200.
+
+## Calibrating the 3200 offer and B1 check (2026-11-06)
+
+At 3200 baud (duplex, not V.90) the offer from Phase 4 TRN and the B1 rate
+check both went through (SNR+13)/6, which asked 32.0 dB for 24000, 36.5 for
+26400 and 41.0 for 28800. Against the Eicon 7920/7930 the first B1 read
+30.7–31.0 dB on a third of calls, and the 1 dB margin then asked for 24000
+needed 31.0, so it retrained to 21600 on a line DATA decoded at 33 dB.
+
+Calibration: forced rates in `v34_duplex_test` at 3200, one million PRBS
+bits each way, both laws, delays 0/7/23, injected noise 21–50 dB, 420
+directions. The harness now prints each end's B1 SNR. A direction passes
+only if it delivered the full million bits with no errors. A run with
+`rx_bits=0` "has no errors" too, so a criterion of errors alone scores dead
+links as clean. B1 and Phase 4 TRN read the same on average (B1 − TRN 0.0 dB,
+range −3.2 to +3.9). Highest failing reading per rate, B1 / TRN:
+19200 22.6 / 23.3, 21600 26.0 / 26.2, 24000 28.3 / 28.1, 26400 30.8 / 31.1,
+28800 33.0 / 34.6, 31200 34.9 / 35.4. The table in `v34_rx_training_rate()`
+puts each threshold 0.1 dB above the higher of the two:
+23.4/26.3/28.4/31.2/34.7/35.5. Below 23.4 the formula stands, capped
+below 19200. The loopback receiver tops out near 35 dB here, so 31200 is
+marginal by construction.
+
+Auto-rate loopback, 3200, noise 24–40 dB and none, both laws, delays
+0/7/23 (54 runs per build): the new table picks one or two steps higher at
+every noise level with no bit errors in any run (HEAD: 30 errors in one run).
+At 24 dB it picks 16800 in three runs, which can't deliver a million bits
+within the harness's block count. Fast tier 686/688; the two HSF rows fail
+here only because a gitignored module is missing.
+
+Live A/B against the Eicon 7920/7930, HEAD vs table alternated per round, v34
+and v90d arms, 24 calls: the table connects 26400 on 12 of 12 with no
+retrain, with B1 31.8–34.3 dB (mean 33.3). HEAD connects 24000 on 11 and
+retrains once to 21600 (B1 30.7). Both arms have no bad FCS and no drops.
+The probe is a 25 s LCP echo exchange, not a soak. `docs/eicon_soak_ppp.md`
+has the matrix context.
