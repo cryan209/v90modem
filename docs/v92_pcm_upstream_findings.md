@@ -1,5 +1,12 @@
 # V.92 PCM upstream against the d-modem/slmodemd rig — findings
 
+**Historical investigation.** The July conclusion below that this rig cannot
+validate PCM upstream was superseded by the later startup/receiver fixes in
+[v92_quick_connect.md](v92_quick_connect.md). The November
+[bit-level and trellis investigation](v92_upstream_trellis.md) reproduces the
+peer's ideal transmitted symbols and identifies our higher-rate decoder limitation.
+Do not treat the old malformed-transmitter conclusion as the current rig status.
+
 Investigation of 2026-07-21. Outcome: **we can negotiate real V.92 with this rig, but
 it cannot validate V.92 PCM upstream — its transmitter for that path is malformed.**
 The startup work is sound and worth keeping; the upstream needs a different peer.

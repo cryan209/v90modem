@@ -77,7 +77,8 @@ Where to start:
 | [vpcm-refactor-plan.md](vpcm-refactor-plan.md) | The shared `vpcm_*` layer |
 | [v92_full_startup.md](v92_full_startup.md) | V.92 full startup, both roles; slmodemd results |
 | [v92_phase4_implementation.md](v92_phase4_implementation.md) | V.92 Phase 4 status |
-| [v92_pcm_upstream_findings.md](v92_pcm_upstream_findings.md) | V.92 PCM upstream against d-modem/slmodemd |
+| [v92_pcm_upstream_findings.md](v92_pcm_upstream_findings.md) | Historical PCM-upstream investigation; later results linked |
+| [v92_upstream_trellis.md](v92_upstream_trellis.md) | Higher-rate upstream collapse: measured BER and frame-local trellis limitation |
 | [v92_p3_rx_line_plan.md](v92_p3_rx_line_plan.md) | V.92 Phase 3 upstream receiver over a real loop |
 | [v92_quick_connect.md](v92_quick_connect.md) | Quick Connect: short Phase 1 and 2 (`AT+PQC`) |
 | [v92_short_phase1_plan.md](v92_short_phase1_plan.md) | Short Phase 1 rewrite |

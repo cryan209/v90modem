@@ -1008,6 +1008,12 @@ ceiling; different constellation design, equalisation or interoperability fixes
 could change it. They do not qualify Quick Connect, live §9.8/§9.11 renegotiation
 or modem-on-hold.
 
+The subsequent [bit-level investigation](v92_upstream_trellis.md) identifies a
+concrete limitation in our frame-local trellis decoder: retaining state metrics
+and about 6 ms of traceback removes all observed errors over a matched
+3447416-bit interval of the **actual live 37333 decoder input**. That is an
+offline receiver result, not yet a live higher-rate payload qualification.
+
 The isolated Linux executable is the same MOH-clock-fixed build documented
 above, SHA-256
 `bcb49335cf86e2e57dfa24005f2b15f8730ad7cac506a4cadd6a1793ec87179e`:
