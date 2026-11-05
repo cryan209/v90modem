@@ -32,6 +32,19 @@ def async_octets(packed):
     return bytes(out)
 
 
+def read_serial_capture(native, path):
+    """Only a complete capture is eligible for payload delivery checks."""
+    if path.exists():
+        serial = path.read_bytes()
+        total = native.get('serial_bytes_total')
+        if total is None or len(serial) != total:
+            raise ValueError(f'serial capture length {len(serial)} != reported total {total}')
+        return serial
+    if native.get('serial_truncated'):
+        raise ValueError('serial report truncated and full-stream capture is missing')
+    raise ValueError('full-stream serial capture is missing')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -212,7 +225,8 @@ def main():
                 command[pos] = command[pos].replace('&U26&N39', '')
             if args.dsp_watch and '--dsp-write-watch' in command:
                 command[command.index('--dsp-write-watch') + 1] = args.dsp_watch
-            command += ['--send-after-connect', args.message, *args.native_arg]
+            command += ['--send-after-connect', args.message, *args.native_arg,
+                        '--serial-output', str(output / 'courier-dte.bin')]
             if args.capture_native or args.capture_receiver or args.capture_rate:
                 assert command[1:3] == ['-m', 'courier_emu']
                 command = [command[0], str(ROOT / 'tools/x2_courier_capture.py'),
@@ -235,7 +249,19 @@ def main():
         'diagnostic_library': os.environ.get('X2_HOST_CAPTURE_LIBRARY'),
     }
     native = json.loads((output / 'analog-result.json').read_text())
-    serial = bytes.fromhex(native.get('serial_hex', ''))
+    try:
+        serial = read_serial_capture(native, output / 'courier-dte.bin')
+    except ValueError as exc:
+        result['validation_status'] = 'invalid_capture'
+        result['validation_error'] = str(exc)
+        result['checks'] = {'capture_valid': False}
+        (output / 'call.json').write_text(json.dumps(result, indent=2) + '\n')
+        print(f'INVALID TEST: {exc}', file=sys.stderr)
+        return 2
+    result['validation_status'] = 'complete_capture'
+    result['serial_capture'] = {'path': str(output / 'courier-dte.bin'),
+                                'bytes': len(serial),
+                                'report_truncated': native.get('serial_truncated', False)}
     received = bytes.fromhex(result['engine'].get('dte_hex', '')) if args.pty_source else decoded
     checks = {'marker_4d': '4d' in result['engine']['accepted_markers'],
               'native_connect_x2': b'/x2/' in serial and b'CONNECT ' in serial,
