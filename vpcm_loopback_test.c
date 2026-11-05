@@ -8745,6 +8745,74 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
     return true;
 }
 
+/* V.91 6.3 / 6.3.9: preserve primary and control-channel state when the
+ * caller must retry a codeword block with a larger output buffer. */
+static bool test_v91_rx_capacity(v91_law_t law)
+{
+    vpcm_log("Test: V.91 receive capacity (%s)", vpcm_law_to_str(law));
+    for (int drn = 1; drn <= 28; drn++) {
+        for (int cc = 0; cc <= 1; cc++) {
+            for (int wrap = 0; wrap <= 1; wrap++) {
+                vpcm_cp_frame_t cp;
+                v91_state_t tx, rx, saved;
+                uint8_t in[65 * 6], out[65 * 6], cw[65 * 6];
+                int offset = 0;
+                int decoded = 0;
+
+                vpcm_cp_init(&cp);
+                cp.drn = (uint8_t) drn;
+                cp.constellation_count = 1;
+                vpcm_cp_enable_all_ucodes(cp.masks[0]);
+                v91_init(&tx, law, V91_MODE_TRANSPARENT);
+                v91_init(&rx, law, V91_MODE_TRANSPARENT);
+                if (!v91_activate_data_mode(&tx, &cp)
+                    || !v91_activate_data_mode(&rx, &cp))
+                    return false;
+                v91_set_control_channel(&tx, cc != 0, false);
+                v91_set_control_channel(&rx, false, cc != 0);
+                tx.tx_frame_index = rx.rx_frame_index = wrap ? UINT32_MAX - 31U : 0;
+                fill_pattern(in, (int) sizeof(in), 0x91CA0000U + (uint32_t) drn);
+                /* The second block tests residual bits and a nonzero CC phase. */
+                for (int chunk = 0; chunk < 2; chunk++) {
+                    int frames = chunk ? 64 : 1;
+                    int bits = rx.rx_bit_count;
+                    int need = v91_tx_bytes_for_frames(&tx, frames);
+                    int expected;
+                    for (int f = 0; f < frames; f++) {
+                        uint32_t index = rx.rx_frame_index + (uint32_t) f;
+                        bits += drn + 20 - ((cc && index % 64 == 0) ? 6 : 0);
+                    }
+                    expected = bits / 8;
+                    if (v91_tx_codewords(&tx, cw, frames * 6, in + offset, need)
+                        != frames * 6)
+                        return false;
+                    memcpy(&saved, &rx, sizeof(saved));
+                    memset(out, 0xA5, sizeof(out));
+                    if (v91_rx_codewords(&rx, out, expected - 1, cw, frames * 6) != 0
+                        || memcmp(&saved, &rx, sizeof(rx)) != 0) {
+                        fprintf(stderr, "V.91 short RX buffer consumed state (drn=%d cc=%d wrap=%d)\n",
+                                drn, cc, wrap);
+                        return false;
+                    }
+                    for (int i = 0; i < (int) sizeof(out); i++)
+                        if (out[i] != 0xA5)
+                            return false;
+                    if (v91_rx_codewords(&rx, out, expected, cw, frames * 6) != expected
+                        || memcmp(out, in + decoded, (size_t) expected) != 0) {
+                        fprintf(stderr, "V.91 RX capacity retry failed (drn=%d cc=%d wrap=%d)\n",
+                                drn, cc, wrap);
+                        return false;
+                    }
+                    offset += need;
+                    decoded += expected;
+                }
+            }
+        }
+    }
+    vpcm_log("PASS: V.91 receive capacity (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 /* V.91 6.3.9 / 6.4: control channel carried in the sign bits of every 64th
  * data frame.  Primary data must still round-trip byte-exact (K user bits in
  * those frames), the 96-bit sequence must verify (slip pattern + CRC), and
@@ -11165,6 +11233,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
+        && test_v91_rx_capacity(V91_LAW_ULAW)
+        && test_v91_rx_capacity(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)
         && test_v91_startup_primitives(V91_LAW_ALAW)
         && test_v91_default_dil(V91_LAW_ULAW)

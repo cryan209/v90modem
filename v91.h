@@ -351,6 +351,10 @@ int v91_tx_codewords(v91_state_t *s,
 /*
  * Decode G.711 codewords to application octets.
  * In transparent mode this is a 1:1 mapping.
+ * In non-transparent data mode, data_max must hold all complete octets from
+ * the supplied whole frames (including residual bits from the previous call).
+ * An undersized output buffer returns 0 without changing state or output;
+ * the caller may retry the same codewords with sufficient capacity.
  * Returns the number of octets produced.
  */
 int v91_rx_codewords(v91_state_t *s,

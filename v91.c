@@ -1760,6 +1760,27 @@ int v91_rx_codewords(v91_state_t *s,
         return g711_len;
     }
 
+    /* V.91 6.3 / 6.3.9: each frame yields K+6 primary bits, except
+     * every 64th frame with a control channel, which yields K. Check the
+     * whole block before advancing any coder or control-channel state: this
+     * API has no consumed-codeword count with which to report a partial read.
+     * Otherwise a full output buffer leaves whole bytes in rx_bit_accum and
+     * subsequent frames can shift beyond its 64-bit width. */
+    {
+        int frames = g711_len / VPCM_CP_FRAME_INTERVALS;
+        long long primary_bits = (long long) frames * (s->active_k + 6)
+                                 + s->rx_bit_count;
+        if (s->cc_rx_active) {
+            int first = (V91_CC_FRAME_PERIOD
+                         - s->rx_frame_index % V91_CC_FRAME_PERIOD)
+                        % V91_CC_FRAME_PERIOD;
+            if (frames > first)
+                primary_bits -= 6LL * (1 + (frames - 1 - first) / V91_CC_FRAME_PERIOD);
+        }
+        if (primary_bits / 8 > data_max)
+            return 0;
+    }
+
     in_pos = 0;
     out_pos = 0;
     d = s->active_k + 6;

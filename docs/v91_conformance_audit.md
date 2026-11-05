@@ -403,3 +403,26 @@ enforce on the peer, and is met by construction (the DIL we receive lasts about
 0.19 s).  The earlier note that our robbed-cadence request sat in reserved CP
 bits was already obsolete: it was deleted on 2026-10-16 and the spec decoder
 checks the reserved bits are zero.
+
+### Receive-buffer capacity and retry safety (6.3, 6.3.9)
+
+`v91_rx_codewords()` previously kept consuming frames after filling the output
+buffer. Whole undelivered octets accumulated in its 64-bit bit reservoir;
+continued input could overflow it and trigger out-of-range shifts. The new
+regression reproduced state consumption on the first case (drn 1, no control
+channel, output capacity one byte short).
+
+Non-transparent receive now computes the complete block's primary-octet count
+before decoding, including residual bits and the six sign bits replaced by the
+control channel every 64th frame. Insufficient capacity returns zero with
+unchanged state and output, so the caller can retry the same codewords. This is
+an API safety improvement, not a wire-format change; no samples are inserted,
+removed or transcoded. Transparent-mode behavior is unchanged.
+
+Validation: `vpcm_loopback_test --primitive-tests` and `--all-tests` passed.
+The new capacity test covers all 28 rates, both G.711 laws, control channel
+on/off and frame-counter wrap (224 configurations, two consecutive blocks per
+configuration). Each block checks rejection with an output buffer one byte
+short, unchanged state/output, then byte-exact decoding with exact capacity.
+The second block exercises carried bit residues and a nonzero frame phase.
+These are local regression checks, not foreign-peer or hardware evidence.
