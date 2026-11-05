@@ -976,9 +976,9 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
-/*! Experimental K56flex common Phase 2 (Draft 0.23 4.1; V.34 Table 15).
-    Receive INFO1c concurrently with the short upstream probe. Does not
-    enable V.90 framing, manufacture INFO1, or enter K56flex DATA. */
+/*! Experimental K56flex common Phase 2 (Draft 0.23 4.1; V.34 11.2.1.2.5).
+    Align the shaped CC reversal with the unshaped L1 probe on transmit.
+    Does not alter RX measurement, manufacture INFO1, or enter DATA. */
 SPAN_DECLARE(void) v34_set_k56_phase2(v34_state_t *s, int enabled);
 
 /*! Re-supply the peer's INFO0 bits 26:27 (V.92 Table 16 capability and

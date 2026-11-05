@@ -7403,13 +7403,6 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     int i;
     int j;
     float phase_1050;
-    /* V.34 10.1.2 probe definitions: the observed legacy HSF K56flex
-       upstream probe is L1 only (160 ms), not L2.
-       Use its interior 40..160 ms and normalize the 6 dB L1/L2 ratio;
-       ordinary V.34 retains its existing L2-only measurement unchanged. */
-    bool measure = s->k56_phase2 ? (s->l1_l2_duration >= 2 && s->l1_l2_duration < 8)
-                                : (s->l1_l2_duration >= 8);
-    float probe_scale = s->k56_phase2 ? 0.5f : 1.0f;
 
     slow_dft(s->dft_buffer, LINE_PROBE_SAMPLES);
     phase_1050 = atan2f(s->dft_buffer[21].im, s->dft_buffer[21].re);
@@ -7432,8 +7425,8 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
                receiver measured from L1/L2.  Accumulate only L2 (the first
                eight 20-ms blocks are L1, 6 dB higher) so gain-dependent
                choices are not biased by the level transition. */
-            if (measure)
-                s->l1_l2_gain_sum[i] += probe_scale*s->l1_l2_gains[i];
+            if (s->l1_l2_duration >= 8)
+                s->l1_l2_gain_sum[i] += s->l1_l2_gains[i];
             /*endif*/
         }
         else
@@ -7446,16 +7439,16 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
                         + s->dft_buffer[j].im*s->dft_buffer[j].im);
             s->l1_l2_gains[i] = 0.0f;
             s->l1_l2_phases[i] = 0.0f;
-            if (measure)
+            if (s->l1_l2_duration >= 8)
             {
-                s->l1_l2_noise_sum += probe_scale*noise;
+                s->l1_l2_noise_sum += noise;
                 s->l1_l2_noise_count++;
             }
             /*endif*/
         }
         /*endif*/
     }
-    if (measure)
+    if (s->l1_l2_duration >= 8)
     {
         float step;
 
@@ -7504,16 +7497,6 @@ static void l1_l2_analysis_init(v34_rx_state_t *s)
     s->l1_l2_have_prev_1050_phase = 0;
     s->current_demodulator = V34_MODULATION_L1_L2;
     s->stage = V34_RX_STAGE_L1_L2;
-    if (s->k56_phase2)
-    {
-        /* Draft 0.23 4.1 / V.34 Table 15: the legacy HSF K56 client
-           sends its 109-bit INFO1c after the short upstream L1 probe,
-           inside the ordinary V.34 L1/L2 analysis window. Decode actual
-           sync/CRC concurrently; do not infer INFO1_OK from elapsed time. */
-        s->stage = V34_RX_STAGE_INFO1C;
-        s->target_bits = 109 - (4 + 8 + 4);
-        s->bit_count = 0;
-    }
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7536,18 +7519,16 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             perform_l1_l2_analysis(s);
             s->dft_ptr = 0;
             V34_RX_LOG(s->logging, SPAN_LOG_DEBUG, "L1/L2 analysis x %d\n", s->l1_l2_duration);
-            if (++s->l1_l2_duration >= (V34_DIAG_GETENV("V34_L1L2_BLOCKS")
-                                        ?  atoi(V34_DIAG_GETENV("V34_L1L2_BLOCKS")) + 1
-                                        :  (s->k56_phase2 ? 8 : 21)))
+            if (++s->l1_l2_duration > (V34_DIAG_GETENV("V34_L1L2_BLOCKS")
+                                       ?  atoi(V34_DIAG_GETENV("V34_L1L2_BLOCKS"))  :  20))
             {
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->phase2_l2_count++;
                 s->current_demodulator = V34_MODULATION_TONES;
-                if ((s->calling_party  &&  s->v90_mode
-                     &&  s->received_event == V34_EVENT_INFO1_OK)
-                    || (s->k56_phase2 && s->info1c_received))
+                if (s->calling_party  &&  s->v90_mode
+                    &&  s->received_event == V34_EVENT_INFO1_OK)
                 {
-                    /* Actual INFO1 already arrived inside the window. */
+                    /* INFO1d already arrived inside the window; keep it. */
                 }
                 else
                 {

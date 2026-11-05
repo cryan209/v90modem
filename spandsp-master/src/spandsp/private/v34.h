@@ -2164,7 +2164,7 @@ typedef struct
     bool repeated_info0c_pending;
     bool info1a_received;
     bool info1c_received;
-    /*! K56flex Phase 2: accept actual INFO1c during the probe window. */
+    /*! K56flex Phase 2: align CC shaper delay with unshaped L1. */
     bool k56_phase2;
     uint8_t info1a_raw_12_17;
     uint8_t info1a_raw_32_33;
