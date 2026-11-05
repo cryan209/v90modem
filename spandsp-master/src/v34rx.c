@@ -9146,6 +9146,75 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         if (data_bits == 1  ||  data_bits == 3)
             s->phase4_s_last_step = data_bits;
         /*endif*/
+
+        /* A caller enters this stage only after Phase 3 has already seen the
+           answerer's S (11.4.1.1: the call modem answers S with J'), so it is
+           always some way into S, and how far depends on how quickly Phase 3
+           confirmed it.  Against the Eicon 7920 that was ~20 ms later than
+           against the 7930, and after the reset front end settles (~37 bauds)
+           only the last ~20 bauds of S-bar remained -- on a 11.5 retrain,
+           none at all.  The 24-of-32 rule above can never be met then, and
+           the receiver sat here for the full 2048-baud timeout while the
+           answerer's TRN went by.  S and S-bar (10.1.3.7) both alternate
+           +90/-90 every baud; TRN (10.1.3.8) is scrambled, so a step
+           alternates with probability 1/4.  Take TRN as begun, junction or
+           not, when either
+             - a run of 8 alternations (0.25^8 by chance) has been seen and
+               the last 8 powered bauds hold at most 2, or
+             - 28 of the last 32 bauds carry signal and at most 12 of them
+               alternated (S would give ~32, TRN ~8). */
+        if (!s->hdx_primary_resync  &&  s->phase4_s_bar_left < 0)
+        {
+            float p_now = sym->re*sym->re + sym->im*sym->im;
+            float p_last = s->last_sample.re*s->last_sample.re
+                         + s->last_sample.im*s->last_sample.im;
+            int powered = (p_now >= 0.16f  &&  p_last >= 0.16f);
+            int alternated = (powered
+                              && (data_bits == 1  ||  data_bits == 3)
+                              && data_bits != s->phase4_s_alt_prev);
+            const char *why = NULL;
+
+            s->phase4_s_alt_prev = data_bits;
+            s->phase4_s_alt_hist = (s->phase4_s_alt_hist << 1) | (unsigned int) alternated;
+            s->phase4_s_pwr_hist = (s->phase4_s_pwr_hist << 1) | (unsigned int) powered;
+            if (alternated)
+            {
+                if (++s->phase4_s_alt_run > s->phase4_s_alt_run_max)
+                    s->phase4_s_alt_run_max = s->phase4_s_alt_run;
+                /*endif*/
+            }
+            else
+            {
+                s->phase4_s_alt_run = 0;
+            }
+            /*endif*/
+            if (s->phase4_s_alt_run_max >= 8
+                && powered
+                && __builtin_popcount(s->phase4_s_alt_hist & 0xFFu) <= 2
+                && (s->phase4_s_alt_hist & 0xC0u) == 0)
+            {
+                why = "S/S-bar alternation ended";
+            }
+            else if (__builtin_popcount(s->phase4_s_pwr_hist) >= 28
+                     && __builtin_popcount(s->phase4_s_alt_hist) <= 12)
+            {
+                why = "no S/S-bar alternation in 32 powered bauds";
+            }
+            /*endif*/
+            if (why)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: %s at baud %d (longest run %d, %d/32 alternated), "
+                         "no junction seen; taking TRN as begun\n",
+                         why, s->duration, s->phase4_s_alt_run_max,
+                         __builtin_popcount(s->phase4_s_alt_hist));
+                s->phase4_s_bar_left = 0;
+                s->duration = 128;
+                s->s_detect_count = 32;
+            }
+            /*endif*/
+        }
+        /*endif*/
         if (s->phase4_s_bar_left > 0  &&  --s->phase4_s_bar_left == 0)
         {
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,

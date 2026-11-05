@@ -322,16 +322,8 @@ become 29.4 / 31.4 dB, and the six first trainings are unchanged. This is a
 measurement only.
 
 Three defects remain open, all ours:
-1. **Phase 4 S detection misses on half of the entries.** The far end's 128T of
-   S arrives while the receiver samples the wrong T/2 output:
-   `phase4_rx_conditioning_init_ex()` keeps the Phase 3 taps but resets
-   `baud_half`, the TED and the RRC history. The eye check needs 256 symbols,
-   longer than S. The S window then peaks at 18–22/32 (it needs 24), and the
-   2048-baud S timeout fires. 4 of 10 Phase 4 entries timed out
-   (two first trainings, both retrains). |z| steadies from 0.2–2.3 to 1.44 the
-   moment the eye flip lands. Keeping the RRC and TED state across the reset
-   made it worse (TRN SNR 7 dB), so the fix is an eye decision within S, not
-   less reset.
+1. **Phase 4 S detection misses on half of the entries.** FIXED the same
+   day, see below. The eye explanation first recorded here was wrong.
 2. **The carrier loop drags while stuck in S.** It tracks TRN symbols against
    S targets for the whole timeout. On first trainings TRN then pulls it back
    to 1828.6. On both retrains (the card's J asks us for 4-point TRN there)
@@ -340,6 +332,52 @@ Three defects remain open, all ours:
    the 1.0 dB margin, 24000 needs B1 >= 31.0 dB, and 7920 reads 30.9 against
    Phase 4 TRN's 32.9. So its first B1 asks for a retrain to 21600 on a line
    DATA decodes at 33 dB (distance to grid 0.036).
+
+**Phase 4 S: we enter after the S has gone (same day).** The receiver's S
+was not misread. As caller we enter Phase 4 only after Phase 3 has
+confirmed the answerer's S (11.4.1.1: S is answered with J'), and the Phase
+4 conditioning reset then costs about 37 bauds before |z| settles. Against
+the 7920, Phase 3 confirmed S about 20 ms later than against the 7930 (J
+lasted 855 against 835 ms), so the Phase 4 receiver saw only the last
+~20 alternating bauds of S-bar before a 16-point TRN, and on a retrain no
+alternation at all. The 24-of-32 window can't be met then, and the stage
+sat out its 2048-baud timeout (640 ms) while TRN went by. HEAD timed out
+the same way on the RasFinder 3429 fixture. `v34rx.c` now also takes TRN
+as begun when S/S-bar's +/-90 alternation (10.1.3.7) stops, junction or
+not. Two triggers:
+- a run of 8 strict alternations has been seen and the last 8 bauds hold at
+  most 2 (TRN alternates with probability 1/4);
+- 28 of the last 32 bauds carry signal and at most 12 alternated.
+
+Replays (`--dial --sync --echo-ref`) of the eight V.34/V.90-digital calls
+went from 4 S timeouts (two first trainings, both retrains) to none, with
+hand-over at baud 55–96. Two more first trainings had reported a
+"junction" at baud 124 and 154, which falls inside TRN; they now hand over
+at 56 and 66. The 7930's junction entries are unchanged.
+Loopback `v34_duplex_test` over 26 rows x 8 delays: 206/208 on both builds,
+the same two rows failing. The fallback never fires there, because loopback
+always finds the junction. Live A/B, 24 calls, HEAD and fix alternated per
+round, v34 and v90d against both cards: all 24 connect and pass the LCP
+probe. Retrains: HEAD 3 of 12, fix 4 of 12. First B1 means: HEAD 31.43,
+fix 31.57 dB. Every retrain is a first B1 of 30.7–31.0 dB against the 31.0
+cut-off, i.e. defect 3, and the extra 640 ms is not visible in time to
+CONNECT. So the fix is neutral live and removes a timeout. New fast row:
+`reference-data/artifacts/eicon7920-p4-late-s-20261106` (14 s of call 03);
+it fails on HEAD and passes with the fix.
+
+**B1 on the RasFinder 3429 fixture is luck.** With `--sync`, B1's
+normalised correlation reads 1.000 (36 dB) only when Phase 4 S exits
+between baud 2016 and 2056. Any other exit, by timeout or by the new rule,
+reads 0.999 (27.1–28.2 dB), with TRN SNR flat at 33.3–34.1. HEAD's
+2048-baud timeout landed in that window, and the fast row had pinned
+"1.000". The row now asserts what it exists for: B1 8 symbols after E,
+trellis state 13, correlation >= 0.99. Without `--sync` the same replay
+flips between 28 and 36 dB with CPU load, so don't grade B1 on it unsynced.
+Defect 2 (carrier drag while stuck in S) now arises only when the fallback
+doesn't fire.
+
+A/B provenance: `/root/e79_ab.py`, batch log `/root/e79/ab1.log`, per-call
+`/root/e79/ab1/`, server logs in CT 117 `/tmp/e79runs/ab1/`.
 
 Provenance on vmhost: driver `/root/e79_matrix.py` (uses `/root/slm_targets.py`),
 batch log `/root/e79/m1.log`, per-call summaries `/root/e79/m1/`, server logs

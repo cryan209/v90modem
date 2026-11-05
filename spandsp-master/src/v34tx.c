@@ -8641,6 +8641,11 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
        otherwise read as "junction already reached". */
     s->rx.phase4_s_bar_left = -1;
     s->rx.phase4_s_last_step = -1;
+    s->rx.phase4_s_alt_prev = -1;
+    s->rx.phase4_s_alt_run = 0;
+    s->rx.phase4_s_alt_run_max = 0;
+    s->rx.phase4_s_alt_hist = 0;
+    s->rx.phase4_s_pwr_hist = 0;
     bool retain_phase3_frontend = retain_frontend;
 
     s->primary_channel_active = true;

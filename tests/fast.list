@@ -930,7 +930,8 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAM
 # V.34 11.5.1.1/11.8.1: the 7910 never received our Phase 3 J and restarted Phase 2 with one INFO0a
 # (DPSK, 2400 Hz) 3.2 s later; our caller sat in PHASE3_WAIT_S until it hung up.  macOS only (CoreAudio).
 sh -c '[ "$(uname -s)" != Darwin ] || ./apple_usb_modem_coupler --rx-replay reference-data/artifacts/apple-7910-v34-info0a-after-j/rx.s16 2>&1 | grep -q "peer retrain tone detected; responding per 11.5"'
-sh -c 'V34_CALL_P3_S_DELAY_MS=0 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v34-3429-swp/live-rx.g711 ulaw --fast --dial --at "AT+MS=V34,0" 2>&1 | grep -q "B1 found 8 symbols after the E detection, far-end trellis state 13 (normalized correlation 1.000"'
+sh -c 'V34_CALL_P3_S_DELAY_MS=0 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v34-3429-swp/live-rx.g711 ulaw --fast --dial --at "AT+MS=V34,0" 2>&1 | grep -qE "B1 found 8 symbols after the E detection, far-end trellis state 13 \(normalized correlation (1\.000|0\.99)"'
+sh -c 'ME_MODE=v34 ME_V34_SPAN_FLOW_LOG=1 ./v90_engine_replay reference-data/artifacts/eicon7920-p4-late-s-20261106/live-rx.g711 alaw --fast --dial --sync --echo-ref > "$TMPDIR/p4s.log" 2>&1; grep -q "Phase 4: S/S-bar alternation ended" "$TMPDIR/p4s.log" && ! grep -q "Phase 4: S detect timeout" "$TMPDIR/p4s.log"'
 sh -c 'ME_V90_UPSTREAM_MAX_BPS=9600 ./v90_engine_replay reference-data/artifacts/rf-mt5634-v90-b1/live-rx.g711 ulaw --fast --dial 2>&1 | grep -q "upstream DATA bits: t=0.1s tap=4 ones=100%"'
 # V.90 9.2.1.1.6: our Tone B reversal waits for the CX93001's Tone A reversal.  With the RX clock frozen at 0 the
 # 9.2.1.2.4 deadline read as expired and we reversed after 2 bauds, into the peer's L2 (docs/v90_hardware_interop.md).

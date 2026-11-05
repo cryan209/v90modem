@@ -1784,6 +1784,15 @@ typedef struct
     /*! \brief Bauds remaining of S-bar after that junction, or -1 if the
         junction has not been seen. */
     int phase4_s_bar_left;
+    /*! \brief Phase 4 S/S-bar alternation tracker for a caller that entered
+        Phase 4 too late to see the junction: the previous differential
+        dibit, the current and longest runs of strict +90/-90 alternation,
+        and the last 32 bauds' alternation and signal-present histories. */
+    int phase4_s_alt_prev;
+    int phase4_s_alt_run;
+    int phase4_s_alt_run_max;
+    uint32_t phase4_s_alt_hist;
+    uint32_t phase4_s_pwr_hist;
     /*! V.34 12.5.2 resynchronization: S/S-bar, PP, then B1/data (no TRN/MP). */
     bool hdx_primary_resync;
     bool hdx_s_silence_seen;
