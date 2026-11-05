@@ -10,6 +10,7 @@
 #include "v92_upstream_data.h"
 
 #include <math.h>
+#include <float.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -903,4 +904,164 @@ bool v92_upstream_wave_decode_viterbi_frame(
     memcpy(bits_out, best_bits,
            (size_t)v92_upstream_bits_per_frame(profile.drn));
     return true;
+}
+
+bool v92_upstream_trellis_init(v92_upstream_trellis_t *state,
+                               const v92_cpd_frame_t *cpd,
+                               const v92_upstream_wave_rx_t *initial)
+{
+    if (!state || !initial || !cpd || cpd->coeffs_present
+        || !v92_upstream_wave_profile_validate(cpd)
+        || initial->convolutional_state >= 16)
+        return false;
+    memset(state, 0, sizeof(*state));
+    state->cpd = *cpd;
+    wave_data_profile(cpd, &state->profile);
+    state->data = initial->data;
+    state->convolutional_state = initial->convolutional_state;
+    for (int i = 0; i < 16; i++)
+        state->metric[i] = (initial->any_initial_state
+                           || i == initial->convolutional_state) ? 0.0 : HUGE_VAL;
+    state->initialized = true;
+    return true;
+}
+
+/* Recover an emitted frame's source word. An invalid §6.4.1 word is an
+ * erasure, not a reason to delete K bits from the receive clock. Advance GPA
+ * with the best available K low bits (self-synchronising after 23 correct
+ * bits) and the differential sign inferred from this word, then output
+ * idle ones so LAPM discards the damaged frame. The exact inverse API above
+ * remains transactional and continues to reject invalid words unchanged. */
+static int stream_source_frame(v92_upstream_trellis_t *state,
+                               const uint8_t ki[V92_UPSTREAM_INTERVALS],
+                               uint8_t *bits, int bits_max)
+{
+    v92_uint128_t product = 1, place = 1, r0 = 0, r;
+    int k = v92_upstream_bits_per_frame(state->profile.drn);
+    int previous = state->data.previous_differential_sign & 1;
+
+    if (v92_upstream_decode_frame(&state->data, &state->profile,
+                                  ki, bits, bits_max))
+        return 1;
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+        r0 += place*ki[i];
+        place *= state->profile.moduli[i];
+    }
+    product = place;
+    r = previous ? product - 1 - r0 : r0;
+    for (int i = 0; i < k; i++)
+        (void)gpa_descramble_bit(&state->data.descramble_reg,
+                                 (int)((r >> i) & 1));
+    state->data.previous_differential_sign = (r > (product - 1)/2) ^ previous;
+    memset(bits, 1, (size_t)k);
+    return -1;
+}
+
+int v92_upstream_trellis_feed(v92_upstream_trellis_t *state,
+                              const double samples[V92_UPSTREAM_INTERVALS],
+                              uint8_t *bits_out, int bits_max)
+{
+    double gain;
+    uint8_t ki[V92_UPSTREAM_INTERVALS];
+    int eta_frame[V92_UPSTREAM_INTERVALS];
+    int previous_frame[3], end_state, emitted_end = 0;
+
+    if (!state || !state->initialized || !samples || !bits_out
+        || bits_max < v92_upstream_bits_per_frame(state->profile.drn))
+        return -2;
+    gain = cpd_gain(&state->cpd);
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+        if (!isfinite(samples[i]) || !isfinite(samples[i]/gain)
+            || fabs(samples[i]/gain) > sqrt(DBL_MAX)/8.0)
+            return -2;
+    for (int group = 0; group < 3; group++) {
+        int candidates[4][2];
+        double errors[4][2], next[16], minimum = HUGE_VAL;
+        v92_upstream_survivor_t *back =
+            state->history[state->groups%V92_UPSTREAM_TRELLIS_HISTORY];
+
+        for (int j = 0; j < 4; j++)
+            two_nearest_points(&state->cpd, 4*group + j,
+                                samples[4*group + j]/gain,
+                                candidates[j], errors[j]);
+        for (int j = 0; j < 16; j++)
+            next[j] = HUGE_VAL;
+        for (int previous = 0; previous < 16; previous++) {
+            if (!isfinite(state->metric[previous]))
+                continue;
+            for (int choice = 0; choice < 16; choice++) {
+                int eta[4], parity, input, destination;
+                double metric = state->metric[previous];
+
+                for (int j = 0; j < 4; j++) {
+                    int bit = (choice >> j) & 1;
+                    eta[j] = candidates[j][bit];
+                    metric += errors[j][bit];
+                }
+                parity = positive_mod(eta[0] + eta[1] + eta[2]
+                                      + (previous & 1), 2);
+                if (positive_mod(eta[3] - parity, 2))
+                    continue;
+                input = v92_conv_input[subset_label(eta[0], eta[1])]
+                                      [subset_label(eta[2], eta[3])];
+                destination = v92_conv16[previous][input];
+                if (metric < next[destination]) {
+                    next[destination] = metric;
+                    back[destination].previous = (uint8_t)previous;
+                    for (int j = 0; j < 4; j++)
+                        back[destination].eta[j] = (int16_t)eta[j];
+                }
+            }
+        }
+        for (int j = 0; j < 16; j++)
+            if (next[j] < minimum)
+                minimum = next[j];
+        /* A valid profile has both parities among its adjacent candidates.
+         * Normalise each transition so metric magnitude cannot grow with
+         * call duration; never collapse the alternatives to one state. */
+        for (int j = 0; j < 16; j++)
+            state->metric[j] = next[j] - minimum;
+        state->groups++;
+    }
+    if (state->groups < V92_UPSTREAM_TRELLIS_HISTORY)
+        return 0;
+
+    end_state = 0;
+    for (int j = 1; j < 16; j++)
+        if (state->metric[j] < state->metric[end_state])
+            end_state = j;
+    /* Trace the oldest full frame, four frames behind the input. The
+     * following frame reuses the surviving metrics, not this hard choice. */
+    for (int age = 0; age < V92_UPSTREAM_TRELLIS_HISTORY; age++) {
+        uint64_t group = state->groups - 1 - (uint64_t)age;
+        const v92_upstream_survivor_t *b =
+            &state->history[group%V92_UPSTREAM_TRELLIS_HISTORY][end_state];
+        int interval = V92_UPSTREAM_TRELLIS_HISTORY - 1 - age;
+
+        if (interval < 3) {
+            if (interval == 2)
+                emitted_end = end_state;
+            previous_frame[interval] = b->previous;
+            for (int j = 0; j < 4; j++)
+                eta_frame[4*interval + j] = b->eta[j];
+        }
+        end_state = b->previous;
+    }
+    for (int group = 0; group < 3; group++) {
+        int base = 4*group;
+        int parity = positive_mod(eta_frame[base] + eta_frame[base + 1]
+                                 + eta_frame[base + 2]
+                                 + (previous_frame[group] & 1), 2);
+        for (int j = 0; j < 4; j++) {
+            int i = base + j;
+            int eta = eta_frame[i];
+            int set = state->cpd.dfi[i%6];
+
+            ki[i] = (uint8_t)positive_mod(j == 3 ? (eta - parity)/2 : eta,
+                                          state->profile.moduli[i]);
+            state->decided[i] = constellation_value(&state->cpd, set, eta);
+        }
+    }
+    state->convolutional_state = (uint8_t)emitted_end;
+    return stream_source_frame(state, ki, bits_out, bits_max);
 }

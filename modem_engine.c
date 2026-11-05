@@ -8622,7 +8622,9 @@ static void me_v92_b1u_train_locked(v92_p3_eq_t *eq, double scale)
         if (v92_upstream_b1_rx_init_equalized(&g_v92_upstream_rx, &cpd,
                                               v92_upstream_live_byte, NULL))
             me_v92_b1u_feed_values_locked(replay, n);
-        /* Those frames' inputs are not in the aided-refit ring. */
+        /* Those inputs, including still-pending trellis frames, are not
+         * in the aided-refit ring. Never train live windows against them. */
+        v92_upstream_b1_rx_refit_live(&g_v92_upstream_rx);
         g_v92_aided_frames_seen = g_v92_upstream_rx.decoded_frames;
     }
     {
@@ -20939,19 +20941,23 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                         me_v92_b1u_feed_values_locked(&dec[k], 1);
                         if (g_v92_aided_refits && g_v92_upstream_rx.locked
                             && g_v92_upstream_rx.decoded_frames != g_v92_aided_frames_seen) {
-                            /* A frame ended with this value; its symbol i is
-                             * (n - 1 - k) + (11 - i) before the equaliser's
-                             * latest output. */
+                            /* Survivor decisions refer to an earlier input
+                             * frame (6.4.4 traceback), not the current frame.
+                             * Include decoder latency and the rest of this
+                             * equaliser batch; skip replay-only windows. */
                             g_v92_aided_frames_seen = g_v92_upstream_rx.decoded_frames;
                             /* decided[] are constellation points; the
                              * equaliser's unit is G x point, as for the
                              * slicer levels. */
                             double g = (double)g_v92_upstream_rx.cpd.gain_q0_16/(4.0*65536.0);
 
-                            for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
-                                (void)v92_p3_eq_aided_row(eq,
-                                    (n - 1 - k) + (V92_UPSTREAM_INTERVALS - 1 - i),
-                                    g_v92_upstream_rx.wave_rx.decided[i]*g/scale);
+                            for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+                                int back = v92_upstream_b1_rx_decision_back(
+                                    &g_v92_upstream_rx, n - 1 - k, i);
+                                if (back >= 0)
+                                    (void)v92_p3_eq_aided_row(eq, back,
+                                        g_v92_upstream_rx.wave_rx.decided[i]*g/scale);
+                            }
                         }
                     }
                     if (g_v92_b1u_train_pending

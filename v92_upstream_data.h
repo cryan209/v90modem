@@ -155,6 +155,47 @@ bool v92_upstream_wave_decode_viterbi_frame(
     uint8_t *bits_out,
     int bits_max);
 
+/* Continuous §6.4.4 trellis for already-equalised, unfiltered u(n).
+ * Keep all 16 metrics across frame boundaries; emit one source frame after
+ * four frames (48 symbols, 6 ms) of lookahead. This is decoder latency, not
+ * a change to the bearer/sample clock. B1u acquisition still uses the short
+ * frame decoder above, then seeds this receiver with its known end state. */
+#define V92_UPSTREAM_TRELLIS_DELAY_FRAMES 4
+#define V92_UPSTREAM_TRELLIS_DELAY_SYMBOLS \
+    (V92_UPSTREAM_TRELLIS_DELAY_FRAMES*V92_UPSTREAM_INTERVALS)
+#define V92_UPSTREAM_TRELLIS_HISTORY \
+    (3*(V92_UPSTREAM_TRELLIS_DELAY_FRAMES + 1))
+
+typedef struct {
+    uint8_t previous;
+    int16_t eta[4];
+} v92_upstream_survivor_t;
+
+typedef struct {
+    bool initialized;
+    v92_cpd_frame_t cpd;
+    v92_upstream_profile_t profile;
+    v92_upstream_rx_state_t data;
+    double metric[16];
+    v92_upstream_survivor_t history[V92_UPSTREAM_TRELLIS_HISTORY][16];
+    uint64_t groups;
+    double decided[V92_UPSTREAM_INTERVALS];
+    uint8_t convolutional_state; /* end of the last emitted frame */
+} v92_upstream_trellis_t;
+
+/* init copies the profile and the acquired B1u state; all state is per call.
+ * feed consumes exactly 12 symbols. Return 0 while filling the traceback,
+ * 1 for a source frame, -1 for an erasure, or -2 for invalid input (not
+ * consumed). An erasure advances the source clock by K bits and supplies
+ * idle ones to abort a damaged HDLC frame, never a claimed valid payload.
+ * There is no synthetic tail flush: frames lacking lookahead stay pending. */
+bool v92_upstream_trellis_init(v92_upstream_trellis_t *state,
+                               const v92_cpd_frame_t *cpd,
+                               const v92_upstream_wave_rx_t *initial);
+int v92_upstream_trellis_feed(v92_upstream_trellis_t *state,
+                              const double samples[V92_UPSTREAM_INTERVALS],
+                              uint8_t *bits_out, int bits_max);
+
 #ifdef __cplusplus
 }
 #endif

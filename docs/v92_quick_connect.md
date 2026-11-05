@@ -882,9 +882,11 @@ Forced with the precoder (`ME_V92_UP_DRN`, one call each, 120 s of data): 33333 
 for the feed-forward-only noise, where 32000 rejected 64-70 frames; the precoded design now
 uses 3.0 (`V92_UPSTREAM_MARGIN_PRECODED`), which designs 36000 here: above the 31200 V.34
 upstream a V.90 call gets from the same peer. (Lines delivered are the harness's paced
-payload, not a throughput measure.) The later [binary sweep](#receiver-verified-binary-upstream-sweep-5-november-2026)
-does **not** qualify 37333 for sustained upload throughput. slmodemd's ~55-63 downstream
-HDLC FCS errors per call are the same in both arms.
+payload, not a throughput measure.) The later pre-fix [binary sweep](#receiver-verified-binary-upstream-sweep-5-november-2026)
+did **not** qualify 37333 for sustained upload throughput; the subsequent
+[streaming trellis fix](v92_upstream_trellis.md#5-production-streaming-receiver)
+now does. slmodemd's ~55-63 downstream HDLC FCS errors per call in the paced
+comparison are the same in both arms.
 
 Also learned: a harness killed mid-batch leaves `qc_slm_pve.sh`'s payload loop typing into the
 next call's PTY, and any keystroke before CONNECT aborts the answer (V.250 5.6.1); the 30 s
@@ -941,8 +943,11 @@ report are in `artifacts/v92-spec-slm-f8d32c64/`, notably
 
 ## Receiver-verified binary upstream sweep (5 November 2026)
 
-**36000 is the highest tested rate that passed this binary-transfer criterion,
-not a V.92 specification limit.** V.92 §6.1 permits PCM upstream rates through
+**Pre-streaming-fix result:** 36000 was the highest tested rate that passed
+this binary-transfer criterion, **not a V.92 specification limit**. This
+section records the old receiver; the subsequent
+[streaming fix and qualification](v92_upstream_trellis.md#5-production-streaming-receiver)
+supersede its higher-rate outcome. V.92 §6.1 permits PCM upstream rates through
 48000 bit/s in increments of 8000/6 bit/s. Forcing higher nominal rates on this
 rig made useful upload throughput substantially worse, even when DATA linked
 at the requested rate.
@@ -1012,9 +1017,17 @@ The subsequent [bit-level investigation](v92_upstream_trellis.md) identifies a
 concrete limitation in our frame-local trellis decoder: retaining state metrics
 and about 6 ms of traceback removes all observed errors over a matched
 3447416-bit interval of the **actual live 37333 decoder input**. That is an
-offline receiver result, not yet a live higher-rate payload qualification.
+offline receiver result. The **production streaming fix is now live-qualified**:
+2 × 1 MiB each direction at 37333 and 1 MiB each direction at 38666, about
+**33.98 / 34.34 kbit/s verified upload**, plus short passes at 40000/41333
+(~30 kbit/s). Across eleven passing calls it verifies **5.75 MiB per direction**.
+The clean 42666 repeat fails before B1u lock, not in the streaming decoder;
+the first 42666 attempt was transport-contaminated. The normal selector and
+margins are unchanged, and an unforced long control still selects 36000.
+See the topic note for the complete matrix, negative control, RTP accounting
+and remaining acquisition/hardware/MOH/renegotiation boundaries.
 
-The isolated Linux executable is the same MOH-clock-fixed build documented
+The isolated Linux executable **for the pre-fix sweep above** is the same MOH-clock-fixed build documented
 above, SHA-256
 `bcb49335cf86e2e57dfa24005f2b15f8730ad7cac506a4cadd6a1793ec87179e`:
 `f8d32c64` plus the `417dc430` signalling correction, without the Mac's pending

@@ -7,6 +7,7 @@
 #include "v92_upstream_rx.h"
 
 #include <math.h>
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -530,6 +531,29 @@ static bool advance_candidate(v92_upstream_rx_t *rx,
     return c->frames == V92_B1U_LOCK_FRAMES;
 }
 
+void v92_upstream_b1_rx_refit_live(v92_upstream_rx_t *rx)
+{
+    if (rx)
+        rx->refit_skip_symbols = rx->input_symbols;
+}
+
+int v92_upstream_b1_rx_decision_back(const v92_upstream_rx_t *rx,
+                                     int newer, int interval)
+{
+    uint64_t delay;
+
+    if (!rx || newer < 0 || interval < 0 || interval >= V92_UPSTREAM_INTERVALS
+        || rx->decision_end_symbol < V92_UPSTREAM_INTERVALS
+        || rx->decision_end_symbol > rx->input_symbols
+        || rx->decision_end_symbol - V92_UPSTREAM_INTERVALS < rx->refit_skip_symbols)
+        return -1;
+    delay = rx->input_symbols - rx->decision_end_symbol;
+    if (newer > INT_MAX - (V92_UPSTREAM_INTERVALS - 1)
+        || delay > (uint64_t)(INT_MAX - newer - (V92_UPSTREAM_INTERVALS - 1)))
+        return -1;
+    return (int)delay + newer + V92_UPSTREAM_INTERVALS - 1 - interval;
+}
+
 int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
                                    const double *values,
                                    int count)
@@ -552,7 +576,37 @@ int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
             if (rx->frame_pos < V92_UPSTREAM_INTERVALS)
                 continue;
             rx->frame_pos = 0;
-            if (decode_frame_with(rx, &rx->wave_rx, rx->frame, bits)) {
+            if (rx->trellis.initialized) {
+                int result = v92_upstream_trellis_feed(&rx->trellis,
+                                                       rx->frame, bits,
+                                                       (int)sizeof(bits));
+                if (result == 0)
+                    continue; /* latency fill, not a missing source frame */
+                if (result == -2) {
+                    /* Invalid numerical input was not consumed by the
+                     * trellis. Fail closed rather than associate subsequent
+                     * decisions with a shifted equaliser-ring timeline. */
+                    rx->rejected_frames++;
+                    rx->locked = false;
+                    rx->trellis.initialized = false;
+                    rx->decision_end_symbol = 0;
+                    rx->recent_fill = 0;
+                    rx->ncandidates = 0;
+                    continue;
+                }
+                rx->wave_rx.data = rx->trellis.data;
+                rx->wave_rx.convolutional_state = rx->trellis.convolutional_state;
+                memcpy(rx->wave_rx.decided, rx->trellis.decided,
+                       sizeof(rx->wave_rx.decided));
+                rx->decision_end_symbol = rx->input_symbols
+                                       - V92_UPSTREAM_TRELLIS_DELAY_SYMBOLS;
+                if (result > 0)
+                    rx->decoded_frames++;
+                else
+                    rx->rejected_frames++;
+                deliver_bits(rx, bits, k); /* also preserve erasure bit timing */
+            } else if (decode_frame_with(rx, &rx->wave_rx, rx->frame, bits)) {
+                rx->decision_end_symbol = rx->input_symbols;
                 rx->decoded_frames++;
                 deliver_bits(rx, bits, k);
             } else
@@ -572,6 +626,9 @@ int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
                     - (double)rx->candidates[i].zero_bits
                       /((double)V92_B1U_LOCK_FRAMES*k);
                 rx->ncandidates = 0;
+                if (!rx->cpd.coeffs_present)
+                    (void)v92_upstream_trellis_init(&rx->trellis, &rx->cpd,
+                                                   &rx->wave_rx);
                 break;
             }
             if (!alive)

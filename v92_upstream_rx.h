@@ -93,6 +93,9 @@ typedef struct {
     /* After lock: frames decoded, and the last one's symbols as decoded
      * (wave_rx.decided), for data-aided equaliser refits. */
     uint64_t decoded_frames;
+    v92_upstream_trellis_t trellis; /* unfiltered equalised-mode data path */
+    uint64_t decision_end_symbol; /* input index (1-based) of emitted frame end */
+    uint64_t refit_skip_symbols;  /* replayed inputs absent from caller's ring */
 } v92_upstream_rx_t;
 
 bool v92_upstream_b1_rx_init(v92_upstream_rx_t *rx,
@@ -117,14 +120,27 @@ int v92_upstream_b1_rx_feed(v92_upstream_rx_t *rx,
  * decoder data mode uses, from the zero memories 8.7.1 puts at B1u's first
  * symbol -- and B1u is the alignment whose frames descramble to ones,
  * V92_B1U_LOCK_FRAMES of them, which need not start at B1u's first frame.
- * After lock every frame is decoded and delivered (what is left of B1u
- * reaches the DTE as idle ones); there is no internal equaliser or
- * decision-directed update.
+ * After lock, unfiltered profiles use a continuous trellis with four
+ * frames of decision latency; profiles carrying filter coefficients retain
+ * the direct inverse. Remaining B1u reaches the DTE as idle ones. There is
+ * no internal equaliser or decision-directed update; delayed frame indices
+ * let the caller associate survivor targets with its own input windows.
  */
 bool v92_upstream_b1_rx_init_equalized(v92_upstream_rx_t *rx,
                                        const v92_cpd_frame_t *cpd,
                                        v92_upstream_byte_handler_t handler,
                                        void *user_data);
+
+/* Mark the current input boundary after replaying samples that are absent
+ * from the caller's equaliser ring. Pending frames that overlap that replay
+ * must not supply aided-refit targets. No decoder/sample state is reset. */
+void v92_upstream_b1_rx_refit_live(v92_upstream_rx_t *rx);
+
+/* Ring lookback for interval 0..11 of the last emitted frame, including
+ * trellis latency and any outputs newer than this feed in the caller's
+ * batch. Returns -1 for unavailable/replayed inputs or invalid arguments. */
+int v92_upstream_b1_rx_decision_back(const v92_upstream_rx_t *rx,
+                                     int newer, int interval);
 
 /* Equalised-mode input; returns payload bytes delivered. */
 int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,

@@ -11,6 +11,7 @@
  * exactly.  A last case feeds data with no B1u and requires no lock.
  */
 #include <math.h>
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,7 +114,9 @@ static int skip_b1u_frames;   /* start the feed this far into B1u */
 static void run_case(int member, int lead, double noise, bool with_b1u,
                      int drn, bool k3_half, bool expect_lock)
 {
-    enum { DATA_FRAMES = 400 };
+    /* Transmit real trailing frames to drain decoder latency and byte
+     * packing; do not flush by inventing samples at the receiver. */
+    enum { DATA_FRAMES = 400, TAIL_FRAMES = V92_UPSTREAM_TRELLIS_DELAY_FRAMES + 2 };
     v92_cpd_frame_t cpd;
     v92_upstream_wave_tx_t tx;
     v92_upstream_rx_t *rx = calloc(1, sizeof(*rx));
@@ -128,9 +131,9 @@ static void run_case(int member, int lead, double noise, bool with_b1u,
 
     make_cpd(&cpd, drn, k3_half);
     k = v92_upstream_bits_per_frame(cpd.selected_upstream_drn);
-    nsym = lead + (V92_B1U_FRAMES + DATA_FRAMES)*12;
+    nsym = lead + (V92_B1U_FRAMES + DATA_FRAMES + TAIL_FRAMES)*12;
     samples = calloc((size_t)nsym, sizeof(double));
-    bits = calloc((size_t)DATA_FRAMES*k, 1);
+    bits = calloc((size_t)(DATA_FRAMES + TAIL_FRAMES)*k, 1);
     memset(ones, 1, sizeof(ones));
 
     /* Lead-in: four-level noise about the TRN2u size, nothing B1u-like. */
@@ -147,7 +150,7 @@ static void run_case(int member, int lead, double noise, bool with_b1u,
             pos += 12;
         }
     }
-    for (int f = 0; f < DATA_FRAMES; f++) {
+    for (int f = 0; f < DATA_FRAMES + TAIL_FRAMES; f++) {
         for (int i = 0; i < k; i++)
             bits[f*k + i] = (uint8_t)(rnd() & 1);
         if (!v92_upstream_wave_encode_frame(&tx, &cpd, &bits[f*k], k,
@@ -186,7 +189,7 @@ static void run_case(int member, int lead, double noise, bool with_b1u,
         } else if (with_b1u) {
             CHECK(rx->locked, "member %d lead %d noise %.0f drn %d: no lock",
                   member, lead, noise, drn);
-            CHECK(sink.got >= (DATA_FRAMES - 1)*k && sink.wrong == 0,
+            CHECK(sink.got == DATA_FRAMES*k && sink.wrong == 0,
                   "member %d lead %d noise %.0f drn %d: %d bits, %d wrong",
                   member, lead, noise, drn, sink.got, sink.wrong);
         } else {
@@ -203,6 +206,254 @@ static void run_case(int member, int lead, double noise, bool with_b1u,
     free(bits);
     free(sink.bits);
     free(rx);
+}
+
+/* Continuous data-mode regression: all Table 30 rate indices, exact
+ * delayed source/trellis state and bounded ring wrap, including non-byte K. */
+static void test_stream_rates(void)
+{
+    int saw_differential = 0;
+    for (int drn = 1; drn <= 19; drn++) {
+        v92_cpd_frame_t c = {0};
+        v92_upstream_wave_tx_t tx;
+        v92_upstream_wave_rx_t initial;
+        v92_upstream_trellis_t stream;
+        uint8_t source[64][V92_UPSTREAM_MAX_FRAME_BITS], out[72];
+        v92_upstream_tx_state_t saved[64];
+        uint8_t conv[64];
+        double samples[12];
+        int k = v92_upstream_bits_per_frame((uint8_t)drn);
+
+        c.modulus_present = c.constellations_present = true;
+        c.selected_upstream_drn = (uint8_t)drn;
+        c.gain_q0_16 = 32768;
+        /* Minimal even LC for this K also exercises differential folding,
+         * unlike an oversized alphabet with R permanently below P/2. */
+        int lc;
+        for (lc = 2; lc <= 96; lc += 2) {
+            __uint128_t product = 1;
+            for (int i = 0; i < 12; i++) product *= (unsigned)(i%4 == 3 ? lc/2 : lc);
+            if (product >= ((__uint128_t)1 << k)) break;
+        }
+        c.set_sizes[0] = (uint8_t)lc;
+        for (int i = 0; i < lc; i++) c.points[0][i] = (uint16_t)(256*(2*i + 1));
+        for (int i = 0; i < 12; i++) c.moduli[i] = (uint8_t)(i%4 == 3 ? lc/2 : lc);
+        v92_upstream_wave_tx_init(&tx);
+        v92_upstream_wave_rx_init(&initial);
+        CHECK(v92_upstream_trellis_init(&stream, &c, &initial), "stream init drn %d", drn);
+        for (int f = 0; f < 64; f++) {
+            int result;
+            for (int i = 0; i < k; i++) source[f][i] = (uint8_t)(rnd() & 1);
+            CHECK(v92_upstream_wave_encode_frame(&tx, &c, source[f], k, samples), "encode");
+            saved[f] = tx.data;
+            saw_differential |= tx.data.previous_differential_sign;
+            conv[f] = tx.convolutional_state;
+            result = v92_upstream_trellis_feed(&stream, samples, out, sizeof(out));
+            if (f < V92_UPSTREAM_TRELLIS_DELAY_FRAMES) {
+                CHECK(result == 0 && stream.data.descramble_reg == 0,
+                      "drn %d advanced source state during latency fill", drn);
+            } else {
+                int old = f - V92_UPSTREAM_TRELLIS_DELAY_FRAMES;
+                CHECK(result == 1 && memcmp(out, source[old], (size_t)k) == 0,
+                      "drn %d delayed frame %d", drn, old);
+                CHECK(stream.data.descramble_reg == saved[old].scramble_reg
+                      && stream.data.previous_differential_sign == saved[old].previous_differential_sign
+                      && stream.convolutional_state == conv[old], "delayed state drn %d", drn);
+            }
+        }
+        {
+            uint64_t before = stream.groups;
+            samples[0] = NAN;
+            CHECK(v92_upstream_trellis_feed(&stream, samples, out, sizeof(out)) == -2
+                  && stream.groups == before, "NaN consumed stream state");
+            samples[0] = DBL_MAX;
+            CHECK(v92_upstream_trellis_feed(&stream, samples, out, sizeof(out)) == -2
+                  && stream.groups == before, "overflow consumed stream state");
+            CHECK(v92_upstream_trellis_init(&stream, &c, &initial)
+                  && stream.groups == 0 && stream.data.descramble_reg == 0,
+                  "stream per-call reset");
+        }
+    }
+    CHECK(saw_differential, "test did not exercise differential folding");
+}
+
+static void dense_cpd(v92_cpd_frame_t *c)
+{
+    static const uint16_t points[] = {
+        129,396,654,929,1188,1446,1705,1996,2254,2513,2771,3030,
+        3288,3547,3805,4258,4516,4775,5033,5292,5550,5809,6067,6326,
+        6584,6843,7102,7360,7619,7877,8265,8782,9299,9816,10333,10850
+    };
+    memset(c, 0, sizeof(*c));
+    c->modulus_present = c->constellations_present = true;
+    c->selected_upstream_drn = 11;
+    c->gain_q0_16 = 90;
+    c->set_sizes[0] = 36;
+    memcpy(c->points[0], points, sizeof(points));
+    for (int i = 0; i < 12; i++) c->moduli[i] = (uint8_t)(i%4 == 3 ? 18 : 36);
+}
+
+/* A geometrically valid trellis path outside §6.4.1's source alphabet must
+ * be marked erased, not reported valid or silently removed from bit time. */
+static void test_stream_erasure(void)
+{
+    v92_cpd_frame_t c;
+    v92_upstream_wave_tx_t tx;
+    v92_upstream_wave_rx_t initial;
+    v92_upstream_trellis_t stream;
+    uint8_t ki[12], ones[72], out[72];
+    double samples[12];
+    __uint128_t word = (__uint128_t)1 << 56;
+
+    dense_cpd(&c);
+    for (int i = 0; i < 12; i++) { ki[i] = (uint8_t)(word%c.moduli[i]); word /= c.moduli[i]; }
+    memset(ones, 1, sizeof(ones));
+    v92_upstream_wave_tx_init(&tx);
+    v92_upstream_wave_rx_init(&initial);
+    CHECK(v92_upstream_trellis_init(&stream, &c, &initial), "erasure init");
+    for (int f = 0; f < 12; f++) {
+        int result;
+        CHECK(f == 0 ? v92_upstream_wave_encode_ki(&tx, &c, ki, samples)
+                     : v92_upstream_wave_encode_frame(&tx, &c, ones, 56, samples), "erasure encode");
+        result = v92_upstream_trellis_feed(&stream, samples, out, sizeof(out));
+        if (f == V92_UPSTREAM_TRELLIS_DELAY_FRAMES)
+            CHECK(result == -1 && memcmp(out, ones, 56) == 0, "invalid word not erased");
+        else if (f > V92_UPSTREAM_TRELLIS_DELAY_FRAMES)
+            CHECK(result == 1 && memcmp(out, ones, 56) == 0, "did not recover after erasure");
+        else CHECK(result == 0, "erasure latency fill");
+    }
+}
+
+static void test_erasure_bit_clock(void)
+{
+    static const int drns[] = {1,10,11};
+    for (unsigned d = 0; d < sizeof(drns)/sizeof(drns[0]); d++) {
+        v92_cpd_frame_t c;
+        v92_upstream_wave_tx_t tx;
+        v92_upstream_rx_t *rx = calloc(1, sizeof(*rx));
+        uint8_t ki[12], ones[72], received[5000];
+        double samples[12];
+        int k = v92_upstream_bits_per_frame((uint8_t)drns[d]);
+        __uint128_t word = (__uint128_t)1 << k;
+        sink_t sink = {0};
+
+        dense_cpd(&c); c.selected_upstream_drn = (uint8_t)drns[d];
+        for (int i = 0; i < 12; i++) { ki[i] = (uint8_t)(word%c.moduli[i]); word /= c.moduli[i]; }
+        memset(ones, 1, sizeof(ones));
+        sink.nexpected = 13*k; sink.bits = received;
+        v92_upstream_wave_tx_init(&tx);
+        CHECK(v92_upstream_b1_rx_init_equalized(rx, &c, put_byte, &sink), "bit clock init");
+        rx->locked = true;
+        CHECK(v92_upstream_trellis_init(&rx->trellis, &c, &rx->wave_rx), "bit clock stream init");
+        for (int f = 0; f < 13; f++) {
+            CHECK(f == 0 ? v92_upstream_wave_encode_ki(&tx, &c, ki, samples)
+                         : v92_upstream_wave_encode_frame(&tx, &c, ones, k, samples), "bit clock encode");
+            (void)v92_upstream_b1_rx_feed_values(rx, samples, 12);
+        }
+        CHECK(rx->input_symbols == 13*12 && rx->output_bits == (uint64_t)(9*k)
+              && rx->byte_bits == (9*k)%8 && sink.nbits == 8*((9*k)/8)
+              && rx->rejected_frames == 1 && rx->decoded_frames == 8,
+              "erasure deleted bits at drn %d", drns[d]);
+        for (int i = 0; i < sink.nbits; i++) CHECK(sink.bits[i] == 1, "erasure/recovery bit");
+        free(rx);
+    }
+}
+
+/* Live 37333 soft samples, before trellis decoding; §8.7.1 supplies the
+ * warm state from the known first 18 B1u frames. No payload oracle is used
+ * by the decoder. Quantised Q20 fixture and packed source are indexed under
+ * reference-data/, not expiring captures. Also exercise refit-ring offsets
+ * and pending frames that straddle a replay/live input boundary. */
+static void test_live_soft_fixture(void)
+{
+    enum { FRAMES = 5000, K = 56 };
+    v92_cpd_frame_t full, c;
+    v92_upstream_wave_tx_t tx;
+    v92_upstream_wave_rx_t initial;
+    double *soft = calloc(FRAMES*12, sizeof(*soft));
+    uint8_t *expected = calloc(FRAMES*K, 1);
+    FILE *f = fopen("reference-data/v92-upstream-trellis/37333-soft-q20.s32le", "rb");
+    FILE *gold = fopen("reference-data/v92-upstream-trellis/37333-source-lsb.bin", "rb");
+    uint8_t ones[72], out[72];
+    double samples[12];
+    static const int16_t p1[] = {2819,5710,821,1808,-868,1870,261,360};
+    static const int chunks[] = {1,37,160,320};
+
+    CHECK(f && gold && soft && expected, "fixture open/allocation");
+    if (!f || !gold || !soft || !expected) {
+        if (f) fclose(f);
+        if (gold) fclose(gold);
+        free(soft); free(expected);
+        return;
+    }
+    for (int i = 0; i < FRAMES*12; i++) {
+        uint8_t b[4] = {0}; uint32_t raw; int32_t value;
+        CHECK(fread(b, 1, 4, f) == 4, "short soft fixture");
+        raw = (uint32_t)b[0] | (uint32_t)b[1]<<8 | (uint32_t)b[2]<<16 | (uint32_t)b[3]<<24;
+        memcpy(&value, &raw, sizeof(value));
+        soft[i] = value/1048576.0;
+    }
+    for (int i = 0; i < FRAMES*K; i += 8) {
+        int b = fgetc(gold); CHECK(b != EOF, "short source fixture");
+        for (int j = 0; j < 8; j++) expected[i+j] = (uint8_t)((b >> j)&1);
+    }
+    CHECK(fgetc(f) == EOF && fgetc(gold) == EOF, "fixture has extra data");
+    fclose(f); fclose(gold);
+    dense_cpd(&full); full.coeffs_present = true; full.lp1 = 8; full.lz2 = 4;
+    full.prefilter_ff[0] = 32767; memcpy(full.precoder_fb, p1, sizeof(p1));
+    memset(ones, 1, sizeof(ones));
+    v92_upstream_wave_tx_init(&tx); tx.class_member = V92_UPSTREAM_MEMBER_SLMODEMD;
+    v92_upstream_wave_rx_init(&initial);
+    for (int frame = 0; frame < 18; frame++) {
+        CHECK(v92_upstream_wave_encode_frame(&tx, &full, ones, K, samples)
+              && v92_upstream_wave_decode_frame(&initial, &full, samples, out, 72)
+              && memcmp(out, ones, K) == 0, "known B1u warm state");
+    }
+    c = full; c.coeffs_present = false;
+    for (unsigned chunk = 0; chunk < sizeof(chunks)/sizeof(chunks[0]); chunk++) {
+        v92_upstream_rx_t *rx = calloc(1, sizeof(*rx));
+        sink_t sink = {0}; uint64_t marked = 0;
+        sink.nexpected = FRAMES*K; sink.bits = calloc(FRAMES*K + 48*72, 1);
+        CHECK(v92_upstream_b1_rx_init_equalized(rx, &c, put_byte, &sink), "fixture init");
+        rx->locked = true; rx->wave_rx = initial;
+        CHECK(v92_upstream_trellis_init(&rx->trellis, &c, &initial), "fixture stream init");
+        for (int at = 0; at < FRAMES*12;) {
+            int n = chunks[chunk]; if (n > FRAMES*12-at) n = FRAMES*12-at;
+            (void)v92_upstream_b1_rx_feed_values(rx, soft+at, n); at += n;
+            if (!marked && at >= 37) {
+                v92_upstream_b1_rx_refit_live(rx); marked = rx->input_symbols;
+            }
+            if (rx->decision_end_symbol) {
+                for (int i = 0; i < 12; i++) {
+                    int back = v92_upstream_b1_rx_decision_back(rx, 2, i);
+                    if (rx->decision_end_symbol - 12 < marked)
+                        CHECK(back == -1, "replayed/pending target used for a live row");
+                    else CHECK(back >= 0 && rx->input_symbols+2-(uint64_t)back
+                               == rx->decision_end_symbol-11+(uint64_t)i,
+                               "wrong equaliser input window, chunk %d", n);
+                }
+            }
+        }
+        CHECK(rx->input_symbols == FRAMES*12
+              && rx->output_bits == (FRAMES-V92_UPSTREAM_TRELLIS_DELAY_FRAMES)*K
+              && sink.nbits == (int)rx->output_bits, "sample/bit latency accounting");
+        CHECK(rx->rejected_frames == 0 && memcmp(sink.bits, expected, (size_t)sink.nbits) == 0,
+              "live soft fixture: chunk %d, %llu rejected", chunks[chunk],
+              (unsigned long long)rx->rejected_frames);
+        {
+            double invalid[12] = {NAN};
+            uint64_t before = rx->output_bits;
+            (void)v92_upstream_b1_rx_feed_values(rx, invalid, 12);
+            CHECK(!rx->locked && !rx->trellis.initialized
+                  && rx->output_bits == before && rx->decision_end_symbol == 0,
+                  "invalid samples did not fail closed");
+        }
+        CHECK(v92_upstream_b1_rx_init_equalized(rx, &c, NULL, NULL)
+              && !rx->locked && !rx->trellis.initialized && rx->refit_skip_symbols == 0
+              && rx->output_bits == 0, "receiver per-call reset");
+        free(sink.bits); free(rx);
+    }
+    free(soft); free(expected);
 }
 
 int main(void)
@@ -236,6 +487,10 @@ int main(void)
     skip_b1u_frames = 0;
     run_case(V92_UPSTREAM_MEMBER_MIN_X, 200, 30.0, false, 6, false, true);
     run_case(V92_UPSTREAM_MEMBER_MOST_NEGATIVE, 200, 30.0, false, 6, true, true);
+    test_stream_rates();
+    test_stream_erasure();
+    test_erasure_bit_clock();
+    test_live_soft_fixture();
     if (failures) {
         printf("v92_b1u_lock_test: %d FAILURES\n", failures);
         return 1;
