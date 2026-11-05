@@ -5876,7 +5876,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         s->persistence2 = 0;
         break;
     }
-    info_search_enabled = (s->stage == V34_RX_STAGE_INFO0
+    /* V.34 12.2.1.4.1: repeated INFO0c is recovery, even after a tone
+       reversal has occupied received_event. Keep CRC framing active. */
+    info_search_enabled = ((!s->duplex
+                            && (s->stage == V34_RX_STAGE_TONE_A
+                                || s->stage == V34_RX_STAGE_TONE_B))
+                           || s->stage == V34_RX_STAGE_INFO0
                            ||
                            s->stage == V34_RX_STAGE_INFOH
                            ||
@@ -6080,6 +6085,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                                     && s->stage == V34_RX_STAGE_TONE_A);
                         first_info0 = !s->info0_received;
                         process_rx_info0(s, s->info_buf);
+                        if (!first_info0 && !s->duplex)
+                            s->hdx_repeated_info0_pending = true;
                         if (preserve_tone_a_recovery)
                         {
                             /* V.90 answerer recovery: after receiving INFO0a and
