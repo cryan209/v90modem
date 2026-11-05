@@ -2424,28 +2424,33 @@ static void v91_live_request_retrain_locked(const char *why)
 /* Start-up timers on the TX clock; true when the call left TRAINING. */
 static bool v91_live_startup_timers_locked(long long now)
 {
-    if (g_v91_retraining) {
-        if (now > g_v91_retrain_deadline) {
-            ME_LOG("[ME] V.91 retrain timer expired\n");
-            trace_phase("V91 retrain timer expired");
-            g_state = ME_HANGUP;
-            return true;
-        }
-        return false;
-    }
-    if (g_v91_test_escape_abs > 0 && now > g_v91_startup_t0 + g_v91_test_escape_abs) {
+    int64_t elapsed = g_v91_retraining ? now - (g_v91_retrain_deadline - 80000)
+                                         : now - g_v91_startup_t0;
+    v91_training_timeout_t timeout = v91_training_timeout(
+        elapsed, g_v91_rx_stage > V91_LIVE_RX_INFO_ACK,
+        g_v91_rx_stage == V91_LIVE_RX_DONE, g_v91_retraining);
+
+    if (!g_v91_retraining && g_v91_test_escape_abs > 0
+        && now > g_v91_startup_t0 + g_v91_test_escape_abs) {
         v91_live_escape_to_v34_locked("test hook");
         return true;
     }
-    if (g_v91_rx_stage <= V91_LIVE_RX_INFO_ACK && now > g_v91_startup_t0 + 12000) {
+    switch (timeout) {
+    case V91_TRAINING_INFO_TIMEOUT:
         v91_live_escape_to_v34_locked("no INFO' within 1.5 s");
         return true;
-    }
-    if (g_v91_rx_stage != V91_LIVE_RX_DONE && now > g_v91_startup_t0 + 80000) {
+    case V91_TRAINING_B1_TIMEOUT:
         v91_live_escape_to_v34_locked("no B1 within 10 s");
         return true;
+    case V91_TRAINING_RETRAIN_TIMEOUT:
+        ME_LOG("[ME] V.91 retrain timer expired\n");
+        trace_phase("V91 retrain timer expired");
+        g_state = ME_HANGUP;
+        return true;
+    case V91_TRAINING_WAIT:
+    default:
+        return false;
     }
-    return false;
 }
 
 /* 8.2.1.11: after sending Es and B1 the transmitter begins data in the very
@@ -2679,7 +2684,9 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
     g_v91_tx_abs_pos = base + len;
     memset(out, v91_idle_codeword(g_v91_tx.law), (size_t)len);
     if (g_state == ME_TRAINING) {
-        if (v91_live_startup_timers_locked(base + len))
+        /* Check elapsed bearer time, not the end of the packet we have yet
+         * to transmit. Otherwise a 20 ms packet expires a deadline early. */
+        if (v91_live_startup_timers_locked(base))
             return false;
       if (!g_v91_tx_data_live) {
         while (pos < len) {

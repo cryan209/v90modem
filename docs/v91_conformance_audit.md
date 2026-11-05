@@ -231,8 +231,9 @@ constellation under robbing (it is real scrambled ones now and does not).
   within 1.5 s, or no B1 within 10 s, or any start-up receive failure, calls
   `start_v34_training()`; V.34's Phase 2 then supplies INFO0a/INFO0c.  Live
   with `V91_TEST_ESCAPE_AFTER_MS` (both ends escape, V.34 connects, payload
-  flows).  The two natural timers share that code path but have no test of their
-  own yet.
+  flows).  The natural deadline decisions are now covered by the deterministic
+  bearer-clock tests described below; these do not replace a live stalled-peer
+  test.
 - **Retrain (8.4, 8.5).**  A frame decode failure, a control-channel slip, or a
   peer retrain warning (bit 17) re-runs the start-up from data mode with the
   data stack paused (not restarted, so LAPM survives) and a 10 s timer; a
@@ -426,3 +427,30 @@ configuration). Each block checks rejection with an output buffer one byte
 short, unchanged state/output, then byte-exact decoding with exact capacity.
 The second block exercises carried bit residues and a nonzero frame phase.
 These are local regression checks, not foreign-peer or hardware evidence.
+
+### Bearer-clock startup and recovery deadlines (8.3-8.5)
+
+The live engine checked startup/retrain expiry against the end of the TX packet
+it was about to generate rather than its beginning. That can expire the timer
+up to one packet early (20 ms with a 160-codeword packet). It now checks the
+elapsed bearer clock at the beginning of the packet, and treats the deadline
+itself as expired rather than waiting for a strictly greater counter value.
+Timer decisions are shared with `v91_training_timeout()` in `v91.c`:
+
+- No INFO' at 12000 codewords (1.5 s) from the start of INFO: escape to V.34.
+- INFO' received but no B1 at 80000 codewords (10 s), from the same origin:
+  escape to V.34; receiving INFO' does not restart the B1 deadline.
+- During retrain, use the separate 80000-codeword recovery interval from
+  clamping circuit 104, and terminate on expiry instead of escaping to V.34.
+  Receiving B1 alone does not disable recovery while local TX is unfinished.
+
+The primitive suite has 22 deterministic cases covering the codeword before,
+at and after each deadline, pre-INFO silence/Ez time, received INFO'/B1,
+retrain precedence, large counters and independent repeated calls. No
+wall-clock sleeps or forced-escape hook are involved in these decision tests.
+`vpcm_loopback_test --all-tests` passed. The rebuilt engine also passed normal,
+`--retrain` and `--escape` SIP serial pairs, each with `--attempts 1`; the normal
+pair included transmit-tap spec decoding and control-channel cleardown. These
+pairs validate integration and successful recovery, but the escape pair still
+uses the existing forced hook: natural expiry with a stalled peer and
+foreign-peer/hardware interoperability remain untested end to end.

@@ -294,6 +294,22 @@ void v91_request_retrain(v91_state_t *s);
 void v91_note_retrain_complete(v91_state_t *s);
 void v91_request_cleardown(v91_state_t *s);
 void v91_note_recovery_timeout(v91_state_t *s);
+
+/* V.91 8.3-8.5, on the 8000-codeword/s bearer clock. elapsed_symbols is
+ * measured from the start of INFO transmission (8.2.1.2), or from clamping
+ * circuit 104 for a retrain. Retrain expiry terminates rather than escaping;
+ * disable its timer once the complete retrain has succeeded. */
+typedef enum {
+    V91_TRAINING_WAIT = 0,
+    V91_TRAINING_INFO_TIMEOUT,
+    V91_TRAINING_B1_TIMEOUT,
+    V91_TRAINING_RETRAIN_TIMEOUT
+} v91_training_timeout_t;
+
+v91_training_timeout_t v91_training_timeout(int64_t elapsed_symbols,
+                                            bool info_ack_received,
+                                            bool b1_received,
+                                            bool retraining);
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
 void v91_deactivate_data_mode(v91_state_t *s);
 

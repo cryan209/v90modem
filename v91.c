@@ -1478,6 +1478,24 @@ void v91_note_recovery_timeout(v91_state_t *s)
     v91_request_cleardown(s);
 }
 
+v91_training_timeout_t v91_training_timeout(int64_t elapsed_symbols,
+                                            bool info_ack_received,
+                                            bool b1_received,
+                                            bool retraining)
+{
+    /* V.91 8.4/8.5 supersede the initial-startup escape deadlines: an
+     * unsuccessful retrain must terminate the established connection. */
+    if (retraining)
+        return elapsed_symbols >= 10 * 8000 ? V91_TRAINING_RETRAIN_TIMEOUT
+                                            : V91_TRAINING_WAIT;
+    /* 8.3: both deadlines start at 8.2.1.2, not when INFO' arrives. */
+    if (!info_ack_received && elapsed_symbols >= 12000)
+        return V91_TRAINING_INFO_TIMEOUT;
+    if (!b1_received && elapsed_symbols >= 10 * 8000)
+        return V91_TRAINING_B1_TIMEOUT;
+    return V91_TRAINING_WAIT;
+}
+
 bool v91_cp_supports_drn(const vpcm_cp_frame_t *cp, uint8_t drn)
 {
     return v91_data_mode_supported(cp, vpcm_cp_drn_to_k(drn));

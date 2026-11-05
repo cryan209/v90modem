@@ -8745,6 +8745,54 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
     return true;
 }
 
+/* V.91 8.3-8.5: actual bearer-clock deadlines, without a forced escape
+ * hook or wall-clock sleeps. Rows also model an independent subsequent call. */
+static bool test_v91_training_deadlines(void)
+{
+    static const struct {
+        int64_t elapsed;
+        bool ack, b1, retrain;
+        v91_training_timeout_t expected;
+    } cases[] = {
+        { -624, false, false, false, V91_TRAINING_WAIT }, /* silence + Ez */
+        { 0, false, false, false, V91_TRAINING_WAIT },
+        { 11999, false, false, false, V91_TRAINING_WAIT },
+        { 12000, false, false, false, V91_TRAINING_INFO_TIMEOUT },
+        { 12001, false, false, false, V91_TRAINING_INFO_TIMEOUT },
+        { 12000, true, false, false, V91_TRAINING_WAIT },
+        { 79999, true, false, false, V91_TRAINING_WAIT },
+        { 80000, true, false, false, V91_TRAINING_B1_TIMEOUT },
+        { 80001, true, false, false, V91_TRAINING_B1_TIMEOUT },
+        { 80000, false, false, false, V91_TRAINING_INFO_TIMEOUT },
+        { 80000, true, true, false, V91_TRAINING_WAIT },
+        { INT64_C(1) << 40, true, true, false, V91_TRAINING_WAIT },
+        { 0, false, false, true, V91_TRAINING_WAIT },
+        { 12000, false, false, true, V91_TRAINING_WAIT },
+        { 79999, false, false, true, V91_TRAINING_WAIT },
+        { 80000, false, false, true, V91_TRAINING_RETRAIN_TIMEOUT },
+        { 80001, true, false, true, V91_TRAINING_RETRAIN_TIMEOUT },
+        /* Receiving B1 alone does not complete both directions of a retrain. */
+        { 80000, true, true, true, V91_TRAINING_RETRAIN_TIMEOUT },
+        { INT64_C(1) << 40, true, false, true, V91_TRAINING_RETRAIN_TIMEOUT },
+        { 0, false, false, false, V91_TRAINING_WAIT },
+        { 12000, true, false, false, V91_TRAINING_WAIT },
+        { 80000, true, false, false, V91_TRAINING_B1_TIMEOUT },
+    };
+
+    vpcm_log("Test: V.91 training deadlines");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        v91_training_timeout_t got = v91_training_timeout(
+            cases[i].elapsed, cases[i].ack, cases[i].b1, cases[i].retrain);
+        if (got != cases[i].expected) {
+            fprintf(stderr, "V.91 deadline case %zu: got %d expected %d\n",
+                    i, (int) got, (int) cases[i].expected);
+            return false;
+        }
+    }
+    vpcm_log("PASS: V.91 training deadlines");
+    return true;
+}
+
 /* V.91 6.3 / 6.3.9: preserve primary and control-channel state when the
  * caller must retry a codeword block with a larger output buffer. */
 static bool test_v91_rx_capacity(v91_law_t law)
@@ -11233,6 +11281,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
+        && test_v91_training_deadlines()
         && test_v91_rx_capacity(V91_LAW_ULAW)
         && test_v91_rx_capacity(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)
