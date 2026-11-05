@@ -323,3 +323,26 @@ in `docs/k56flex_implementation.md` ("The MT5634MU's intermittent failures").
 With them, 4 of 5 calls that pass Phase 2 connect at 44000 V42bis.
 Evening: with the Phase 2 fixes (a repeated INFO0c, a false Tone B reversal) 8 of 8
 calls connect at 44000/46000 V42bis.
+
+## V.90 hardware check, 28 October 2026
+
+One MT5634MU call through the existing `/tmp/mt5634mu` bridge to isolated
+account 2902 on wired CT117 connected after 32.4 s at 49333 down / 31200 up.
+ATI11 confirms V.90, LAPM/V42bis, unchanged initial/final rates, zero TX/RX
+frame errors, zero retrains/renegotiations and normal termination (cause 0).
+All 20 numbered downstream lines arrived byte-exact during the 30-second
+hold. This is not an upstream payload-integrity or repeatability test.
+
+The answerer was the previously built corrected baseline
+`/root/mt9234-debug-20261028/mt9234-fixed2-v90`, not a rebuild of the Mac's
+uncommitted DSP changes. Initial explicit escape was unconfirmed; the bridge's
+close-triggered escape/ATH subsequently dropped carrier, and AT plus full
+ATI11 were recovered. No NVRAM or DSP changes were made.
+
+The other attached modem is MT9234ZBA-USB (`06e0:0319`, TI USB serial bridge),
+not a second MT5634MU. Its existing `/tmp/mt9234zba` bridge was occupied by
+concurrent fax tests and was left untouched, so this run does not grade it.
+Bridge implementation is currently in the sibling `modem-dsp-emu` repository
+at `tools/ti_usb_bridge/`; do not use the MT5634MU USB protocol on that device.
+Local evidence: `artifacts/multitech-pair-20261028/` (AT transcript, recovered
+ATI11, summary, server excerpt and archived server logs/G.711 taps).
