@@ -305,9 +305,41 @@ does not do PAP. This is the rig's grade limit, not a modem drop.
   worse than before the retrain, and the call stays at 21600. 7930 stayed at
   24000 (31.2–33.3 dB) and did not retrain. Data-mode SNR on these calls reads
   32.7–33.5 dB while the rate estimate still says 24000, so 24000 at ~33 dB
-  is itself conservative. Open: why the §11.5 retrain lands 10 dB lower (compare
-  the 7910's §11.5 retrains, which also land lower: see
-  `docs/slmodemd_vs_hardware_20261029.md`).
+  is itself conservative.
+
+**The "10 dB lower" was a B1 misreading, not the line (same day).** An offline
+`v90_engine_replay --dial --sync --echo-ref` of calls 05 and 15 reproduces both
+readings exactly. After the retrain, B1 carries a residual carrier of
+0.1366 and 0.1106 degrees/symbol (1.21 and 0.98 Hz); every first training reads
+under 0.005. Across B1's 128 symbols that ramp alone caps the normalised
+correlation at 0.996–0.997, which reads as 20–22 dB. DATA is entered
+de-rotated by that same rate and measures 30.3–33.7 dB. The far end is not
+off frequency: a z⁴ estimate on the raw tap over 25 s of post-retrain data gives
++0.04 and +0.13 Hz from nominal. The error is our NCO, which sits at 1827.4 Hz
+against 1828.6. Fixed: `v34rx_data.c` now reads B1's correlation with the
+measured ramp removed, as DATA will see it. On replay the post-retrain readings
+become 29.4 / 31.4 dB, and the six first trainings are unchanged. This is a
+measurement only.
+
+Three defects remain open, all ours:
+1. **Phase 4 S detection misses on half of the entries.** The far end's 128T of
+   S arrives while the receiver samples the wrong T/2 output:
+   `phase4_rx_conditioning_init_ex()` keeps the Phase 3 taps but resets
+   `baud_half`, the TED and the RRC history. The eye check needs 256 symbols,
+   longer than S. The S window then peaks at 18–22/32 (it needs 24), and the
+   2048-baud S timeout fires. 4 of 10 Phase 4 entries timed out
+   (two first trainings, both retrains). |z| steadies from 0.2–2.3 to 1.44 the
+   moment the eye flip lands. Keeping the RRC and TED state across the reset
+   made it worse (TRN SNR 7 dB), so the fix is an eye decision within S, not
+   less reset.
+2. **The carrier loop drags while stuck in S.** It tracks TRN symbols against
+   S targets for the whole timeout. On first trainings TRN then pulls it back
+   to 1828.6. On both retrains (the card's J asks us for 4-point TRN there)
+   it stays 1.2 Hz low into MP, where tracking freezes.
+3. **The rate rule at 3200 baud** is still the uncalibrated (SNR+13)/6. With
+   the 1.0 dB margin, 24000 needs B1 >= 31.0 dB, and 7920 reads 30.9 against
+   Phase 4 TRN's 32.9. So its first B1 asks for a retrain to 21600 on a line
+   DATA decodes at 33 dB (distance to grid 0.036).
 
 Provenance on vmhost: driver `/root/e79_matrix.py` (uses `/root/slm_targets.py`),
 batch log `/root/e79/m1.log`, per-call summaries `/root/e79/m1/`, server logs

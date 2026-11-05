@@ -317,6 +317,9 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float gain;
                 bool b1_fallback = false;
                 int32_t prev_derot_rate = s->phase4_da_derot_rate;
+                /* Residual carrier advance per symbol that DATA will be
+                   de-rotated by, 0 when none was accepted. */
+                float b1_dphi = 0.0f;
 
                 search = s->b1_search_len;
                 if (search > 0)
@@ -474,6 +477,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             s->phase4_da_derot_rate = (int32_t)
                                 (dphi*2147483648.0f/3.14159265358979f);
+                            b1_dphi = dphi;
                         }
                         else
                         {
@@ -597,14 +601,49 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 }
                 s->b1_corr = sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
                                    /(expected_power*observed_power));
+                /* v34_get_b1_snr_db() turns this correlation into the SNR the
+                   B1 rate check (11.5) reads.  DATA is entered de-rotated by
+                   the residual carrier measured above, so read B1 the same
+                   way: correlate with that ramp removed about B1's centre.
+                   Uncorrected, a 7920 retrain's 0.137 degrees/symbol (1.21 Hz
+                   at 3200 baud) spans 17 degrees across 128 symbols, caps the
+                   correlation at 0.996 whatever the noise, and read 20.4 dB
+                   while DATA measured 30.3-33.7 dB (docs/eicon_soak_ppp.md).
+                   Measurement only: no decision, coefficient or loop uses it. */
+                if (!b1_fallback  &&  b1_dphi != 0.0f
+                    &&  expected_power > 0.0f  &&  observed_power > 0.0f)
+                {
+                    float centre = (float) (s->v90_t3_b1_symbols - 1)/2.0f;
+                    float dr = 0.0f;
+                    float di = 0.0f;
+
+                    for (int i = 0;  i < s->v90_t3_b1_symbols;  i++)
+                    {
+                        complexf_t o = s->b1_observed[i];
+                        complexf_t e = s->v90_t3_b1[i];
+                        float pr = o.re*e.re + (conjugate ? -o.im*e.im : o.im*e.im);
+                        float pi = (conjugate ? -o.im : o.im)*e.re - o.re*e.im;
+                        float a = -b1_dphi*((float) i - centre);
+                        float ca = cosf(a);
+                        float sa = sinf(a);
+
+                        dr += pr*ca - pi*sa;
+                        di += pr*sa + pi*ca;
+                    }
+                    /*endfor*/
+                    s->b1_corr = sqrtf((dr*dr + di*di)/(expected_power*observed_power));
+                }
+                /*endif*/
                 s->b1_corr_valid = true;
                 V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - B1 acquired: symbols=%d phase=%.2f deg gain=%.4f "
-                         "conjugate=%d normalized-correlation=%.3f\n",
+                         "conjugate=%d normalized-correlation=%.3f (%.3f with the "
+                         "residual carrier removed)\n",
                          s->v90_t3_b1_symbols, phase*180.0f/3.14159265f,
                          gain, conjugate,
                          sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
-                               /(expected_power*observed_power)));
+                               /(expected_power*observed_power)),
+                         s->b1_corr);
                 if (!b1_fallback)
                     v34_rx_condition_b1_equalizer(s, gain, phase);
                 /*endif*/
