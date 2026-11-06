@@ -177,8 +177,9 @@ byte-exact, RTP loss 0, **no V.90 retrain in any run**.
 | 52 | 3 x B + 2 x V.90 | 12 MiB down and 12 MiB up at once | down 520 s, 193.6 kbit/s; up 595 s, 169.3 kbit/s; 363 kbit/s together |
 | 54 | 3 x B + 2 x V.90 | 3 x 16 MiB upload back to back (the test server caps one transfer at 16 MiB) | 637.1, 636.9, 637.1 s: 210.7 kbit/s each; V.90 members ~1,950 s in data unbroken |
 
-The duplex figures sit below the solo ones (236.7 down, 210.5 up) because
-each direction's TCP acknowledgements now queue behind the other's data.
+The duplex figures sit below the solo ones (236.7 down, 210.5 up),
+presumably because each direction's TCP acknowledgements now queue behind
+the other's data (not measured).
 
 **17950 corrupts downstream frames; 17920 and 17930 never do.** Bad-FCS
 frames received on 17950: 120 (15c), 104 (33), 103 (52) on runs carrying a
