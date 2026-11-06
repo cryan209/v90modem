@@ -500,3 +500,37 @@ Additional provenance in CT117: `/tmp/e79-final-7900-20261106/`,
 `/tmp/e79-modemfix{,-v34}-7950-20261106/`, and
 `/tmp/e79-dchannel-7940-20261106/`. These paths are disposable provenance;
 the measured results above are the retained findings.
+
+### Windows 95 on 7920: named-account address-policy regression
+
+At **19:58:42 and 20:03:05 NZDT on 6 November**, the server authenticated
+Windows 95 account `snuggi` with PAP, negotiated client **10.254.114.2** and
+server **10.254.114.1**, then sent IPCP TermReq **"Unauthorized remote IP
+address"** and LCP TermReq **"No network protocols running"**. The client
+acknowledged termination. These calls were actively closed by PPP address
+authorization, not evidence of a physical carrier failure.
+
+Cause: the earlier address-policy edit replaced the old address text inside
+existing quotes. Three named-account records consequently contained all
+eleven permitted subnets in **one quoted address token**. The wildcard record
+used by the successful `v90modem` tests contained eleven separate tokens and
+worked. Those tests did not cover named-account policy. The three malformed
+records are now normalized to eleven distinct subnet tokens, preserving the
+original client/server/secret fields verbatim. A mode-0600 backup is
+`/etc/ppp/pap-secrets.before-address-token-fix-20261106`. Parsed verification
+confirms `snuggi` / `multitech-7910` permits **10.254.114.2**. pppd reads this
+policy for the next authentication; no answerer restart is needed. A fresh
+Windows 95 call opens IPCP at **20:06:43 NZDT**, keeps `e79p4` up at
+**10.254.114.1 peer 10.254.114.2**, and returns **10/10 server-originated
+pings, 0% loss**, RTT **133.002–164.736 ms** (mean **143.438 ms**). The user
+independently confirms the Windows 95 connection is up. This verifies the
+immediate PPP teardown is fixed; it is not a long soak qualification.
+
+The separately approved 7940 law alignment is applied: only its PBX route
+now selects existing endpoint `6501` (allows PCMU), Cisco voice-port 0/2/0
+reports **u-law**, and the probe forces PCMU. The PBX backup is
+`/etc/asterisk/extensions.conf.before-7940-ulaw-20261106`; other dialplan
+routes are unchanged. The bounded test still returns **NO DIAL after 8 s**
+(no SIP CONNECT), so law alignment does not resolve its signaling failure.
+The Cisco change is verified in running configuration; no whole-router
+startup-config save was performed.
