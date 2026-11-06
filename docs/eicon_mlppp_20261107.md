@@ -141,8 +141,9 @@ B only 3.1 MB (33 kbit/s, half its 64000). Linux sizes each link's share of a
 multilink packet by its channel speed (`ppp_generic.c` `ppp_mp_explode`), and
 an async PPP channel's speed is its tty's baud rate. The harness ran pppd with
 `notty`, so every link sat on pppd's own pty at its default 38400. RFC 1990
-leaves the fragment schedule to the sender; the server's pppd splits
-downloads in proportion because its Diva ttys report different speeds.
+leaves the fragment schedule to the sender; the server's pppd already splits
+downloads in proportion (presumably its Diva ttys report different speeds;
+not checked).
 
 `tools/eicon_mlppp.py` now hands pppd the relay pty itself at a baud rate
 proportional to the line rate (64000 -> 115200, 31200 -> 57600; `baud=` per
