@@ -383,3 +383,44 @@ A/B provenance: `/root/e79_ab.py`, batch log `/root/e79/ab1.log`, per-call
 Provenance on vmhost: driver `/root/e79_matrix.py` (uses `/root/slm_targets.py`),
 batch log `/root/e79/m1.log`, per-call summaries `/root/e79/m1/`, server logs
 `/root/e79/m1-ct117-logs.tgz`.
+
+## 6 November 2026: six SIP destinations and PAP/IP boundary
+
+A wired CT117 probe using `/tmp/e79/sip_v90_modem` dialled 7900, 7910,
+7920, 7930, 7940 and 7950 with `AT+MS=V90,0`, analogue role. The first
+four trained at **31200 bit/s in V.34**, not V.90: the captured 7900 V.8
+peer menu offered V.34 only. LCP opened on all four. Exact LCP echoes
+returned **21/22, 21/22, 22/22 and 22/23** respectively; PPP FCS errors
+were **1, 0, 0 and 0**. These probes omit PAP and do not qualify IP service.
+7950 trained at **24000 bit/s**, but supplied no decoded PPP frames during
+45 seconds after CONNECT. 7940 returned **NO DIAL** after 8 seconds.
+
+An authenticated PCMA call to 7900 using PAP user `v90modem` assigned peer
+**10.254.104.13**, completed five pings with **0% packet loss**, and finished
+in **34.7 seconds**. Separate 7910 (PCMU and PCMA), 7920 (PCMA), and 7930
+(PCMA, V.34 ceiling 26400, trained 24000) calls did not complete IP setup.
+Server diagnostics confirm PAP success followed by **`Couldn't create ppp
+interface mtppp0: File exists`** on ttyM4, ttyds14 and ttyds13. Thus at least
+some 7910 calls are answered by the MultiTech ttyM services, rather than the
+Diva ttyds services. Both sets of peers force the same interface name.
+Do not label these failures bad credentials or a demonstrated codec defect.
+
+The PBX has routes for all six numbers via 192.168.88.62. A missing 7940
+answerer was added as `eicon-7940-7.service`, ttyds7, bound explicitly to Diva
+controller 3, copying the existing 7930 PPP policy. It remains ready but a
+repeat call still failed before SIP connection; card-to-gateway span routing
+is unverified. The proposed unique PPP interface-name fix was blocked by
+automatic approval review pending explicit approval; it was **not applied**.
+Gateway SSH access as scottcryan was denied. A separate unrestricted-digital
+17950 call (`AT+MS=CLEAR,0`, `ME_DATA_FRAMING=ppp`) reported CONNECT 64000 but
+received no LCP and is not a working PPP connection.
+
+`tools/eicon_ppp_direct.py` now accepts `--ppp-user` with password in
+`EICON_PPP_PASSWORD`, hides passwords in pppd diagnostics, supports an explicit
+binary/SIP account, and requires zero ping loss for a pass. It clears both
+inherited G.711 force flags before selecting the requested law. No DSP or
+sample-path changes were made. PAP is RFC 1334 §2; async PPP framing remains
+RFC 1662 §4, with the existing clear-channel conversion in §5 on the DS0.
+
+Provenance on vmhost: `/root/e79/sip-six-20261106/`; CT117 modem evidence:
+`/tmp/e79runs/sip-six-20261106/` and `/tmp/e79-auth-*-20261106/`.

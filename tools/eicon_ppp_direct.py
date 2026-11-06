@@ -36,16 +36,24 @@ def main():
     ap.add_argument('--pings', type=int, default=30)
     ap.add_argument('--local-port', type=int, default=5078)
     ap.add_argument('--rtp-port', type=int, default=14600)
+    ap.add_argument('--binary', type=Path, default=ROOT / 'sip_v90_modem')
+    ap.add_argument('--sip-user', help='SIP account (default selected by G.711 law)')
+    ap.add_argument('--ppp-user', help='PAP username; password from EICON_PPP_PASSWORD')
     args = ap.parse_args()
+    if args.ppp_user and 'EICON_PPP_PASSWORD' not in os.environ:
+        ap.error('--ppp-user requires EICON_PPP_PASSWORD')
     d = args.output
     d.mkdir(parents=True, exist_ok=False)
     ext, account = ('7900', '2905') if args.law == 'alaw' else ('7910', '2900')
+    account = args.sip_user or account
     if args.ext:
         ext = args.ext
     pty = '/tmp/eicon-ppp-' + d.name
     env = os.environ.copy()
     env.pop('ME_V34_SPAN_FLOW_LOG', None)
     env.pop('ME_V90_ROLE', None)
+    env.pop('SIP_FORCE_PCMA', None)
+    env.pop('SIP_FORCE_PCMU', None)
     if args.role == 'analogue':
         env['ME_V90_ROLE'] = 'analogue'
     env.update(ME_MODE=args.mode, VPCM_ME_VERBOSE='1',
@@ -59,7 +67,7 @@ def main():
     try:
         with (d / 'server.log').open('wb') as log:
             proc = subprocess.Popen(
-                [str(ROOT / 'sip_v90_modem'), '--sip-server', 'asterisk.net.cryan.nz',
+                [str(args.binary.resolve()), '--sip-server', 'asterisk.net.cryan.nz',
                  '--username', account, '--password', os.environ.get('EICON_SIP_PASSWORD', account),
                  '--local-port', str(args.local_port), '--rtp-port', str(args.rtp_port),
                  '--pty-link', pty, '--verbose'], cwd=ROOT, env=env, stdout=log, stderr=log)
@@ -88,7 +96,7 @@ def main():
                         rx.extend(chunk)
                         if token in rx:
                             return True
-                        if b'NO CARRIER' in rx:
+                        if any(code in rx for code in (b'NO CARRIER', b'NO DIAL', b'BUSY')):
                             return False
                 return False
 
@@ -133,11 +141,15 @@ def main():
             relayer = threading.Thread(target=relay, daemon=True)
             relayer.start()
             with (d / 'pppd.log').open('wb') as out:
+                authentication = []
+                if args.ppp_user:
+                    authentication = ['user', args.ppp_user, 'password',
+                                      os.environ['EICON_PPP_PASSWORD'], 'hide-password']
                 child = subprocess.Popen(
                     ['/usr/sbin/pppd', 'notty', 'nodetach', 'local', 'noauth', 'nodefaultroute',
                      'noproxyarp', 'noipv6', 'noccp', 'novj', 'nopersist', 'logfd', '2',
                      'ipcp-accept-local', 'ipcp-accept-remote', 'lcp-echo-interval', '10',
-                     'lcp-echo-failure', '6', 'debug', '0.0.0.0:'],
+                     'lcp-echo-failure', '6', 'debug', '0.0.0.0:'] + authentication,
                     stdin=slave, stdout=slave, stderr=out)
                 deadline = time.monotonic() + 60
                 peer_ip = None
@@ -146,6 +158,7 @@ def main():
                         raise RuntimeError('pppd exited')
                     text = (d / 'pppd.log').read_text(errors='replace')
                     result['lcp_seen'] = 'rcvd [LCP' in text
+                    result['pap_authenticated'] = 'PAP authentication succeeded' in text
                     m = re.search(r'remote IP address (\S+)', text)
                     if m:
                         peer_ip = m.group(1)
@@ -160,7 +173,7 @@ def main():
                 result['ping_status'] = ping.returncode
                 loss = re.search(rb'(\d+(?:\.\d+)?)% packet loss', ping.stdout)
                 result['loss_percent'] = float(loss.group(1)) if loss else None
-                result['ok'] = ping.returncode == 0
+                result['ok'] = ping.returncode == 0 and result['loss_percent'] == 0
     except Exception as exc:
         result['error'] = str(exc)
         print('ERROR', exc, flush=True)
