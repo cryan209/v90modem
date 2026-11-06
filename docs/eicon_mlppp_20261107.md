@@ -38,6 +38,7 @@ transfer that completed was byte-exact. Rates are receiver-side goodput.
 | 13 | 2 x B + V.90 7920, fixed | 861 s, 116.9 kbit/s | not run | 176 kbit/s with all 3; V.90 retrain failed in Phase 2, 100 s stall |
 | 15c | 3 x B + V.90 7920 + V.90 7930 | 635 s, **158.5 kbit/s** | 577 s, **174.5 kbit/s** | peak 249 kbit/s (60 s); both V.90 members resumed one retrain, lost the second |
 | 14 | 3 x V.90 (7920, 7920, 7930) | aborted at 6.85 MB | not run | 152 kbit/s for 240 s (the user's 3-modem figure); two members lost to failed retrains by 360 s, 240 s at zero, then one link |
+| 33 | as 15c, loop-timed TX | 425 s, **236.7 kbit/s** | 754 s, 133.4 kbit/s | no V.90 retrains in ~1,200 s; upload held back by our pppd's even split (below) |
 
 \* The first harness relay dropped writes that would block (fixed before
 run 15c): the upload pushed 165.8 kbit/s of IP into a 128 kbit/s pair and
@@ -78,15 +79,74 @@ upstream, the Diva's downstream), no idle flags, ~757-octet MP fragments.
 3. **Harness relays lost data** under backpressure (`tools/eicon_mlppp.py`,
    `tools/eicon_ppp_direct.py`), now lossless.
 
+## The V.90 retrains were our transmit clock
+
+The Diva retrained our V.90 upstream 192–272 s into data, then about every
+150 s. Cause: **we sent at this host's 8000 Hz, not the network's.**
+
+- Every call's received RTP runs **+62.3 ppm** against CT117's clock (linear
+  fit of RTP timestamp against arrival time, 25 calls, 47–1846 s, spread
+  +62.0 to +67.9); our send rate fitted **0.0 ± 0.5 ppm**. The Cisco
+  therefore receives our upstream 0.5 samples/s slower than its TDM clock
+  plays it out.
+- The BRI voice ports use default adaptive playout, which corrects that by
+  inserting a block: the 8 Oct card captures showed our upstream stepping
+  by **80 samples** (`eicon_live_20261008.md`). 80 samples at 0.5 samples/s
+  is **160 s**, the retrain interval. Each insertion is a 10 ms step in the
+  upstream the Diva's receiver cannot absorb. Windows 95 modems never see
+  it: a codec on a real line is network-timed (V.90 5.2), so their upstream
+  reaches the network at its own rate.
+- Our receive side was not involved: the fixed 40 ms jitter buffer has
+  840 ms of headroom and never discarded.
+- ISDN B channels go through the same insertions (one damaged HDLC frame
+  each, recovered by TCP), which is why only V.90 noticed.
+
+**Fix: loop timing** (`media_clock.c`, `ME_TX_LOOP_TIMING`, default on). The
+engine already emits one transmit sample per received sample, so nothing is
+resampled: a thread of ours replaces pjsua's null sound device and ticks the
+conference bridge at the rate the far end's RTP arrives, steered by a PI loop
+on receive-buffer fill (least-delayed packet per 1 s window; 0.05 rad/s,
+critically damped). Offline (`media_clock_test`): locks to +62, 0, −150 and
++300 ppm within 0.5 ppm under 0–15 ms jitter, fill held within 4 samples.
+Live it sends at **+61.7 ppm** against **+62.0 ppm** received.
+
+Live A/B, both arms in one MLPPP bundle at the same time, arms swapped
+between numbers:
+
+| Run | Link | TX timing | Retrains | Data held |
+|---|---|---|---|---|
+| 30 | 7920 | loop-timed | none | 343 s, whole call |
+| 30 | 7930 | host clock | 236 s | — |
+| 31 | 7920 | host clock | 271 s (resumed), 432 s (failed) | lost at 432 s |
+| 31 | 7930 | loop-timed | 70 s (resumed) | then 1,395 s unbroken to the end |
+
+Host clock: 3 retrains, at 236, 271 and 432 s, as every earlier call.
+Loop-timed: one, at 70 s, which the drift cannot explain (at most 35
+samples by then even uncorrected, under half a block; our send timing at
+that moment ramps smoothly, no step); the next
+1,395 s, nine retrain intervals' worth, had none.
+
+End to end, run 33 repeats 15c (3 x B + V.90 7920 + V.90 7930, 12 MiB each
+way) with every link loop-timed: **no retrain on either V.90 member in
+1,195–1,223 s of data** (15c: both retrained at ~245 s and lost the second).
+Download 425 s, **236.7 kbit/s** (15c 158.5), proportional to line rate: B
+59 kbit/s, V.90 52 kbit/s each. Upload 754 s, 133.4 kbit/s, both byte-exact.
+
+The upload is slower than 15c's 3-B 174.5 because our Linux pppd splits
+outgoing MP traffic about evenly, not by link speed: each V.90 member carried
+2.75 MB up (29 kbit/s, near its 31200 line) and each B only 3.1 MB
+(33 kbit/s, half its 64000). The server's pppd splits downloads in
+proportion. An upload bundle should not include V.90 members until the client
+weights its links (RFC 1990 leaves the fragment schedule to the sender).
+
+Between two of our own instances neither end is a master, so the pair's
+common rate is free to wander (by an estimated few ppm an hour, harmless).
+Every gateway is network-timed, so this only arises in our loopback tests.
+
 ## Open issues
 
-1. **The Diva retrains our V.90 upstream every few minutes.** First Tone B at
-   192–272 s into data on 8/8 V.90 members that lasted that long, the next
-   ~150 s after resuming. No RTP send gap over 35 ms on those calls (13,206
-   packets checked on one). The user's analogue modems hold hour-long
-   sessions on the same answerers, so this is ours until shown otherwise.
-   Next: A/B the upstream ceiling (28800/26400) and look for slow timing or
-   level drift in the TX tap over the first 200 s.
+1. **One early retrain with loop timing** (run 31, 7930, 54 s into data).
+   One case; it resumed in 10.6 s.
 2. **Retrain fails when we miss the Tone A reversal.** In all 8 retrains:
    reversal seen 160–180 ms after FIRST_NOT_A gives DATA in 10.6–10.8 s (5/5);
    the 2.2 s fallback gives no INFO1d decode and no recovery (3/3).
@@ -99,4 +159,4 @@ upstream, the Diva's downstream), no idle flags, ~757-octet MP fragments.
 5. The clear-channel summary line reports `rx 0 frames` in PPP mode
    (cosmetic; `ppp_rx_frames` is not printed).
 
-Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c}*` (disposable).
+Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.

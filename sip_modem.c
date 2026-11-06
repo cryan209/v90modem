@@ -28,6 +28,7 @@
 #include "data_interface.h"
 #include "v250_ctl.h"
 #include "line_monitor.h"
+#include "media_clock.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <limits.h>
@@ -338,6 +339,158 @@ static pj_status_t modem_passthrough_port_create(const pjmedia_port *source_port
 }
 
 /* ------------------------------------------------------------------ */
+/* Loop-timed media clock (media_clock.h)                              */
+/*                                                                      */
+/* pjsua's null sound device ticks the conference bridge off this      */
+/* host's oscillator, so our transmit stream ran at OUR 8000 Hz and    */
+/* the far gateway's playout buffer absorbed the difference with       */
+/* 10 ms insertions -- each one a step in the upstream the far modem   */
+/* had to retrain over.  With loop timing we drive the bridge          */
+/* ourselves, one frame per tick, at the rate the far end's RTP        */
+/* arrives (V.90 5.2: the PCM stream is timed from the network).       */
+/* ME_TX_LOOP_TIMING=0 restores the null sound device.                 */
+/* ------------------------------------------------------------------ */
+
+static int g_loop_timing = 1;
+static media_clock_t g_mclock;
+static pthread_mutex_t g_mclock_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_mclock_thread;
+static volatile int g_mclock_run;
+static pjmedia_port *g_mclock_conf;
+static int64_t g_mclock_last_log_ns;
+
+static int64_t mclock_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000000LL + (int64_t) ts.tv_nsec;
+}
+
+static void mclock_reset(void)
+{
+    if (!g_loop_timing)
+        return;
+    pthread_mutex_lock(&g_mclock_lock);
+    media_clock_reset(&g_mclock);
+    pthread_mutex_unlock(&g_mclock_lock);
+}
+
+static void mclock_rx(uint32_t rtp_ts, int64_t now_ns)
+{
+    if (!g_loop_timing)
+        return;
+    pthread_mutex_lock(&g_mclock_lock);
+    media_clock_rx(&g_mclock, rtp_ts, now_ns);
+    pthread_mutex_unlock(&g_mclock_lock);
+}
+
+static void *mclock_main(void *arg)
+{
+    pj_thread_desc desc;
+    pj_thread_t *self = NULL;
+    unsigned fsz = PJMEDIA_PIA_AVG_FSZ(&g_mclock_conf->info);
+    unsigned spf = PJMEDIA_PIA_SPF(&g_mclock_conf->info);
+    void *buf = calloc(1, fsz ? fsz : 320);
+    void *silence = calloc(1, fsz ? fsz : 320);
+    double next;
+
+    (void) arg;
+    pj_bzero(desc, sizeof(desc));
+    pj_thread_register("mclock", desc, &self);
+    if (self)
+        pj_thread_set_prio(self, pj_thread_get_prio_max(self));
+    next = (double) mclock_now_ns();
+    while (g_mclock_run) {
+        int64_t now = mclock_now_ns();
+        double period;
+        pjmedia_frame f;
+
+        if ((double) now < next) {
+            int64_t wait = (int64_t) (next - (double) now);
+            struct timespec req = { (time_t) (wait / 1000000000LL), (long) (wait % 1000000000LL) };
+            nanosleep(&req, NULL);
+            continue;
+        }
+        /* Behind by more than a second (suspended, debugger): resync rather
+           than burst.  Shorter stalls catch up tick by tick, as
+           pjmedia_clock does, so no frame is skipped. */
+        if ((double) now - next > 1e9)
+            next = (double) now;
+
+        pthread_mutex_lock(&g_mclock_lock);
+        media_clock_tick(&g_mclock, now);
+        period = media_clock_period_ns(&g_mclock);
+        if (now - g_mclock_last_log_ns >= 30000000000LL && g_mclock.windows > 0) {
+            g_mclock_last_log_ns = now;
+            PJ_LOG(4, ("sip_modem", "TX loop timing: %+.2f ppm (fill error %+.1f samples)",
+                       media_clock_ppm(&g_mclock), g_mclock.last_err));
+        }
+        pthread_mutex_unlock(&g_mclock_lock);
+
+        /* What pjmedia_master_port's clock_callback does with a null port:
+           silence into port 0, then pull port 0 -- which runs the bridge,
+           receiving and transmitting every connected call. */
+        pj_bzero(&f, sizeof(f));
+        f.type = PJMEDIA_FRAME_TYPE_AUDIO;
+        f.buf = silence;
+        f.size = fsz;
+        f.timestamp.u64 = (pj_uint64_t) g_mclock.ticks * spf;
+        pjmedia_port_put_frame(g_mclock_conf, &f);
+        pj_bzero(&f, sizeof(f));
+        f.buf = buf;
+        f.size = fsz;
+        f.timestamp.u64 = (pj_uint64_t) g_mclock.ticks * spf;
+        pjmedia_port_get_frame(g_mclock_conf, &f);
+
+        next += period;
+    }
+    free(buf);
+    free(silence);
+    return NULL;
+}
+
+/* Replaces pjsua_set_null_snd_dev(); returns its status. */
+static pj_status_t mclock_install(void)
+{
+    /* 0 transmits on the host clock (null sound device); default 1 paces sends to the received RTP clock */
+    const char *v = getenv("ME_TX_LOOP_TIMING");
+
+    if (v && *v)
+        g_loop_timing = atoi(v) != 0;
+    if (!g_loop_timing) {
+        PJ_LOG(3, ("sip_modem", "TX timing: host clock (null sound device)"));
+        return pjsua_set_null_snd_dev();
+    }
+    g_mclock_conf = pjsua_set_no_snd_dev();
+    if (!g_mclock_conf)
+        return PJ_ENOTFOUND;
+    media_clock_init(&g_mclock, (int) PJMEDIA_PIA_SRATE(&g_mclock_conf->info),
+                     (int) PJMEDIA_PIA_SPF(&g_mclock_conf->info));
+    PJ_LOG(3, ("sip_modem", "TX timing: loop-timed to the received RTP clock"));
+    return PJ_SUCCESS;
+}
+
+static void mclock_start(void)
+{
+    if (!g_loop_timing || g_mclock_run)
+        return;
+    g_mclock_run = 1;
+    if (pthread_create(&g_mclock_thread, NULL, mclock_main, NULL) != 0) {
+        g_mclock_run = 0;
+        PJ_LOG(1, ("sip_modem", "TX loop timing: cannot start the media clock thread"));
+    }
+}
+
+/* Before pjsua_destroy(): the thread drives the conference bridge. */
+static void mclock_stop(void)
+{
+    if (!g_mclock_run)
+        return;
+    g_mclock_run = 0;
+    pthread_join(g_mclock_thread, NULL);
+}
+
+/* ------------------------------------------------------------------ */
 /* RTP timing tap — feeds clock_recovery.c's DPLL                     */
 /*                                                                      */
 /* modem_passthrough_get_frame() pulls audio through PJSIP's own       */
@@ -456,6 +609,7 @@ static void rtp_tap_observe(rtp_tap_transport_t *tap, const void *pkt,
     now_ns = rtp_tap_now_ns();
     rtp_trace_packet(&tap->rx_trace, pkt, (pj_size_t)size, now_ns);
     me_cr_update(pj_ntohl(hdr->ts), now_ns);
+    mclock_rx(pj_ntohl(hdr->ts), now_ns);
 }
 
 static void rtp_tap_rtp_cb2(pjmedia_tp_cb_param *param)
@@ -684,6 +838,7 @@ static pjmedia_transport *on_create_media_transport(pjsua_call_id call_id,
         pj_grp_lock_add_handler(base_tp->grp_lock, pool, tap, &rtp_tap_on_destroy);
     }
 
+    mclock_reset();   /* a new call is a new far-end clock */
     PJ_LOG(3, ("sip_modem", "RTP clock-recovery tap installed on call %d media %d",
                call_id, media_idx));
     return &tap->base;
@@ -1715,8 +1870,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Use null sound device — audio is handled by our media port */
-    pjsua_set_null_snd_dev();
+    /* No sound device -- audio is handled by our media port, clocked by
+       mclock (loop-timed) or the null sound device. */
+    status = mclock_install();
+    if (status != PJ_SUCCESS)
+        PJ_LOG(1, ("sip_modem", "media clock setup failed: %d", status));
 
     if (ata_server) {
         if (sip_server) { fprintf(stderr, "ATA server cannot use an upstream SIP server\n"); return 2; }
@@ -1763,6 +1921,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     di_set_auto_answer(auto_answer);
+    mclock_start();
     di_set_connect_timeout(connect_timeout);
     di_load_profile(profile);
 
@@ -1978,6 +2137,7 @@ int main(int argc, char *argv[])
         pjsua_call_hangup(g_call_id, 0, NULL, NULL);
 
     pjsua_handle_events(200); /* flush pending events */
+    mclock_stop();
     /* The audio subsystem was initialized with PJSUA's pool factory.
      * Destroy its CoreAudio factories before pjsua_destroy() invalidates
      * that factory and the mutexes allocated from it.  The error paths above
