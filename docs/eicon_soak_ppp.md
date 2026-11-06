@@ -424,3 +424,79 @@ RFC 1662 §4, with the existing clear-channel conversion in §5 on the DS0.
 
 Provenance on vmhost: `/root/e79/sip-six-20261106/`; CT117 modem evidence:
 `/tmp/e79runs/sip-six-20261106/` and `/tmp/e79-auth-*-20261106/`.
+
+### Follow-up: approved PPP fixes and four complete IP checks
+
+With explicit approval, the eleven Diva/MultiTech peers that shared
+`ifname mtppp0` were assigned `e79p0` through `e79p10`, and address pairs
+`10.254.110.1:10.254.110.2` through `10.254.120.1:10.254.120.2`, in this order:
+7900-1, 7900-2, 7910-c, 7910-d, 7920-14, 7920-15, 7930-12, 7930-13,
+7940-7, multitech-7910, multitech-7910-b. Backups have suffixes
+`.before-ifname-20261106` and `.before-address-20261106`. Restarts require
+both a waiting descendant `chat` process and no `/dev/ppp` descriptor;
+connected channels were left running.
+
+The first retest negotiated IP but lost all five pings: **PAP's address
+policy still forced every client to 10.254.104.2**, overriding each peer's
+new default. The return route belonged to another active call. The approved
+address fix therefore also replaces that pin in the four `multitech-7910`
+PAP policy records with the eleven per-port /24 ranges, preserving passwords
+and making a mode-0600 `pap-secrets.before-address-20261106` backup. The new
+per-port default is now permitted rather than overridden. PAP is RFC 1334
+§2; the measured address exchange is IPCP (RFC 1332 §3.3).
+
+Completed PCMA checks from wired CT117, analogue role, fixed 40 ms local RTP
+prefetch, five ICMP pings after PAP and IPCP:
+
+| Destination | CONNECT | PPP peer | Pings | Total probe duration |
+|---|---:|---|---|---:|
+| 7900 | 31200 | 10.254.104.13 | 5/5, 0% loss | 34.8 s |
+| 7910 | 31200 | 10.254.119.1 | 5/5, 0% loss | 34.4 s |
+| 7920 | 31200 | 10.254.114.1 | 5/5, 0% loss | 31.4 s |
+| 7930 | 31200 | 10.254.117.1 | 5/5, 0% loss | 31.3 s |
+
+These are short **V.34** IP checks, not V.90 or sustained-transfer
+qualification. 7900's answering MultiTech service uses its separate existing
+address policy. Example from a Linux build on the wired rig, with
+`EICON_PPP_PASSWORD` already exported:
+
+```sh
+ME_JB_MS=40 python3 tools/eicon_ppp_direct.py artifacts/eicon-7920-ppp \
+  --ext 7920 --law alaw --mode v90 --role analogue \
+  --ppp-user v90modem --pings 5 --local-port 5092 --rtp-port 14920
+```
+
+**7940 remains unresolved.** Its AT log confirms `AT&F14`, `AT+iQ=a3`,
+`AT+iA7940`, `AT+MS=V90,1` and auto-answer were all accepted. Cisco BRI0/2/0
+and Diva controller 3 have Layer 1 active. Resetting only that Cisco port
+established an additional Layer 2 instance but did not fix calls. Q.931
+SETUP repeats at four seconds and ends with cause **102 (timer expiry)**;
+a 30-second Diva D-channel trace independently sees the SETUP for 7940,
+so the message reaches the card. The approved `isdn skipsend-idverify`
+experiment did not help and was reverted; all Cisco debugging was disabled.
+Attempts to select controller 4's stable-L2 mode through mantool did **not**
+change controller 3: the verified readback remains **On demand (0)**. Do not
+report that mode change as applied. Controller 3 also reports **u-Law TRUE**,
+whereas gateway voice-port 0/2/0 is A-law and the PBX `toprouter-bri` endpoint
+allows only A-law. End-to-end law alignment requires the corresponding
+SIP route/endpoint as well as gateway configuration; it must not add a
+transcoding step. That additional change awaits explicit approval.
+
+**7950 is not qualified.** Its idle `isdn-7950` service was switched from
+profile 9 to a profile-14 modem chat script on controller 4, with peer backup
+`.before-modem-profile-20261106`. The card then reports V.90
+**56000 TX / 21600 RX**, but the caller receives no PPP LCP and retrains.
+A V.34 call (26400 ceiling) trains at **24000**, completes PAP/IPCP, and
+returns only **1 of 5 pings (80% loss)**. Its receive distance to grid rises
+from **0.0697 to 0.6703**, with a peer retrain; reported RTP packet loss and
+discard are **zero**. A 14400-ceiling attempt retrains to **4800** and times
+out in IPCP. A 9600-ceiling attempt CONNECTs at **9600** and receives LCP, but does not
+complete LCP or PAP within **55.0 s**. A clean V.32bis attempt does not
+CONNECT. An earlier overlapping
+V.32bis attempt is excluded. No DSP constants or DS0 processing changed.
+
+Additional provenance in CT117: `/tmp/e79-final-7900-20261106/`,
+`/tmp/e79-addressfix-{7910,7920,7930}-20261106/`,
+`/tmp/e79-modemfix{,-v34}-7950-20261106/`, and
+`/tmp/e79-dchannel-7940-20261106/`. These paths are disposable provenance;
+the measured results above are the retained findings.
