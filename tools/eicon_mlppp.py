@@ -38,6 +38,16 @@ ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_SEED = b'eicon-ppp-http-v1'          # matches http_test_server.py
 
 
+STD_BAUD = (9600, 19200, 38400, 57600, 115200, 230400, 460800)
+
+
+def link_baud(rate):
+    """A standard baud rate proportional to the line rate (64000 -> 115200,
+    31200 -> 57600): only the ratio between links matters to the split."""
+    target = 1.8 * (rate or 64000)
+    return min(STD_BAUD, key=lambda b: abs(b - target))
+
+
 def parse_link(spec, index):
     link = dict(ms='AT+MS=V90,0', law='alaw', role='analogue', framing=None,
                 clearmode='0', delay='0', env=[])
@@ -56,7 +66,8 @@ def parse_link(spec, index):
 
 
 class Link:
-    def __init__(self, index, cfg, outdir, binary, common_env):
+    def __init__(self, index, cfg, outdir, binary, common_env, weight=True):
+        self.weight = weight
         self.i, self.cfg = index, cfg
         self.d = outdir / ('link-%d-%s' % (index, cfg['ext']))
         self.d.mkdir(parents=True)
@@ -195,13 +206,28 @@ class Link:
         threading.Thread(target=relay, daemon=True).start()
         self.pppd_log = self.d / 'pppd.log'
         out = self.pppd_log.open('wb')
-        self.pppd = subprocess.Popen(
-            ['/usr/sbin/pppd', 'notty', 'nodetach', 'local', 'noauth', 'nodefaultroute',
-             'noproxyarp', 'noipv6', 'noccp', 'novj', 'nopersist', 'logfd', '2',
-             'ipcp-accept-local', 'ipcp-accept-remote', 'lcp-echo-interval', '10',
-             'lcp-echo-failure', '6', 'debug', 'multilink', 'mrru', '1500',
-             '0.0.0.0:'] + self.cfg.get('pppd_extra', []),
-            stdin=slave, stdout=slave, stderr=out)
+        # Linux splits each multilink packet across the free links in
+        # proportion to their channel speed (ppp_generic.c ppp_mp_explode),
+        # and an async PPP channel's speed is its tty's baud rate.  Under
+        # `notty` pppd made its own pty, every link sat at that pty's
+        # default 38400, and the split was even: a 3 x B + 2 x V.90 upload
+        # ran each B at the V.90 members' 29 kbit/s.  Give pppd the relay
+        # pty itself at a baud rate proportional to the line rate.
+        # RFC 1990 leaves the fragment schedule to the sender.
+        base = ['/usr/sbin/pppd', 'nodetach', 'local', 'noauth', 'nodefaultroute',
+                'noproxyarp', 'noipv6', 'noccp', 'novj', 'nopersist', 'logfd', '2',
+                'ipcp-accept-local', 'ipcp-accept-remote', 'lcp-echo-interval', '10',
+                'lcp-echo-failure', '6', 'debug', 'multilink', 'mrru', '1500',
+                '0.0.0.0:'] + self.cfg.get('pppd_extra', [])
+        if self.weight:
+            self.baud = int(self.cfg.get('baud') or link_baud(self.result.get('connect_rate')))
+            self.result['tty_baud'] = self.baud
+            self.slave = slave        # keep it open: pppd's close must not EIO the relay
+            self.pppd = subprocess.Popen([base[0], os.ttyname(slave), str(self.baud)] + base[1:],
+                                         stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+        else:
+            self.pppd = subprocess.Popen([base[0], 'notty'] + base[1:],
+                                         stdin=slave, stdout=slave, stderr=out)
 
     def ppp_text(self):
         try:
@@ -247,12 +273,15 @@ def main():
     ap.add_argument('--join-timeout', type=float, default=90)
     ap.add_argument('--binary', type=Path, default=ROOT / 'sip_v90_modem')
     ap.add_argument('--jb-ms', default='40')
+    ap.add_argument('--weight', choices=('on', 'off'), default='on',
+                    help='on: pppd on the relay pty at a baud rate proportional to the line rate, '
+                         'so the kernel weights the MP split; off: notty (every link 38400, even split)')
     ap.add_argument('--hold', type=float, default=0, help='extra seconds to keep the bundle up after the tests')
     args = ap.parse_args()
     out = args.output
     out.mkdir(parents=True, exist_ok=False)
     common_env = {'ME_JB_MS': args.jb_ms} if args.jb_ms else {}
-    links = [Link(i, parse_link(s, i), out, args.binary.resolve(), common_env)
+    links = [Link(i, parse_link(s, i), out, args.binary.resolve(), common_env, args.weight == 'on')
              for i, s in enumerate(args.link)]
     summary = dict(links=[], tests={}, ok=False, bytes=args.bytes)
     t_start = time.monotonic()

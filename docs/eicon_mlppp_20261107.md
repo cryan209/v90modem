@@ -38,7 +38,8 @@ transfer that completed was byte-exact. Rates are receiver-side goodput.
 | 13 | 2 x B + V.90 7920, fixed | 861 s, 116.9 kbit/s | not run | 176 kbit/s with all 3; V.90 retrain failed in Phase 2, 100 s stall |
 | 15c | 3 x B + V.90 7920 + V.90 7930 | 635 s, **158.5 kbit/s** | 577 s, **174.5 kbit/s** | peak 249 kbit/s (60 s); both V.90 members resumed one retrain, lost the second |
 | 14 | 3 x V.90 (7920, 7920, 7930) | aborted at 6.85 MB | not run | 152 kbit/s for 240 s (the user's 3-modem figure); two members lost to failed retrains by 360 s, 240 s at zero, then one link |
-| 33 | as 15c, loop-timed TX | 425 s, **236.7 kbit/s** | 754 s, 133.4 kbit/s | no V.90 retrains in ~1,200 s; upload held back by our pppd's even split (below) |
+| 33 | as 15c, loop-timed TX | 425 s, **236.7 kbit/s** | 754 s, 133.4 kbit/s | no V.90 retrains in ~1,200 s; upload held back by an even MP split (below) |
+| 40 | as 33, upload weighted by link speed | not run | 478 s, **210.5 kbit/s** | B channels at line rate; control run 41 (even split): 133.2 |
 
 \* The first harness relay dropped writes that would block (fixed before
 run 15c): the upload pushed 165.8 kbit/s of IP into a 128 kbit/s pair and
@@ -132,12 +133,33 @@ way) with every link loop-timed: **no retrain on either V.90 member in
 Download 425 s, **236.7 kbit/s** (15c 158.5), proportional to line rate: B
 59 kbit/s, V.90 52 kbit/s each. Upload 754 s, 133.4 kbit/s, both byte-exact.
 
-The upload is slower than 15c's 3-B 174.5 because our Linux pppd splits
-outgoing MP traffic about evenly, not by link speed: each V.90 member carried
-2.75 MB up (29 kbit/s, near its 31200 line) and each B only 3.1 MB
-(33 kbit/s, half its 64000). The server's pppd splits downloads in
-proportion. An upload bundle should not include V.90 members until the client
-weights its links (RFC 1990 leaves the fragment schedule to the sender).
+## Weighting the upload split
+
+Run 33's upload was slower than 15c's 3-B 174.5 because the split was even:
+each V.90 member carried 2.75 MB up (29 kbit/s, near its 31200 line) and each
+B only 3.1 MB (33 kbit/s, half its 64000). Linux sizes each link's share of a
+multilink packet by its channel speed (`ppp_generic.c` `ppp_mp_explode`), and
+an async PPP channel's speed is its tty's baud rate. The harness ran pppd with
+`notty`, so every link sat on pppd's own pty at its default 38400. RFC 1990
+leaves the fragment schedule to the sender; the server's pppd splits
+downloads in proportion because its Diva ttys report different speeds.
+
+`tools/eicon_mlppp.py` now hands pppd the relay pty itself at a baud rate
+proportional to the line rate (64000 -> 115200, 31200 -> 57600; `baud=` per
+link overrides, `--weight off` restores `notty`). Same 3 x B + 2 x V.90
+bundle, 12 MiB upload, both byte-exact, no retrains:
+
+| Run | Split | Upload | B channel | V.90 member |
+|---|---|---|---|---|
+| 41 | even (`notty`) | 755.6 s, 133.2 kbit/s | 3.1 MB (33 kbit/s) | 2.76 MB (29 kbit/s) |
+| 40 | weighted | 478.1 s, **210.5 kbit/s** | 3.9 MB (65 kbit/s) | 1.74 MB (29 kbit/s) |
+
+The B channels now run at line rate (65 kbit/s of HDLC-framed octets) and
+the V.90 members still fill their 31200, so adding V.90 to an upload bundle
+helps (210.5 against 174.5 for 3 B alone) instead of hurting. Anyone running
+pppd directly on our PTYs gets the same effect by giving each link's pppd a
+proportional speed (`pppd /tmp/v90modem.0 115200 ...` for a B channel,
+`57600` for a V.90 line).
 
 Between two of our own instances neither end is a master, so the pair's
 common rate is free to wander (by an estimated few ppm an hour, harmless).
@@ -159,4 +181,4 @@ Every gateway is network-timed, so this only arises in our loopback tests.
 5. The clear-channel summary line reports `rx 0 frames` in PPP mode
    (cosmetic; `ppp_rx_frames` is not printed).
 
-Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
+Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33,40,41}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
