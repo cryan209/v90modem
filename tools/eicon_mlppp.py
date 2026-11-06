@@ -148,22 +148,49 @@ class Link:
         if tail:
             os.write(master, tail)
 
+        # Lossless relay with backpressure.  The modem PTY is non-blocking:
+        # a write that would block, or a short one, must keep the rest for
+        # later, and we stop reading a side while its peer has a backlog so
+        # the stall reaches pppd and TCP.  The first version dropped such
+        # writes, so the upload sent 143 kbit/s of IP into a 128 kbit/s
+        # bundle and lost the difference to retransmission.
+        os.set_blocking(master, False)
+        to_modem, to_pppd = bytearray(), bytearray()
+        LIMIT = 4096
+
         def relay():
             while not self.stop.is_set():
-                r, _, _ = select.select([self.fd, master], [], [], .2)
+                rl = []
+                if len(to_modem) < LIMIT:
+                    rl.append(master)
+                if len(to_pppd) < LIMIT:
+                    rl.append(self.fd)
+                wl = ([self.fd] if to_modem else []) + ([master] if to_pppd else [])
                 try:
-                    if self.fd in r:
-                        data = os.read(self.fd, 65536)
+                    r, w, _ = select.select(rl, wl, [], .2)
+                except (OSError, ValueError):
+                    return
+                for src, buf, attr in ((self.fd, to_pppd, 'bytes_from_modem'),
+                                       (master, to_modem, 'bytes_to_modem')):
+                    if src in r:
+                        try:
+                            data = os.read(src, LIMIT)
+                        except (BlockingIOError, InterruptedError):
+                            data = b''
+                        except OSError:
+                            return
                         if data:
-                            self.bytes_from_modem += len(data)
-                            os.write(master, data)
-                    if master in r:
-                        data = os.read(master, 65536)
-                        if data:
-                            self.bytes_to_modem += len(data)
-                            os.write(self.fd, data)
-                except (BlockingIOError, OSError):
-                    continue
+                            setattr(self, attr, getattr(self, attr) + len(data))
+                            buf.extend(data)
+                for dst, buf in ((self.fd, to_modem), (master, to_pppd)):
+                    if dst in w and buf:
+                        try:
+                            n = os.write(dst, buf)
+                        except (BlockingIOError, InterruptedError):
+                            n = 0
+                        except OSError:
+                            return
+                        del buf[:n]
 
         threading.Thread(target=relay, daemon=True).start()
         self.pppd_log = self.d / 'pppd.log'

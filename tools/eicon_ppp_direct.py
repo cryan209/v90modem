@@ -122,21 +122,37 @@ def main():
             if tail:
                 os.write(master, tail)
             stop = threading.Event()
+            # Lossless, with backpressure: a write that would block or comes
+            # up short keeps the rest (the old relay dropped it, which costs
+            # TCP retransmissions on any transfer larger than a ping).
+            os.set_blocking(master, False)
+            to_modem, to_pppd = bytearray(), bytearray()
 
             def relay():
                 while not stop.is_set():
-                    r, _, _ = select.select([fd, master], [], [], .2)
+                    rl = ([master] if len(to_modem) < 4096 else []) + \
+                         ([fd] if len(to_pppd) < 4096 else [])
+                    wl = ([fd] if to_modem else []) + ([master] if to_pppd else [])
                     try:
-                        if fd in r:
-                            data = os.read(fd, 65536)
-                            if data:
-                                os.write(master, data)
-                        if master in r:
-                            data = os.read(master, 65536)
-                            if data:
-                                os.write(fd, data)
-                    except (BlockingIOError, OSError):
-                        continue
+                        r, w, _ = select.select(rl, wl, [], .2)
+                    except (OSError, ValueError):
+                        return
+                    for src, buf in ((fd, to_pppd), (master, to_modem)):
+                        if src in r:
+                            try:
+                                buf.extend(os.read(src, 4096))
+                            except (BlockingIOError, InterruptedError):
+                                pass
+                            except OSError:
+                                return
+                    for dst, buf in ((fd, to_modem), (master, to_pppd)):
+                        if dst in w and buf:
+                            try:
+                                del buf[:os.write(dst, buf)]
+                            except (BlockingIOError, InterruptedError):
+                                pass
+                            except OSError:
+                                return
 
             relayer = threading.Thread(target=relay, daemon=True)
             relayer.start()
