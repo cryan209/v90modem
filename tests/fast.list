@@ -10,6 +10,8 @@ python3 tools/test_retention.py
 python3 tools/check_reference_data.py
 # Bounded stdout/stderr capture and test-runner status handling.
 python3 tools/test_log_capture.py
+# MLPPP members share a kernel unit after per-peer interfaces are renamed.
+python3 -m unittest discover -s tools/eicon -p test_collect_ppp_members.py
 # Allocation-free media callback latency histograms (no hardware dependency).
 ./media_perf_test
 python3 tools/test_media_perf_report.py

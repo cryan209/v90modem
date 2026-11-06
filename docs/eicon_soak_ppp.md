@@ -534,3 +534,45 @@ routes are unchanged. The bounded test still returns **NO DIAL after 8 s**
 (no SIP CONNECT), so law alignment does not resolve its signaling failure.
 The Cisco change is verified in running configuration; no whole-router
 startup-config save was performed.
+
+### MLPPP stats and network access after interface/address changes
+
+The Windows 95 bundle stays on **e79p4 / kernel PPP unit 0** while additional
+links configured as e79p5 and e79p6 join it. The old stats collector required
+each peer's configured interface to exist before querying its TTY, so it
+omitted the joined links. `/usr/local/lib/ppp-web/collect-members.py` now
+queries PPPIOCGUNIT first, maps the original modem from the interface-up
+record to the live interface, and groups all members by kernel unit. A
+validated ifindex mapping persists when the first modem leaves. An interface
+name reused with a new ifindex cannot inherit the old mapping. The last
+CONNECT report is selected rather than the first historical report.
+
+Canonical collector and three regressions are now in
+`tools/eicon/collect_ppp_members.py` and `test_collect_ppp_members.py`, with a
+fast-tier row. The regressions cover a joined member whose configured
+interface does not exist, departure of the first modem, and stale interface
+name reuse. Live `/stats.json` and `/stats` on port 8085 both show **3 active
+links**: ttyds14 (**49333/31200** down/up), ttyds15 (**50666/26400**) and
+ttyds12 (**52000/31200**), combined initial rates **151999/88800 bit/s**.
+These are negotiated line rates, not measured aggregate throughput. The
+collector deployment backup is `collect-members.py.before-unit-map-20261106`.
+PPP calls were not restarted.
+
+The address/interface changes also regressed Internet/LAN web access: NAT
+only covered the old client IPs, web redirects matched only ppp*/mtppp*, and
+the proxy's CLIENTS set rejected the new addresses. After explicit approval,
+`/etc/nftables.d/ppp-internet.nft` and its live table were updated atomically:
+redirects also match **e79p*/isdnppp***, and outbound masquerading includes
+**10.254.110–120.2**, plus existing clients **10.254.104.10, 10.254.104.14,
+10.254.105.2**. `/usr/local/lib/ppp-web/addon.py` permits those same clients;
+its script watcher reloads the change without restarting PPP or the proxy.
+Both files have `.before-e79-network-20261106` backups. Other nftables tables
+and existing clients are preserved.
+
+Verification used a temporary network namespace with client **10.254.120.2**
+and host-side **e79pcheck** to exercise the same approved address and interface
+rules: **3/3 pings to 1.1.1.1**, RTT **1.503–1.731 ms**, **HTTP 200** from
+`http://192.168.1.100:83/welcome.htm`, and **HTTP 200** from
+`http://example.com/`. The namespace and veth were removed afterward. This
+checks forwarding, NAT, legacy LAN redirect, external web proxying and client
+authorization; it does not substitute for a sustained Windows 95 download.
