@@ -187,6 +187,29 @@ download, 4-20 (40, 41, 54) on upload-only runs; 0 on every 17920/17930 call.
 The count follows the downstream traffic, so it is the path from controller 4
 (ttyds5) through its Cisco BRI port, not call-start noise. TCP hides it.
 
+## V.34 against the Diva: no 33600
+
+`AT+MS=V34,0` to 7920 (run 60): CONNECT in 13 s at **a2c 26400 / c2a 31200**;
+2 MiB each way byte-exact, 23.2 kbit/s down, 27.5 kbit/s up (88% of each
+line rate), no retrain in 1,351 s.
+
+- **33600 needs 3429 baud, and the Diva will not use it.** Its INFO0a sets
+  `b14_3429=1` and `b19_3429ok=1` but `b21_23` (maximum symbol-rate
+  difference between directions, V.34 Table 12) = 0, so one rate serves
+  both ways, and its INFO1a picks 3200 for both (`baud=4`, c2a projected
+  N=13). Our INFO1c rated 3429 higher for its direction (N 14 vs 13). Our
+  probing is not the cause: L2 in our TX tap has all 21 tones from 150 to
+  3750 Hz within 0.1 dB, the four omitted ones 40-60 dB down, floor -129 dB,
+  and it reaches the Diva over a digital A-law path. 3200 baud caps a call at
+  31200, which is what we send.
+- **26400 toward us is our receiver.** B1 read 32.8 dB at 3200 baud (rising
+  to 34.4 dB in data). Scaling the 3429 refit thresholds (about 2.9 dB per
+  bit/symbol) puts 28800 at 3200 baud near 33.6 dB, so 26400 was the right
+  pick for that reading. But the Diva transmits at -11.9 dBm0, where A-law
+  quantization alone should allow roughly 37 dB, so the 33 dB is our
+  receiver's, not the line's. We have carried 33600 at 3429 against the
+  MT5634, so 3429 itself works where the peer accepts it.
+
 ## Open issues
 
 1. **One early retrain with loop timing** (run 31, 7930, 54 s into data).
@@ -203,4 +226,4 @@ The count follows the downstream traffic, so it is the path from controller 4
 5. The clear-channel summary line reports `rx 0 frames` in PPP mode
    (cosmetic; `ppp_rx_frames` is not printed).
 
-Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33,40,41,51,52,54}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
+Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33,40,41,51,52,54,60}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
