@@ -9304,7 +9304,22 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
     v34_tx_power(g_v34, -10.0f);
     v34_v90_start_analogue_retrain(g_v34);
 
-    data_stack_prepare(bps);
+    /* §9.5.2 from data mode is a retrain under a link that stays up, exactly
+       as restart_v90_phase2_locked() treats it for the digital role: clamp
+       the DTE and keep the error-control link (V.34 §11.5 by reference).
+       data_stack_prepare() released the stack, so LAPM restarted with XID
+       and SABME against a Diva still in its own connection and the call
+       dropped 24 s after a clean 11 s retrain (live, 7 November 2026).
+       LAPM's timers run on transmitted bits, and none are pulled outside
+       ME_DATA, so they hold for the retrain.  A retrain that is itself
+       restarted keeps the flag. */
+    if (g_state == ME_DATA) {
+        g_retrain_from_data = true;
+        ME_LOG("[ME] V.90 analogue: retraining out of data mode; DTE data "
+               "clamped, error-control link retained (§9.5.2/§11.5)\n");
+    } else if (!g_retrain_from_data) {
+        data_stack_prepare(bps);
+    }
     g_state = ME_TRAINING;
     g_notch.active = false;
     notch_filter_init(&g_notch, 2400.0f, 30.0f, 8000.0f);
@@ -19354,9 +19369,19 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
          * stream.  In the analogue role that stream is the V.34 upstream,
          * not the faster PCM downstream; using 56 kbit/s here made V.42's
          * detection timers expire while bits left at 12–26.4 kbit/s. */
-        data_stack_start_online(upstream_rate > 0 ? upstream_rate
-                                                  : downstream_rate,
-                                g_calling_party);
+        bool resumed = g_retrain_from_data;
+        int line_rate = upstream_rate > 0 ? upstream_rate : downstream_rate;
+
+        if (resumed) {
+            /* §9.5.2 retrain complete: only the rate is refreshed. */
+            g_retrain_from_data = false;
+            g_data_connect_rate = line_rate;
+            ds_set_line_bit_rate(&g_data_stack, line_rate);
+            ME_LOG("[ME] V.90 analogue retrain complete; resuming the "
+                   "existing data link (upstream %d bps)\n", line_rate);
+        } else {
+            data_stack_start_online(line_rate, g_calling_party);
+        }
         g_report_tx_rate = upstream_rate;
         g_report_rx_rate = downstream_rate;
         g_state = ME_DATA;
@@ -19364,9 +19389,12 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
         ME_LOG("[ME] V.90 analogue startup complete after B1d "
                "(upstream V.34 %d bps, downstream PCM %d bps)\n",
                upstream_rate, downstream_rate);
-        trace_phase("V90a enter DATA after B1d: upstream=%d downstream=%d",
-                    upstream_rate, downstream_rate);
-        if (g_data_framing != DS_FRAMING_V42) {
+        trace_phase("V90a enter DATA after B1d: upstream=%d downstream=%d%s",
+                    upstream_rate, downstream_rate,
+                    resumed ? " (link resumed)" : "");
+        if (resumed) {
+            /* The DTE saw CONNECT (or LAPM's) before the retrain. */
+        } else if (g_data_framing != DS_FRAMING_V42) {
             g_data_connect_reported = true;
             di_on_connected(downstream_rate);
         } else {
