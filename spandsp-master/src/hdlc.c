@@ -390,7 +390,7 @@ SPAN_DECLARE(hdlc_rx_state_t *) hdlc_rx_init(hdlc_rx_state_t *s,
     s->crc_bytes = (crc32)  ?  4  :  2;
     s->report_bad_frames = report_bad_frames;
     s->framing_ok_threshold = (framing_ok_threshold < 1)  ?  1  :  framing_ok_threshold;
-    s->max_frame_len = sizeof(s->buffer);
+    s->max_frame_len = HDLC_DEFAULT_MAXFRAME_LEN + 4;   /* the old sizeof(s->buffer) */
     return s;
 }
 /*- End of function --------------------------------------------------------*/
@@ -732,7 +732,7 @@ SPAN_DECLARE(hdlc_tx_state_t *) hdlc_tx_init(hdlc_tx_state_t *s,
     /*endif*/
     s->idle_octet = 0x7E;
     s->progressive = progressive;
-    s->max_frame_len = HDLC_MAXFRAME_LEN;
+    s->max_frame_len = HDLC_DEFAULT_MAXFRAME_LEN;
     return s;
 }
 /*- End of function --------------------------------------------------------*/

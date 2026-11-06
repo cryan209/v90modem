@@ -41,9 +41,19 @@ HDLC may not be a DSP function, but is needed to accompany several DSP component
 #define _SPANDSP_HDLC_H_
 
 /*!
-    HDLC_MAXFRAME_LEN is the maximum length of a stuffed HDLC frame, excluding the CRC.
+    HDLC_MAXFRAME_LEN is the maximum length of a stuffed HDLC frame, excluding the CRC:
+    the largest a caller may ask for with hdlc_rx/tx_set_max_frame_len().  v90modem:
+    raised from 400 to 2048 so PPP over a clear B channel (RFC 1662/RFC 1618, default
+    MRU 1500, RFC 1990 MRRU 1500 plus MP header) fits; at 400 every full-size IP packet
+    was silently dropped in both directions.
 */
-#define HDLC_MAXFRAME_LEN       400
+#define HDLC_MAXFRAME_LEN       2048
+
+/*!
+    HDLC_DEFAULT_MAXFRAME_LEN is the limit a new receiver/transmitter starts with, so
+    callers that never set one (T.30, V.42) keep SpanDSP's original 400-octet behaviour.
+*/
+#define HDLC_DEFAULT_MAXFRAME_LEN   400
 
 typedef void (*hdlc_frame_handler_t)(void *user_data, const uint8_t *pkt, int len, int ok);
 typedef void (*hdlc_underflow_handler_t)(void *user_data);

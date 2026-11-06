@@ -856,6 +856,74 @@ static void test_ppp_pair(bool r56)
     free(ea); free(eb);
 }
 
+/* CC_PPP must carry a full-size frame: RFC 1661's default MRU is 1500, and
+ * RFC 1990 multilink fragments of a 1500-octet MRRU are as large.  SpanDSP's
+ * HDLC used to cap every frame at 400 octets and clamp the larger limit
+ * cc_init_ppp() asks for, so each full-size IP packet vanished both ways
+ * while LCP, PAP, pings and HTTP headers (all under 400) passed -- a live
+ * ISDN MLPPP download stalled on its first TCP segment. */
+static void test_ppp_full_size(void)
+{
+    enum { BODY = 4 + 1500 };                   /* ff 03 00 21 + a 1500-octet IP packet */
+    uint8_t body[BODY + 2], *async = malloc(2 * (BODY + 2) + 2);
+    int blen, alen = 0;
+    uint32_t x = 0x12345678;
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+
+    body[0] = 0xff; body[1] = 0x03; body[2] = 0x00; body[3] = 0x21;
+    for (int i = 4; i < BODY; i++) {            /* every octet value, flag/escape included */
+        x = x * 1103515245u + 12345u;
+        body[i] = (uint8_t) (x >> 23);
+    }
+    blen = crc_itu16_append(body, BODY);
+    async[alen++] = CC_PPP_FLAG;
+    for (int i = 0; i < blen; i++) {
+        if (body[i] == CC_PPP_FLAG || body[i] == CC_PPP_ESC || body[i] < 0x20) {
+            async[alen++] = CC_PPP_ESC;
+            async[alen++] = (uint8_t) (body[i] ^ CC_PPP_XOR);
+        } else {
+            async[alen++] = body[i];
+        }
+    }
+    async[alen++] = CC_PPP_FLAG;
+    ea->src = async; ea->src_len = (size_t) alen;
+    check(cc_init_ppp(&a, false, end_pull, end_push, ea) == 0
+          && cc_init_ppp(&b, false, end_pull, end_push, eb) == 0, "PPP full-size init");
+    run_pair(&a, &b, 8000, false, NULL, NULL);
+    check(a.ppp_tx_frames == 1 && a.ppp_tx_overlong == 0,
+          "PPP: a 1504-octet frame leaves the DTE for the line (RFC 1661 MRU 1500)");
+    check(b.ppp_rx_frames == 1 && b.rx_bad_frames == 0,
+          "PPP: the 1504-octet frame arrives whole off the line");
+    {
+        uint8_t got[BODY + 8];
+        int len = 0, esc = 0, started = 0;
+
+        for (size_t i = 0; i < eb->dst_len; i++) {
+            uint8_t c = eb->dst[i];
+
+            if (c == CC_PPP_FLAG) {
+                if (started && len)
+                    break;
+                started = 1;
+                continue;
+            }
+            if (!started)
+                continue;
+            if (c == CC_PPP_ESC) { esc = 1; continue; }
+            if (esc) { c = (uint8_t) (c ^ CC_PPP_XOR); esc = 0; }
+            if (len < (int) sizeof(got))
+                got[len] = c;
+            len++;
+        }
+        check(len == blen && !memcmp(got, body, (size_t) blen),
+              "PPP: the full-size frame reaches the far DTE byte-exact, FCS included");
+    }
+    cc_release(&a);
+    cc_release(&b);
+    free(async); free(ea); free(eb);
+}
+
 static void test_v120_pair(bool r56)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -2001,6 +2069,7 @@ int main(void)
     test_transparent_pair();
     test_ppp_pair(false);
     test_ppp_pair(true);
+    test_ppp_full_size();
     test_v120_pair(false);
     test_v120_pair(true);
     test_v120_rx_variants();
