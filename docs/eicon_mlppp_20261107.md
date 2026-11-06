@@ -166,6 +166,26 @@ Between two of our own instances neither end is a master, so the pair's
 common rate is free to wander (by an estimated few ppm an hour, harmless).
 Every gateway is network-timed, so this only arises in our loopback tests.
 
+## Upstream tests with both fixes (7 Nov, evening)
+
+Loop-timed TX and weighted upload split throughout; every transfer
+byte-exact, RTP loss 0, **no V.90 retrain in any run**.
+
+| Run | Links | Test | Result |
+|---|---|---|---|
+| 51 | 3 x V.90 (7920, 7920, 7930) | 12 MiB upload | 1,220 s, 82.5 kbit/s; 4.45 MB per link (29.2 kbit/s, 93.5% of 31200); all three ~1,250 s in data. Run 14 (host clock) lost two of these three by 360 s |
+| 52 | 3 x B + 2 x V.90 | 12 MiB down and 12 MiB up at once | down 520 s, 193.6 kbit/s; up 595 s, 169.3 kbit/s; 363 kbit/s together |
+| 54 | 3 x B + 2 x V.90 | 3 x 16 MiB upload back to back (the test server caps one transfer at 16 MiB) | 637.1, 636.9, 637.1 s: 210.7 kbit/s each; V.90 members ~1,950 s in data unbroken |
+
+The duplex figures sit below the solo ones (236.7 down, 210.5 up) because
+each direction's TCP acknowledgements now queue behind the other's data.
+
+**17950 corrupts downstream frames; 17920 and 17930 never do.** Bad-FCS
+frames received on 17950: 120 (15c), 104 (33), 103 (52) on runs carrying a
+download, 4-20 (40, 41, 54) on upload-only runs; 0 on every 17920/17930 call.
+The count follows the downstream traffic, so it is the path from controller 4
+(ttyds5) through its Cisco BRI port, not call-start noise. TCP hides it.
+
 ## Open issues
 
 1. **One early retrain with loop timing** (run 31, 7930, 54 s into data).
@@ -182,4 +202,4 @@ Every gateway is network-timed, so this only arises in our loopback tests.
 5. The clear-channel summary line reports `rx 0 frames` in PPP mode
    (cosmetic; `ppp_rx_frames` is not printed).
 
-Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33,40,41}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
+Provenance: CT117 `/root/mlrun/{01,02,11,12,13,14,15,15b,15c,30,31,33,40,41,51,52,54}*` (disposable). Run 32 is void: `isdn-7950` Protocol-Rejected MP again until restarted.
