@@ -576,3 +576,8 @@ rules: **3/3 pings to 1.1.1.1**, RTT **1.503–1.731 ms**, **HTTP 200** from
 `http://example.com/`. The namespace and veth were removed afterward. This
 checks forwarding, NAT, legacy LAN redirect, external web proxying and client
 authorization; it does not substitute for a sustained Windows 95 download.
+
+The user subsequently confirms that website browsing from the connected
+Windows 95 machine works again after refreshing. The live stats endpoint
+continues to report the three-member bundle; its calls were preserved during
+both the collector and NAT/proxy updates.
