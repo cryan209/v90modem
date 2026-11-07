@@ -1784,6 +1784,10 @@ typedef struct
     /*! \brief Bauds remaining of S-bar after that junction, or -1 if the
         junction has not been seen. */
     int phase4_s_bar_left;
+    /* Set while an 11.6 initiator waits for the peer's S: the peer is still
+       in data mode, and scrambled data reads exactly like TRN to the
+       "no alternation" handoff rule below, which must wait for S. */
+    bool phase4_reneg_wait_s;
     /*! \brief Phase 4 S/S-bar alternation tracker for a caller that entered
         Phase 4 too late to see the junction: the previous differential
         dibit, the current and longest runs of strict +90/-90 alternation,

@@ -8654,6 +8654,7 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
     /* The S-to-S-bar junction detector starts unarmed; a zeroed struct would
        otherwise read as "junction already reached". */
     s->rx.phase4_s_bar_left = -1;
+    s->rx.phase4_reneg_wait_s = false;
     s->rx.phase4_s_last_step = -1;
     s->rx.phase4_s_alt_prev = -1;
     s->rx.phase4_s_alt_run = 0;
@@ -11554,7 +11555,12 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
 
 SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
 {
-    return start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, false,
+    /* Keep the data-mode front end (equalizer, timing, carrier): the line
+       has not changed, and the responder's experiment (reneg_answer_mode)
+       already found retaining it the winner.  Reset, the equalizer started
+       from zero taps 330 ms before the peer's S arrived and never locked its
+       TRN (6.9 dB; rig/v90ras 2026-11-07, 7802). */
+    return start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, true,
                                     "11.6 rate renegotiation: S, S-bar, TRN, MP");
 }
 /*- End of function --------------------------------------------------------*/
@@ -11623,6 +11629,9 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
     s->tx.negotiated_rates_valid = false;
 
     phase4_rx_conditioning_init_ex(s, rx_stage, reason, retain_frontend);
+    /* 11.6.1.1: the initiator's receiver waits for the peer's S, and until
+       it arrives the peer is still sending DATA. */
+    s->rx.phase4_reneg_wait_s = (rx_stage == V34_RX_STAGE_PHASE4_S);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

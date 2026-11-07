@@ -9222,6 +9222,16 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase4_s_alt_run = 0;
             }
             /*endif*/
+            /* An 11.6 initiator enters here while the peer is still in DATA
+               (11.6.1.1), and scrambled data alternates like TRN, so the
+               second rule took the peer's data for TRN 32 bauds in and the
+               receiver then missed the real S/S-bar/TRN/MP: live against a
+               Win95 modem on the Cisco FXS (rig/v90ras, 2026-11-07, 7802) the
+               rx left PHASE4_S 40 ms after our S began, the peer's S arrived
+               330 ms after ours, and 11.6.2.1 timed out.  Wait for S first. */
+            if (s->phase4_reneg_wait_s  &&  s->phase4_s_alt_run_max >= 8)
+                s->phase4_reneg_wait_s = false;
+            /*endif*/
             if (s->phase4_s_alt_run_max >= 8
                 && powered
                 && __builtin_popcount(s->phase4_s_alt_hist & 0xFFu) <= 2
@@ -9229,7 +9239,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             {
                 why = "S/S-bar alternation ended";
             }
-            else if (__builtin_popcount(s->phase4_s_pwr_hist) >= 28
+            else if (!s->phase4_reneg_wait_s
+                     && __builtin_popcount(s->phase4_s_pwr_hist) >= 28
                      && __builtin_popcount(s->phase4_s_alt_hist) <= 12)
             {
                 why = "no S/S-bar alternation in 32 powered bauds";
