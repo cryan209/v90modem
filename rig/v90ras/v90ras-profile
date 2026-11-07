@@ -1,0 +1,12 @@
+# Power-on profile for every v90ras line (installed as
+# /etc/v90ras/profile.0 .. .9; --profile appends the line number).
+# Plain V.34, capped at 21600 both ways: the Win95 modems on the Cisco FXS
+# never decode as V.90 (no Ja), the V.90 attempt and its fallback cost ~15 s
+# of their ~55 s connect timeout, and the fallback's first MP asks 31200.
+# Plain V.34 takes its first rate from the Phase-4 TRN measurement (28.5 dB
+# -> 21600 on this line).  docs/at_stored_profiles.md has the format.
+power-on-profile 0
+!
+profile 0
+ +MS V34,1,0,21600,0,21600
+!

@@ -32,6 +32,7 @@ transcoded; add an A-law set if that is needed.
 | `/etc/systemd/system/v90ras.service` | the 10-line server (copy here); SIP ports 5300-5309, RTP 30000+100*i, PTYs `/run/v90ras/line.0`-`.9`, `ME_JB_MS=40`, per-call G.711 taps in `/var/tmp/v90ras/calls/line<L>-<pid>` |
 | `/etc/systemd/system/v90ras-ppp@.service` | one pppd per line, instances 0-9 (copy here) |
 | `/etc/ppp/v90ras-options` | shared pppd options (copy here) |
+| `/etc/v90ras/profile.0`-`.9` | power-on AT profile, copies of `v90ras-profile` (plain V.34, 21600 cap) |
 | `/etc/v90ras/sip.env` | SIP account passwords (0600, not in git) |
 | `/etc/ppp/pap-secrets` | an unused `v90dial` line from before `noauth` (backup `pap-secrets.before-v90ras-20261107`) |
 
@@ -173,6 +174,21 @@ full retrain. Fixed in 6dec6dca: an initiator waits for S and keeps the
 data-mode front end. Replayed, it decodes the peer's MP0 (CRC valid,
 19200/19200) and E, and the first data window reads 0.24 from the grid
 before the recording diverges.
+
+19:07, 7802, on 6dec6dca: one slow retrain, then clean data (0.04-0.07,
+30 dB, estimate 21600) and PPP up. About 9 s later the **modem** opened an
+11.6 renegotiation; our answer ended in a full retrain, the data after it was
+white, and IPCP never completed. The replay of this call diverges at the
+first B1 (live B1 correlated 0.144), so the responder failure is not
+reproduced offline yet.
+
+**Since 19:20 v90ras offers plain V.34 capped at 21600** (`v90ras-profile`,
+installed as `/etc/v90ras/profile.<line>`, `--profile /etc/v90ras/profile`).
+V.90 never trained with these modems, and every rate change mid-call
+(the fallback's 31200 first MP, B1's step-down, the modem's own 11.6) is
+what lost calls. Calls that stayed at one moderate rate (14400, ~21600)
+carried LCP/PAP and PPP. The offline pair at this setting connects 21600
+in 13 s. Remove the `--profile` argument to offer V.90 again.
 
 ## Windows 95 client
 
