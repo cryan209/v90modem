@@ -27,8 +27,9 @@ Environment=ME_LINE_BUSY_DIR=/run/v90ras/busy
 # 2 s, reproduced offline); every clean decode was at 3200. Our own probe
 # rated 3429 worst (ripple 0.90 vs 0.29). Offer at most 3200.
 Environment=ME_V34_BAUD=3200
-# V.90 is offered again (no --profile; rig/v90ras/v90ras-profile is the
-# plain-V.34 cap used 19:20-23:45 on 2026-11-07).  The Win95 modems' Ja never
+# V.90 is offered again: only line 9 (2960) has a profile file, and that one
+# selects x2 (rig/v90ras/v90ras-profile-x2); rig/v90ras/v90ras-profile is the
+# plain-V.34 cap used 19:20-23:45 on 2026-11-07, no longer installed.  The Win95 modems' Ja never
 # decoded because blind CMA walked our Phase 3 equalizer off during Ja; DD-LMS
 # there decodes it on the recorded calls.  The engine default Ja fallback
 # (500 ms) stays.
@@ -47,7 +48,7 @@ ExecStartPre=/bin/mkdir -p /var/tmp/v90ras/calls
 ExecStart=/opt/v90ras/sip_v90_modem --lines 10 --recycle \
   --sip-server asterisk.net.cryan.nz \
   --username ${V90RAS_USERS} --password ${V90RAS_PASSWORDS} \
-  --local-port 5300 --rtp-port 30000 --pty-link /run/v90ras/line
+  --local-port 5300 --rtp-port 30000 --pty-link /run/v90ras/line --profile /etc/v90ras/profile
 Restart=always
 RestartSec=3
 KillMode=mixed

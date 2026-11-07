@@ -1,0 +1,11 @@
+# Power-on profile for line 9 only (2960; the 2950 pilot hunts 2951 upward,
+# so it reaches line 9 last).  Installed as /etc/v90ras/profile.9; lines 0-8
+# have no profile file and answer with the engine default (V.90 offered).
+# x2 digital server for a client that speaks x2 (USR/3Com chipsets mark it
+# with an inverted carrier at each V.8 CM preamble); docs/x2_implementation.md.
+# docs/at_stored_profiles.md has the format.
+power-on-profile 0
+!
+profile 0
+ +MS X2,1
+!
