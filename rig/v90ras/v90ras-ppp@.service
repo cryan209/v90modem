@@ -1,0 +1,15 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=v90ras MLPPP bundle member on line %i
+After=v90ras.service
+PartOf=v90ras.service
+
+[Service]
+# The line's PTY symlink is recreated after every call (--recycle).
+ExecStartPre=/bin/sh -c 'until [ -e /run/v90ras/line.%i ]; do sleep 1; done'
+ExecStart=/usr/sbin/pppd /run/v90ras/line.%i file /etc/ppp/v90ras-options linkname v90ras-%i ipparam v90ras-%i
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=v90ras.service

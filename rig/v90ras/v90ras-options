@@ -1,0 +1,31 @@
+# pppd options for every v90ras bundle member (v90ras-ppp@N, N = 0-9).
+# Mirrors the eicon420 members: the name, address pair and ifname are the
+# bundle identity and must be identical on every member, or a link raises its
+# own session instead of joining the bundle (RFC 1990).
+115200
+# A PTY has no modem-control lines: sip_v90_modem auto-answers (S0=2), the
+# chat below waits for CONNECT, and the worker closing the PTY ends the link.
+local
+nocrtscts
+nolock
+connect "/usr/sbin/chat -t 86400 CONNECT \\c"
+nodetach
+nopersist
+maxfail 1
+require-pap
+name v90ras
+passive
+nodefaultroute
+noproxyarp
+noipv6
+noccp
+novj
+asyncmap 0
+lcp-echo-interval 10
+lcp-echo-failure 6
+debug
+multilink
+mrru 1500
+ms-dns 192.168.88.1
+10.254.200.1:10.254.200.2
+ifname v90ras0

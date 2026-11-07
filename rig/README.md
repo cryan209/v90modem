@@ -4,6 +4,12 @@ Files here support the live V.90 interop test against a real SmartLink
 softmodem DSP, used to validate the digital-modem server against an actual
 analogue-modem peer without physical hardware.
 
+## 10-line dial-in server with multilink PPP
+
+`v90ras/`: v90modem answering 2950 (pilot) and 2951-2960 on CT 117, one
+pppd multilink per line, bundled like the eicon420 members. See
+[`v90ras/README.md`](v90ras/README.md).
+
 ## Physical MultiTech USB peer (macOS)
 
 The Lucent-based MT5634MU (`06e0:f103`) needs the vendor-endpoint PTY bridge,

@@ -111,8 +111,9 @@ choice. There are two arrangements.
 
 Outbound calls are per line: each line's console dials independently.
 
-Neither arrangement has been tried against the rig's Asterisk yet, which needs
-the AOR change above. The local test below uses no registrar.
+One number per line is live on the rig's Asterisk since 2026-11-07: 2951-2960
+with a hunting pilot 2950 and a pppd multilink per line, `rig/v90ras/README.md`.
+The one-number-N-contacts arrangement still needs the AOR change above.
 
 ## Test: `tools/multi_line_test.py`
 

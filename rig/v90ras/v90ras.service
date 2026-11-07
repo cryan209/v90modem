@@ -1,0 +1,26 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=v90modem 10-line dial-in server (Asterisk 2951-2960, pilot 2950)
+Documentation=file:///root/v90ras/rig/v90ras/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/v90ras/sip.env
+# Halves PPP RTT against the 200 ms default (docs/eicon_mlppp_20261107.md).
+Environment=ME_JB_MS=40
+Environment=TMPDIR=/var/tmp/v90ras
+RuntimeDirectory=v90ras
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/bin/mkdir -p /var/tmp/v90ras
+ExecStart=/opt/v90ras/sip_v90_modem --lines 10 --recycle \
+  --sip-server asterisk.net.cryan.nz \
+  --username ${V90RAS_USERS} --password ${V90RAS_PASSWORDS} \
+  --local-port 5300 --rtp-port 30000 --pty-link /run/v90ras/line
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
