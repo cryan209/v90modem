@@ -128,6 +128,21 @@ RTP CSVs land there too) so they can be replayed.
 | 7800 x2, 7802 | V.90 Phase 3, no J/Ja decoded, peer retrain, V.34 white, hung up after 50-55 s |
 | 7801 | V.90 retrain at tx_phase 3, V.34 3200 high carrier, white for ~80 s, hung up |
 
+Second round, 17:32-17:34, both on line 0 with full taps (replayed with
+`v90_engine_replay ... ulaw --sync`, `VPCM_ME_VERBOSE=1`):
+
+| Call | Result |
+|---|---|
+| 7801 | V.90 Phase 3 no Ja, peer retrain, V.34 3200 **DATA at 31200**; 40 ms later **our** B1 rate check read 17.0 dB ("carries about 14400") and retrained per 11.5; the retrain resumed DATA (live distance to grid 0.03, 28 dB), **LAPM and PPP came up** (LCP with mrru 1500), and PAP failed: the client sent user `swine`, the server's account is `v90dial` |
+| 7800 | same path; B1 read 23.6 dB at 3200, asked 19200 and capped our TX too; the retrain came back at **2400 baud / 19200**, which decoded white (0.65-0.67, 24 dB) until the peer retrained and hung up |
+
+So the modem link does work against these clients, but the B1 check fires on
+both calls and costs a retrain. Its 3200-baud reading is low (17 dB on a line
+that then measured 28 dB in data mode) and does not depend on
+`ME_V34_DENSE_3200`: the same reading with it at 0 and 1. A cap of 19200
+carried across a fall to 2400 baud is a rate that baud cannot carry. Both
+are still open.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
