@@ -3422,10 +3422,10 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
     {
         /* Where DATA will run on the B1 fit, ask for what that fit gets
            (v34_rx_phase4_trn_refit()): the live reading carries the TRN
-           taps' noise, which DATA at 26400 and up never sees.  Only ever
-           raise the ask, and only into the rates conditioned on B1 -- below
-           26400 DATA keeps the TRN taps, so the live reading is the right one
-           there. */
+           taps' noise, which DATA on the B1 fit never sees.  Only ever
+           raise the ask, and only into the rates the refit table was
+           calibrated for (26400 and up): below that it returns 0 and the
+           live reading stands, which under-asks but never over-asks. */
         double refit = v34_rx_phase4_trn_refit(s, NULL);
         int refit_n = (refit > 0.0)  ?  v34_rx_refit_training_rate(s->baud_rate, (float) refit)/2400  :  0;
 
@@ -11885,17 +11885,20 @@ static bool v34_rx_dense_baud(const v34_rx_state_t *s)
    frame.  Scalar calibration alone leaves the dense 3429-baud modes exposed
    to the Phase-4 tap solution and acquisition phase.  The known 10.1.3.1
    symbols permit a supervised fit before any user decisions steer the taps.
-   Keep the proven lower-rate and V.90 paths on their existing conditioning. */
+   V.90 keeps its own T/3 conditioning. */
 bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
 {
-    /* bit_rate encodes 2*(N - 1): N >= 11 means 26400 bit/s and up.
-       V.34 11.4 B1 conditioning and 12.5.2 DATA timing must be enabled
+    /* V.34 11.4 B1 conditioning and 12.5.2 DATA timing must be enabled
        together: the complete-frame fit alone lets the Godard loop walk
-       away from its solution. At 26400/28800 the old N >= 13 gate left
-       both disabled and corrupted otherwise recoverable noisy payloads.
-       See docs/v34_data_mode_rates.md for the timing/noise A/B matrix. */
-    return s->duplex && !s->v90_mode
-        && v34_rx_dense_baud(s) && s->bit_rate >= 20;
+       away from its solution.  Every rate on the dense bauds, not only
+       26400 and up: below that the 127-tap Phase 4 LMS taps went into DATA
+       unrefitted, and against Win95 modems on Cisco FXS ports (3200 baud)
+       B1 read 22 dB where the TRN refit read 31 dB, the decision-directed
+       loops ran away and 19200/21600 decoded white from the first symbol
+       (0.66 from the grid).  With the fit: 0.06-0.07 and 28-31 dB on the
+       same recordings, and the loopback noise matrix gains 15 of 200
+       cells and loses none.  See docs/v34_data_mode_rates.md. */
+    return s->duplex && !s->v90_mode && v34_rx_dense_baud(s);
 }
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
@@ -11967,7 +11970,7 @@ void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
 bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s)
 {
     /* The receivers whose DATA mode replaces the taps with the B1 fit
-       (v34_rx_b1_batch_eq_enabled() at 26400 and up). */
+       (v34_rx_b1_batch_eq_enabled(): every duplex dense-baud rate). */
     return s->duplex  &&  !s->v90_mode  &&  v34_rx_dense_baud(s);
 }
 

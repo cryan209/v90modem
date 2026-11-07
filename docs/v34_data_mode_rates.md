@@ -1245,3 +1245,38 @@ picks that f385dacd caused there were fixed by 30b7b923 (above). What remains
 at 24 and 30 dB is 36-75 error bursts at 19200/24000. Those rates are below the
 26400 gate, so they come from the live TRN table (`v34_rx_training_rate()`),
 not the dense path.
+
+## B1 conditioning at every dense rate, not only 26400 and up (2026-11-07)
+
+Win95 modems on the Cisco FXS ports (v90ras rig, 3200 baud) decoded 19200
+and 21600 white from the first DATA symbol: 0.66 from the grid, 19.2 dB,
+with B1 correlating at 0.997 and the right Table 10 parameters (19200: b=48,
+K=28, q=1, M=14 expanded). Not the mapper, the echo canceller or precoding (we
+send MP0, the peer's MP1 coefficients are zero). B1's own symbols on the data
+scale sat 0.476 from the grid (about 22 dB) while the Phase 4 TRN refit read
+31.4 dB on the same call. Below 26400, `v34_rx_b1_batch_eq_enabled()` handed
+DATA the unrefitted 127-tap LMS taps, and the decision-directed loops ran away
+from that 22 dB start. The 26400 floor was never measured; the 2026-10-16
+change above only left lower rates untested.
+
+Gate now: every duplex rate on the dense bauds (3429, and 3200 while
+`ME_V34_DENSE_3200` is on). DATA grid distance on the recorded live calls,
+before and after:
+
+| call | rate | before | after |
+|---|---|---|---|
+| 22:04 | 19200 | 0.663, 19.2 dB | 0.062, 29.1 dB |
+| 21:47 | 21600 | 0.641, 19.4 dB | 0.072, 28.4 dB |
+| 19:4x (b0) | 21600 | 0.496, 22.2 dB | 0.064, 31.2 dB |
+| m0 | 21600 | 0.097 then 0.470 | 0.040 then 0.164 |
+| t2 | 7200 | 0.008 | 0.003 |
+
+Loopback (`v34_duplex_test`, u-law, 3200 and 3429, 9600-24000, noise none/32/
+28/26/24 dB, delays 0/3/7/23, 100000 payload bits per direction): clean runs
+173/200 -> 188/200, no cell worse. Gains are at 21600/24 dB, 24000/28 dB
+(3200), 21600/24-26 dB and 24000/26 dB (3429).
+
+The Phase 4 rate ask still uses the live TRN reading below 26400, because the
+refit table (`v34_rx_refit_training_rate()`) is only calibrated there. It
+under-asks (19200 on a line DATA then reads 29 dB) but never over-asks.
+Extending the table is open.
