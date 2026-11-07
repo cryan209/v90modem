@@ -152,6 +152,17 @@ calls, and B1 then reads 17-23.6 dB, so each call spends one or two 11.5
 retrains (~8 s each) finding the rate. The first rate should come from a
 measurement (docs/v34_data_mode_rates.md).
 
+Live on b13a2b19, 17:49 and 17:51 (7802): B1 walked 28800 (27.6 dB) ->
+21600 at 2400 baud (30.1 dB) -> 16800 (17.3 dB) -> 12000 through three 11.5
+retrains of ~10 s each, and the modem hung up 55 s after answering both
+times, just as 12000 came up. So the modem's connect timeout (about
+55 s) is the budget. A B1 reading is a correlation, SNR = c^2/(1-c^2), so
+0.990 -> 17 dB and 0.997 -> 22 dB, and it moves several dB between
+trainings. From 4e3dfcf1 v90ras runs `ME_V34_B1_RENEG=1`, which asks for B1's
+rate by a 11.6 renegotiation (~2 s, same baud) and falls back to the retrain
+after 3.15 s. This is a live A/B: these modems have not yet been seen to
+answer 11.6.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
