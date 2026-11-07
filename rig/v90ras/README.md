@@ -163,6 +163,17 @@ rate by a 11.6 renegotiation (~2 s, same baud) and falls back to the retrain
 after 3.15 s. This is a live A/B: these modems have not yet been seen to
 answer 11.6.
 
+18:08, 7802 + 7801 (multilink), on 4e3dfcf1: **PPP and IPCP came up**.
+The client got 10.254.200.2 with DNS 192.168.88.1 on bundle `v90ras0` and
+stayed up 35 s. It then dropped after a retrain in data mode. The modem
+did answer our 11.6: its S arrived 330 ms after ours. But our receiver
+left PHASE4_S 40 ms in, because the "no alternation in 32 bauds" handoff
+took the peer's still-running DATA for TRN, so 11.6.2.1 timed out into a
+full retrain. Fixed in 6dec6dca: an initiator waits for S and keeps the
+data-mode front end. Replayed, it decodes the peer's MP0 (CRC valid,
+19200/19200) and E, and the first data window reads 0.24 from the grid
+before the recording diverges.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
