@@ -15427,6 +15427,22 @@ static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
                                 trace_phase("V90 WAIT_JA energy return rejected as Tone A band=%.3f",
                                             tone_a);
                             }
+                            /* The energy HAS returned, so the gap is over: back
+                               to "in signal", and only a fresh gap may precede
+                               Ja.  The commonest gap here is not TRN-to-Ja at
+                               all but §9.3.2.1's 70 ms of silence after INFO1a,
+                               and what follows it is S -- which this test also
+                               rejects.  Staying in the gap state, the next
+                               window without the 2400 Hz signature (PP, then
+                               TRN) counted as Ja, which started the 500 ms Ja
+                               fallback clock at the start of TRN.  Against our
+                               own analogue role (TRN 2048T = 640 ms at 3200
+                               baud) that fired Sd 200 ms before Ja began, every
+                               call: the peer saw Sd 20 ms into Ja, stopped it
+                               (§9.3.2.4), and no descriptor was ever decoded,
+                               so no DIL was sent and Phase 4 retrained until
+                               the call fell back to V.22bis. */
+                            state = 1;
                             ms_in_state = 0;
                             break;
                         }

@@ -77,13 +77,19 @@ the client and a ping or HTTP test over the bundle never crosses the modems
 (run 01's 0.03 ms RTT). Throughput needs a client on another host: the
 Windows 95 MLPPP machine is the intended one.
 
-Run 01 failure: the server never decoded a DIL descriptor from our client's
-Ja (three "J scan, no J found", then "analogue Ja detected" from the
-heuristic path), so `dil_requested` was false and it went from J'd straight
-to Phase 4 Ri (`v90.c` V90_TX_JD_PRIME). The client waited 15 s for a DIL
-and the server sent Tone B. Our client against the Diva and our server
-against hardware analogue modems both train V.90, so this is the pairing of
-our own two roles over Asterisk; not investigated further.
+Run 01 failure, found and fixed the same day: the server's WAIT_JA energy
+gate took §9.3.2.1's 70 ms silence before S for a TRN-to-Ja gap. It rejected
+S as "Tone A" but stayed in its gap state, so PP/TRN counted as Ja, and the
+500 ms Ja fallback (`ME_V90_JA_HEURISTIC_FALLBACK_MS`) started at the start
+of TRN. Our client's TRN is 640 ms, so Sd went out before Ja began. The client
+saw Sd 20 ms into Ja and stopped it (§9.3.2.4), no descriptor parsed, no DIL
+was sent (J'd went straight to Ri), and Phase 4 retrained 7 times before the
+V.22bis fallback. Replaying the client's TX tap through the server engine
+reproduced it, and so did the offline pair at the production default. Every
+fast.list V.90 pair row had set the fallback to 0, which hid it. Fix: a
+rejected energy return puts the gate back to "in signal". Offline, the pair
+then parses N=120 600 ms into Ja and sends the DIL. fast.list has the
+default-fallback row.
 
 ## Windows 95 client
 

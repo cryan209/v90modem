@@ -476,6 +476,14 @@ A-law, and is a `make test` row. Two things stood in the way:
    retrained, every attempt. The test row sets the fallback to 0; the default
    stays 500, because it was set against live peers (SmartLink, Apple,
    RasFinder) whose Ja does not decode, and none of them is in this harness.
+   **Fixed 2026-11-07.** The gate rejected S after that gap as "Tone A" but
+   stayed in its gap state, so PP/TRN then counted as Ja. A rejected return now
+   puts the gate back to "in signal". The anchor can only move later, never
+   earlier. In the recorded corpus no call both took that rejection and used
+   the fallback (the RasFinder and Apple r7 fallback calls never hit it; Apple
+   r6's was a real retrain). Live it had cost every V.90 call from our client
+   to our server (rig/v90ras, fell back to V.22bis 2400); fast.list now
+   carries the pair at the default fallback.
 
 `engine_pair_test --fdm-slot K --fdm-call-linear` carries the same call
 through a channel-bank slot with this side on linear converters: Phase 3
