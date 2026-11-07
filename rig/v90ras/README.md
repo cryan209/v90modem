@@ -423,3 +423,23 @@ First calls after the change (2026-11-08 11:14-11:20, all from 7800):
   B1 (fit 99.4%) and decodes the upstream at 21 dB.
 - x2 via 2959/2960: every call since 2026-11-08 00:04 stops at X2
   RECORD_WAIT and fails 10 s later, the same before and after the change.
+
+2026-11-08 11:48, the first V.90 data with LAPM (line0-1122235, 7800): DIL
+ended on the modem's S after about 2 cycles, CPt was accepted at once, and B1
+was acquired through the batch-CP' path (fit 100%, 0.011 to the grid). The
+upstream decoded at 35 dB (symbol error 0.009, 0 bad shell frames in about
+114 per window), and **V.42 LAPM connected** at 52000 down / 16800 up. Each
+data period then ended within 1.5-6 s on OUR "abrupt discontinuity" resync
+request (§9.6 Rd), which this modem does not answer, so a retrain followed.
+- 11:48:55: a real RTP loss. One packet (160 samples) was missing at +25.212
+  s. That call lost 4 of 2970 packets, against 0 in about 108k packets
+  yesterday and 0 in today's other calls. This is sporadic transport loss,
+  not the gateway settings.
+- 11:49:14 and 11:51:10: no packet loss. The T/3 timing loop reads a steady
+  freq of +0.00024 samples/symbol (about 80 ppm between the modem's upstream
+  symbol clock and the Cisco's sample clock) and logs a slip about every
+  1-1.5 s. A slip whose timing search fails 3 times raises the resync.
+  OPEN: handle this drift without a §9.6 request. The taps are in
+  line0-1122235 and line0-1122312.
+- 11:47: one call failed in V.34 Phase 2 (INFO0 retry, no valid INFO1a, then
+  our TX went IDLE and stayed silent for 38 s until the modem hung up). OPEN.
