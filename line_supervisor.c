@@ -292,12 +292,16 @@ static int make_directories(char *path)
  * testing for %L after expansion used to append an extra /line<i>. */
 static int per_line_environment(int line)
 {
-    char name[256], number[32];
+    char name[256], number[32], pid_text[32];
     size_t n = 0;
     char **copy;
     int result = -1;
 
     snprintf(number, sizeof(number), "%d", line);
+    /* %P is this worker's PID (exec keeps it): with --recycle every call is
+     * a new worker, so ".../line%L-%P" gives each call its own directory
+     * and the next worker cannot truncate the last call's taps. */
+    snprintf(pid_text, sizeof(pid_text), "%ld", (long)getpid());
     while (environ[n])
         n++;
     copy = calloc(n + 1, sizeof(char *));
@@ -319,13 +323,15 @@ static int per_line_environment(int line)
             continue;
         memcpy(name, copy[i], (size_t)(eq - copy[i]));
         name[eq - copy[i]] = '\0';
-        templated = strstr(eq + 1, "%L") != NULL;
+        templated = strstr(eq + 1, "%L") != NULL || strstr(eq + 1, "%P") != NULL;
         kind = diagnostic_path_kind(name);
         if (!templated && !kind)
             continue;
         capacity = strlen(eq + 1) + 32;
         for (src = eq + 1; (src = strstr(src, "%L")); src += 2)
             capacity += strlen(number);
+        for (src = eq + 1; (src = strstr(src, "%P")); src += 2)
+            capacity += strlen(pid_text);
         value = malloc(capacity);
         if (!value)
             goto done;
@@ -333,6 +339,10 @@ static int per_line_environment(int line)
             if (src[0] == '%' && src[1] == 'L') {
                 memcpy(value + o, number, strlen(number));
                 o += strlen(number);
+                src++;
+            } else if (src[0] == '%' && src[1] == 'P') {
+                memcpy(value + o, pid_text, strlen(pid_text));
+                o += strlen(pid_text);
                 src++;
             } else {
                 value[o++] = *src;

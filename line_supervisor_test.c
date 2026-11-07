@@ -75,6 +75,13 @@ static int environment_case(int which)
         CHECK(per_line_environment(3) == 0);
         CHECK(strlen(getenv("TEST_MULTILINE_VALUE")) == 2055);
         CHECK(!strcmp(getenv("TEST_MULTILINE_VALUE") + 2048, "3/end/3"));
+    } else if (which == 5) {
+        snprintf(value, sizeof(value), "%s/calls/line%%L-%%P", root);
+        setenv("VPCM_G711_TAP_DIR", value, 1);
+        CHECK(per_line_environment(3) == 0);
+        snprintf(expected, sizeof(expected), "%s/calls/line3-%ld", root, (long)getpid());
+        CHECK(!strcmp(getenv("VPCM_G711_TAP_DIR"), expected));
+        CHECK(stat(expected, &st) == 0 && S_ISDIR(st.st_mode));
     } else {
         FILE *file = fopen(test_tmp("supervisor-not-a-directory"), "w");
 
@@ -186,7 +193,7 @@ int main(int argc, char **argv)
                                    line_supervisor_parse(argc, argv, &recycle), false);
     }
 
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 7; i++)
         failed += check_environment(i);
     failed += check_drain();
     failed += check_pipe();
