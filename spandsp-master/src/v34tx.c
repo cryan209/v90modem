@@ -402,7 +402,8 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s);
 enum
 {
     V92_SHORT_B_MIN_BAUDS = 30,         /* Tone B for at least 50 ms before the reversal */
-    V92_SHORT_WAIT_BAUDS = 1500         /* 2500 ms (9.4.1.2.2/.3); analogue gets 3 s */
+    V92_SHORT_WAIT_BAUDS = 1500,        /* 2500 ms (9.4.1.2.2/.3); analogue gets 3 s */
+    V34_FIRST_A_TONE_B_WAIT_BAUDS = 1500 /* 2500 ms of Tone A after INFO0c with no Tone B */
 };
 
 /* Test hook: the analogue modem never answers the digital modem's Tone B
@@ -3681,10 +3682,30 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
         }
-        else if (!s->tx.v90_mode  &&  s->rx.received_event == V34_EVENT_INFO0_OK)
+        else if (!s->tx.v90_mode
+                 &&
+                 s->rx.info0_received
+                 &&
+                 (s->rx.tone_b_present
+                  ||
+                  ++s->tx.tone_duration >= 30 + V34_FIRST_A_TONE_B_WAIT_BAUDS))
         {
+            /* 11.2.1.2.3: "After Tone B is detected and Tone A has been
+               transmitted for at least 50 ms".  This used to fire on
+               INFO0_OK alone, on the assumption that the call modem's Tone B
+               is already up when its INFO0c decodes.  Win95 DUN modems on the
+               Cisco FXS (rig/v90ras, 2026-11-07 19:59) send INFO0c, then 1.4 s
+               of silence, then Tone B; our reversal went out 40 ms after
+               INFO0c, before they listened, and both sides waited for the
+               other's reversal until the call modem gave up 48 s later.  The
+               tone_b_present flag is the receiver's 30-bit detection, not the
+               shared event slot.  If Tone B is never detected, reverse anyway
+               after V34_FIRST_A_TONE_B_WAIT_BAUDS, which is what this always
+               did, so a peer whose tone we miss is no worse off. */
             s->tx.retrain_omit_info0 = false;
-            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A (11.2.1.2.3)\n");
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: INFO0c received, Tone B %s, sending !A (11.2.1.2.3)\n",
+                     s->rx.tone_b_present ? "detected" : "not detected (timeout)");
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
