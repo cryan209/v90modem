@@ -295,6 +295,27 @@ Phase 2 deadlock), and the bundle reached three members at 20:28:32.
 - **Still open:** the initial Phase 3/4 under-measurement, and the loss
   hang-up counting a line that is still training as "another call".
 
+**21:47, on 338aa76a.** Every TRN reading was sensible this time (28.5, 26.5,
+22-26 dB). The 3 dB misreads are gone.
+- **The open defect is data after OUR 11.6.**
+  - Data entered at 21600, and B1 read 25.2 dB ("about 19200"). With
+    `ME_V34_B1_RENEG=1` we renegotiated 40 ms into data.
+  - Both MPs agreed on 19200. Our reneg MP0 does carry c2a=19200, despite
+    the "asking 21600" log line, which is printed before the policy ceiling
+    is applied.
+  - The modem's B1 matched our 19200 template (0.997, residual carrier
+    about 0), yet data was white from the first block: 0.64 from the grid,
+    "shell index over k=28 bits" out of range in 23-37% of frames.
+  - This reproduces offline on the tap
+    (`v90_engine_replay ... --sync --at "AT+MS=V34,1,0,21600,0,21600"`,
+    `ME_V34_BAUD=3200 ME_V34_B1_RENEG=1`).
+- **Not the rate tables:** `engine_pair_test` at 3200/19200 and 3200/21600
+  exchanges payload.
+- **Not expanded shaping as such:** MP bit 32 selects the REMOTE transmitter
+  (V.34 Table 13), and our receiver uses our own bit, as it should.
+- **Next suspect:** mapping, superframe or trellis state carried across the
+  renegotiation.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
