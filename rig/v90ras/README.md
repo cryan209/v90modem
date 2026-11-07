@@ -349,6 +349,18 @@ no TermReq. Ping 5/5. Line 1 then dropped (23:34:58): the peer's §11.6
 renegotiation produced no E, we fell back to an §11.5 retrain, and that link
 was hung up. Every line sees the peer open §11.6 roughly 8 s into data.
 
+**V.90 back on (315cb9b8).** "No Ja ever decodes" was ours. The Win95
+modems send a correct Ja (V.90 8.3.1): a 2114-bit descriptor with N=192,
+LSP=LTP=120, repeated until Sd. Our Phase 3 receiver demodulated it at about
+10% bit errors, because blind CMA walked the equalizer from 6 to 17-19
+degrees rms during Ja. So no descriptor passed its CRC, the modem retrained
+after about 5.6 s, and its second INFO1a dropped V.90. With DD-LMS in
+Phase 3 the two recorded calls (17:42, 17:44) decode Ja at 2.2-2.9 degrees
+and send Sd. The peer's TRN runs about 2.2 s before Ja, so the parse lands
+about 2.3 s after TRN locks. That is the peer's choice (9.3.2.3), not ours.
+Everything past our Sd is untested live. `--profile` is gone from the unit;
+`ME_V34_BAUD=3200` stays for the V.34 fallback.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
