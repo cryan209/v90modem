@@ -28,14 +28,14 @@ lcp-echo-failure 6
 debug
 multilink
 mrru 1500
-# Bundle on the (empty, noauth) peer name only, not the client's endpoint
-# discriminator.  pppd names a bundle after the endpoint the first link sends,
-# and Win95 DUN does not always send the same one: 2026-11-07 21:00 the first
-# link's acknowledged ConfReq carried a 15-byte endpoint (FCS-valid, last 00
-# missing) and the next two links 16 bytes, so each tried to create a second
-# v90ras0 ("File exists") and pppd hung up.  noendpoint ConfRejs the option
-# (RFC 1990 makes it optional), so every member joins the one bundle.
-noendpoint
+# Accept the client's endpoint discriminator (no `noendpoint`).  Win95 DUN
+# keeps a first link whose endpoint we ConfRej, but every member added after
+# IP is up gets an immediate LCP TermReq (2026-11-07 22:36 x3, 23:26 x2).
+# Within one dial session Win95 sends the same 16-byte endpoint on every
+# link.  The one mismatch seen (21:00, "Couldn't create ppp interface
+# v90ras0: File exists") was a 15-byte retransmitted ConfReq on a first link
+# that took 20 s to get LCP through, during the white-data decoder era.
+# If "File exists" comes back on clean links, compare the endpoints first.
 ms-dns 192.168.88.1
 10.254.200.1:10.254.200.2
 ifname v90ras0
