@@ -7235,6 +7235,21 @@ static bool restart_v90_phase2_locked(const char *reason);
 static int me_v34_reneg_enabled(void);
 static void v34_reneg_begin_locked(void);
 static int64_t data_mode_elapsed_ms(void);
+/* The B1 check's own retrain budget: the per-call cap, but NOT the loss
+   dwell.  The dwell stops a receiver that keeps losing lock from retraining
+   back to back; B1 runs once per data-mode entry, on a fresh measurement at
+   the rate just negotiated.  Under the dwell, a retrain that came back at a
+   rate the line could not carry stayed there: live (rig/v90ras, 2026-11-07,
+   7800) the second B1 read 21.4 dB at 2400 baud against 19200 13.6 s after
+   the first retrain, was refused by the 20 s dwell, and the call ran white
+   until the peer gave up. */
+static bool b1_retrain_allowed(void)
+{
+    int cap = me_v34_max_loss_retrains();
+
+    return cap > 0 && (int) g_loss_retrains < cap;
+}
+
 static bool v34_b1_rate_check_locked(void)
 {
     static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -7278,7 +7293,7 @@ static bool v34_b1_rate_check_locked(void)
        the call straight to the 4800 floor.  Below 6 dB, read it as "too
        high" and step down two N, as v34_rx_rate_backoff_locked() does. */
     if (snr < 6.0f && rx_code > 0 && !g_v90_fallback_v34_logged
-        && retrain_on_loss_due(me_v34_max_loss_retrains())) {
+        && b1_retrain_allowed()) {
         /* No correlation at all says this receiver cannot take THIS symbol
            rate on this line, not that the line is two N short: against the
            RasFinder every 3429-baud B1 read about -12 dB and the 3200-baud
@@ -7303,7 +7318,7 @@ static bool v34_b1_rate_check_locked(void)
         supported = 2;
     ME_LOG("[ME] V.34 B1: receive SNR %.1f dB at %d baud carries about %d bps; "
            "negotiated %d bps\n", snr, baud_by_code[rx_code], supported*2400, *ours*2400);
-    if (*ours <= supported || !retrain_on_loss_due(me_v34_max_loss_retrains()))
+    if (*ours <= supported || !b1_retrain_allowed())
         return false;
     *ours = supported;
     /* Cap our TRANSMIT direction at the same rate.  Both directions cross

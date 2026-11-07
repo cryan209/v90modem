@@ -8815,22 +8815,13 @@ SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void v34_tx_get_mp_rates_unbounded(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
+static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
 {
     int a_to_c;
     int c_to_a;
 
     if (!bit_rate_a_to_c || !bit_rate_c_to_a)
         return;
-    if (s->tx.mp_rate_policy_valid
-        && mp_rate_n_is_valid(s->tx.mp_rate_a_to_c)
-        && mp_rate_n_is_valid(s->tx.mp_rate_c_to_a))
-    {
-        *bit_rate_a_to_c = s->tx.mp_rate_a_to_c;
-        *bit_rate_c_to_a = s->tx.mp_rate_c_to_a;
-        return;
-    }
-
     if (s->tx.v90_mode && !s->tx.v90_v34_fallback)
     {
         /* V.90 repurposes INFO1a's max-rate field as U_INFO and its PCM
@@ -8907,6 +8898,36 @@ static void v34_tx_get_mp_rates_unbounded(v34_state_t *s, int *bit_rate_a_to_c, 
     }
     *bit_rate_a_to_c = a_to_c;
     *bit_rate_c_to_a = c_to_a;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The engine's rate policy (v34_set_mp_rate_policy) is a CEILING on the
+   rates measured above, never a replacement for them.  Both of its users only
+   lower a rate -- the B1 SNR check and the loss back-off -- but as a
+   replacement the number outlived the symbol rate it was measured at: live
+   (rig/v90ras, 2026-11-07, caller 7800) B1 capped 31200 to 19200 at 3200
+   baud, the 11.5 retrain then came up at 2400 baud, and MP still offered
+   exactly 19200 -- 8 bits a symbol, decoded white at 24.6 dB -- because the
+   policy bypassed this baud's INFO1 projection and Phase-4 TRN measurement
+   (10.1.3.9). */
+static void v34_tx_get_mp_rates_unbounded(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
+{
+    v34_tx_get_mp_rates_measured(s, bit_rate_a_to_c, bit_rate_c_to_a);
+    if (!bit_rate_a_to_c  ||  !bit_rate_c_to_a)
+        return;
+    /*endif*/
+    if (s->tx.mp_rate_policy_valid
+        && mp_rate_n_is_valid(s->tx.mp_rate_a_to_c)
+        && mp_rate_n_is_valid(s->tx.mp_rate_c_to_a))
+    {
+        if (*bit_rate_a_to_c > s->tx.mp_rate_a_to_c)
+            *bit_rate_a_to_c = s->tx.mp_rate_a_to_c;
+        /*endif*/
+        if (*bit_rate_c_to_a > s->tx.mp_rate_c_to_a)
+            *bit_rate_c_to_a = s->tx.mp_rate_c_to_a;
+        /*endif*/
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
