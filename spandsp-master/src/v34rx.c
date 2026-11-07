@@ -11657,12 +11657,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            V34_DUPLEX_DELAY=1, PP mean residual 0.569 against 0.178 at delay
            0, TRN refine 58% ones against 91%, and the caller never decodes
            the answerer's J.  A 64-symbol window closes inside S, so the
-           instant is chosen on S itself, before PP starts. */
+           instant is chosen on S itself, before PP starts.
+           The answer modem needs the same when it receives the call modem's
+           S, S-bar and PP (11.3.1.2.4-5): 3200/21600 A-law, delay 1, PP
+           residual 0.558 and 20506 errors with the long window there.  Not,
+           though, while it is still sending its own S, PP and TRN
+           (11.3.1.2.1-3) to a silent call modem.  It then hears only echo
+           and line noise, and at 28 dB that noise clears the
+           V34_EYE_MIN_MAG gate (mean |z| 0.13).  64-symbol windows flipped
+           four times on it in 0.36 s and used up V34_EYE_MAX_FLIPS, so
+           Phase 4 TRN had no flip left, read 3.2 dB and offered 7200. */
         int eye_window = ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
                           || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
                           || (s->duplex  &&  !s->v90_mode
                               &&  s->stage == V34_RX_STAGE_PHASE3_TRAINING
-                              &&  !s->phase3_pp_started))
+                              &&  !s->phase3_pp_started
+                              &&  !v34_rx_answerer_sending_own_phase3(s)))
                          ? 64 : V34_EYE_OBSERVE_SYMBOLS;
         if (++s->eye_n >= eye_window)
         {

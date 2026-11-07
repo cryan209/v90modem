@@ -1175,6 +1175,40 @@ both arms share:
   | 3429/33600, 2743/26400 auto | 48/48 each | 48/48 each |
 
   Auto-rate 3200 at delays 1 and 11, both laws, are now in `tests/fast.list`.
+  **Follow-up, same day.** As first committed (f385dacd), the short window
+  also applied to the answer modem's first PHASE3_TRAINING. That stage runs
+  while the answer modem sends its own S, PP and TRN (§11.3.1.2.1-3) to a
+  silent call modem, so it hears only echo and noise. At 28 dB that noise
+  clears V34_EYE_MIN_MAG (mean |z| 0.13). Four 64-symbol windows flipped on
+  it in 0.36 s and used up V34_EYE_MAX_FLIPS. Phase 4 TRN then had no flip
+  left, read 3.2 dB and offered 7200 caller-to-answer (21600,7200 at 28 and
+  30 dB, delays 0/7/15). The window now excludes
+  `v34_rx_answerer_sending_own_phase3()`. Restricting it to the call modem
+  instead is wrong: the answer modem receiving the caller's S and PP
+  (§11.3.1.2.4-5) has the same straddle (3200/21600 A-law, delay 1: PP
+  residual 0.558, 20506 errors).
+
+  The 144-job auto-rate noise matrix (3200/31200, both laws, delays
+  0/1/3/7/11/15/19/23, 1 Mbit, `ME_V34_DENSE_3200=1`):
+
+  | noise | c5c3b4f1 | now |
+  |---|---|---|
+  | none to 32 dB | 12-13/16 each | 16/16 each |
+  | 30 dB | 13/16 | 14/16 |
+  | 28 dB | 15/16 | 16/16 |
+  | 24 dB | 14/16 | 12/16 |
+
+  No run picks 7200. Every failure that remains at 24 and 30 dB picked the
+  same rate as before or one step higher, with 36-75 errors in 1 Mbit:
+  - 24 dB: 16800 -> 19200 at delays 7, 11 and 19 (u-law), and A-law delay
+    1, which now trains.
+  - 30 dB: 21600 -> 24000 at A-law delay 15.
+
+  The better-placed eye reads more TRN SNR and moves the offer into a rung
+  whose threshold is thin. That is a 3200 refit-table calibration question
+  at 19200/24000, not a wrong T/2 phase. Delay sweep 0-23, both laws, dense
+  on and off: 3200/31200 auto, 3200/21600 forced, 3000/28800, 2743/26400 and
+  3429/33600 are 48/48 each.
 - 3200 ulaw, delay 3, 30 dB noise, 24000 caller-to-answer: 60 errors.
 
 Still to do before the switch can default on:
