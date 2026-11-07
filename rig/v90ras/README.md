@@ -241,6 +241,23 @@ Still open: after some peer 11.6 renegotiations our receiver ends white
   - Fixed in edafdde1: the hang-up applies only while another line has a call
     (`ME_LINE_BUSY_DIR=/run/v90ras/busy`); a lone link retrains.
 
+**20:26-20:32, three-modem bundle, on 2189b0fb.** All three calls trained (no
+Phase 2 deadlock), and the bundle reached three members at 20:28:32.
+- **Line 0 (7800).** IP up at 20:27:24. The modem's 11.6 left us white; it
+  retrained as the lone call, and data was back at 20:27:55, clean (0.045 from
+  the grid, 23.8 dB). But **no PPP frame from the client arrived again**:
+  v90ras0 RX stayed at 9 packets while TX grew, ping 0/5, and pppd logged no
+  LCP echo after IP came up. The physical layer is clean, so the data link
+  (V.42/V.14) doesn't resume across a retrain. Not yet diagnosed: the replay
+  diverges from live (its training fails at 15.8 s), so the rig now runs
+  `VPCM_ME_VERBOSE=1` and `ME_RX_BIT_DUMP` per call (c62c6dbd) to see it live.
+- **Line 1 (7802).** Clean at 21600 (0.06, 31.6 dB). The modem opened 11.6
+  at 20:28:08; our side never returned to data, and the modem hung up 33 s
+  later.
+- **Line 2 (7801).** White 14.3 s into data, then hung up by the new rule
+  (another line was up).
+- The repeated "only call up" message (128 per report) is fixed in 288487a6.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
