@@ -8676,6 +8676,7 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
        otherwise read as "junction already reached". */
     s->rx.phase4_s_bar_left = -1;
     s->rx.phase4_reneg_wait_s = false;
+    s->rx.reneg_frontend_retained = false;
     s->rx.phase4_s_last_step = -1;
     s->rx.phase4_s_alt_prev = -1;
     s->rx.phase4_s_alt_run = 0;
@@ -11653,6 +11654,7 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
     /* 11.6.1.1: the initiator's receiver waits for the peer's S, and until
        it arrives the peer is still sending DATA. */
     s->rx.phase4_reneg_wait_s = (rx_stage == V34_RX_STAGE_PHASE4_S);
+    s->rx.reneg_frontend_retained = retain_frontend;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

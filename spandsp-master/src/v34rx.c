@@ -11511,9 +11511,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        two near-zero sums differ by whatever noise decides -- which is a
        coin-flip chance of moving the symbol instant to the wrong phase just
        before the far end's Phase 4 S arrives. */
+    /* Not in an 11.6 renegotiation that kept the data-mode front end.  Data
+       mode was decoding at this instant, and the chooser is for acquisition:
+       answering a Win95 DUN modem's 11.6 (rig/v90ras 2026-11-07 21:15, data
+       0.0045 from the grid at 29.7 dB) it compared eyes of 269.5 against
+       251.8, moved the instant half a symbol, and the TRN that followed read
+       52% ones and 3.0 dB, so our MP asked 7200 and the peer retrained. */
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
                  &&  s->eye_flips < V34_EYE_MAX_FLIPS
                  &&  v34_eye_select_enabled()
+                 &&  !s->reneg_frontend_retained
                  &&  !v34_rx_caller_hearing_own_phase3_m(s, 4));
     /* V.90 digital modem: once PP conditioning has begun, leave the symbol
        instant alone until Ja has been accepted.  PP trains the equalizer at the

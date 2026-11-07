@@ -1788,6 +1788,10 @@ typedef struct
        in data mode, and scrambled data reads exactly like TRN to the
        "no alternation" handoff rule below, which must wait for S. */
     bool phase4_reneg_wait_s;
+    /* An 11.6 renegotiation kept the data-mode front end: the symbol
+       instant data mode was decoding at is the right one, so the T/2
+       eye-phase chooser leaves it alone (v34rx.c). */
+    bool reneg_frontend_retained;
     /*! \brief Phase 4 S/S-bar alternation tracker for a caller that entered
         Phase 4 too late to see the junction: the previous differential
         dibit, the current and longest runs of strict +90/-90 alternation,
