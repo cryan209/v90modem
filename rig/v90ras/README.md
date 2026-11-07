@@ -414,6 +414,12 @@ First calls after the change (2026-11-08 11:14-11:20, all from 7800):
   interval 5 is empty). 9.3.1.6 says to repeat DIL until that S. With
   `ME_V90_DIL_AUTOTERMINATE_CYCLES=0` the replay repeats DIL, detects the S
   at 28.5 s and ends on a segment boundary; v90ras.service sets it since
-  2026-11-08. Live result pending.
+  2026-11-08. LIVE 11:36 (line0-1121194): the modem's S came after two DIL
+  cycles (3.2 s), CPt was accepted at once, and V.90 DATA was reached twice
+  (52000 down / 16800 up), but upstream B1 was never acquired: a rejected
+  frame disqualified the CP tap's E watch and nothing started the B1 search.
+  Fixed in 596bdde2 (deployed 11:44; the old binary is kept as
+  /opt/v90ras/sip_v90_modem.df9781d5). Its replay at the live 16800 acquires
+  B1 (fit 99.4%) and decodes the upstream at 21 dB.
 - x2 via 2959/2960: every call since 2026-11-08 00:04 stops at X2
   RECORD_WAIT and fails 10 s later, the same before and after the change.
