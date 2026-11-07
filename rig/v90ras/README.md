@@ -369,3 +369,24 @@ server runs `noauth` since 2026-11-07: a home test rig, and the first real
 call failed only on the login). Multilink: add the second (and later) modems
 under the connection's Multilink tab, each dialling 2950 (or a fixed
 2951-2960 number).
+
+## Cisco 2911 FXS gateway (TopRouter, 192.168.88.62)
+
+The Win95 modems sit on TopRouter's FXS ports 0/3/0-0/3/3 (7800-7803) and
+reach Asterisk as SIP endpoint 6501, through outbound dial-peer 6502
+(`[2-9]...`, which covers 2950) or 6501 (`1.T`). Management is telnet with
+`login local` (its SSH offers only SHA-1 key exchange, which current OpenSSH
+refuses). Set modem-safe on 2026-11-08 and saved with `write memory`:
+
+| Where | As found | Now | Why |
+|---|---|---|---|
+| FXS 0/3/x | `compand-type a-law`; the SIP leg is u-law | u-law | no law conversion between the modem and the RTP |
+| 0/3/1 | `output attenuation -6` (+6 dB toward the modem) | 0 dB out, 0 dB in on all four ports | a hot downstream compresses (see the VG224 loss-plan finding) |
+| 0/3/0 | adaptive playout | fixed, nominal 40 ms, on FXS, BRI 0/0/0-0/2/1 and dial-peers 6501/6502 | adaptive playout inserts and deletes samples |
+| 0/3/2 | fixed playout, nominal 200 ms | the same fixed 40 ms | 200 ms only adds to the PPP round trip |
+| 0/3/3 | EC on; VAD and CNG at their defaults | EC, NLP, VAD and comfort noise off on every FXS port | each one rewrites the samples |
+| 6501, 6502 | `dtmf-relay rtp-nte sip-info ...`, plus `dtmf-interworking` on 6502 | removed | digit detection can take modem energy for DTMF and mute the audio. CME phones now send DTMF in-band |
+
+Left alone: `network-clock-select 1 BRI0/1/0` (the +62 ppm reference that
+our loop timing follows), the A-law BRI ports and the FXS impedance (default
+600r). No live modem call has been made on the new settings yet.
