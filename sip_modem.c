@@ -70,6 +70,7 @@ static pjsua_call_id    g_call_id    = PJSUA_INVALID_ID;
 static volatile int     g_running    = 1;
 /* --line-index (set by the line supervisor): this worker's line. */
 static int              g_line_index = 0;
+static int              g_answer_stagger = 0;   /* --answer-stagger, see ring_incoming() */
 /* --exit-after-call (the supervisor's --recycle): leave once a call is over. */
 static bool             g_exit_after_call = false;
 static bool             g_had_call = false;
@@ -98,7 +99,7 @@ static void log_modem_diag_snapshot(const char *reason);
 
 /* Ring state for incoming calls — emulates S0 register auto-answer */
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
-#define LINE_ANSWER_STAGGER_MS 500  /* per --line-index, see ring_incoming() */
+#define LINE_ANSWER_STAGGER_MS 500  /* per --answer-stagger, see ring_incoming() */
 #define AUTO_ANSWER_RINGS   2       /* default S0: answer after this many rings */
 static pjsua_call_id   g_ringing_call = PJSUA_INVALID_ID;
 /* A call that arrived mid-call under +PCW=1 (V.250 6.8.1, "hang up"): it is
@@ -1125,9 +1126,12 @@ static void ring_incoming(pjsua_call_id call_id)
     pj_gettimeofday(&g_last_ring_time);
     /* Under --lines every idle worker registered on one account rings for a
      * forked INVITE; stagger the ring cadence so the lowest idle line
-     * reaches S0 first and the PBX cancels the others before they answer. */
-    if (g_line_index > 0) {
-        g_last_ring_time.msec += g_line_index * LINE_ANSWER_STAGGER_MS;
+     * reaches S0 first and the PBX cancels the others before they answer.
+     * The supervisor counts only lower lines on the SAME account: a line with
+     * its own number gets no fork, and a 4.5 s stagger on line 9 made Cisco
+     * FXS callers give up 0.3 s after our 200 OK (Win95 error 676). */
+    if (g_answer_stagger > 0) {
+        g_last_ring_time.msec += g_answer_stagger * LINE_ANSWER_STAGGER_MS;
         pj_time_val_normalize(&g_last_ring_time);
     }
 
@@ -1692,6 +1696,8 @@ int main(int argc, char *argv[])
             modem_mode = argv[++i];
         } else if (!strcmp(a, "--line-index") && has_val) {
             g_line_index = atoi(argv[++i]);
+        } else if (!strcmp(a, "--answer-stagger") && has_val) {
+            g_answer_stagger = atoi(argv[++i]);
         } else if (!strcmp(a, "--exit-after-call")) {
             g_exit_after_call = true;
         } else {
@@ -1699,7 +1705,7 @@ int main(int argc, char *argv[])
                 "--sip-server", "--username", "--password", "--pty-link",
                 "--control-link", "--data-link",
                 "--local-port", "--rtp-port", "--bind-addr", "--mode",
-                "--line-index"
+                "--line-index", "--answer-stagger"
             };
             bool missing = false;
 

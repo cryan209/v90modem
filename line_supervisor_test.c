@@ -174,6 +174,31 @@ static int check_ports(void)
     return 0;
 }
 
+static int check_answer_stagger(void)
+{
+    /* Only lines on the same SIP account see a forked INVITE; a line with its
+     * own number must answer without the stagger (v90ras line 9, error 676). */
+    char *own[] = {"modem", "--username", "2951,2952,2953", "--pty-link", "/tmp/x"};
+    char *shared[] = {"modem", "--username", "6001", "--pty-link", "/tmp/x"};
+    char *mixed[] = {"modem", "--username", "a,b,a,a", "--pty-link", "/tmp/x"};
+    char *none[] = {"modem", "--pty-link", "/tmp/x"};
+    struct { char **argv; int argc, line; const char *want; } c[] = {
+        {own, 5, 2, "0"}, {shared, 5, 2, "2"}, {mixed, 5, 3, "2"},
+        {mixed, 5, 1, "0"}, {none, 3, 4, "4"},
+    };
+
+    for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        worker_args_t w;
+        const char *v;
+
+        build_worker_args(c[i].argc, c[i].argv, c[i].line, false, &w);
+        v = opt_value(w.argc, w.argv, "--answer-stagger");
+        CHECK(v && !strcmp(v, c[i].want));
+    }
+    printf("PASS: answer stagger counts only lower lines on the same account\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int failed = 0;
@@ -198,5 +223,6 @@ int main(int argc, char **argv)
     failed += check_drain();
     failed += check_pipe();
     failed += check_ports();
+    failed += check_answer_stagger();
     return failed ? 1 : 0;
 }

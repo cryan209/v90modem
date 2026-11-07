@@ -4,7 +4,8 @@
  * See line_supervisor.h and docs/multi_line.md.  Worker i is this binary
  * with the supervisor's arguments minus --lines/--recycle, plus:
  *
- *   --line-index i              answer stagger and log tag
+ *   --line-index i              log tag and line-busy slot
+ *   --answer-stagger k          lower lines on the same SIP account
  *   --local-port  base + i      SIP (base from --local-port, default 5060)
  *   --rtp-port    rtp + 100*i   RTP (rtp from --rtp-port, default 4000)
  *   --pty-link    link.i        or --control-link ctl.i --data-link data.i
@@ -216,6 +217,24 @@ static void build_worker_args(int argc, char **argv, int line, bool recycle,
     if ((v = opt_value(argc, argv, "--rtp-port")) && atoi(v) > 0)
         rtp_port = atoi(v);
     wa_pushf(w, "--line-index", "%d", line);
+    {
+        /* Only lines sharing one account see a forked INVITE, so only those
+         * need staggering (sip_modem.c ring_incoming()). */
+        int k = line;
+
+        if ((v = opt_value(argc, argv, "--username"))) {
+            char mine[256], other[256];
+
+            list_field(v, line, mine, sizeof(mine));
+            k = 0;
+            for (int j = 0; j < line; j++) {
+                list_field(v, j, other, sizeof(other));
+                if (!strcmp(mine, other))
+                    k++;
+            }
+        }
+        wa_pushf(w, "--answer-stagger", "%d", k);
+    }
     wa_pushf(w, "--local-port", "%d", local_port + line);
     wa_pushf(w, "--rtp-port", "%d", rtp_port + 100 * line);
     if (opt_value(argc, argv, "--control-link")) {
@@ -498,7 +517,7 @@ int line_supervisor_run(int argc, char **argv, int lines, bool recycle)
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--gui") || !strcmp(argv[i], "--gui-web")
             || !strcmp(argv[i], "--gui-loopback") || !strcmp(argv[i], "--line-index")
-            || !strcmp(argv[i], "--exit-after-call")) {
+            || !strcmp(argv[i], "--answer-stagger") || !strcmp(argv[i], "--exit-after-call")) {
             fprintf(stderr, "%s: %s cannot be used with --lines\n", argv[0], argv[i]);
             return 2;
         }
