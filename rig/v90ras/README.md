@@ -69,7 +69,7 @@ one on CT 117; pass client options on the command line.
 
 | Run | Calls | Result |
 |---|---|---|
-| 01 | 1 x V.90 analogue (our client, 2903) to 2950 | line 0 answered; V.90 retrained 7 times in Phase 3/4 and fell back to **V.22bis 2400**; PAP and IPCP then fine |
+| 01 | 1 x V.90 analogue (our client, 2903) to 2950 | line 0 answered; V.90 retrained 7 times in Phase 3/4 and fell back to **V.22bis 2400** (fixed below, runs 06-07); PAP and IPCP then fine |
 | 02 | 2 x V.34 (2903, 2902) to 2950, client pppd multilink | hunt put call 2 on line 1; both **33600**, RTP loss 0; server `New bundle v90ras0 created`, then `Link attached to v90ras0` |
 
 The client and server share CT 117, so 10.254.200.1 is a local address to
@@ -86,10 +86,28 @@ saw Sd 20 ms into Ja and stopped it (§9.3.2.4), no descriptor parsed, no DIL
 was sent (J'd went straight to Ri), and Phase 4 retrained 7 times before the
 V.22bis fallback. Replaying the client's TX tap through the server engine
 reproduced it, and so did the offline pair at the production default. Every
-fast.list V.90 pair row had set the fallback to 0, which hid it. Fix: a
-rejected energy return puts the gate back to "in signal". Offline, the pair
-then parses N=120 600 ms into Ja and sends the DIL. fast.list has the
-default-fallback row.
+fast.list V.90 pair row had set the fallback to 0, which hid it. Engine fix
+(91f52721): a rejected energy return puts the gate back to "in signal".
+Offline, the pair then parses N=120 600 ms into Ja and sends the DIL, and
+fast.list has the default-fallback row.
+
+**That alone did not fix the live call.** Live, S read band2400 below the
+0.35 Tone A threshold (0.456 in the replay), so it was never rejected: the
+gate took S itself as Ja and the clock started at S (9,459 ms), 500 ms
+before Sd (9,980 ms), with Ja due about 780 ms after S. The fallback is a
+deliberate rescue for peers whose Ja never decodes (SmartLink in August,
+Apple r7), and no anchor available to the gate marks Ja onset: v34rx enters
+WAIT_S mid-TRN, and no hypothesis shows TRN as ones. So **v90ras runs
+`ME_V90_JA_HEURISTIC_FALLBACK_MS=0`** (in `v90ras.service`): Sd only on a
+CRC-valid descriptor, as §9.3.1.3 says. In the recorded corpus every
+hardware peer (MT5634, MT9234, SmartLink, Intel serial) parsed without the
+fallback. A peer whose Ja does not decode now waits for the v90.c interop
+fallback (6 s) and then concedes to V.34 after 20 s.
+
+| Run | Server | Result |
+|---|---|---|
+| 03, 04 | 91f52721, fallback 500 | V.22bis 2400: Sd 20 ms before Ja, as before |
+| 06, 07 | 91f52721, fallback 0 | **V.90 56000 down / 31200 up**, descriptor N=120 at 10.55 s, DIL sent, PPP up in 35 s (93 s before) |
 
 ## Windows 95 client
 
