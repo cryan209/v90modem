@@ -390,3 +390,23 @@ refuses). Set modem-safe on 2026-11-08 and saved with `write memory`:
 Left alone: `network-clock-select 1 BRI0/1/0` (the +62 ppm reference that
 our loop timing follows), the A-law BRI ports and the FXS impedance (default
 600r). No live modem call has been made on the new settings yet.
+
+First calls after the change (2026-11-08 11:14-11:20, all from 7800):
+
+- Law: before the change, upstream codewords had **0.00%** outside the A-law
+  image (4 calls on 2026-11-07, 1.2-6.8 M samples each), so 0/3/x was
+  transcoding A-law <-> u-law. After it: **0.5-3%** (call line0-1103132), so
+  that hop is gone upstream. The modem's CPt still sets bit 35 (A-law codec
+  output) with codec constellations that differ (bit 128), so it still sees an
+  A-law D/A downstream.
+- V.90 via 2950: the first call from these modems to get past Ja. Ja decoded
+  (N=197), then Sd, TRN1d, Jd, one DIL cycle and Ri. The modem's CPt
+  (drn=16, 6 constellations, CRC good) has **constellation 5 empty** (0/0
+  points, used by frame interval 5) and constellation 2 at 41 points against
+  101-103 in the others. v90_configure_phase4_mapper refuses it (an Mi of 0
+  breaks §5.4.1's 2^K <= prod Mi), so we never send TRN2d. The modem retrains
+  to V.34 after 17 s. This reproduces offline with v90_engine_replay --sync.
+  OPEN: what kills interval 5 (a 1-in-6 path impairment, or our own DIL
+  transmission for that interval).
+- x2 via 2959/2960: every call since 2026-11-08 00:04 stops at X2
+  RECORD_WAIT and fails 10 s later, the same before and after the change.
