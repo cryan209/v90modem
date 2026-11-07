@@ -224,6 +224,23 @@ the grid, 31.7 dB). The B1 rate check in the first 10 s is unchanged.
 Still open: after some peer 11.6 renegotiations our receiver ends white
 (e.g. line 1 19:33:35, 0.66), which is what triggers these losses.
 
+**20:00 and 20:01, 7800 alone, on 2ff37ab6.**
+- **19:59 call, stuck in Phase 2.** It sat 48 s and the modem hung up.
+  - The modem sent INFO0c, then 1.4 s of silence, then Tone B at 8.1 s (full
+    level). Our answer path had reversed Tone A at 6.48 s, 40 ms after
+    INFO0c, before the modem was listening. Each side then waited for the
+    other's reversal.
+  - 11.2.1.2.3 requires Tone B *detected* first. Fixed in 2189b0fb: wait for
+    Tone B, falling back to reversing after 2.5 s. The replay now reverses at
+    8.20 s.
+- **20:01 call, reached data, then hung up.**
+  - It entered data white (0.65 from the grid); our 11.6 fixed it (21600,
+    0.015, 30.8 dB) and PPP came up.
+  - The modem's own 11.6 then measured 8.3 dB, it sent the 11.5 retrain
+    tone, and 2ff37ab6 hung up the client's *only* link.
+  - Fixed in edafdde1: the hang-up applies only while another line has a call
+    (`ME_LINE_BUSY_DIR=/run/v90ras/busy`); a lone link retrains.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
