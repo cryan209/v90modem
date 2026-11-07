@@ -12,6 +12,11 @@ Environment=ME_JB_MS=40
 # Live A/B (2026-11-07): B1 rate drops by V.34 11.6 instead of a ~10 s 11.5
 # retrain; the Win95 modems hang up ~55 s after answering.
 Environment=ME_V34_B1_RENEG=1
+# B1 stepped 21600 down at 25.2 dB (2026-11-07 21:47) and the 11.6 that did
+# it left data white; the same modems ran 21600 clean at 23.8 dB (20:28,
+# 0.045 from the grid).  3 dB of slack keeps the trained rate; a rate that is
+# really too high still goes white and the data-loss path handles it.
+Environment=ME_V34_B1_RATE_MARGIN_DB=3
 # A retraining multilink member stalled the whole bundle (2026-11-07 19:23):
 # past 10 s of data, hang the member up instead.
 # ... but only while another line has a call: a lone link retrains.
