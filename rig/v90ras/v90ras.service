@@ -33,6 +33,13 @@ Environment=ME_V34_BAUD=3200
 # decoded because blind CMA walked our Phase 3 equalizer off during Ja; DD-LMS
 # there decodes it on the recorded calls.  The engine default Ja fallback
 # (500 ms) stays.
+# V.90 9.3.1.6: repeat DIL until the analogue modem's S-to-S-bar.  The
+# engine's default one-cycle cap (1.63 s here) sent Ri while the Win95 modem
+# was still studying DIL; its 9.3.2.10 S came 14 s later and the CPt it built
+# from our Ri had an empty interval-5 constellation, which we cannot map
+# (2026-11-08, line0-1103132; replay with 0 detects that S and ends DIL on a
+# segment boundary).
+Environment=ME_V90_DIL_AUTOTERMINATE_CYCLES=0
 # G.711 taps per call: %L is the line, %P the worker's PID (one worker per
 # call under --recycle). Disposable; delete old calls/ entries by hand.
 Environment=VPCM_G711_TAP_DIR=/var/tmp/v90ras/calls/line%%L-%%P

@@ -406,7 +406,14 @@ First calls after the change (2026-11-08 11:14-11:20, all from 7800):
   101-103 in the others. v90_configure_phase4_mapper refuses it (an Mi of 0
   breaks §5.4.1's 2^K <= prod Mi), so we never send TRN2d. The modem retrains
   to V.34 after 17 s. This reproduces offline with v90_engine_replay --sync.
-  OPEN: what kills interval 5 (a 1-in-6 path impairment, or our own DIL
-  transmission for that interval).
+  CAUSE, ours: our DIL is exact (all 13002 symbols of the cycle match the
+  descriptor, starting at offset 0 mod 6 from Sd), but the engine's default
+  one-cycle cap sent Ri 1.63 s into DIL. The modem went on sending SCR,
+  studying our Ri as if it were DIL, and gave its 9.3.2.10 S only at 28.5 s,
+  14 s later; its CPt was built from Ri (interval 2 has no Ucodes 31-80,
+  interval 5 is empty). 9.3.1.6 says to repeat DIL until that S. With
+  `ME_V90_DIL_AUTOTERMINATE_CYCLES=0` the replay repeats DIL, detects the S
+  at 28.5 s and ends on a segment boundary; v90ras.service sets it since
+  2026-11-08. Live result pending.
 - x2 via 2959/2960: every call since 2026-11-08 00:04 stops at X2
   RECORD_WAIT and fails 10 s later, the same before and after the change.
