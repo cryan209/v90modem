@@ -4728,6 +4728,25 @@ static void g711_taps_init(void)
     }
     if (!dir || !dir[0])
         return;
+    /* "%P" becomes this process's ID.  Under --lines --recycle every call is a
+     * fresh worker, and a fixed per-line directory is truncated by the next
+     * worker about a second after hangup -- before anything outside can copy
+     * it (rig/v90ras, 2026-11-07: 8 ms after pppd saw the hangup).  A per-
+     * process directory keeps every call's taps. */
+    char expanded[1024];
+    {
+        const char *p = strstr(dir, "%P");
+
+        if (p) {
+            if (snprintf(expanded, sizeof(expanded), "%.*s%ld%s",
+                         (int)(p - dir), dir, (long)getpid(), p + 2)
+                >= (int)sizeof(expanded)) {
+                fprintf(stderr, "[ME] VPCM_G711_TAP_DIR path is too long; live taps disabled\n");
+                return;
+            }
+            dir = expanded;
+        }
+    }
     if (snprintf(rx_path, sizeof(rx_path), "%s/live-rx.g711", dir) >= (int)sizeof(rx_path)
         || snprintf(tx_path, sizeof(tx_path), "%s/live-tx.g711", dir) >= (int)sizeof(tx_path)) {
         fprintf(stderr, "[ME] VPCM_G711_TAP_DIR path is too long; live taps disabled\n");

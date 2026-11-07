@@ -29,7 +29,7 @@ transcoded; add an A-law set if that is needed.
 |---|---|
 | `/opt/v90ras/sip_v90_modem` | frozen copy of the binary (rebuilding the worktree does not swap it under live workers) |
 | `/root/v90ras` | detached worktree it was built from |
-| `/etc/systemd/system/v90ras.service` | the 10-line server (copy here); SIP ports 5300-5309, RTP 30000+100*i, PTYs `/run/v90ras/line.0`-`.9`, `ME_JB_MS=40` |
+| `/etc/systemd/system/v90ras.service` | the 10-line server (copy here); SIP ports 5300-5309, RTP 30000+100*i, PTYs `/run/v90ras/line.0`-`.9`, `ME_JB_MS=40`, per-call G.711 taps in `/var/tmp/v90ras/calls/line<L>-<pid>` |
 | `/etc/systemd/system/v90ras-ppp@.service` | one pppd per line, instances 0-9 (copy here) |
 | `/etc/ppp/v90ras-options` | shared pppd options (copy here) |
 | `/etc/v90ras/sip.env` | SIP account passwords (0600, not in git) |
@@ -108,6 +108,24 @@ fallback (6 s) and then concedes to V.34 after 20 s.
 |---|---|---|
 | 03, 04 | 91f52721, fallback 500 | V.22bis 2400: Sd 20 ms before Ja, as before |
 | 06, 07 | 91f52721, fallback 0 | **V.90 56000 down / 31200 up**, descriptor N=120 at 10.55 s, DIL sent, PPP up in 35 s (93 s before) |
+
+**Fallback 0 was reverted the same afternoon (back to the default 500).** The
+first real clients, modems on the Cisco 2911 FXS ports (callers 7800, 7801,
+7802 via endpoint 6501, u-law end to end: 3.8% of received codewords lie
+outside the A-law image, against 0% if transcoded), never had their Ja
+decoded. In one call the modem ran S/PP/TRN/Ja for 3.65 s after the
+§9.3.2.1 silence and gave up, so without the fallback it never got Sd. All
+four calls then fell to V.34, where our receiver decoded white for the rest of
+the call (distance to grid 0.64-0.68, SNR 15-28 dB, at 3200 and at 2400 baud),
+so LAPM never came up and pppd's chat never saw CONNECT. Our own client
+trains V.34 33600 against the same server. Both failures are open. The
+server now keeps each call's G.711 taps (`VPCM_G711_TAP_DIR=.../line%L-%P`,
+`%P` added to the engine for this) so they can be replayed.
+
+| Call (17:17-17:23) | Result |
+|---|---|
+| 7800 x2, 7802 | V.90 Phase 3, no J/Ja decoded, peer retrain, V.34 white, hung up after 50-55 s |
+| 7801 | V.90 retrain at tx_phase 3, V.34 3200 high carrier, white for ~80 s, hung up |
 
 ## Windows 95 client
 
