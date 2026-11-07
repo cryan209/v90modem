@@ -11843,11 +11843,11 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
 
 /* The symbol rates that take the dense full-duplex path below: B1
    conditioning (11.4, 10.1.3.1), the Phase 4 TRN refit and DATA timing
-   (12.5.2).  3429 always.  ME_V34_DENSE_3200=1 adds 3200 (EXPERIMENTAL,
-   default off): on the loopback it lifts B1 from 31-33 dB to ~37.5 dB and
-   carries 31200 clean.  The offer uses its own 3200 refit table
-   (v34_rx_refit_training_rate()); it has no live run yet.  Status and
-   calibration: docs/v34_data_mode_rates.md, "3200 baud on the dense path". */
+   (12.5.2): 3429 and 3200.  At 3200 the offer uses its own refit table
+   (v34_rx_refit_training_rate()).  Against the Eicon 7930 this took a2c
+   from 26400 to 31200 on 7/7 calls (B1 33-35 -> 37-38 dB).
+   ME_V34_DENSE_3200=0 returns 3200 to the TRN LMS taps.  Calibration and
+   live A/B: docs/v34_data_mode_rates.md, "3200 baud on the dense path". */
 static bool v34_rx_dense_baud(const v34_rx_state_t *s)
 {
     static int dense_3200 = -1;
@@ -11856,7 +11856,7 @@ static bool v34_rx_dense_baud(const v34_rx_state_t *s)
     {
         const char *e = getenv("ME_V34_DENSE_3200");
 
-        dense_3200 = (e  &&  *e)  ?  (atoi(e) != 0)  :  0;
+        dense_3200 = (e  &&  *e)  ?  (atoi(e) != 0)  :  1;
     }
     /*endif*/
     return s->baud_rate == V34_BAUD_RATE_3429

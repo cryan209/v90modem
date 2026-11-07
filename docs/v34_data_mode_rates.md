@@ -1090,7 +1090,7 @@ retrains once to 21600 (B1 30.7). Both arms have no bad FCS and no drops.
 The probe is a 25 s LCP echo exchange, not a soak. `docs/eicon_soak_ppp.md`
 has the matrix context.
 
-## 3200 baud on the dense path (2026-11-07, PARKED)
+## 3200 baud on the dense path (2026-11-07, default on)
 
 Against the Eicon 7920 at 3200 baud (run 60, `docs/eicon_mlppp_20261107.md`)
 B1 read 32.8 dB and we offered 26400, yet the DATA-mode reading then climbed
@@ -1100,8 +1100,8 @@ that 3200 baud keeps, whose outer-tap noise is the floor the 3429 refit
 comment describes. B1 conditioning (11.4, 10.1.3.1), the Phase 4 TRN refit
 and the DATA Mueller/Muller timing (12.5.2) were gated to 3429 only.
 
-`ME_V34_DENSE_3200=1` (`v34_rx_dense_baud()`, default off) opens the same
-path at 3200. Loopback, A-law, no noise: B1 31.0-33.4 -> 37.0-37.8 dB, and
+`ME_V34_DENSE_3200` (`v34_rx_dense_baud()`) opens the same path at 3200.
+It was off by default until the live A/B below and is now on; `=0` turns it off. Loopback, A-law, no noise: B1 31.0-33.4 -> 37.0-37.8 dB, and
 3200/31200 goes from 6014/721 bit errors to none (26400 and 28800 clean both
 ways).
 
@@ -1175,6 +1175,7 @@ both arms share:
   | 3429/33600, 2743/26400 auto | 48/48 each | 48/48 each |
 
   Auto-rate 3200 at delays 1 and 11, both laws, are now in `tests/fast.list`.
+
   **Follow-up, same day.** As first committed (f385dacd), the short window
   also applied to the answer modem's first PHASE3_TRAINING. That stage runs
   while the answer modem sends its own S, PP and TRN (§11.3.1.2.1-3) to a
@@ -1211,11 +1212,36 @@ both arms share:
   3429/33600 are 48/48 each.
 - 3200 ulaw, delay 3, 30 dB noise, 24000 caller-to-answer: 60 errors.
 
-Still to do before the switch can default on:
+### Live A/B against the Eicon 7930 (2026-11-07)
 
-1. Live A/B against the 7920/7930 (rig as for run 60), alternated arms, with
-   one variable. Expect 28800 or 31200 toward us instead of 26400. The
-   live B1 reading at 3200 was 32.8 dB on the TRN taps, and DATA reached
-   36.8 dB, so 31200 needs a refit reading of at least 36.6 dB live.
-2. If live agrees: default on, add 3200/31200 auto-rate rows to the test lists,
-   then `make test`.
+`AT+MS=V34,0`, A-law, account 2905, caller to ext 7930, as run 60 (7920
+itself refused every call that afternoon with Q.850 cause 34, no circuit
+available). One binary, the run-60 CT117 tree plus this `v34rx.c`; arms
+alternated, `ME_V34_DENSE_3200=0` vs `=1`, 14 calls.
+
+| arm | a2c rate | B1 (dB) | refit (dB) | DATA SNR (dB) | 256 KiB down/up byte-exact |
+|---|---|---|---|---|---|
+| off | 26400 on 7/7 | 33.0-34.8 | - | 32.6-33.5 | 3/3 (23.1 / 27.3 kbit/s) |
+| on | 31200 on 7/7 | 36.8-38.4 | 38.2-38.6 | 37.0-38.0 | 2/3 (27.3 / 27.3 kbit/s) |
+
+c2a was 31200 on every call (projected N=13, the Diva's own choice).
+In calls 1-4 the HTTP server was not running, so they grade the rate only,
+but PPP reached IPCP on all eight.
+The failed switch-on call lost 108 received RTP packets, about one a second
+from 60 s on, with no gap in our transmit stream. DATA SNR held at
+37.7 dB until the first retrain at 94 s. The other 13 calls lost no packets.
+Received-RTP loss does not depend on our receiver, so that call is void
+rather than a failure of the arm.
+
+The switch is now on by default. After f385dacd (Phase 3 eye chosen on S),
+the 144-run auto-rate matrix gives 16/16 in both arms at every noise level
+from 32 dB up. With the switch on, the mean rate goes 27000 -> 31200 with no
+noise, 25425 -> 28800 at 36 dB, and 24000 -> 26400 at 32 dB. Results at 30 dB
+and below are identical in both arms. Auto-rate 3200 rows (31200 clean, 38 dB
+-> 28800, 34 dB -> 26400, both laws) are in `tests/fast.list`.
+
+Below 32 dB both arms are identical, so the switch is not involved. The 7200
+picks that f385dacd caused there were fixed by 30b7b923 (above). What remains
+at 24 and 30 dB is 36-75 error bursts at 19200/24000. Those rates are below the
+26400 gate, so they come from the live TRN table (`v34_rx_training_rate()`),
+not the dense path.

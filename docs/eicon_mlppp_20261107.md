@@ -212,8 +212,9 @@ line rate), no retrain in 1,351 s.
   Cause found since: at 3200 baud we keep the TRN LMS taps, because the B1
   least-squares equalizer and TRN refit ran at 3429 only. Over the call the DATA
   reading climbs 32.7 -> 36.8 dB. Opening that path at 3200
-  (`ME_V34_DENSE_3200=1`, off by default) lifts B1 to ~37.5 dB on the loopback;
-  parked, see `docs/v34_data_mode_rates.md`, "3200 baud on the dense path".
+  (`ME_V34_DENSE_3200`, now on by default) lifts B1 to ~37.5 dB on the loopback,
+  and live against the 7930 a2c went from 26400 to 31200 on 7/7 calls; see
+  `docs/v34_data_mode_rates.md`, "3200 baud on the dense path".
 
 ## Open issues
 
