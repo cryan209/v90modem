@@ -120,7 +120,8 @@ the call (distance to grid 0.64-0.68, SNR 15-28 dB, at 3200 and at 2400 baud),
 so LAPM never came up and pppd's chat never saw CONNECT. Our own client
 trains V.34 33600 against the same server. Both failures are open. The
 server now keeps each call's G.711 taps (`VPCM_G711_TAP_DIR=.../line%L-%P`,
-`%P` added to the engine for this) so they can be replayed.
+`%P`, the worker PID, expanded by the line supervisor since 7bc08170 so the
+RTP CSVs land there too) so they can be replayed.
 
 | Call (17:17-17:23) | Result |
 |---|---|
