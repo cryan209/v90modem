@@ -258,6 +258,23 @@ Phase 2 deadlock), and the bundle reached three members at 20:28:32.
   (another line was up).
 - The repeated "only call up" message (128 per report) is fixed in 288487a6.
 
+**21:00, on c62c6dbd.**
+- **Line 0 (7800)** ran clean at 21600 the whole call (0.017-0.05 from the
+  grid, no retrain), IP up at 21:00:42, ping 5/5 at ~300 ms.
+- **Lines 1 and 2** (7802, then 7801) reached data but never joined the
+  bundle. pppd logged "Couldn't create ppp interface v90ras0: File exists",
+  exited, and the call dropped.
+  - Cause: line 0's acknowledged LCP ConfReq (id 7) carried a 15-byte
+    endpoint discriminator, `...1c.23.00`, with the last `00` missing. It was
+    FCS-valid, so the client sent it that way. The later links sent all 16
+    bytes. pppd names a bundle after the peer's endpoint, so the later links
+    belonged to a different bundle, which tried to create a second
+    `v90ras0`.
+  - The 19:23 and 20:28 bundles all sent 16 bytes and attached.
+  - Fix: `noendpoint` in `v90ras-options`. pppd ConfRejs the endpoint (RFC
+    1990 makes it optional) and bundles on the peer name, which is the same
+    for every link under noauth.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
