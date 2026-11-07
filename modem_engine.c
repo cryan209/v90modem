@@ -81,6 +81,8 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <dirent.h>
+#include <signal.h>
 
 /* Per-section wall time inside one media callback, printed by
    me_media_timing_note() when the callback is slow so the step can be named
@@ -7263,14 +7265,85 @@ static bool b1_retrain_allowed(void)
  * one with no loss), and so is anything in the first n ms, where the B1
  * check and early retrains still find the rate before PPP is up.  0, the
  * default, keeps the retrain. */
+/* ME_LINE_BUSY_DIR: each worker of a --lines server keeps "line<i>" there
+ * (holding its pid) while it has a call, so a worker can tell whether it is
+ * the only call up.  A marker whose pid is gone is ignored, so a worker that
+ * dies mid-call leaves nothing to clean up. */
+static int g_line_busy_index = -1;
+
+void me_line_busy_mark(int line, bool busy)
+{
+    const char *dir = getenv("ME_LINE_BUSY_DIR");
+    char path[PATH_MAX];
+    FILE *f;
+
+    if (dir == NULL || *dir == '\0' || line < 0)
+        return;
+    snprintf(path, sizeof(path), "%s/line%d", dir, line);
+    if (!busy) {
+        unlink(path);
+        return;
+    }
+    (void) mkdir(dir, 0755);
+    g_line_busy_index = line;
+    if ((f = fopen(path, "w")) != NULL) {
+        fprintf(f, "%ld\n", (long) getpid());
+        fclose(f);
+    }
+}
+
+/* -1: no ME_LINE_BUSY_DIR, so nothing is known; otherwise the number of
+ * OTHER lines with a call up. */
+static int other_lines_busy(void)
+{
+    const char *dir = getenv("ME_LINE_BUSY_DIR");
+    struct dirent *de;
+    DIR *d;
+    int n = 0;
+
+    if (dir == NULL || *dir == '\0')
+        return -1;
+    if ((d = opendir(dir)) == NULL)
+        return 0;
+    while ((de = readdir(d)) != NULL) {
+        char path[PATH_MAX];
+        FILE *f;
+        long pid = 0;
+        int line;
+
+        if (sscanf(de->d_name, "line%d", &line) != 1
+            || line == g_line_busy_index)
+            continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        if ((f = fopen(path, "r")) == NULL)
+            continue;
+        if (fscanf(f, "%ld", &pid) == 1 && pid > 0 && pid != (long) getpid()
+            && (kill((pid_t) pid, 0) == 0 || errno == EPERM))
+            n++;
+        fclose(f);
+    }
+    closedir(d);
+    return n;
+}
+
 static bool loss_hangup_due_locked(void)
 {
     static int after_ms = -1;
 
     if (after_ms < 0)
         after_ms = parse_env_int("ME_V34_LOSS_HANGUP_AFTER_MS", 0);
-    return after_ms > 0 && g_state == ME_DATA
-           && data_mode_elapsed_ms() >= after_ms;
+    if (after_ms <= 0 || g_state != ME_DATA
+        || data_mode_elapsed_ms() < after_ms)
+        return false;
+    /* With ME_LINE_BUSY_DIR, only when another line has a call: a lone link
+     * has no bundle to protect, and hanging it up loses the whole session
+     * (live 2026-11-07 20:01, 7800 alone, hung up 13.5 s into data). */
+    if (other_lines_busy() == 0) {
+        fprintf(stderr, "[ME] V.34: data loss on the only call up; "
+                "retraining rather than hanging up\n");
+        return false;
+    }
+    return true;
 }
 
 static void loss_hangup_locked(const char *why)

@@ -14,7 +14,9 @@ Environment=ME_JB_MS=40
 Environment=ME_V34_B1_RENEG=1
 # A retraining multilink member stalled the whole bundle (2026-11-07 19:23):
 # past 10 s of data, hang the member up instead.
+# ... but only while another line has a call: a lone link retrains.
 Environment=ME_V34_LOSS_HANGUP_AFTER_MS=10000
+Environment=ME_LINE_BUSY_DIR=/run/v90ras/busy
 # Our V.34 receiver at 3429 baud drifts to white against these modems
 # (2026-11-07 19:15, 7802: 21600 at 3429, B1 27.6 dB, data 0.43 -> white in
 # 2 s, reproduced offline); every clean decode was at 3200. Our own probe

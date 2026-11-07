@@ -993,6 +993,7 @@ static void on_call_media_state(pjsua_call_id call_id)
                 if (ci.role == PJSIP_ROLE_UAC && ci.state != PJSIP_INV_STATE_CONFIRMED)
                     me_on_sip_early_media();
                 g_media_connected = PJ_TRUE;
+                me_line_busy_mark(g_line_index, true);
                 g_last_logged_media_connected = 1;
                 log_modem_diag_snapshot("media-connected");
             }
@@ -2000,6 +2001,8 @@ int main(int argc, char *argv[])
         if ((g_media_connected ? 1 : 0) != g_last_logged_media_connected) {
             g_last_logged_media_connected = g_media_connected ? 1 : 0;
             log_modem_diag_snapshot(g_media_connected ? "media-up" : "media-down");
+            if (!g_media_connected)
+                me_line_busy_mark(g_line_index, false);
             if (!g_media_connected)
                 me_flush_g711_taps();   /* off the media clock; see header */
             if (!g_media_connected)

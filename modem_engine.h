@@ -193,6 +193,8 @@ int  me_tx_g711(uint8_t *codewords, int count);
 void me_flush_diagnostic_captures(void);
 /* Historical name retained as an alias; now also drains training PCM. */
 void me_flush_g711_taps(void);
+/* Mark this --lines worker's line busy/idle in ME_LINE_BUSY_DIR (if set). */
+void me_line_busy_mark(int line, bool busy);
 /* Offline replays only: block until the V.90 CP and Ja worker threads have
  * nothing posted or running, so their results land at the same media frame
  * on every run (v90_engine_replay --sync). */
