@@ -142,6 +142,16 @@ that then measured 28 dB in data mode) and does not depend on
 carried across a fall to 2400 baud is a rate that baud cannot carry. Both
 are still open.
 
+Fixed in b13a2b19 (deployed 17:47): the MP rate policy is now a ceiling on
+the rates measured at the new baud, not a replacement, and the B1 check
+obeys only the per-call cap of 4, not the 20 s loss dwell. Replayed, 7800's
+second B1 (21.4 dB at 2400) retrains to 12000. A 17:42 redial from 7801
+that ran 50 s white at 19200 (0.64-0.67, 19 dB) gets a second B1 retrain
+to 14400 instead. Still open: our first MP asks 31200 on every one of these
+calls, and B1 then reads 17-23.6 dB, so each call spends one or two 11.5
+retrains (~8 s each) finding the rate. The first rate should come from a
+measurement (docs/v34_data_mode_rates.md).
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
