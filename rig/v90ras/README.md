@@ -214,6 +214,16 @@ the client: multilink fragments lost across line 1's retrain wedged the
 Win95 reassembly. Open: line 1's drift to white at 3200, and whether our
 V.42 delivers everything across a retrain.
 
+**Since 2ff37ab6, a member that loses data hangs up instead of retraining**
+(`ME_V34_LOSS_HANGUP_AFTER_MS=10000` in the unit). Past 10 s in data mode, a
+receiver that stops decoding, or the peer's 11.5 retrain tone, ends that
+call. The client then drops only that link, and the bundle carries on with
+the others (redial to add it back). The modem's own 11.6 renegotiations are
+still answered, and line 1 at 19:34 rode one cleanly at 21600 (0.057 from
+the grid, 31.7 dB). The B1 rate check in the first 10 s is unchanged.
+Still open: after some peer 11.6 renegotiations our receiver ends white
+(e.g. line 1 19:33:35, 0.66), which is what triggers these losses.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
