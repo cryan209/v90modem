@@ -315,6 +315,25 @@ Phase 2 deadlock), and the bundle reached three members at 20:28:32.
   (V.34 Table 13), and our receiver uses our own bit, as it should.
 - **Next suspect:** mapping, superframe or trellis state carried across the
   renegotiation.
+- **Not specific to renegotiation** (correcting the suspect above). The 22:04
+  call's *initial* data at 19200 was white the same way: B1 0.997, shell
+  index out of range in 32% of frames, 0.66 from the grid. It reproduces
+  offline on tap line0-1094929.
+  - Both white cases are **19200 at 3200 baud**; every clean call ran 21600.
+  - `mappings_3200` matches V.34 Table 10 (19200: K=28, M 12/14).
+    `engine_pair_test` at 3200/19200 passes, but both ends are our own code,
+    so a symmetric error would cancel.
+  - Next: decode one 19200 data frame from the tap by hand against 9.x
+    (shell mapping, the 8 Q bits, superframe sync and the W/J mapping-frame
+    switch, which differs at even and odd bit-rate codes).
+- **Consequence:** V.42 detection runs during that white stretch, fails, and
+  both modems drop to V.14 ("no error-control peer"). With no
+  retransmission, PPP then dies of bit errors: at 22:33 data was clean
+  (0.04, 24 dB), but our IPCP ConfReqs never got through and pppd quit,
+  "No network protocols running".
+
+**22:04 bundle, on a6048a86.** Two links bundled (line 1 attached 22:05:09).
+Line 0 kept going white and was hung up after 86.8 s with line 1 up.
 
 ## Windows 95 client
 
