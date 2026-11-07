@@ -199,6 +199,21 @@ reproduces offline (0.4289). Every clean decode against these modems was
 at 3200. **Since 19:25 v90ras runs `ME_V34_BAUD=3200`**; the offline pair
 connects 21600 at it. Our 3429 receive against them is a defect of its own.
 
+**19:22, first working call, on bb042443.** 7802 on line 0 reached V.34 DATA
+20 s after the call arrived, with PPP/IPCP up at 30 s (10.254.200.2). The
+modem's own mid-call 11.6 was answered cleanly (data 0.020 from the grid,
+31.6 dB, before and after). Ping over the link: **10/10, RTT ~418 ms**.
+7801 then joined on line 1 ("Link attached to v90ras0", multilink with two
+modems). About 30 s later line 1's decode drifted (0.04 -> 0.065 -> 0.53)
+to white, and the loss retrain recovered it to 0.009. But from then on the
+client answered no LCP echo on **either** link, although line 0 decoded
+clean throughout and line 1 still carried the closing TermReq/TermAck.
+Ping went 2/20 at ~4 s RTT, then 0/20. Both members dropped on "No
+response to 6 echo-requests" at 19:25:53-58. Likely cause, not verified on
+the client: multilink fragments lost across line 1's retrain wedged the
+Win95 reassembly. Open: line 1's drift to white at 3200, and whether our
+V.42 delivers everything across a retrain.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
