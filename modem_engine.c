@@ -7354,6 +7354,29 @@ static bool v34_b1_rate_check_locked(void)
        2.0 s (rf-tower-fb-13) into data mode -- our S on the wire, none back --
        so each attempt only added ~6 s before the same retrain, and the B1
        rate change retrains directly. */
+    /* ME_V34_B1_RENEG=1 tries 11.6 first: S, S-bar, TRN, MP, E and B1 at
+       the same symbol rate, ~2 s with the call kept, and 11.6.2.1's timeout
+       (3.15 s here) falls back to the retrain below through the existing
+       renegotiation branch.  Against Win95 modems on the Cisco FXS
+       (rig/v90ras, 2026-11-07, caller 7802) B1 walked 28800 -> 21600 ->
+       16800 -> 12000 through three 11.5 retrains of ~10 s each, one of them
+       moving 3200 -> 2400 baud, and the modem hung up 55 s after answering,
+       as 12000 came up.  Off by default: the RasFinder ignored 11.6 opened
+       0.16 s and 2.0 s into data mode (rf-tower-fb-11, -13). */
+    {
+        static int b1_reneg = -1;
+
+        if (b1_reneg < 0)
+            b1_reneg = parse_env_int("ME_V34_B1_RENEG", 0) ? 1 : 0;
+        if (b1_reneg && me_v34_reneg_enabled()
+            && v34_start_rate_renegotiation(g_v34) == 0) {
+            ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
+                   "renegotiation\n", supported*2400);
+            trace_phase("V34 B1 reneg to %d", supported*2400);
+            v34_reneg_begin_locked();
+            return true;
+        }
+    }
     ME_LOG("[ME] V.34 B1: asking for %d bps and retraining per 11.5\n",
            supported*2400);
     if (g_v90_fallback_v34_logged) {

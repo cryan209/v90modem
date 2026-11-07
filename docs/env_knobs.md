@@ -61,6 +61,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V8_CI_REPEATS` | v8.c | CI repetitions while ringing a hunt group. |
 | `ME_V34_ECHO` | modem_engine.c | Receive-path echo handling: none, notch or canceller. |
 | `ME_V34_RENEG` | modem_engine.c | 0 never initiates a V.34 11.6 rate renegotiation (answering one is unaffected). |
+| `ME_V34_B1_RENEG` | modem_engine.c | 1: when B1 says the rate is too high, ask for the lower one by a 11.6 renegotiation (falls back to an 11.5 retrain on the 11.6.2.1 timeout). Default 0; live A/B on rig/v90ras. |
 | `ME_V34_RETRAIN_ON_LOSS` | modem_engine.c | Per-call cap on V.34 retrains when the receiver stops decoding (default 4). |
 | `ME_V90_RETRAIN_ON_LOSS_DWELL_MS` | modem_engine.c | Minimum time between those retrains. |
 | `ME_V90_MAX_DOWNSTREAM_RATE` | v90.c | V.90 downstream ceiling in bit/s (AT+MS does the same per call). |
@@ -432,7 +433,6 @@ Kept in `tools/env_knobs_removed.tsv`.
 | `V92_DATA_DFI` | a46f4ab3 |
 | `V92_DATA_UCODES` | a46f4ab3 |
 | `ME_RX_ACCOUNTING` | 834db955 |
-| `ME_V34_B1_RENEG` | 834db955 |
 | `ME_V34_B1_RENEG_DELAY_MS` | 834db955 |
 | `ME_V34_INVERT_ROLE` | 834db955 |
 | `ME_V34_TRAINING_FAIL_RETRAINS` | 834db955 |

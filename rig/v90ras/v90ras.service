@@ -9,6 +9,9 @@ After=network-online.target
 EnvironmentFile=/etc/v90ras/sip.env
 # Halves PPP RTT against the 200 ms default (docs/eicon_mlppp_20261107.md).
 Environment=ME_JB_MS=40
+# Live A/B (2026-11-07): B1 rate drops by V.34 11.6 instead of a ~10 s 11.5
+# retrain; the Win95 modems hang up ~55 s after answering.
+Environment=ME_V34_B1_RENEG=1
 # The engine default Ja fallback (500 ms) stays: real modems on the Cisco
 # FXS (7800/7802) send a Ja we do not decode, and without the fallback they
 # never got Sd (rig/v90ras/README.md, 2026-11-07).
