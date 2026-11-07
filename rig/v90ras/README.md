@@ -431,15 +431,29 @@ upstream decoded at 35 dB (symbol error 0.009, 0 bad shell frames in about
 114 per window), and **V.42 LAPM connected** at 52000 down / 16800 up. Each
 data period then ended within 1.5-6 s on OUR "abrupt discontinuity" resync
 request (§9.6 Rd), which this modem does not answer, so a retrain followed.
-- 11:48:55: a real RTP loss. One packet (160 samples) was missing at +25.212
-  s. That call lost 4 of 2970 packets, against 0 in about 108k packets
-  yesterday and 0 in today's other calls. This is sporadic transport loss,
-  not the gateway settings.
-- 11:49:14 and 11:51:10: no packet loss. The T/3 timing loop reads a steady
-  freq of +0.00024 samples/symbol (about 80 ppm between the modem's upstream
-  symbol clock and the Cisco's sample clock) and logs a slip about every
-  1-1.5 s. A slip whose timing search fails 3 times raises the resync.
-  OPEN: handle this drift without a §9.6 request. The taps are in
-  line0-1122235 and line0-1122312.
+- 11:48:55: OURS. One RTP packet was lost (RTP timestamp +25.18 s; that call
+  lost 4 of 2970 packets, against 0 in about 108k yesterday). The receive tap
+  has no fill there. Instead it has a double fill at the next loss (+25.96 s;
+  the same again at +37.80/+37.90 s), so the 0.74 s between were 160 samples
+  short. That is a 64-symbol step, and the resync came 80 ms after it. Putting
+  the 160 samples back in the tap removes that resync from the replay. The
+  cause is pjmedia's jitter buffer, which reset its origin when a packet
+  arrived into an empty buffer, dropping the lost slot. With
+  `ME_JB_MS=40` (about one frame of real headroom) that is the usual case;
+  at the 200 ms default it never happens. Fixed in the vendored
+  `pjproject/pjmedia/src/pjmedia/jbuf.c` with a regression test
+  (`jbuf_gap_test`): stock pjmedia steps in 215 of 240 simulated single-loss
+  runs at 40 ms, the fixed one in 0 of 240 for every loss pattern tested.
+- 11:49:14: not drift. The data period after the first retrain started at
+  symbol error 0.043 (against 0.009 before) and lasted 1.4 s; no RTP loss.
+- 11:51:10 (line0-1122312): a weak B1 fit (best of 7 windows, 0.134 to the
+  grid), then the resync at once.
+- The ~80 ppm T/3 offset (+0.00024 samples/symbol) is absorbed: slips count
+  up while the symbol error stays at 0.009, so it caused none of these.
+- Seen while tracing: under LAPM the upstream frame-phase sweep never locks
+  (HDLC flags read 75% ones and carry no V.14 framing, and both lock rules
+  need one or the other), so it keeps stepping through all 112 candidates
+  during clean data. It did not move the symbol error in replay. OPEN whether
+  the steps cost LAPM frames.
 - 11:47: one call failed in V.34 Phase 2 (INFO0 retry, no valid INFO1a, then
   our TX went IDLE and stayed silent for 38 s until the modem hung up). OPEN.

@@ -284,7 +284,12 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
        me_rx_g711_slip_permitted() in modem_engine.h.  Replayed over a clean
        recorded call, losing one packet the way we do today costs 1% of the
        call and concealing it costs nothing (99% vs 100% clean;
-       tools/inject_sample_slips.py --lose/--conceal). */
+       tools/inject_sample_slips.py --lose/--conceal).
+
+       A lost packet only reaches here, in its own slot, because the vendored
+       pjmedia jbuf.c keeps short sequence gaps when the buffer is empty
+       (stock pjmedia dropped them -- a 160-sample deletion per loss at
+       ME_JB_MS=40); jbuf_gap_test guards that. */
     if (!fed) {
         static uint8_t fill_buf[PJ_ARRAY_SIZE(g_tx_linear)];
         unsigned n = port->payload_samples_per_frame;

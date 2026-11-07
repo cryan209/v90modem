@@ -172,6 +172,8 @@ python3 tools/mt9234_v90_gradient_test.py
 ./v250_ctl_test
 ./near_echo_test
 ./media_clock_test
+# Lost RTP packets must come out as fill in their own slot (pjmedia jbuf.c).
+./jbuf_gap_test
 ./v34_line_ec_test
 ./v90_analogue_pr4_test
 # Apple direct pair: B1 precedes the CP-bitstream E anchor by six seconds.

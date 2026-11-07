@@ -83,6 +83,12 @@ typedef struct jb_framelist_t
     unsigned         discarded_num;     /**< current number of discarded
                                              frames.                        */
     int              origin;            /**< original index of flist_head   */
+    unsigned         empty_gets;        /**< v90modem: GETs that found the
+                                             list empty since it last held
+                                             a frame (each one played a
+                                             frame of fill)                 */
+    unsigned         covered_last;      /**< v90modem: how many of those the
+                                             last PUT counted as lost slots */
 
 } jb_framelist_t;
 
@@ -234,6 +240,8 @@ static pj_status_t jb_framelist_reset(jb_framelist_t *framelist)
     framelist->origin = INVALID_OFFSET;
     framelist->size = 0;
     framelist->discarded_num = 0;
+    framelist->empty_gets = 0;
+    framelist->covered_last = 0;
 
 
     //pj_bzero(framelist->content,
@@ -481,6 +489,7 @@ static pj_status_t jb_framelist_put_at(jb_framelist_t *framelist,
 
     /* get distance of this frame to the first frame in the buffer */
     distance = index - framelist->origin;
+    framelist->covered_last = 0;
 
     /* too late or sequence restart or far jump */
     if (distance < 0) {
@@ -508,7 +517,32 @@ static pj_status_t jb_framelist_put_at(jb_framelist_t *framelist,
     }
 
     /* if jbuf is empty, just reset the origin */
-    if (framelist->size == 0) {
+    /* v90modem: not across a short gap.  Resetting the origin here drops the
+     * lost frames' slots, so the consumer -- which pulls one frame per tick
+     * -- plays the frame after the gap in the lost frame's place: a deletion
+     * of one frame per lost packet.  The G.711 passthrough feeds those
+     * samples to a modem receiver as its DS0, where 160 deleted samples are a
+     * permanent 20 ms step (64 symbols at 3200 baud) that no timing loop can
+     * absorb.  Measured on the v90ras rig with a 40 ms buffer: each isolated
+     * lost packet left the RX stream 160 samples short until the next
+     * underrun inserted it back, and the V.90 upstream receiver requested a
+     * 9.6 resynchronisation 80 ms after the first one.  So keep the origin
+     * and let the gap be returned as MISSING frames (the passthrough port
+     * plays fill for those), except for the slots that GETs already covered
+     * while the list was empty: those ticks played fill already. */
+    if (framelist->size == 0 && framelist->origin != INVALID_OFFSET &&
+        distance > 0 && distance < (int)framelist->max_count)
+    {
+        unsigned covered = PJ_MIN(framelist->empty_gets, (unsigned)distance);
+
+        pj_assert(framelist->discarded_num == 0);
+        framelist->origin += (int)covered;
+        framelist->head = (framelist->head + covered) % framelist->max_count;
+        distance -= (int)covered;
+        framelist->covered_last = covered;
+        TRACE__((THIS_FILE,"Put frame #%d: JB empty, keeping a gap of %d",
+                           index, distance));
+    } else if (framelist->size == 0) {
         pj_assert(framelist->discarded_num == 0);
         TRACE__((THIS_FILE,"Put frame #%d: origin reset (from %d) as JB empty",
                            index, framelist->origin));
@@ -547,6 +581,7 @@ static pj_status_t jb_framelist_put_at(jb_framelist_t *framelist,
     framelist->content_len[pos] = frame_size;
     framelist->bit_info[pos] = bit_info;
     framelist->ts[pos] = ts;
+    framelist->empty_gets = 0;
 
     /* update framelist size */
     if (framelist->origin + (int)framelist->size <= index)
@@ -1094,7 +1129,11 @@ PJ_DEF(void) pjmedia_jbuf_put_frame3(pjmedia_jbuf *jb,
         if (jb->jb_prefetching) {
             TRACE__((jb->jb_name.ptr, "PUT prefetch_cnt=%d/%d",
                      new_size, jb->jb_prefetch));
-            if (new_size >= jb->jb_prefetch)
+            /* v90modem: GETs that covered lost slots (see
+             * jb_framelist_put_at()) stood for frames, not for a buffer
+             * that ran dry, so they count toward the depth: prefetching
+             * again for them would insert a frame. */
+            if (new_size + jb->jb_framelist.covered_last >= jb->jb_prefetch)
                 jb->jb_prefetching = PJ_FALSE;
         }
         jb->jb_level += (new_size > cur_size ? new_size-cur_size : 1);
@@ -1138,6 +1177,11 @@ PJ_DEF(void) pjmedia_jbuf_get_frame3(pjmedia_jbuf *jb,
                                      pj_uint32_t *ts,
                                      int *seq)
 {
+    /* v90modem: this GET finds nothing to consume, so the consumer plays a
+     * frame of fill for it; see jb_framelist_put_at(). */
+    if (jb->jb_framelist.size == 0)
+        jb->jb_framelist.empty_gets++;
+
     if (jb->jb_prefetching) {
 
         /* Can't return frame because jitter buffer is filling up

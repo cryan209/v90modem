@@ -173,7 +173,7 @@ SRCS   = k56flex_client_tx.c k56flex_startup.c k56flex_upstream_pcm.c k56flex_up
 SRCS += vfc_mapper.c vfc_signature.c vfc_frame.c vfc_trellis.c async_capture.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = media_clock_test v90_b1_state_test k56flex_7910_p1_test k56flex_startup_test k56flex_upstream_pcm_test k56flex_upstream_test line_monitor_test near_echo_test v34_line_ec_test v90_analogue_pr4_test v92_b1u_lock_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test mica_qam_test x2_test v42bis_test mnp5_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_stress_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_info1a_validate_test v34_phase4_16pt_test v34_data_test v34_gardner_test fax_class_test fax_class2_test fax_v34_preamble_test v90_upstream_replay v90_engine_replay v34_duplex_test v34_fdm_test v32bis_spandsp_test v32bis_duplex_test bell212a_test v22bis_s1_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_reneg_silence_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_qc_test v92_su_test v92_qc_engine_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_client_test x2_sym_test x2_b1_test v8bis_test v8bis_fsm_test v8bis_modem_test v76_test v75_test v70_test v70_v34_test
+TEST_TARGETS = media_clock_test jbuf_gap_test v90_b1_state_test k56flex_7910_p1_test k56flex_startup_test k56flex_upstream_pcm_test k56flex_upstream_test line_monitor_test near_echo_test v34_line_ec_test v90_analogue_pr4_test v92_b1u_lock_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test mica_qam_test x2_test v42bis_test mnp5_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_stress_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_info1a_validate_test v34_phase4_16pt_test v34_data_test v34_gardner_test fax_class_test fax_class2_test fax_v34_preamble_test v90_upstream_replay v90_engine_replay v34_duplex_test v34_fdm_test v32bis_spandsp_test v32bis_duplex_test bell212a_test v22bis_s1_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_reneg_silence_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_qc_test v92_su_test v92_qc_engine_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_client_test x2_sym_test x2_b1_test v8bis_test v8bis_fsm_test v8bis_modem_test v76_test v75_test v70_test v70_v34_test
 TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = legacy_pcm_decode.o x2_session.o x2_client.o x2_sym.o x2_mp_rx.o x2.o k56flex_client.o k56flex_rxfe.o k56flex_train.o k56flex_probe.o k56flex.o vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -217,6 +217,7 @@ TEST_TARGETS += vfc_mapper_test vfc_signature_test vfc_frame_test vfc_frame_code
 V250_CTL_TEST_OBJS = v250_ctl_test.o v250_ctl.o
 NEAR_ECHO_TEST_OBJS = near_echo_test.o near_echo.o
 MEDIA_CLOCK_TEST_OBJS = media_clock_test.o media_clock.o
+JBUF_GAP_TEST_OBJS = jbuf_gap_test.o
 V34_LINE_EC_TEST_OBJS = v34_line_ec_test.o v34_line_ec.o
 V90_JA_MATCH_TEST_OBJS = v90_ja_match_test.o
 TEST_TARGETS += v90_ja_match_test
@@ -580,6 +581,10 @@ vfc_trellis_test: $(VFC_TRELLIS_TEST_OBJS)
 
 media_clock_test: $(MEDIA_CLOCK_TEST_OBJS)
 	$(CC) $(MEDIA_CLOCK_TEST_OBJS) -o $@ -lm
+
+# Links the vendored pjmedia: the jitter buffer under test is its jbuf.c.
+jbuf_gap_test: $(JBUF_GAP_TEST_OBJS) $(PJ_BUILD_PREREQ)
+	$(CC) $(JBUF_GAP_TEST_OBJS) -o $@ $(PJ_LIBS) $(SYSTEM_LIBS)
 
 near_echo_test: $(NEAR_ECHO_TEST_OBJS)
 	$(CC) $(NEAR_ECHO_TEST_OBJS) -o $@ -lm -lpthread
