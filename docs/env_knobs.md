@@ -62,6 +62,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_ECHO` | modem_engine.c | Receive-path echo handling: none, notch or canceller. |
 | `ME_V34_RENEG` | modem_engine.c | 0 never initiates a V.34 11.6 rate renegotiation (answering one is unaffected). |
 | `ME_V34_B1_RENEG` | modem_engine.c | 1: when B1 says the rate is too high, ask for the lower one by a 11.6 renegotiation (falls back to an 11.5 retrain on the 11.6.2.1 timeout). Default 0; live A/B on rig/v90ras. |
+| `ME_V34_LOSS_HANGUP_AFTER_MS` | modem_engine.c | n>0: once the call has been in data mode n ms (since the last DATA entry), a receiver that stops decoding, or a peer 11.5 retrain, hangs up instead of retraining; 11.6 renegotiations are untouched. For multilink members, where a retraining link stalls the whole bundle. Default 0; 10000 on rig/v90ras. |
 | `ME_V34_RETRAIN_ON_LOSS` | modem_engine.c | Per-call cap on V.34 retrains when the receiver stops decoding (default 4). |
 | `ME_V90_RETRAIN_ON_LOSS_DWELL_MS` | modem_engine.c | Minimum time between those retrains. |
 | `ME_V90_MAX_DOWNSTREAM_RATE` | v90.c | V.90 downstream ceiling in bit/s (AT+MS does the same per call). |

@@ -7250,6 +7250,40 @@ static bool b1_retrain_allowed(void)
     return cap > 0 && (int) g_loss_retrains < cap;
 }
 
+/* ME_V34_LOSS_HANGUP_AFTER_MS=<n>: once this call has been in data mode for
+ * n ms, a receiver that stops decoding, or a peer retrain, ends the call
+ * instead of retraining.  For a multilink PPP server (rig/v90ras): a member
+ * link that retrains stops taking data for 10-20 s while it still counts as
+ * part of the bundle.  Live, 2026-11-07 19:23 (Win95 DUN, two modems on the
+ * Cisco FXS), line 1 spent ~90 s retraining and renegotiating, and the
+ * client then answered no LCP echo on EITHER link although line 0 decoded
+ * clean throughout; both members dropped on echo failure.  A member that
+ * hangs up drops carrier at the client, which removes that link and keeps
+ * the bundle.  The short 11.6 renegotiations are untouched (line 0 rode
+ * one with no loss), and so is anything in the first n ms, where the B1
+ * check and early retrains still find the rate before PPP is up.  0, the
+ * default, keeps the retrain. */
+static bool loss_hangup_due_locked(void)
+{
+    static int after_ms = -1;
+
+    if (after_ms < 0)
+        after_ms = parse_env_int("ME_V34_LOSS_HANGUP_AFTER_MS", 0);
+    return after_ms > 0 && g_state == ME_DATA
+           && data_mode_elapsed_ms() >= after_ms;
+}
+
+static void loss_hangup_locked(const char *why)
+{
+    fprintf(stderr, "[ME] V.34: %s after %lld ms of data mode; hanging up "
+            "instead of retraining (ME_V34_LOSS_HANGUP_AFTER_MS)\n",
+            why, (long long) data_mode_elapsed_ms());
+    trace_phase("V34 loss hangup: %s", why);
+    g_hangup_cause = why;
+    v34_reneg_clear_locked();
+    g_state = ME_HANGUP;
+}
+
 static bool v34_b1_rate_check_locked(void)
 {
     static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -16853,7 +16887,11 @@ skip_8k_codewords:
                     } else {
                         g_v34_phase3_wait_s_ms = 0;
                     }
-                    if (rx_event == V34_EVENT_PEER_RETRAIN) {
+                    if (rx_event == V34_EVENT_PEER_RETRAIN
+                        && loss_hangup_due_locked()) {
+                        v34_clear_peer_retrain_event(g_v34);
+                        loss_hangup_locked("peer retrain in data mode");
+                    } else if (rx_event == V34_EVENT_PEER_RETRAIN) {
                         /* §11.5.1.2/§11.5.2.2: silence, then our own tone,
                          * then back to §11.2.1.  v34_restart() re-enters
                          * Phase 2 from INFO0, which is the branch both
@@ -16925,6 +16963,10 @@ skip_8k_codewords:
                             trace_phase("V34 reneg probe");
                             v34_reneg_begin_locked();
                         }
+                    } else if (v34_data_carrier_lost(g_v34)
+                               && loss_hangup_due_locked()) {
+                        v34_clear_data_carrier_lost(g_v34);
+                        loss_hangup_locked("data mode stopped decoding");
                     } else if (v34_data_carrier_lost(g_v34)
                                && retrain_on_loss_due(
                                       me_v34_max_loss_retrains())) {
