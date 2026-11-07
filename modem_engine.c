@@ -8327,9 +8327,27 @@ static void v90_live_cp_bit(void *user_data, int bit)
         && g_v90_cp_rx.sync_candidates != sync_before)
         v90_rate_renegotiation_note_answer(g_v90);
     if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before) {
+        bool was_e_watch = g_v90_upstream_stream_valid
+            && g_v34_upstream_data_armed && !g_v34_upstream_data_started;
+
         g_v90_upstream_stream_valid = false;
         g_v90_upstream_e_run = 0;
         v34_reject_v90_phase4_hypothesis(g_v34);
+        /* V.90 9.4.2.4-.5: once a data-mode CP' is accepted (that is what
+         * armed the upstream receiver) the peer sends E and then B1.  A
+         * rejected frame on this tap disqualifies its E run, but nothing else
+         * then started the upstream receiver: the batch-CP' B1 search below
+         * runs only at CP' acceptance.  The Win95 modems on the 2911 FXS
+         * reached V.90 DATA (52000 down) twice in one call and were never
+         * heard (2026-11-08, line0-1121194).  The B1 correlator validates a
+         * whole frame itself, so it cannot be fooled by this tap's false E
+         * (the CX93001 trap above). */
+        if (was_e_watch && !g_v92_active
+            && v34_v90_begin_b1_search(g_v34) == 0) {
+            g_v34_upstream_data_started = true;
+            ME_LOG("[ME] V.90 upstream: CP tap disqualified after CP'; starting validated B1 search\n");
+            trace_phase("V90 upstream tap disqualified -> validated B1 search");
+        }
     }
 }
 
