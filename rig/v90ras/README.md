@@ -275,6 +275,26 @@ Phase 2 deadlock), and the bundle reached three members at 20:28:32.
     1990 makes it optional) and bundles on the peer name, which is the same
     for every link under noauth.
 
+**21:13-21:17, on 5f3e3ff0 (noendpoint).**
+- **Bundling works.** The client accepted the endpoint ConfRej, and line 1
+  attached at 21:16:23 ("Link attached to v90ras0").
+- **Line 1** then saw V.42 LAPM connected and clean data (0.056, 31.7 dB).
+  The client sent a LAPM disconnect 1 s after PPP attached, most likely
+  because line 0 was retraining at the time.
+- **Line 0's first call:** after the modem's 11.6 the client resent IPCP
+  every 3 s for 30 s, never hearing our replies.
+- **Line 0's second call:** initial Phase 4 TRN read **4.6 dB** (Phase 3 TRN
+  0.596 from the grid, PP lag8 33%), so our MP asked **7200**. Data then ran
+  0.0045 from the grid at 29.7 dB, and B1 logged "carries about 21600
+  bps; negotiated 7200". These modems' constant 11.6s are probably them
+  raising a rate we under-asked.
+- **The responder's TRN read 3.0 dB.** Cause: the T/2 eye-phase chooser
+  moved the symbol instant on a front end the renegotiation had kept (eyes
+  269.5 vs 251.8). Fixed in 338aa76a: no chooser while a renegotiation
+  keeps the data-mode front end. Replay: 3.0 -> 23.8 dB, MP 7200 -> 19200.
+- **Still open:** the initial Phase 3/4 under-measurement, and the loss
+  hang-up counting a line that is still training as "another call".
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
