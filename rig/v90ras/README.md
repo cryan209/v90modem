@@ -335,6 +335,14 @@ Phase 2 deadlock), and the bundle reached three members at 20:28:32.
 **22:04 bundle, on a6048a86.** Two links bundled (line 1 attached 22:05:09).
 Line 0 kept going white and was hung up after 86.8 s with line 1 up.
 
+**The white data was our B1 conditioning gate (e9600f43).** Every white
+data entry at 19200 and 21600 was DATA running on the unrefitted Phase 4 LMS
+taps: `v34_rx_b1_batch_eq_enabled()` refitted them over B1 only at 26400
+and up. B1 read 22 dB where the TRN refit read 31.4 dB, and the
+decision-directed loops ran away. With the fit at every dense-baud rate the
+recorded calls decode at 0.06-0.07 from the grid and 28-31 dB (22:04 19200
+was 0.663, 21:47 21600 was 0.641). Details in `docs/v34_data_mode_rates.md`.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
