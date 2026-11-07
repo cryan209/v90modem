@@ -236,6 +236,13 @@ V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=0 V3
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=1 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=7 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_EXPECT_RATES=33600,33600 V34_DUPLEX_DELAY=23 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+# V.34 11.3.1.1.2: at 3200 baud the caller's T/2 eye must be chosen on the
+# answerer's S (10.1.3.7), before PP.  At these delays a 256-symbol eye window
+# straddled PP, PP trained at the eye crossing and the caller never found J.
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_DELAY=1 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3200 31200 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_DELAY=1 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3200 31200 alaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_DELAY=11 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3200 31200 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_DELAY=11 V34_DUPLEX_PAYLOAD=100000 ./v34_duplex_test 3200 31200 alaw
 # Automatic selection must still step down with injected noise.  At 3429
 # baud the ask is the B1-style refit of the TRN tail (v34_rx_refit_training_rate,
 # docs/v34_data_mode_rates.md); each level below sits mid-band in that table,

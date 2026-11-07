@@ -11643,8 +11643,26 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /*endif*/
         /* 12.5.1 gives only 128T of S before S-bar/PP. Reacquire the T/2
            eye within that signal, rather than after a 256-symbol window. */
+        /* Duplex V.34 Phase 3 before PP: the answer modem sends 70 ms of
+           silence, 128T of S and 16T of S-bar (10.1.3.7, 11.3.1.2.1) and then
+           PP (10.1.3.6, 11.3.1.2.2), and the call modem trains its equalizer
+           on PP after the S-to-S-bar transition (11.3.1.1.2) -- the
+           conditioning the PP guard above protects.  A 256-symbol window
+           opened at stage entry spans the silence, all of S and the start
+           of PP, so whether it closes before PP is detected is decided by
+           where the window boundary falls.  When it closes after, the vote
+           is held for the PP window and dropped (plain V.34), PP trains at
+           the eye crossing, and the next window moves the instant onto the
+           equalizer PP has just trained: measured at 3200 baud, auto-rate,
+           V34_DUPLEX_DELAY=1, PP mean residual 0.569 against 0.178 at delay
+           0, TRN refine 58% ones against 91%, and the caller never decodes
+           the answerer's J.  A 64-symbol window closes inside S, so the
+           instant is chosen on S itself, before PP starts. */
         int eye_window = ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
-                          || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
+                          || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+                          || (s->duplex  &&  !s->v90_mode
+                              &&  s->stage == V34_RX_STAGE_PHASE3_TRAINING
+                              &&  !s->phase3_pp_started))
                          ? 64 : V34_EYE_OBSERVE_SYMBOLS;
         if (++s->eye_n >= eye_window)
         {

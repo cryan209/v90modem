@@ -1147,9 +1147,34 @@ The switch-on arm has no errors that the switch-off arm lacks. The failures
 both arms share:
 
 - **Auto-rate at 3200 does not train at delays 1 and 11**, with the switch on
-  or off. The caller's receiver stops at stage 10. Forced-rate 3200 at delay 1
-  trains (24000, B1 35.4 dB), and auto-rate at 3429 delay 1 is in the fast
-  list. This is a separate defect and has not been investigated.
+  or off. The caller's receiver stops at stage 10. **Fixed 2026-11-07; it
+  was not an auto-rate defect.** Over delays 0-23, forced 3200/21600 failed
+  at the same delays as auto-rate: 1, 6, 11, 16 and 21. That is every delay
+  that is 1 mod 5 samples, i.e. 2 symbols at 3200 baud. The forced 24000 run at
+  delay 1 just happened to clear it. The cause is the caller's T/2 eye
+  chooser in Phase 3. Its first 256-symbol window opens at stage entry. It
+  spans the answerer's 70 ms silence, 128T of S and 16T of S-bar
+  (§11.3.1.2.1), and closes about 20 ms after PP is detected (§10.1.3.6,
+  §11.3.1.2.2). Plain V.34 drops a vote taken inside PP, so PP trained at
+  the eye crossing: mean residual 0.569 against 0.178 at delay 0. The next
+  window then moved the symbol instant onto the equalizer PP had just
+  trained. TRN refine read 58% ones (91% at delay 0), and the caller never
+  matched J (10,957 rejected candidates in 60 s). Fix in
+  `process_primary_half_baud()`: in duplex plain V.34, before PP starts, the
+  eye window is 64 symbols (as HDX already uses), so the window closes inside
+  S and the instant is chosen before §11.3.1.1.2's PP training begins. No
+  constants changed. Before/after over delays 0-23, both laws, 100 kbit
+  each way:
+
+  | row | before | after |
+  |---|---|---|
+  | 3200/31200 auto, dense off | 38/48 | 48/48 |
+  | 3200/31200 auto, dense on | 38/48 | 48/48 |
+  | 3200/21600 forced | 38/48 | 48/48 |
+  | 3000/28800 auto | 46/48 (delay 15) | 48/48 |
+  | 3429/33600, 2743/26400 auto | 48/48 each | 48/48 each |
+
+  Auto-rate 3200 at delays 1 and 11, both laws, are now in `tests/fast.list`.
 - 3200 ulaw, delay 3, 30 dB noise, 24000 caller-to-answer: 60 errors.
 
 Still to do before the switch can default on:
