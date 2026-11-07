@@ -28,6 +28,11 @@ Environment=ME_V34_BAUD=3200
 # G.711 taps per call: %L is the line, %P the worker's PID (one worker per
 # call under --recycle). Disposable; delete old calls/ entries by hand.
 Environment=VPCM_G711_TAP_DIR=/var/tmp/v90ras/calls/line%%L-%%P
+# Diagnosis of V.42 across a retrain (2026-11-07 20:27: line 0 decoded clean
+# after its retrain but no PPP frame arrived from the client again).
+# Engine log ~2 lines/s; received bits as ASCII next to the taps.
+Environment=VPCM_ME_VERBOSE=1
+Environment=ME_RX_BIT_DUMP=/var/tmp/v90ras/calls/line%%L-%%P/rx-bits.txt
 Environment=TMPDIR=/var/tmp/v90ras
 RuntimeDirectory=v90ras
 RuntimeDirectoryPreserve=yes
