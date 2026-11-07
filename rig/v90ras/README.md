@@ -33,8 +33,7 @@ transcoded; add an A-law set if that is needed.
 | `/etc/systemd/system/v90ras-ppp@.service` | one pppd per line, instances 0-9 (copy here) |
 | `/etc/ppp/v90ras-options` | shared pppd options (copy here) |
 | `/etc/v90ras/sip.env` | SIP account passwords (0600, not in git) |
-| `/etc/ppp/pap-secrets` | PAP line for user `v90dial`, server name `v90ras` (backup `pap-secrets.before-v90ras-20261107`) |
-| `/root/v90ras-CREDENTIALS` | the dial-in username/password for the client (0600) |
+| `/etc/ppp/pap-secrets` | an unused `v90dial` line from before `noauth` (backup `pap-secrets.before-v90ras-20261107`) |
 
 Bundle: server 10.254.200.1, client 10.254.200.2, interface `v90ras0`,
 `ms-dns 192.168.88.1`. There is no NAT or forwarding, so a client reaches
@@ -52,7 +51,7 @@ journalctl -u 'v90ras-ppp@*' -f
 ## How a call runs
 
 The worker auto-answers (S0=2) and prints `CONNECT`; the member's `chat`
-waits for it, pppd negotiates (`passive`, `require-pap`, `multilink`,
+waits for it, pppd negotiates (`passive`, `noauth`, `multilink`,
 `mrru 1500`, same name/addresses/ifname on every member, as eicon420), and
 the first member up creates `v90ras0`; later ones log `Link attached to
 v90ras0`. At hangup `--recycle` ends the worker, the PTY closes, pppd sees
@@ -146,7 +145,8 @@ are still open.
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
-TCP/IP only, server-assigned address, PAP user/password from
-`/root/v90ras-CREDENTIALS`. Multilink: add the second (and later) modems
+TCP/IP only, server-assigned address, any username and password (the
+server runs `noauth` since 2026-11-07: a home test rig, and the first real
+call failed only on the login). Multilink: add the second (and later) modems
 under the connection's Multilink tab, each dialling 2950 (or a fixed
 2951-2960 number).

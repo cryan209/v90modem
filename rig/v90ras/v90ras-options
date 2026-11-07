@@ -12,7 +12,9 @@ connect "/usr/sbin/chat -t 86400 CONNECT \\c"
 nodetach
 nopersist
 maxfail 1
-require-pap
+# Home test rig: accept any caller, any (or no) login.  A client that
+# still sends PAP is simply not asked for it.
+noauth
 name v90ras
 passive
 nodefaultroute
