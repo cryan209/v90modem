@@ -7339,8 +7339,17 @@ static bool loss_hangup_due_locked(void)
      * has no bundle to protect, and hanging it up loses the whole session
      * (live 2026-11-07 20:01, 7800 alone, hung up 13.5 s into data). */
     if (other_lines_busy() == 0) {
-        fprintf(stderr, "[ME] V.34: data loss on the only call up; "
-                "retraining rather than hanging up\n");
+        /* Polled every cycle while the loss flag stands: say it once per
+           DATA entry, not 128 times per report (live 2026-11-07 20:27). */
+        static int64_t last_elapsed = INT64_MAX;
+        int64_t elapsed = data_mode_elapsed_ms();
+        bool new_entry = elapsed < last_elapsed;   /* the clock restarted */
+
+        last_elapsed = elapsed;
+        if (new_entry) {
+            fprintf(stderr, "[ME] V.34: data loss on the only call up; "
+                    "retraining rather than hanging up\n");
+        }
         return false;
     }
     return true;
