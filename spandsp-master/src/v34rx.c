@@ -7054,8 +7054,10 @@ void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
    where they belong: measured over the G.711 round trip the equalizer is the
    identity at the end of PP refinement (main tap 0.99 of 1.00 total energy)
    and has been walked to 0.83 by the time Phase 4 starts, with the off-centre
-   energy quadrupled.  Stopping the blind tap gradient here was tried; CMA
-   stays on. */
+   energy quadrupled.  Stopping the blind tap gradient alone was tried and is
+   not enough; on the V.90 digital side it is replaced by decision-directed
+   LMS once TRN is locked (see the WAIT_S branch in the equalizer update).
+   Plain V.34 Phase 3 keeps CMA. */
 static int phase3_cma_disabled(void)
 {
     return 0;
@@ -11318,6 +11320,36 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        (rf-tower-v34b-1).  V34_P4_TRN_DD_START is the TRN
                        symbol it starts at. */
                     v34_rx_tune_equalizer(s, sym, &eq_target);
+                }
+                else if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
+                         &&  s->v90_mode  &&  !s->v90_v34_fallback)
+                {
+                    /* V.90 8.3.1/9.3.1.3: the digital modem has to receive Ja,
+                       a 2114-bit DIL descriptor that is accepted only with a
+                       valid CRC, sent with the 4-point modulation of
+                       10.1.3.3/V.34 -- the same grid as the TRN before it,
+                       which has locked by the time this branch runs.  Blind
+                       CMA here walked the PP/TRN tap solution off: against
+                       Win95 modems on Cisco FXS (3200 baud) the differential
+                       phase error grew from 6 to 17-19 degrees rms within a
+                       second of TRN, Ja came out with ~10% bit errors, no
+                       descriptor ever passed its CRC and every call fell back
+                       to V.34 after the modem's retrain.  Decision-directed
+                       LMS on the 4-point decisions (the Phase 4 TRN branch
+                       above) holds 2.2-2.9 degrees with no symbol errors, and
+                       the descriptor parses on its first repetition.
+                       9.3.2.4 has the analogue modem fall silent once it sees
+                       Sd, and this stage runs on through that silence and
+                       DIL: adapt only on symbols that sit on the grid, so
+                       noise and silence freeze the taps rather than train
+                       them (Phase 4 starts from this solution). */
+                    float mag2 = sym->re*sym->re + sym->im*sym->im;
+                    float dot = sym->re*eq_target.re + sym->im*eq_target.im;
+
+                    if (mag2 > 0.25f  &&  mag2 < 4.0f
+                        &&  dot > 0.866f*sqrtf(mag2))   /* within 30 degrees */
+                        v34_rx_tune_equalizer(s, sym, &eq_target);
+                    /*endif*/
                 }
                 else if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                 {
