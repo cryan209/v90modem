@@ -854,7 +854,7 @@ bool v34_rx_t2_data_path(const v34_rx_state_t *s);
 void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
 bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s);
 double v34_rx_phase4_trn_refit(const v34_rx_state_t *s, complexf_t *coeff);
-int v34_rx_refit_training_rate(float snr_db);
+int v34_rx_refit_training_rate(int baud_rate, float snr_db);
 static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
 static int set_tx_trellis_mode(v34_state_t *s, int trellis_size);
 static int set_rx_trellis_mode(v34_state_t *s, int trellis_size);
@@ -3168,11 +3168,27 @@ static int mp_highest_enabled_rate(int maximum, int mask)
      31200: 34-1181 at 32.6-34.1, 262 once at 34.9, clean from 34.3
      33600: 18-162 at 35.3-36.0, 130 once at 36.1, clean from 36.3
    The MultiTech 7910 reads 34.6-34.9 dB and carried 31200 live with no bad
-   PPP frame on 3 of 3 calls (docs/slmodemd_vs_hardware_20261029.md). */
-int v34_rx_refit_training_rate(float snr_db)
+   PPP frame on 3 of 3 calls (docs/slmodemd_vs_hardware_20261029.md).
+   At 3200 baud (only reached with ME_V34_DENSE_3200=1) Table 16 tops out at
+   31200.  Same forced-rate method, both laws, ten delays (0-23; 1 and 11 do
+   not train at 3200), noise in 1 dB steps around each boundary, 460 runs;
+   highest failing / lowest passing refit reading per receiver:
+     26400: 31.7 (34 errors, once; else <= 31.1) / 30.5 dB
+     28800: 34.2 / 32.2 dB      31200: 36.5 / 34.8 dB
+   Each 3200 threshold sits just above the highest failing reading
+   (docs/v34_data_mode_rates.md, "3200 baud on the dense path"). */
+int v34_rx_refit_training_rate(int baud_rate, float snr_db)
 {
     if (!isfinite(snr_db))
         return 0;
+    if (baud_rate == V34_BAUD_RATE_3200)
+    {
+        if (snr_db >= 36.6f) return 31200;
+        if (snr_db >= 34.3f) return 28800;
+        if (snr_db >= 31.8f) return 26400;
+        return 0;
+    }
+    /*endif*/
     if (snr_db >= 36.3f) return 33600;
     if (snr_db >= 34.5f) return 31200;
     if (snr_db >= 31.5f) return 28800;
@@ -3199,7 +3215,7 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
 
     if (s  &&  s->rx.phase4_trn_refit_installed)
     {
-        rate = v34_rx_refit_training_rate(snr_db + V34_B1_REFIT_SLACK_DB);
+        rate = v34_rx_refit_training_rate(s->rx.baud_rate, snr_db + V34_B1_REFIT_SLACK_DB);
         if (rate > 0)
             return rate;
         /*endif*/
@@ -3411,7 +3427,7 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
            26400 DATA keeps the TRN taps, so the live reading is the right one
            there. */
         double refit = v34_rx_phase4_trn_refit(s, NULL);
-        int refit_n = (refit > 0.0)  ?  v34_rx_refit_training_rate((float) refit)/2400  :  0;
+        int refit_n = (refit > 0.0)  ?  v34_rx_refit_training_rate(s->baud_rate, (float) refit)/2400  :  0;
 
         V34_RX_LOG(&st->logging, SPAN_LOG_WARNING,
                  "Rx - Phase 4 TRN SNR: live %.1f dB (%d bps), B1-style refit %.1f dB (%d bps)\n",
@@ -11801,8 +11817,8 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
    conditioning (11.4, 10.1.3.1), the Phase 4 TRN refit and DATA timing
    (12.5.2).  3429 always.  ME_V34_DENSE_3200=1 adds 3200 (EXPERIMENTAL,
    default off): on the loopback it lifts B1 from 31-33 dB to ~37.5 dB and
-   carries 31200 clean, but the offer at 3200 still uses the 3429 refit
-   table (which can name 33600), and it has no live run yet.  Status and
+   carries 31200 clean.  The offer uses its own 3200 refit table
+   (v34_rx_refit_training_rate()); it has no live run yet.  Status and
    calibration: docs/v34_data_mode_rates.md, "3200 baud on the dense path". */
 static bool v34_rx_dense_baud(const v34_rx_state_t *s)
 {
@@ -12038,7 +12054,7 @@ void v34_rx_phase4_trn_install_refit(v34_rx_state_t *s)
         return;
     /*endif*/
     refit = v34_rx_phase4_trn_refit(s, coeff);
-    if (refit <= 0.0  ||  v34_rx_refit_training_rate((float) refit) == 0)
+    if (refit <= 0.0  ||  v34_rx_refit_training_rate(s->baud_rate, (float) refit) == 0)
         return;
     /*endif*/
     memcpy(s->eq_coeff, coeff, sizeof(coeff));

@@ -110,7 +110,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_RX_CLOCK_SLIP` | modem_engine.c |  | sdh | the connection and closes no loop, so it is off unless asked for. |
 | `ME_SLOW_CALLBACK_US` | modem_engine.c |  | d | ME_SLOW_CALLBACK_US lowers the threshold (diagnostic): a replay on a |
 | `ME_TX_LOOP_TIMING` | sip_modem.c |  | d | 0 transmits on the host clock (null sound device); default 1 paces sends to the received RTP clock |
-| `ME_V34_DENSE_3200` | v34rx.c |  | d | 1 puts 3200 baud on the 3429 dense path (B1 fit, TRN refit, MM timing); default 0, parked: docs/v34_data_mode_rates.md |
+| `ME_V34_DENSE_3200` | v34rx.c |  | d | 1 puts 3200 baud on the 3429 dense path (B1 fit, TRN refit with its own 3200 rate table, MM timing); default 0 pending a live A/B: docs/v34_data_mode_rates.md |
 | `ME_V34_B1_RATE_MARGIN_DB` | modem_engine.c |  | d | TRN picked the rate we asked for; B1 re-reads the same SNR a moment |
 | `ME_V34_DATA_CARRIER_TRACK` | v34rx_data.c |  | sd |  |
 | `ME_V34_NO_INFO1C_RETRAIN` | modem_engine.c | 0 | d | round trip, and only when the peer is holding Tone A now. |

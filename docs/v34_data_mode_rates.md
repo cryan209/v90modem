@@ -1105,28 +1105,58 @@ path at 3200. Loopback, A-law, no noise: B1 31.0-33.4 -> 37.0-37.8 dB, and
 3200/31200 goes from 6014/721 bit errors to none (26400 and 28800 clean both
 ways).
 
-Forced-rate calibration with the switch on: `v34_duplex_test` 3200 baud,
-one million PRBS bits each way, both laws, delays 0/7/23, injected noise
-28-46 dB and none (180 runs). A run passes only with the full million bits
-and no errors in both directions. Refit reading = the higher of the two ends.
+### Refit table at 3200 (2026-11-07)
 
-| rate | highest failing refit | lowest passing refit | highest failing B1 | clean (6/6) from injected |
-|---|---|---|---|---|
-| 26400 | 30.9 dB | 30.8 dB | 29.7 dB | 32 dB |
-| 28800 | 33.9 dB | 33.6 dB | 33.3 dB | 36 dB |
-| 31200 | 35.9 dB | 35.6 dB | 34.7 dB | 40 dB |
+`v34_rx_refit_training_rate()` now takes the baud rate and has its own 3200
+table, capped at 31200 (Table 16): 31200 >= 36.6, 28800 >= 34.3,
+26400 >= 31.8 dB. It only runs with `ME_V34_DENSE_3200=1`.
 
-Read with the same rule as the 3429 table, that suggests a 3200 refit table
-of 31200 >= 36.0, 28800 >= 34.0, 26400 >= 31.0 dB. It is not in the code yet.
+A first calibration on delays 0/7/23 (180 runs) put the boundaries at
+36.0/34.0/31.0 dB. Auto-rate at eight delays then took 549 errors at 26400 on a
+31.0 dB reading and 187 at 31200 on 36.3 dB, so the sweep was widened.
 
-Still to do before this can be the default:
+Calibration: `v34_duplex_test` 3200 baud at forced rates, one million PRBS bits
+each way, both laws, delays 0/3/5/7/9/13/15/17/19/23, noise in 1 dB steps
+around each boundary (460 runs, 920 receiver readings). Each receiver's
+refit reading is scored against that receiver's own errors.
 
-1. Make `v34_rx_refit_training_rate()` baud-aware (its callers in
-   `v34rx.c` all have the rx state) with the 3200 table above, capped at
-   31200: today the 3429 table runs at 3200 and can name 33600.
-2. A/B pass rates with the switch off and on at 3200: every rate, both laws, eight
-   delays, plus `V34_DUPLEX_AUTO_RATE=1` at 24-40 dB noise. The gate is
-   `bit_rate >= 20` (26400 and up), so lower rates should be untouched.
-3. Default on, add a 3200/31200 row to the test lists, `make test`.
-4. Live A/B against the 7920/7930 (rig as for run 60), alternated arms.
-   Expect 28800 or 31200 toward us instead of 26400.
+| rate | highest failing refit | lowest passing refit | pass rate by reading |
+|---|---|---|---|
+| 26400 | 31.7 dB (34 errors, once; the rest <= 31.1) | 30.5 dB | 31.0: 11/22, 31.5: 37/38, >= 32.0: 121/121 |
+| 28800 | 34.2 dB | 32.2 dB | 33.5: 15/23, 34.0: 32/37, >= 34.5: 101/101 |
+| 31200 | 36.5 dB | 34.8 dB | 36.0: 55/60, 36.5: 61/64, >= 37.0: 56/56 |
+
+Each threshold sits just above the highest failing reading. The failures
+just below the 31200 threshold are small (54-187 bit errors), and the
+headroom is thin: the loopback with no noise reads about 37-37.8 dB.
+
+Auto-rate A/B with the new table (`V34_DUPLEX_AUTO_RATE=1`, 3200, both laws,
+delays 0/1/3/7/11/15/19/23, no noise and 24-40 dB, 144 runs per arm):
+
+| noise | pass off / on | mean rate off -> on |
+|---|---|---|
+| none | 12/16 / 12/16 | 27200 -> 31200 |
+| 40 dB | 13/16 / 13/16 | 26308 -> 29354 |
+| 38 dB | 13/16 / 13/16 | 25477 -> 28800 |
+| 36 dB | 13/16 / 13/16 | 25385 -> 28800 |
+| 34 dB | 12/16 / 12/16 | 24800 -> 26400 |
+| 32 dB | 13/16 / 13/16 | 24000 -> 26400 |
+| 30, 28, 24 dB | identical | identical (gate is 26400 and up) |
+
+The switch-on arm has no errors that the switch-off arm lacks. The failures
+both arms share:
+
+- **Auto-rate at 3200 does not train at delays 1 and 11**, with the switch on
+  or off. The caller's receiver stops at stage 10. Forced-rate 3200 at delay 1
+  trains (24000, B1 35.4 dB), and auto-rate at 3429 delay 1 is in the fast
+  list. This is a separate defect and has not been investigated.
+- 3200 ulaw, delay 3, 30 dB noise, 24000 caller-to-answer: 60 errors.
+
+Still to do before the switch can default on:
+
+1. Live A/B against the 7920/7930 (rig as for run 60), alternated arms, with
+   one variable. Expect 28800 or 31200 toward us instead of 26400. The
+   live B1 reading at 3200 was 32.8 dB on the TRN taps, and DATA reached
+   36.8 dB, so 31200 needs a refit reading of at least 36.6 dB live.
+2. If live agrees: default on, add 3200/31200 auto-rate rows to the test lists,
+   then `make test`.
