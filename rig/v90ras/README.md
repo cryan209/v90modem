@@ -190,6 +190,15 @@ what lost calls. Calls that stayed at one moderate rate (14400, ~21600)
 carried LCP/PAP and PPP. The offline pair at this setting connects 21600
 in 13 s. Remove the `--profile` argument to offer V.90 again.
 
+19:15, 7802, plain V.34: DATA 19 s after the call arrived (30+ s via V.90),
+but at **3429 baud**: we (the answerer) chose 3429 both ways from our own
+probe, although it rated 3429 worst (ripple 0.90 against 0.29 at 3200).
+B1 read 27.6 dB, yet our receiver started 0.43 from the grid and was white
+2 s later; the loss retrain followed and the modem hung up. This
+reproduces offline (0.4289). Every clean decode against these modems was
+at 3200. **Since 19:25 v90ras runs `ME_V34_BAUD=3200`**; the offline pair
+connects 21600 at it. Our 3429 receive against them is a defect of its own.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
