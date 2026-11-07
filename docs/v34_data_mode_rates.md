@@ -1089,3 +1089,44 @@ retrain, with B1 31.8–34.3 dB (mean 33.3). HEAD connects 24000 on 11 and
 retrains once to 21600 (B1 30.7). Both arms have no bad FCS and no drops.
 The probe is a 25 s LCP echo exchange, not a soak. `docs/eicon_soak_ppp.md`
 has the matrix context.
+
+## 3200 baud on the dense path (2026-11-07, PARKED)
+
+Against the Eicon 7920 at 3200 baud (run 60, `docs/eicon_mlppp_20261107.md`)
+B1 read 32.8 dB and we offered 26400, yet the DATA-mode reading then climbed
+32.7 -> 35.5 dB within ~90 s and reached 36.8 dB by the end of a 22-minute
+call. The line supports more; the deficit is the 127-tap TRN LMS solution
+that 3200 baud keeps, whose outer-tap noise is the floor the 3429 refit
+comment describes. B1 conditioning (11.4, 10.1.3.1), the Phase 4 TRN refit
+and the DATA Mueller/Muller timing (12.5.2) were gated to 3429 only.
+
+`ME_V34_DENSE_3200=1` (`v34_rx_dense_baud()`, default off) opens the same
+path at 3200. Loopback, A-law, no noise: B1 31.0-33.4 -> 37.0-37.8 dB, and
+3200/31200 goes from 6014/721 bit errors to none (26400 and 28800 clean both
+ways).
+
+Forced-rate calibration with the switch on: `v34_duplex_test` 3200 baud,
+one million PRBS bits each way, both laws, delays 0/7/23, injected noise
+28-46 dB and none (180 runs). A run passes only with the full million bits
+and no errors in both directions. Refit reading = the higher of the two ends.
+
+| rate | highest failing refit | lowest passing refit | highest failing B1 | clean (6/6) from injected |
+|---|---|---|---|---|
+| 26400 | 30.9 dB | 30.8 dB | 29.7 dB | 32 dB |
+| 28800 | 33.9 dB | 33.6 dB | 33.3 dB | 36 dB |
+| 31200 | 35.9 dB | 35.6 dB | 34.7 dB | 40 dB |
+
+Read with the same rule as the 3429 table, that suggests a 3200 refit table
+of 31200 >= 36.0, 28800 >= 34.0, 26400 >= 31.0 dB. It is not in the code yet.
+
+Still to do before this can be the default:
+
+1. Make `v34_rx_refit_training_rate()` baud-aware (its callers in
+   `v34rx.c` all have the rx state) with the 3200 table above, capped at
+   31200: today the 3429 table runs at 3200 and can name 33600.
+2. A/B pass rates with the switch off and on at 3200: every rate, both laws, eight
+   delays, plus `V34_DUPLEX_AUTO_RATE=1` at 24-40 dB noise. The gate is
+   `bit_rate >= 20` (26400 and up), so lower rates should be untouched.
+3. Default on, add a 3200/31200 row to the test lists, `make test`.
+4. Live A/B against the 7920/7930 (rig as for run 60), alternated arms.
+   Expect 28800 or 31200 toward us instead of 26400.

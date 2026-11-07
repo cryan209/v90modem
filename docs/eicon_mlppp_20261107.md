@@ -209,6 +209,11 @@ line rate), no retrain in 1,351 s.
   quantization alone should allow roughly 37 dB, so the 33 dB is our
   receiver's, not the line's. We have carried 33600 at 3429 against the
   MT5634, so 3429 itself works where the peer accepts it.
+  Cause found since: at 3200 baud we keep the TRN LMS taps, because the B1
+  least-squares equalizer and TRN refit ran at 3429 only. Over the call the DATA
+  reading climbs 32.7 -> 36.8 dB. Opening that path at 3200
+  (`ME_V34_DENSE_3200=1`, off by default) lifts B1 to ~37.5 dB on the loopback;
+  parked, see `docs/v34_data_mode_rates.md`, "3200 baud on the dense path".
 
 ## Open issues
 

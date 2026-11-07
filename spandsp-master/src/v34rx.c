@@ -11797,6 +11797,28 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
 #pragma clang optimize off
 #endif
 
+/* The symbol rates that take the dense full-duplex path below: B1
+   conditioning (11.4, 10.1.3.1), the Phase 4 TRN refit and DATA timing
+   (12.5.2).  3429 always.  ME_V34_DENSE_3200=1 adds 3200 (EXPERIMENTAL,
+   default off): on the loopback it lifts B1 from 31-33 dB to ~37.5 dB and
+   carries 31200 clean, but the offer at 3200 still uses the 3429 refit
+   table (which can name 33600), and it has no live run yet.  Status and
+   calibration: docs/v34_data_mode_rates.md, "3200 baud on the dense path". */
+static bool v34_rx_dense_baud(const v34_rx_state_t *s)
+{
+    static int dense_3200 = -1;
+
+    if (dense_3200 < 0)
+    {
+        const char *e = getenv("ME_V34_DENSE_3200");
+
+        dense_3200 = (e  &&  *e)  ?  (atoi(e) != 0)  :  0;
+    }
+    /*endif*/
+    return s->baud_rate == V34_BAUD_RATE_3429
+        || (dense_3200  &&  s->baud_rate == V34_BAUD_RATE_3200);
+}
+
 /* V.34 11.4.1.1.5/11.4.1.2.5 conditions the receiver on the complete B1
    frame.  Scalar calibration alone leaves the dense 3429-baud modes exposed
    to the Phase-4 tap solution and acquisition phase.  The known 10.1.3.1
@@ -11811,7 +11833,7 @@ bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
        both disabled and corrupted otherwise recoverable noisy payloads.
        See docs/v34_data_mode_rates.md for the timing/noise A/B matrix. */
     return s->duplex && !s->v90_mode
-        && s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 20;
+        && v34_rx_dense_baud(s) && s->bit_rate >= 20;
 }
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
@@ -11884,7 +11906,7 @@ bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s)
 {
     /* The receivers whose DATA mode replaces the taps with the B1 fit
        (v34_rx_b1_batch_eq_enabled() at 26400 and up). */
-    return s->duplex  &&  !s->v90_mode  &&  s->baud_rate == V34_BAUD_RATE_3429;
+    return s->duplex  &&  !s->v90_mode  &&  v34_rx_dense_baud(s);
 }
 
 /* V.34 11.4: refit the TRN tail the way B1 conditioning will refit B1.
