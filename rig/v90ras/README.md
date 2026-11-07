@@ -343,6 +343,12 @@ decision-directed loops ran away. With the fit at every dense-baud rate the
 recorded calls decode at 0.06-0.07 from the grid and 28-31 dB (22:04 19200
 was 0.663, 21:47 21600 was 0.641). Details in `docs/v34_data_mode_rates.md`.
 
+**23:33 fresh multilink dial, endpoint accepted (65b4f94d): 3 links bundled.**
+All three links sent the endpoint `64.aa…` and attached to one v90ras0, with
+no TermReq. Ping 5/5. Line 1 then dropped (23:34:58): the peer's §11.6
+renegotiation produced no E, we fell back to an §11.5 retrain, and that link
+was hung up. Every line sees the peer open §11.6 roughly 8 s into data.
+
 ## Windows 95 client
 
 Dial-Up Networking, server type "PPP: Windows 95, Windows NT 3.5, Internet",
