@@ -1280,3 +1280,17 @@ The Phase 4 rate ask still uses the live TRN reading below 26400, because the
 refit table (`v34_rx_refit_training_rate()`) is only calibrated there. It
 under-asks (19200 on a line DATA then reads 29 dB) but never over-asks.
 Extending the table is open.
+
+### The gate missed V.90 calls that fell back to V.34 (f938b387, 2026-11-08)
+
+`v34_rx_b1_batch_eq_enabled()` and `v34_rx_phase4_trn_refit_enabled()`
+tested `!v90_mode`. When the analogue modem answers our V.90 offer with a
+Table 11 INFO1a (V.90 9.2.1.1.8), the receiver keeps `v90_mode` and sets
+`v90_v34_fallback`, so the fallback ran DATA on the unrefitted LMS taps,
+the failure above. Once v90ras offered V.90 again, every fallback against
+the Win95 modems decoded white: 0.65-0.68 from the grid, 21-22 dB. That held
+at 28800 and 31200 on entry, and at 21600 after our 11.6 (lines 0 and 2,
+14:42-14:46). Plain V.34 calls on the same lines read 0.006. The gate now
+also covers `v90_v34_fallback`, the test the other plain-V.34 sites already
+use. The rate tables still test `v90_mode` alone. The engine replay of the
+14:42 tap cannot check this: its Phase 3 fails where the live one succeeded.

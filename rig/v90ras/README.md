@@ -487,3 +487,15 @@ Our TX repeats at 1188 samples during Phase 4 training (r = 0.95 at 17 s),
 but a synthetic stationary echo with that TX does not reproduce the move.
 - 11:47: one call failed in V.34 Phase 2 (INFO0 retry, no valid INFO1a, then
   our TX went IDLE and stayed silent for 38 s until the modem hung up). OPEN.
+
+2026-11-08 14:43: **PPP up over V.90** (line 0, 52000/16800; IPCP gave
+10.254.200.2, ping 3/3 at 236 ms). The lines that fell back to plain V.34
+(the modem's Table 11 INFO1a) all decoded white. That was our B1-conditioning
+gate, which skipped V.90-to-V.34 fallbacks; f938b387 fixes it, see
+`docs/v34_data_mode_rates.md`. Still OPEN:
+- Line 1 at 14:43:48 sent an INFO1d with N=0 at every baud. Its receiver
+  left L1/L2 after 60 ms, behind an INFO0 retry, so there was no probe
+  analysis. The modem repeated INFO1a against it for 50 s and hung up.
+- The modem retrains about 30 s into V.90 data (52.7 s at 14:34, 50.6 s at
+  14:43) while the upstream is clean (0.009). At 14:43 it came back to data
+  in 13 s and PPP survived.
