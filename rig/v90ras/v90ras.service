@@ -40,6 +40,15 @@ Environment=ME_V34_BAUD=3200
 # (2026-11-08, line0-1103132; replay with 0 detects that S and ends DIL on a
 # segment boundary).
 Environment=ME_V90_DIL_AUTOTERMINATE_CYCLES=0
+# Hold the line echo canceller's delay tracker.  Behind the TopRouter the
+# Cisco's playout is fixed (40 ms), so the echo path cannot move; but the
+# tracker moved it +/-146-148 ms to a false peak and back, in pairs, right after
+# DATA began, on both 2026-11-08 calls after 12:59 (line0-47498).  The V.90
+# upstream then went 0.04 -> 0.31 from the grid in 64 symbols and we requested
+# a 9.6 resync, or B1 never validated.  Replayed with the tracker held, that
+# data period stays at 0.008 until the recording diverges.  What the tracker
+# locks onto at ~250 ms is not yet known.
+Environment=ME_LEC_NO_TRACK=1
 # G.711 taps per call: %L is the line, %P the worker's PID (one worker per
 # call under --recycle). Disposable; delete old calls/ entries by hand.
 Environment=VPCM_G711_TAP_DIR=/var/tmp/v90ras/calls/line%%L-%%P

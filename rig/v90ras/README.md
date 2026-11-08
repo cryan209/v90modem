@@ -455,5 +455,26 @@ request (§9.6 Rd), which this modem does not answer, so a retrain followed.
   need one or the other), so it keeps stepping through all 112 candidates
   during clean data. It did not move the symbol error in replay. OPEN whether
   the steps cost LAPM frames.
+
+2026-11-08 12:33: a site-wide reboot. CT 117 got no DHCP lease (the router
+made no offers 12:34:24-12:35:52 and dhclient gave up on IPv4), and Asterisk
+dropped every endpoint-modem endpoint (the known load-order problem: fix it
+with `module reload res_pjsip.so`). Both were fixed by hand at 12:57.
+
+2026-11-08 12:59 and 13:04 (line0-47498, with the jitter-buffer fix
+c7c67863): no RTP loss and the peer's level steady, yet the V.90 upstream
+went from 0.04 to 0.31 from the grid within 64 symbols, with no rotation, no
+gain change and no timing offset that helped, and we requested the §9.6
+resync 0.8 s into data. Just before, the line echo canceller's tracker had
+moved its bulk delay 814 -> 1999 samples (+148 ms) and back, in pairs, right
+after DATA began. It did this 9 times in the 12:59 call and 4 in the 13:04
+one, against none at 11:48. In the 13:04 call B1 never validated. Replayed
+with the tracker held (`ME_LEC_NO_TRACK=1`, one variable), the 12:59 data
+period stays at 0.0074-0.0081 until the recording diverges at our live Rd.
+The Cisco's playout is fixed, so the echo path cannot move and nothing is
+lost by holding it: set in `v90ras.service` (CT 117 drop-in
+`lec-no-track.conf`, 13:08). OPEN: what the tracker finds at about 250 ms.
+Our TX repeats at 1188 samples during Phase 4 training (r = 0.95 at 17 s),
+but a synthetic stationary echo with that TX does not reproduce the move.
 - 11:47: one call failed in V.34 Phase 2 (INFO0 retry, no valid INFO1a, then
   our TX went IDLE and stayed silent for 38 s until the modem hung up). OPEN.
