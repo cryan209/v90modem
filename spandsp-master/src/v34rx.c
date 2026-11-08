@@ -11929,8 +11929,16 @@ bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
        loops ran away and 19200/21600 decoded white from the first symbol
        (0.66 from the grid).  With the fit: 0.06-0.07 and 28-31 dB on the
        same recordings, and the loopback noise matrix gains 15 of 200
-       cells and loses none.  See docs/v34_data_mode_rates.md. */
-    return s->duplex && !s->v90_mode && v34_rx_dense_baud(s);
+       cells and loses none.  See docs/v34_data_mode_rates.md.
+       A V.90 call the analogue modem turned into V.34 (V.90 9.2.1.1.8,
+       Table 11 INFO1a: v90_v34_fallback) runs this same plain V.34
+       receiver and needs the same conditioning.  Testing v90_mode alone
+       left those calls on the unrefitted taps: against the Win95 modems,
+       once V.90 was offered, every fallback decoded white at 0.65-0.68
+       from the grid (28800, 31200 and 21600 after 11.6) while plain V.34
+       calls on the same lines read 0.006. */
+    return s->duplex && (!s->v90_mode || s->v90_v34_fallback)
+        && v34_rx_dense_baud(s);
 }
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
@@ -12003,7 +12011,8 @@ bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s)
 {
     /* The receivers whose DATA mode replaces the taps with the B1 fit
        (v34_rx_b1_batch_eq_enabled(): every duplex dense-baud rate). */
-    return s->duplex  &&  !s->v90_mode  &&  v34_rx_dense_baud(s);
+    return s->duplex  &&  (!s->v90_mode  ||  s->v90_v34_fallback)
+        &&  v34_rx_dense_baud(s);
 }
 
 /* V.34 11.4: refit the TRN tail the way B1 conditioning will refit B1.
