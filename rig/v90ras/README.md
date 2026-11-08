@@ -506,3 +506,13 @@ detection failed: our B1 check opened a 11.6 (31200 -> 28800) 40 ms into
 data, over the modem's ODP, so the link ran V.14 with no error correction.
 95bf13ee makes the B1 check wait for detection
 (`ME_V34_B1_V42_DEFER_MS`, default 4000).
+
+2026-11-08 15:38-15:40 (95bf13ee): fallbacks now decode cleanly (19200 at
+0.011 from the grid, 36 dB), and the B1 check waited for detection as
+intended. Detection still failed, in 0.78 s: the fallback entered DATA at
+31200, which was white (53% ones in the bit dump, with no ODP in it or
+after it). Our MP had asked the INFO1a ceiling, because the fallback sent
+MP at 512T, before our receiver had trained: TRN read 5-8 dB there, against
+33-34 dB from the refit 2 s later. PPP still came up, over V.14 with no
+error correction. 1cb06bc6 holds TRN until our receiver has trained
+(V.34 11.4.1.1.2) and asks the measured rate (`ME_V90_FALLBACK_TRN_RATE`).
