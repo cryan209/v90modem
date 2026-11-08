@@ -97,3 +97,10 @@ the 7940 PCMCIA call's offer without telephone-event was rejected with SIP
 488 / cause 65. The final endpoint (CLEARMODE plus telephone-event) passed
 a separate real digital PPP probe at 64000 bit/s and 3/3 pings with 0% loss.
 The separate telephone-event payload does not convert or inspect DS0 bytes.
+
+Subsequent controlled testing isolated **missing caller number**, rather
+than telephone-event alone, as the remaining TopRouter rejection trigger:
+an anonymous call with telephone-event still failed, whereas the identical
+call with caller 2620 passed. The deployed digital route now supplies 2620
+only when the incoming caller number is empty. See
+[the measured A/B and two-channel payload pass](../../rig/eicon-7940/README.md).

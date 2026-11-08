@@ -144,3 +144,21 @@ so the ping result does not establish payload transfer over the DS0.
 Two test calls also joined one multilink bundle in **10.3 s**.
 No actual PCMCIA pass is inferred
 from this controlled wired test. See the linked deployment note.
+
+## Rejection isolated to missing caller number
+
+A controlled repeat reproduced the 7940 rejection with a blank caller
+number **even with telephone-event present**. Changing only caller identity
+to **2620** restored CONNECT 64000, PAP/IPCP and **3/3 pings, 0% loss**.
+Thus the earlier telephone-event explanation did not isolate the root
+cause. Added a fallback caller number 2620 only for empty calling numbers
+on the new gateway's digital 7900–7950 route. The exact TopRouter internal
+dial-peer selection remains uninspected.
+
+Also added a second 7940 PPP answerer (idle ttyds16 alongside ttyds7).
+Two anonymous synthetic callers through the repaired production route
+formed one bundle and transferred **65536 bytes each way, SHA-256 exact**,
+at **104.5 kbit/s download / 106.6 kbit/s upload**. The existing two-channel
+2690 card session stayed Up. Details and reproducible configuration:
+[7940 repair](../rig/eicon-7940/README.md). The card's own 7940 retry is
+still required for final hardware confirmation.

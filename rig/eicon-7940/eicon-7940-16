@@ -1,0 +1,40 @@
+# Second PPP answerer on Diva controller 3, MSN 7940, /dev/ttyds16.
+# Bundle member of the 7910 MLPPP bundle. The name below is the shared
+# bundle identity used by every member and by its pap-secrets line; it is
+# not a per-card label. Address pair, ifname and name must stay identical
+# across all members or the link raises its own session instead of joining.
+/dev/ttyds16
+115200
+lock
+modem
+crtscts
+nodetach
+# Restart=always in systemd supplies a fresh process after each call.
+# Reusing a joined MLPPP pppd leaves a stale bundle descriptor on reconnect.
+nopersist
+maxfail 0
+holdoff 3
+require-pap
+name multitech-7910
+passive
+nodefaultroute
+noproxyarp
+noipv6
+noccp
+novj
+# Windows MLPPP compatibility test: full PPP framing headers.
+nopcomp
+noaccomp
+asyncmap 0
+lcp-echo-interval 10
+lcp-echo-failure 6
+# debug: log the LCP/PAP/IPCP option exchange, so a refused MRRU is visible.
+# /etc/ppp/options sets hide-password, so PAP passwords stay out of the log.
+debug
+multilink
+mrru 1500
+10.254.118.1:10.254.118.2
+ifname e79p8
+linkname eicon-7940-16
+ipparam eicon-7940-16
+connect "/usr/sbin/chat -r /run/ppp-modem/ttyds16.report -f /etc/chatscripts/eicon-7940-answer"
