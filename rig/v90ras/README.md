@@ -32,6 +32,7 @@ transcoded; add an A-law set if that is needed.
 | `/etc/systemd/system/v90ras.service` | the 10-line server (copy here); SIP ports 5300-5309, RTP 30000+100*i, PTYs `/run/v90ras/line.0`-`.9`, `ME_JB_MS=40`, per-call G.711 taps in `/var/tmp/v90ras/calls/line<L>-<pid>` |
 | `/etc/systemd/system/v90ras-ppp@.service` | one pppd per line, instances 0-9 (copy here) |
 | `/etc/ppp/v90ras-options` | shared pppd options (copy here) |
+| vmhost `/dev/ppp` | must be mode 0666: the CT is unprivileged and maps the host's root-owned node to `nobody` |
 | `/etc/v90ras/profile.0`-`.9` | power-on AT profile, copies of `v90ras-profile` (plain V.34, 21600 cap) |
 | `/etc/v90ras/sip.env` | SIP account passwords (0600, not in git) |
 | `/etc/ppp/pap-secrets` | an unused `v90dial` line from before `noauth` (backup `pap-secrets.before-v90ras-20261107`) |
@@ -460,6 +461,13 @@ request (§9.6 Rd), which this modem does not answer, so a retrain followed.
 made no offers 12:34:24-12:35:52 and dhclient gave up on IPv4), and Asterisk
 dropped every endpoint-modem endpoint (the known load-order problem: fix it
 with `module reload res_pjsip.so`). Both were fixed by hand at 12:57.
+The reboot also reset the host's `/dev/ppp` to `0600 root:root`. CT 117 is
+unprivileged, so inside it the node belongs to `nobody` and every pppd
+failed with "Couldn't open the /dev/ppp device: Permission denied" (restart
+counter 3078 by 14:34): no call after the reboot had a PPP peer, so LAPM came
+up into nothing. `chmod 666 /dev/ppp` on vmhost at 14:36 brought all 10
+members up; it does not survive a host reboot without a udev rule
+(`KERNEL=="ppp", MODE="0666"`).
 
 2026-11-08 12:59 and 13:04 (line0-47498, with the jitter-buffer fix
 c7c67863): no RTP loss and the peer's level steady, yet the V.90 upstream
