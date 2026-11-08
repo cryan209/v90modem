@@ -12,6 +12,10 @@ Environment=ME_JB_MS=40
 # Live A/B (2026-11-07): B1 rate drops by V.34 11.6 instead of a ~10 s 11.5
 # retrain; the Win95 modems hang up ~55 s after answering.
 Environment=ME_V34_B1_RENEG=1
+# V.34 11.6 fall-forward (2026-11-09): TRN asks 26400 at 32 dB while the data
+# mode then reads 36 dB on these lines; once V.42 is up, renegotiate up to
+# what the data mode itself carries.  Live A/B; off by default in the engine.
+Environment=ME_V34_FALL_FORWARD=1
 # B1 stepped 21600 down at 25.2 dB (2026-11-07 21:47) and the 11.6 that did
 # it left data white; the same modems ran 21600 clean at 23.8 dB (20:28,
 # 0.045 from the grid).  3 dB of slack keeps the trained rate; a rate that is

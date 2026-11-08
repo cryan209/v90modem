@@ -1297,3 +1297,60 @@ use. The rate tables still test `v90_mode` alone. The engine replay of the
 Live at 15:02, the first fallback after the fix (line 1, 31200 then 11.6 to
 28800) decoded at 0.088-0.12 from the grid, 35-36 dB, where before it was
 0.65-0.68.
+
+## Data-mode SNR thresholds and the 11.6 fall-forward (2026-11-09)
+
+**Why.** Nothing ever renegotiated a V.34 call *up*. The first rate comes from
+the Phase-4 TRN measurement, and the B1 check and loss paths only lower it. On
+the rig/v90ras Win95 lines TRN read 32.0-32.3 dB on the refit (26400 at 3200
+baud; 27 dB, 19200, on the live taps) while the data mode that followed read
+36 dB at 0.011 from the grid. The TRN taps do not see what the
+decision-directed data-mode equalizer does, so every call ran below what the
+line carried.
+
+**The reading.** `v34_get_data_snr_db()` is the data mode's own receive SNR
+(mean squared target point over mean squared distance from the odd-integer
+grid, the same quantity as the 4096-symbol "Rx - DATA: ... receive SNR" log
+line), kept as a ~4096-symbol running average and reset at every DATA entry.
+It is **independent of the rate being run**: at 3200 baud the median per
+injected-noise level agrees within 0.1 dB from 14400 to 31200 wherever the
+rate decodes, so a reading taken at a low rate predicts a higher one. It
+saturates near 37 dB (this receiver's floor on a clean line).
+
+**Calibration.** `v34_duplex_test` now prints that reading per side. Sweep:
+every rate from 9600 to each baud's maximum at 2400/3000/3200/3429, injected
+noise 20-46 dB in 1 dB steps, delays 0/7/23, both laws, 1M PRBS bits each way
+(`V34_DUPLEX_PAYLOAD=1000000 V34_DUPLEX_BLOCKS=4500`): 5832 runs, 648
+readings per cell. Each threshold is 0.1 dB above the highest reading with
+any bit error (`v34_data_snr_need_db[]` in v34rx.c):
+
+| baud | 14400 | 16800 | 19200 | 21600 | 24000 | 26400 | 28800 | 31200 | 33600 |
+|---|---|---|---|---|---|---|---|---|---|
+| 2400 | 22.7 | 27.0 | 29.5 | 33.7 | | | | | |
+| 3000 | 19.7 | 21.8 | 23.8 | 26.4 | 30.0 | 32.9 | 34.7 | | |
+| 3200 | 20.5 | 20.7 | 23.4 | 24.7 | 27.4 | 30.0 | 33.6 | 35.9 | |
+| 3429 | 20.2 | 20.1 | 22.2 | 23.4 | 26.1 | 28.8 | 31.2 | 33.3 | 36.0 |
+
+(3429 also has 12000 at 20.2.) 9600/12000 elsewhere never completed 1M bits
+inside the run, so they are uncalibrated and never asked. Against the Phase-4
+refit table above (3200: 26400 at 31.8, 28800 at 34.3, 31200 at 36.6), the
+data-mode reading needs 1.8-0.7 dB less for the same rate *and* reads about
+4 dB higher on the Win95 lines.
+
+**Fall-forward** (`ME_V34_FALL_FORWARD=1`, default 0, on in rig/v90ras). Once
+V.42 detection is over and 8 s into data, if the reading less 0.5 dB has
+supported a higher rate for 3 s, open an 11.6 asking that rate for our
+receive direction. `v34_set_mp_rx_data_rate()` puts it in the MP in place of
+the INFO1 projection and the TRN reading (which would cap it again); the rate
+policy and +MS still apply. The new rate is a probe: confirmed when its own
+data mode reads at least its threshold less 0.5 dB; on a lower reading it
+steps back by 11.6, and on a loss, a retrain or a different settled rate it
+counts as failed. A failure makes one N below it the call's ceiling. At most
+3 attempts, 20 s apart.
+
+Engine pair, clean line, first MP held at 14400 by `ME_V34_TEST_FIRST_MP_BPS`
+(fast.list): caller 14400 -> 26400 (32.4 dB) -> 31200 (37.6 dB), answerer
+14400 -> 31200, both confirmed, LAPM kept, no retrain. On the Win95 lines
+(36 dB) the table gives 28800 at 3200 baud; 31200 needs 36.4 with the margin.
+**Not yet tried live.** The failure path (a probe that does not hold) has not
+been exercised: a clean pair carries every rate.

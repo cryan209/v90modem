@@ -3197,6 +3197,86 @@ int v34_rx_refit_training_rate(int baud_rate, float snr_db)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 data-mode SNR (v34_get_data_snr_db()) each rate needs at each symbol
+   rate, for the engine's 11.6 fall-forward.  Empirical, NOT ITU values: the
+   lowest data-mode reading at which every forced-rate v34_duplex_test run
+   (1M PRBS bits each way) was error free; see docs/v34_data_mode_rates.md,
+   "Data-mode SNR thresholds".  0 = not calibrated (never asked). */
+/* Rows: 2400, 3000, 3200, 3429 baud.  Columns: N = 1..14 (2400..33600).
+   Sweep of 2026-11-09: v34_duplex_test at every rate from 9600 to the
+   baud's maximum, injected noise 20-46 dB in 1 dB steps, delays 0/7/23,
+   both laws, both directions -- 648 readings per cell, 5832 runs.  Each
+   value is 0.1 dB above the highest reading that had any bit error.  The
+   reading does not depend on the rate being run (3200 baud, median per
+   noise level: within 0.1 dB from 14400 to 31200 wherever the rate
+   decodes), which is what lets one taken at a low rate pick a higher one;
+   it saturates at about 37 dB, this receiver's own floor.  9600 and 12000
+   are left 0: 1M bits does not fit the run at those rates, so they never
+   scored, and nothing falls forward to them. */
+static const float v34_data_snr_need_db[4][14] =
+{
+    /* 2400 */ {0, 0, 0, 0, 0, 22.7f, 27.0f, 29.5f, 33.7f, 0, 0, 0, 0, 0},
+    /* 3000 */ {0, 0, 0, 0, 0, 19.7f, 21.8f, 23.8f, 26.4f, 30.0f, 32.9f, 34.7f, 0, 0},
+    /* 3200 */ {0, 0, 0, 0, 0, 20.5f, 20.7f, 23.4f, 24.7f, 27.4f, 30.0f, 33.6f, 35.9f, 0},
+    /* 3429 */ {0, 0, 0, 0, 20.2f, 20.2f, 20.1f, 22.2f, 23.4f, 26.1f, 28.8f, 31.2f, 33.3f, 36.0f},
+};
+
+static int data_snr_baud_index(int baud_rate)
+{
+    switch (baud_rate)
+    {
+    case V34_BAUD_RATE_2400: return 0;
+    case V34_BAUD_RATE_3000: return 1;
+    case V34_BAUD_RATE_3200: return 2;
+    case V34_BAUD_RATE_3429: return 3;
+    }
+    /*endswitch*/
+    return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(float) v34_rx_data_snr_threshold_db(v34_state_t *s, int bps)
+{
+    int b;
+    int n;
+
+    if (!s)
+        return 99.0f;
+    /*endif*/
+    b = data_snr_baud_index(s->rx.baud_rate);
+    n = bps/2400;
+    if (b < 0  ||  n < 1  ||  n > 14  ||  v34_data_snr_need_db[b][n - 1] <= 0.0f)
+        return 99.0f;
+    /*endif*/
+    return v34_data_snr_need_db[b][n - 1];
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_rx_data_snr_rate(v34_state_t *s, float snr_db)
+{
+    int b;
+    int n;
+
+    if (!s  ||  !isfinite(snr_db))
+        return 0;
+    /*endif*/
+    b = data_snr_baud_index(s->rx.baud_rate);
+    if (b < 0)
+        return 0;
+    /*endif*/
+    for (n = 14;  n >= 1;  n--)
+    {
+        float need = v34_data_snr_need_db[b][n - 1];
+
+        if (need > 0.0f  &&  snr_db >= need)
+            return n*2400;
+        /*endif*/
+    }
+    /*endfor*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* The rate a B1 SNR reading supports.  B1 reads on whichever taps TRN left:
    the refit's (v34_rx_phase4_trn_install_refit()), whose table is
    v34_rx_refit_training_rate(), or the LMS solution, which the live TRN table
@@ -18681,6 +18761,23 @@ SPAN_DECLARE(void) v34_v90_upstream_clear_resync_required(v34_state_t *s)
 /* V.34 11.5/11.6: a receiver that has stopped decoding is what both the
    retrain and the rate renegotiation exist for.  Plain V.34 had no read on
    its own data mode at all, so neither could ever be reached. */
+SPAN_DECLARE(int) v34_get_data_snr_db(v34_state_t *s, float *snr_db, int *symbols)
+{
+    if (symbols)
+        *symbols = s  ?  s->rx.data_snr_symbols  :  0;
+    /*endif*/
+    if (!s  ||  s->rx.stage != V34_RX_STAGE_DATA
+        ||  s->rx.data_snr_symbols < V34_DATA_SNR_MIN_SYMBOLS
+        ||  s->rx.data_snr_err_ema <= 0.0f  ||  s->rx.data_snr_sig_ema <= 0.0f)
+        return -1;
+    /*endif*/
+    if (snr_db)
+        *snr_db = 10.0f*log10f(s->rx.data_snr_sig_ema/s->rx.data_snr_err_ema);
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_data_carrier_lost(v34_state_t *s)
 {
     if (!s)
@@ -19423,6 +19520,9 @@ static int begin_rx_data(v34_state_t *s, bool report_e)
        unclamping user data.  Buffer B1 to measure gain, phase and conjugation
        from waveform evidence, then replay it through this reset-state decoder. */
     s->rx.duration = 0;
+    s->rx.data_snr_symbols = 0;
+    s->rx.data_snr_err_ema = 0.0f;
+    s->rx.data_snr_sig_ema = 0.0f;
     s->rx.stage = V34_RX_STAGE_DATA;
     return 0;
 }

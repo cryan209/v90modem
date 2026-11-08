@@ -957,6 +957,26 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             + (g_im - t_im)*(g_im - t_im);
 
                     s->data_grid_err_ema += (d - s->data_grid_err_ema)/256.0f;
+                    /* ~1 s at 3200 baud.  Started from the first sample
+                       rather than zero, so the early ratio is not biased. */
+                    {
+                        float p = t_re*t_re + t_im*t_im;
+
+                        if (s->data_snr_symbols == 0)
+                        {
+                            s->data_snr_err_ema = d;
+                            s->data_snr_sig_ema = p;
+                        }
+                        else
+                        {
+                            s->data_snr_err_ema += (d - s->data_snr_err_ema)/V34_DATA_SNR_EMA_SYMBOLS;
+                            s->data_snr_sig_ema += (p - s->data_snr_sig_ema)/V34_DATA_SNR_EMA_SYMBOLS;
+                        }
+                        /*endif*/
+                        if (s->data_snr_symbols < 1000000000)
+                            s->data_snr_symbols++;
+                        /*endif*/
+                    }
                     if (s->data_grid_symbols < V34_DATA_LOST_SETTLE_SYMBOLS)
                     {
                         /* Give the EMA and the receiver time to settle after

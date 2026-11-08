@@ -8934,6 +8934,18 @@ static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, i
         }
         /*endif*/
     }
+    if (s->tx.mp_rx_data_rate_n > 0  &&  mp_rate_n_is_valid(s->tx.mp_rx_data_rate_n))
+    {
+        int *mine = (s->calling_party  ||  s->tx.v90_v34_fallback)
+                  ? &a_to_c : &c_to_a;
+
+        V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                 "Tx MP receive-rate: data-mode measurement asks %d bps "
+                 "(projection/TRN gave %d bps)\n",
+                 s->tx.mp_rx_data_rate_n*2400, (*mine)*2400);
+        *mine = s->tx.mp_rx_data_rate_n;
+    }
+    /*endif*/
     *bit_rate_a_to_c = a_to_c;
     *bit_rate_c_to_a = c_to_a;
 }
@@ -11413,6 +11425,15 @@ SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, i
     s->tx.mp_rate_policy_valid = true;
     s->tx.mp_rate_a_to_c = bit_rate_a_to_c;
     s->tx.mp_rate_c_to_a = bit_rate_c_to_a;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_mp_rx_data_rate(v34_state_t *s, int n)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->tx.mp_rx_data_rate_n = mp_rate_n_is_valid(n)  ?  n  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 

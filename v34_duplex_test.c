@@ -751,6 +751,18 @@ static int run_case(int baud, int bps, bool alaw)
            caller.rx_bits, answer.rx_bits,
            caller.bit_errors, answer.bit_errors,
            completed_block >= 0 ? (completed_block + 1)*0.020 : max_blocks*0.020);
+    /* The engine's fall-forward input (v34_get_data_snr_db()), so forced-rate
+       noise runs can be read against bit errors: docs/v34_data_mode_rates.md. */
+    {
+        float snr_c = 0.0f, snr_a = 0.0f;
+        int sym_c = 0, sym_a = 0;
+        int ok_c = v34_get_data_snr_db(call_modem, &snr_c, &sym_c);
+        int ok_a = v34_get_data_snr_db(answer_modem, &snr_a, &sym_a);
+
+        printf("  data SNR: caller=%s%.1f dB (%d symbols) answer=%s%.1f dB (%d symbols)\n",
+               ok_c == 0 ? "" : "n/a ", snr_c, sym_c,
+               ok_a == 0 ? "" : "n/a ", snr_a, sym_a);
+    }
     if (getenv("V34_DUPLEX_AUTO_RATE")) {
         int a2c = 0, c2a = 0;
         if (v34_get_negotiated_mp_rates(call_modem, &a2c, &c2a) == 0)

@@ -7550,6 +7550,237 @@ static bool v34_b1_rate_check_locked(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 11.6 fall-forward.  11.6: "The rate renegotiation procedure ... can be
+ * used to change the data signalling rate" at any time in data mode, and it
+ * keeps the call and its error-control link.  Nothing here ever used it to go
+ * UP: the first rate comes from the Phase-4 TRN measurement, and the B1
+ * check and the loss paths only lower it.  On the v90ras Win95 lines
+ * (2026-11-08) TRN read 32.0-32.3 dB (26400 at 3200 baud) while the data mode
+ * that followed read 36 dB at 0.011 from the grid -- the TRN taps do not see
+ * what the decision-directed data-mode equalizer does -- so every call ran
+ * one or more rates below what the line carried.
+ *
+ * Once V.42 detection is over and the data mode's own SNR
+ * (v34_get_data_snr_db()) has supported a higher rate, by
+ * ME_V34_FALL_FORWARD_MARGIN_DB (0.5), for ME_V34_FALL_FORWARD_HOLD_MS, open an
+ * 11.6 asking that rate for our receive direction
+ * (v34_set_mp_rx_data_rate(): the TRN reading would cap it again).  The new
+ * rate is a probe: it is confirmed when its own data mode reads at least its
+ * threshold less ME_V34_FALL_FORWARD_MARGIN_DB, and it fails if that reads
+ * lower, if the receiver loses the data mode, or if anything retrains before
+ * then.  A failure steps back down by 11.6 where the data mode still runs,
+ * and in every case puts a ceiling one N below the failed rate for the rest
+ * of the call.
+ *
+ * ME_V34_FALL_FORWARD=1 enables it.  Off by default, like ME_V34_B1_RENEG,
+ * because an 11.6 the peer ignores costs a retrain (the RasFinder ignored
+ * ours, rf-tower-fb-11/-13); the Win95 modems answer 11.6 both ways. */
+static int g_v34_ff_attempts = 0;
+static int g_v34_ff_ceiling_n = 0;      /* 0 = none */
+static int g_v34_ff_probe_n = 0;        /* rate being proved, 0 = none */
+static int g_v34_ff_prev_n = 0;         /* the rate the probe came from */
+static int64_t g_v34_ff_good_since_ms = 0;
+static int64_t g_v34_ff_last_ms = 0;
+
+static int me_v34_ff_param(const char *name, int fallback)
+{
+    return parse_env_int(name, fallback);
+}
+
+static bool me_v34_ff_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = me_v34_ff_param("ME_V34_FALL_FORWARD", 0) ? 1 : 0;
+    return cached && me_v34_reneg_enabled();
+}
+
+static float me_v34_ff_margin_db(void)
+{
+    const char *m = getenv("ME_V34_FALL_FORWARD_MARGIN_DB");
+
+    /* The table is already the highest failing reading plus 0.1 dB, and
+       the reading saturates near 37 dB, so 1.5 dB here would put 31200 at
+       3200 baud (35.9) out of reach of every line. */
+    return (m && *m) ? (float) atof(m) : 0.5f;
+}
+
+static void v34_ff_reset_locked(void)
+{
+    g_v34_ff_attempts = 0;
+    g_v34_ff_ceiling_n = 0;
+    g_v34_ff_probe_n = 0;
+    g_v34_ff_prev_n = 0;
+    g_v34_ff_good_since_ms = 0;
+    g_v34_ff_last_ms = 0;
+    if (g_v34)
+        v34_set_mp_rx_data_rate(g_v34, 0);
+}
+
+/* The probe did not hold: no rate at or above it again this call. */
+static void v34_ff_fail_locked(const char *why)
+{
+    if (!g_v34_ff_probe_n)
+        return;
+    g_v34_ff_ceiling_n = g_v34_ff_probe_n - 1;
+    ME_LOG("[ME] V.34 fall-forward to %d bps failed (%s); %d bps is this "
+           "call's ceiling\n", g_v34_ff_probe_n*2400, why,
+           g_v34_ff_ceiling_n*2400);
+    trace_phase("V34 fall-forward %d failed: %s", g_v34_ff_probe_n*2400, why);
+    g_v34_ff_probe_n = 0;
+    g_v34_ff_good_since_ms = 0;
+    g_v34_ff_last_ms = trace_now_ms();
+    if (g_v34) {
+        v34_set_mp_rx_data_rate(g_v34, 0);
+        /* A retrain keeps the rate policy (v34_restart() does not clear
+           it), so leave it at the ceiling, not at the rate that failed. */
+        v34_set_mp_rate_policy(g_v34, g_v34_ff_ceiling_n, g_v34_ff_ceiling_n);
+    }
+}
+
+/* A retrain or the call's end, from anywhere: an unconfirmed probe failed. */
+static void v34_ff_abandon_locked(const char *why)
+{
+    v34_ff_fail_locked(why);
+    g_v34_ff_good_since_ms = 0;
+    if (g_v34)
+        v34_set_mp_rx_data_rate(g_v34, 0);
+}
+
+/* Returns true when it started a renegotiation. */
+static bool v34_fall_forward_check_locked(void)
+{
+    int a_to_c;
+    int c_to_a;
+    int *ours;
+    int cur;
+    int target;
+    int top;
+    int symbols = 0;
+    float snr;
+    float margin;
+    int64_t now;
+
+    if (!me_v34_ff_enabled() || !g_v34 || g_state != ME_DATA
+        || g_v42_detecting || v34_rate_renegotiation_active(g_v34))
+        return false;
+    if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
+        return false;
+    ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
+    cur = *ours;
+    margin = me_v34_ff_margin_db();
+    now = trace_now_ms();
+
+    if (g_v34_ff_probe_n) {
+        float need;
+
+        if (v34_data_carrier_lost(g_v34)) {
+            v34_ff_fail_locked("data mode lost");
+            return false;
+        }
+        if (cur != g_v34_ff_probe_n) {
+            /* The renegotiation ended at a different rate (the peer's MP is
+               the minimum, 11.4.2.1.1); nothing was proved either way. */
+            ME_LOG("[ME] V.34 fall-forward: renegotiation settled at %d bps, "
+                   "not %d bps\n", cur*2400, g_v34_ff_probe_n*2400);
+            g_v34_ff_probe_n = 0;
+            v34_set_mp_rx_data_rate(g_v34, 0);
+            g_v34_ff_last_ms = now;
+            return false;
+        }
+        if (v34_get_data_snr_db(g_v34, &snr, &symbols) != 0)
+            return false;
+        need = (float) v34_rx_data_snr_threshold_db(g_v34, cur*2400);
+        if (snr >= need - margin) {
+            ME_LOG("[ME] V.34 fall-forward to %d bps confirmed: data mode "
+                   "reads %.1f dB (needs %.1f)\n", cur*2400, snr, need);
+            trace_phase("V34 fall-forward %d confirmed %.1f dB", cur*2400, snr);
+            g_v34_ff_probe_n = 0;
+            v34_set_mp_rx_data_rate(g_v34, 0);
+            g_v34_ff_last_ms = now;
+            return false;
+        }
+        /* Running, but short of the rate: step back down while the data
+           mode still works, rather than wait for it to fail. */
+        {
+            int back = g_v34_ff_prev_n;
+            char why[64];
+
+            snprintf(why, sizeof(why), "data mode reads %.1f dB, needs %.1f",
+                     snr, need);
+            v34_ff_fail_locked(why);
+            if (back > 0 && v34_start_rate_renegotiation(g_v34) == 0) {
+                v34_set_mp_rx_data_rate(g_v34, back);
+                v34_set_mp_rate_policy(g_v34, ours == &a_to_c ? back : 14,
+                                       ours == &a_to_c ? 14 : back);
+                ME_LOG("[ME] V.34 fall-forward: back to %d bps by §11.6\n",
+                       back*2400);
+                v34_reneg_begin_locked();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (g_v34_ff_attempts >= me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3))
+        return false;
+    if (data_mode_elapsed_ms() < me_v34_ff_param("ME_V34_FALL_FORWARD_AFTER_MS", 8000))
+        return false;
+    if (g_v34_ff_last_ms
+        && now - g_v34_ff_last_ms < me_v34_ff_param("ME_V34_FALL_FORWARD_DWELL_MS", 20000))
+        return false;
+    if (v34_data_carrier_lost(g_v34)
+        || v34_get_data_snr_db(g_v34, &snr, &symbols) != 0) {
+        g_v34_ff_good_since_ms = 0;
+        return false;
+    }
+    target = v34_rx_data_snr_rate(g_v34, snr - margin)/2400;
+    {
+        static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+        int code = v34_get_rx_baud_rate(g_v34);
+
+        if (code < 0 || code >= 6)
+            return false;
+        top = max_v34_bps_for_baud(baud_by_code[code])/2400;
+    }
+    if (g_lim[LIM_MAX_RX] > 0 && top > g_lim[LIM_MAX_RX]/2400)
+        top = g_lim[LIM_MAX_RX]/2400;
+    if (g_v34_ff_ceiling_n > 0 && top > g_v34_ff_ceiling_n)
+        top = g_v34_ff_ceiling_n;
+    if (target > top)
+        target = top;
+    if (target <= cur) {
+        g_v34_ff_good_since_ms = 0;
+        return false;
+    }
+    if (g_v34_ff_good_since_ms == 0) {
+        g_v34_ff_good_since_ms = now;
+        return false;
+    }
+    if (now - g_v34_ff_good_since_ms < me_v34_ff_param("ME_V34_FALL_FORWARD_HOLD_MS", 3000))
+        return false;
+    if (v34_start_rate_renegotiation(g_v34) != 0)
+        return false;
+    v34_set_mp_rx_data_rate(g_v34, target);
+    /* The policy is a ceiling: lift ours to the target, and leave our
+       transmit direction to the peer's own MP. */
+    v34_set_mp_rate_policy(g_v34, ours == &a_to_c ? target : 14,
+                           ours == &a_to_c ? 14 : target);
+    g_v34_ff_attempts++;
+    g_v34_ff_probe_n = target;
+    g_v34_ff_prev_n = cur;
+    g_v34_ff_good_since_ms = 0;
+    ME_LOG("[ME] V.34 fall-forward: data mode reads %.1f dB at %d bps; asking "
+           "%d bps by a §11.6 rate renegotiation (%d of %d)\n",
+           snr, cur*2400, target*2400, g_v34_ff_attempts,
+           me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3));
+    trace_phase("V34 fall-forward %d -> %d (%.1f dB)", cur*2400, target*2400, snr);
+    v34_reneg_begin_locked();
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool retrain_on_loss_due(int cap)
 {
     int64_t now;
@@ -9292,6 +9523,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reneg_respond_pending = false;
     g_v90_reneg_responding = false;
     g_v90_b1_wait_from_samples = 0;
+    v34_ff_reset_locked();
     g_v90_reneg_cp_rx_marked = false;
     g_v90_reneg_cp_ack_seen = false;
     g_v34_retrain_probe_done = false;
@@ -9382,6 +9614,7 @@ static bool restart_v34_phase2_locked(const char *reason)
 
     if (g_mod != ME_MOD_V34 || !g_v34)
         return false;
+    v34_ff_abandon_locked("retrain before it was confirmed");
 
     baud = g_v34_start_baud ? g_v34_start_baud : 3200;
     if (g_v34_call_baud_cap > 0 && baud > g_v34_call_baud_cap)
@@ -9427,6 +9660,7 @@ static bool restart_v90_phase2_locked(const char *reason)
 
     if (g_mod != ME_MOD_V90 || !g_v34)
         return false;
+    v34_ff_abandon_locked("retrain before it was confirmed");
 
     /* V.90 9.5.1.1-.2 omits INFO0, not the configured receive ceiling.
      * Keep retrain INFO1d, MP and B1 consistent just as at initial startup
@@ -12144,6 +12378,17 @@ static void start_v34_training(void)
     /* V.250 6.4.1 +MS: our MP never offers a rate outside the DTE's bounds. */
     v34_set_mp_rate_limits(g_v34, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX],
                            g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]);
+    /* ME_V34_TEST_FIRST_MP_BPS=<bps>: a TEST HOOK for the 11.6 fall-forward.
+       Starts the call's rate policy (a ceiling, unlike ME_V34_BPS's INFO and
+       +MS limits, which bind every MP) at that rate, the way an under-reading
+       Phase-4 TRN does on the v90ras Win95 lines; the fall-forward is then
+       free to lift it.  Unset by default. */
+    {
+        int first = parse_env_int("ME_V34_TEST_FIRST_MP_BPS", 0);
+
+        if (g_v34 && first > 0 && valid_v34_bps(first))
+            v34_set_mp_rate_policy(g_v34, first/2400, first/2400);
+    }
     if (g_v34  &&  me_k56c_call()) {
         /* As native HSF's client: INFO0 symbol-rate difference 0 (V.34
            Table 12 bits 21:23; with 5 the 7910 completes no Phase 2), and
@@ -17203,6 +17448,8 @@ skip_8k_codewords:
                         }
                     } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
                         /* Retrained at a rate B1 says this line carries. */
+                    } else if (g_mod == ME_MOD_V34 && v34_fall_forward_check_locked()) {
+                        /* §11.6 to the rate the data mode says it carries. */
                     } else if (v34_retrain_probe_due_locked()) {
                         g_v34_retrain_probe_done = true;
                         ME_LOG("[ME] V.34: ME_V34_RETRAIN_AFTER_MS probe; "

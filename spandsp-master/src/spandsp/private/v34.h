@@ -219,6 +219,11 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
 #define V34_DATA_LOST_ERR                   0.55f
 #define V34_DATA_LOST_SYMBOLS               3200
 #define V34_DATA_LOST_SETTLE_SYMBOLS        3200
+/* Time constant of the data-mode SNR averages, and the symbols a reading
+   needs before v34_get_data_snr_db() reports it (B1's settle plus three time
+   constants). */
+#define V34_DATA_SNR_EMA_SYMBOLS            4096.0f
+#define V34_DATA_SNR_MIN_SYMBOLS            16000
 /*! T/3 samples of fresh wire between two acquisition attempts, and the most
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
@@ -1169,6 +1174,12 @@ typedef struct
     /*! \brief Optional explicit MP direction-rate policy. When false, MP rate
                advertisement falls back to locally-derived defaults. */
     bool mp_rate_policy_valid;
+    /* V.34 11.6 fall-forward: when > 0, the N our receive direction asks for in
+       the next MP, measured in data mode (v34_get_data_snr_db()).  It replaces
+       the INFO1 projection and the Phase-4 TRN reading, which under-read the
+       data mode by about 4 dB on the v90ras Win95 lines; the policy ceiling
+       and +MS still apply.  Set and cleared by the engine. */
+    int mp_rx_data_rate_n;
     /*! V.250 6.4.1 +MS bounds in bit/s, this modem's transmit and receive
         directions (0 = none).  Applied over whatever chose the MP rates. */
     int mp_lim_min_tx;
@@ -1503,6 +1514,14 @@ typedef struct
     float data_grid_err_ema;
     int data_grid_symbols;
     int data_lost_run;
+    /* The receive SNR of the data mode in use, as running averages of the
+       squared distance from the grid and the squared target point (the
+       "receive SNR" of the 4096-symbol DATA log line, but always kept and
+       readable by the engine).  data_snr_symbols counts symbols since the
+       last DATA entry, so a renegotiated data mode starts a fresh window. */
+    float data_snr_err_ema;
+    float data_snr_sig_ema;
+    int data_snr_symbols;
     int v90_t3_lost_reported;
     /*! \brief The equalizer from when it was demonstrably working, and the
         bookkeeping to notice that it no longer is.  B1 is long gone by the

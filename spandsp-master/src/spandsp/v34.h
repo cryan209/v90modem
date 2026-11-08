@@ -573,6 +573,23 @@ SPAN_DECLARE(int) v34_datapath_is_fixed_point(void);
     \param s The V.34 context.
     \return non-zero if the received symbols have been off the constellation
             for long enough to be a failure rather than a burst. */
+/*! Get the receive SNR of the data mode in use: mean squared target point
+    over mean squared distance from the grid, averaged over about 4096
+    symbols and reset at each DATA entry.
+    \param s The modem context.
+    \param snr_db The SNR, when one is available.
+    \param symbols If not NULL, the symbols counted since DATA entry.
+    \return 0, or -1 before V34_DATA_SNR_MIN_SYMBOLS symbols of DATA. */
+SPAN_DECLARE(int) v34_get_data_snr_db(v34_state_t *s, float *snr_db, int *symbols);
+
+/*! The highest rate (bit/s) a data-mode SNR reading supports at the current
+    receive symbol rate, from this receiver's calibration; 0 if none. */
+SPAN_DECLARE(int) v34_rx_data_snr_rate(v34_state_t *s, float snr_db);
+
+/*! The data-mode SNR (dB) a rate needs at the current receive symbol rate;
+    99 if that rate is not calibrated. */
+SPAN_DECLARE(float) v34_rx_data_snr_threshold_db(v34_state_t *s, int bps);
+
 SPAN_DECLARE(int) v34_data_carrier_lost(v34_state_t *s);
 
 /*! \brief Clear a reported peer retrain, role-independently.  The event is
@@ -688,6 +705,14 @@ SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s);
     \param bit_rate_a_to_c Maximum answerer-to-caller signalling rate N.
     \param bit_rate_c_to_a Maximum caller-to-answerer signalling rate N. */
 SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, int bit_rate_c_to_a);
+
+/*! V.34 11.6 fall-forward: the N our receive direction asks for in the next
+    MP, measured in data mode.  It replaces the INFO1 projection and the
+    Phase-4 TRN measurement for that direction; the rate policy and +MS still
+    cap it.  0 clears it.
+    \param s The modem context.
+    \param n The signalling rate N (1-14), or 0. */
+SPAN_DECLARE(void) v34_set_mp_rx_data_rate(v34_state_t *s, int n);
 
 /*! Read the signalling rates settled by the last Phase 4 MP exchange, in the
     V.34 MP N coding (rate = N * 2400 bps).
