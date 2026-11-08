@@ -3335,3 +3335,29 @@ sends an unchecked escape followed by `ATH\r`, which could otherwise submit
 a remote login line if escape failed. No CR or credentials were submitted to
 the remote application. Printable marker matches are still not whole-stream
 BER, backspace semantics, authenticated login or duplex qualification.
+
+## Upstream rate control by 9.6 (2026-11-09)
+
+The upstream rate used to be fixed once, by the 300 ms 4-point measurement
+before MP, and only lowered after the receiver had lost the constellation.
+
+- **Data-mode SNR on T/3.** The T/3 receiver now keeps the data-mode SNR
+  that the V.34 T/2 data mode keeps: power over squared distance to the
+  odd-integer lattice. Readings are bounded to |y| < 128, because a diverged
+  receiver lands exactly on the float grid. Engine pair: 37.3 dB clean at
+  31200, and under noise it holds decoding at 28800 on 33.1 dB, 24000 on
+  30.0 dB and 21600 on 26.9 dB, consistent with the V.34 thresholds.
+- **The controller.** `v90_upstream_adapt_locked()`
+  (`ME_V90_UPSTREAM_ADAPT`, default 1) uses those readings to step the upstream
+  down and up by 9.6, with MP bits 24:27 carrying the new maximum
+  (9.4.2.4). Step-ups stop for the call once a 9.6 of ours times out.
+- **Two caps that pinned every renegotiation to the rate being left.**
+  `enter_v90_phase4_rx_locked()` capped the MP at the V.34 receiver's current
+  rate, and the CP acceptance used the same rate as the "receiver ceiling",
+  so any step-up was refused and hung up. A pending step-up's target now
+  sets both.
+- **Engine pair only, by retrain.** Our analogue role does not answer the
+  digital modem's Rd (the existing discontinuity resync times out the same
+  way), so offline the change lands by retrain: 19200 to 31200, confirmed at
+  37.3 dB. Real peers answer 9.6: it completed live on 3/3 calls on 2026-08-28.
+  The thresholds have not been checked against a real modem's upstream.

@@ -1870,6 +1870,8 @@ static bool            g_v90_cp_live_pending = false;
 static bool            g_v90_cp_live_running = false;
 static int16_t         g_v90_cp_live_samples[V90_CP_LIVE_MAX_SAMPLES];
 static int             g_v90_cp_live_sample_count = 0;
+/* Protected by g_v90_cp_live_mtx; §9.6 receives CP while ME_DATA is retained. */
+static bool            g_v90_cp_live_reneg = false;
 static int             g_v90_cp_live_phase4_hint = -1;
 static int             g_v90_cp_live_next_request = -1;
 static int             g_v90_cp_live_expected_compatibility = 0;
@@ -6890,11 +6892,22 @@ static uint64_t v90_cp_live_counter_delta64(uint64_t current,
     return current >= baseline ? current - baseline : current;
 }
 
+/* V.90 §9.6 retains the existing data link, hence ME_DATA. Only an active
+ * renegotiation may accept new CP there; ordinary DATA must not consume a
+ * late startup worker result. Caller holds g_state_mtx. */
+static bool v90_cp_rx_window_locked(void)
+{
+    return g_mod == ME_MOD_V90 && g_v90
+        && (g_state == ME_TRAINING
+            || (g_state == ME_DATA && v90_rate_renegotiation_active(g_v90)));
+}
+
 static void v90_cp_live_capture_reset_locked(void)
 {
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     g_v90_cp_live_generation++;
     g_v90_cp_live_sample_count = 0;
+    g_v90_cp_live_reneg = false;
     g_v90_cp_live_phase4_hint = -1;
     g_v90_cp_live_next_request = -1;
     g_v90_cp_live_expected_compatibility = 0;
@@ -6908,13 +6921,18 @@ static void v90_cp_live_capture_reset_locked(void)
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
 }
 
-static void v90_cp_live_capture_append(const int16_t *samples, int count)
+static void v90_cp_live_capture_append(const int16_t *samples, int count,
+                                        bool training)
 {
     int available;
 
     if (!samples || count <= 0 || !g_v90_cp_live_thread_started)
         return;
     pthread_mutex_lock(&g_v90_cp_live_mtx);
+    if (!training && !g_v90_cp_live_reneg) {
+        pthread_mutex_unlock(&g_v90_cp_live_mtx);
+        return;
+    }
     available = V90_CP_LIVE_MAX_SAMPLES - g_v90_cp_live_sample_count;
     if (count > available)
         count = available;
@@ -6941,12 +6959,14 @@ static void v90_cp_live_capture_append(const int16_t *samples, int count)
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
 }
 
-/* Called at the exact downstream DIL->Ri transition with g_state_mtx held. */
+/* Called at DIL->Ri (§9.4), or Rd (§9.6), with g_state_mtx held. */
 static void v90_cp_live_note_phase4_hint_locked(void)
 {
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     g_v90_cp_live_phase4_hint = g_v90_cp_live_sample_count;
-    g_v90_cp_live_expected_compatibility = 0;
+    g_v90_cp_live_reneg = v90_rate_renegotiation_active(g_v90);
+    /* §9.6.1.2.3 receives CP, never startup's CPt. */
+    g_v90_cp_live_expected_compatibility = g_v90_cp_live_reneg ? 1 : 0;
     g_v90_cp_live_baud_code = v90_selected_upstream_baud_locked();
     /* Attempt as soon as one observed 428-bit CPt could be complete.  If the
      * peer starts later, short strict retries below catch its first frame. */
@@ -6966,8 +6986,9 @@ static void v90_cp_live_mark_accepted_locked(const vpcm_cp_diag_t *diag)
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     if (diag->frame.v90_compatibility
         && diag->frame.acknowledge) {
-        /* CP' is the last Table-14 frame needed during startup. */
+        /* CP' ends this Table-14 receive window (§9.4 and §9.6). */
         g_v90_cp_live_next_request = -1;
+        g_v90_cp_live_reneg = false;
     } else {
         if (!diag->frame.v90_compatibility) {
             /* This is the waveform boundary at which the digital modem
@@ -7261,6 +7282,14 @@ static bool restart_v90_phase2_locked(const char *reason);
 static int me_v34_reneg_enabled(void);
 static void v34_reneg_begin_locked(void);
 static int64_t data_mode_elapsed_ms(void);
+static float me_v34_ff_margin_db(void);
+static int v34_data_snr_target_n(float snr);
+static void v90_upstream_adapt_reset_locked(void);
+static bool g_v90_ua_test_first_used;
+static int g_v90_ua_pending_bps;
+static bool g_v90_ua_peer_ignores_rd;
+static int g_v34_b1_up_n;
+static bool g_v34_peer_ignores_reneg;
 /* The B1 check's own retrain budget: the per-call cap, but NOT the loss
    dwell.  The dwell stops a receiver that keeps losing lock from retraining
    back to back; B1 runs once per data-mode entry, on a fresh measurement at
@@ -7475,6 +7504,24 @@ static bool v34_b1_rate_check_locked(void)
         supported = 2;
     ME_LOG("[ME] V.34 B1: receive SNR %.1f dB at %d baud carries about %d bps; "
            "negotiated %d bps\n", snr, baud_by_code[rx_code], supported*2400, *ours*2400);
+    /* And the other way: B1 says the line carries MORE than the first MP
+       asked (Phase-4 TRN under-reads the data mode, docs/v34_data_mode_rates.md).
+       Hand that rate to the fall-forward, which opens it as soon as V.42
+       detection is over instead of waiting for the data mode's own reading
+       to build up and hold (8 s + 3 s), and confirms it the same way. */
+    if (snr >= 6.0f && g_mod == ME_MOD_V34
+        && parse_env_int("ME_V34_B1_FALL_FORWARD", 1)) {
+        int up = v34_rx_b1_training_rate(g_v34, snr - me_v34_ff_margin_db())/2400;
+        int top = v34_data_snr_target_n(99.0f);
+
+        if (top > 0 && up > top)
+            up = top;
+        if (up > *ours) {
+            g_v34_b1_up_n = up;
+            ME_LOG("[ME] V.34 B1: %d bps looks reachable; fall-forward will "
+                   "ask for it once V.42 detection is over\n", up*2400);
+        }
+    }
     if (*ours <= supported || !b1_retrain_allowed())
         return false;
     *ours = supported;
@@ -7524,8 +7571,8 @@ static bool v34_b1_rate_check_locked(void)
         static int b1_reneg = -1;
 
         if (b1_reneg < 0)
-            b1_reneg = parse_env_int("ME_V34_B1_RENEG", 0) ? 1 : 0;
-        if (b1_reneg && me_v34_reneg_enabled()
+            b1_reneg = parse_env_int("ME_V34_B1_RENEG", 1) ? 1 : 0;
+        if (b1_reneg && me_v34_reneg_enabled() && !g_v34_peer_ignores_reneg
             && v34_start_rate_renegotiation(g_v34) == 0) {
             ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
                    "renegotiation\n", supported*2400);
@@ -7591,6 +7638,8 @@ static bool g_v34_peer_ignores_reneg = false;  /* our 11.6 timed out (11.6.2) */
 static bool g_v34_reneg_ours = false;          /* the open 11.6 is one we started */
 static int64_t g_v34_fb_low_since_ms = 0;      /* data mode below its rate */
 static int g_v34_fb_to_n = 0;                  /* fall-back in flight, 0 = none */
+static int g_v34_b1_up_n = 0;                  /* B1 says this rate, 0 = none */
+static int64_t g_v34_bundle_reneg_ms = 0;      /* last bundle-loss 11.6 */
 
 static int me_v34_ff_param(const char *name, int fallback)
 {
@@ -7628,6 +7677,8 @@ static void v34_ff_reset_locked(void)
     g_v34_ff_last_ms = 0;
     g_v34_answer_ask_pending = false;
     g_v34_fb_to_n = 0;
+    g_v34_b1_up_n = 0;
+    g_v34_bundle_reneg_ms = 0;
     g_v34_peer_ignores_reneg = false;
     g_v34_reneg_ours = false;
     g_v34_fb_low_since_ms = 0;
@@ -7663,6 +7714,7 @@ static void v34_ff_abandon_locked(const char *why)
     g_v34_ff_good_since_ms = 0;
     g_v34_answer_ask_pending = false;
     g_v34_fb_to_n = 0;
+    g_v34_b1_up_n = 0;
     if (g_v34)
         v34_set_mp_rx_data_rate(g_v34, 0);
 }
@@ -7816,6 +7868,28 @@ static bool v34_fall_forward_check_locked(void)
 
     if (g_v34_ff_attempts >= me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3))
         return false;
+    if (g_v34_b1_up_n) {
+        target = g_v34_b1_up_n;
+        g_v34_b1_up_n = 0;
+        if (g_v34_ff_ceiling_n > 0 && target > g_v34_ff_ceiling_n)
+            target = g_v34_ff_ceiling_n;
+        if (target > cur && v34_start_rate_renegotiation(g_v34) == 0) {
+            v34_set_mp_rx_data_rate(g_v34, target);
+            v34_set_mp_rate_policy(g_v34, ours == &a_to_c ? target : 14,
+                                   ours == &a_to_c ? 14 : target);
+            g_v34_ff_attempts++;
+            g_v34_ff_probe_n = target;
+            g_v34_ff_prev_n = cur;
+            g_v34_ff_good_since_ms = 0;
+            ME_LOG("[ME] V.34 fall-forward: B1 supports %d bps; asking it by a "
+                   "§11.6 rate renegotiation from %d bps (%d of %d)\n",
+                   target*2400, cur*2400, g_v34_ff_attempts,
+                   me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3));
+            trace_phase("V34 fall-forward %d -> %d (B1)", cur*2400, target*2400);
+            v34_reneg_begin_locked();
+            return true;
+        }
+    }
     if (data_mode_elapsed_ms() < me_v34_ff_param("ME_V34_FALL_FORWARD_AFTER_MS", 8000))
         return false;
     if (g_v34_ff_last_ms
@@ -8367,6 +8441,7 @@ static int me_tx_disrupt_ms(void)
  * default. */
 static uint32_t g_tx_noise_seed = 0x2545f491u;
 static bool g_tx_noise_on = false;
+static uint64_t g_tx_noise_data_samples = 0;   /* transmitted in ME_DATA */
 
 static bool tx_noise_apply(int16_t *amp, int len)
 {
@@ -8381,7 +8456,12 @@ static bool tx_noise_apply(int16_t *amp, int len)
     if (after_ms <= 0 || rms <= 0)
         return false;
     if (!g_tx_noise_on) {
-        if (g_state != ME_DATA || data_mode_elapsed_ms() < after_ms)
+        /* Its own clock: data_mode_elapsed_ms() is the V.34 receiver's, and
+           the V.90 analogue role never sets it. */
+        if (g_state != ME_DATA)
+            return false;
+        g_tx_noise_data_samples += (uint64_t) len;
+        if (g_tx_noise_data_samples < (uint64_t) after_ms*8u)
             return false;
         g_tx_noise_on = true;
         ME_LOG("[ME] TX NOISE: adding %d RMS white noise (ME_TX_NOISE_RMS)\n", rms);
@@ -8560,6 +8640,18 @@ static bool v90_upstream_measure_locked(void)
             ME_LOG("[ME] V.90 upstream: MP now offers %d bps (§9.4.2.4, MP bits 24:27)\n",
                    v90_mp_upstream_max_bps(g_v90));
         }
+        {
+            /* ME_V90_UPSTREAM_TEST_FIRST_BPS: a TEST HOOK that makes the
+             * first MP under-ask the upstream, as ME_V34_TEST_FIRST_MP_BPS
+             * does for V.34, so the §9.6 fall-forward can be seen.  Unlike
+             * ME_V90_UPSTREAM_MAX_BPS it is not a ceiling for the call. */
+            int first = parse_env_int("ME_V90_UPSTREAM_TEST_FIRST_BPS", 0);
+
+            if (first > 0 && first < v90_mp_upstream_max_bps(g_v90)
+                && !g_v90_ua_test_first_used)
+                v90_set_upstream_rate_limit(g_v90, first);
+            g_v90_ua_test_first_used = true;
+        }
         if (v90_mp_upstream_max_bps(g_v90) <= 0) {
             ME_LOG("[ME] V.90 upstream measured limit leaves no common rate; no MP rate offered\n");
             if (!restart_v90_phase2_locked("empty measured upstream rate intersection"))
@@ -8735,9 +8827,15 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
         && !frame->silence_request
         && !g_v34_upstream_data_armed && g_v34) {
         int baud = v90_selected_upstream_baud_locked();
-        int ceiling = me_v90_upstream_cap(v34_get_current_bit_rate(g_v34));
+        int ceiling = v34_get_current_bit_rate(g_v34);
         int rate = v90_mp_upstream_max_bps(g_v90);
         int max_rate = v90_upstream_baud_max_bps(baud);
+
+        /* The V.34 receiver's rate is the one a §9.6 step-up is leaving
+         * (v90_upstream_adapt_locked()); the target is the ceiling then. */
+        if (g_v90_ua_pending_bps > ceiling)
+            ceiling = g_v90_ua_pending_bps;
+        ceiling = me_v90_upstream_cap(ceiling);
         /* §9.4.2.4: the analogue modem transmits at the highest rate enabled
          * in both modems, no higher than MP's bits 24:27 -- and our MP's
          * mask is the intersection with the CP's bits 36:48.  A peer that
@@ -8780,7 +8878,7 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
      * failed CRC. It cannot qualify that stream's E, but it can start the
      * independently validated B1 search. Keep the ordinary E/blind path
      * when the streaming decoder is qualified. */
-    if (accepted && g_state == ME_TRAINING
+    if (accepted && v90_cp_rx_window_locked()
         && (g_g711_rx_octets == 0 || !g_v90_upstream_stream_valid)
         && frame->v90_compatibility && frame->acknowledge
         && !frame->silence_request && !g_v92_active && g_v34
@@ -8982,8 +9080,7 @@ static void *v90_cp_live_worker(void *user_data)
             pthread_mutex_lock(&g_v90_cp_live_mtx);
             bool current = generation == g_v90_cp_live_generation;
             pthread_mutex_unlock(&g_v90_cp_live_mtx);
-            if (current && g_state == ME_TRAINING
-                && g_mod == ME_MOD_V90 && g_v90) {
+            if (current && v90_cp_rx_window_locked()) {
                 fprintf(stderr,
                         "[ME] V.90 strict batch recovered %s%s: bits=%d "
                         "frame=%d carrier=%s timing=%d step=%d pll=%.3f "
@@ -9039,7 +9136,7 @@ static void *v90_cp_live_worker(void *user_data)
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
             }
             pthread_mutex_unlock(&g_state_mtx);
-        } else if (snapshot && expected_compatibility
+        } else if (snapshot && expected_compatibility && cpt_accept_sample >= 0
                    && (post_cpt_attempt == 1
                        || (post_cpt_attempt % 2) == 0)) {
             vpcm_cp_diag_t repeated_cpt_diag;
@@ -9091,8 +9188,7 @@ static void *v90_cp_live_worker(void *user_data)
             pthread_mutex_lock(&g_v90_cp_live_mtx);
             current = generation == g_v90_cp_live_generation;
             pthread_mutex_unlock(&g_v90_cp_live_mtx);
-            current = current && g_state == ME_TRAINING
-                && g_mod == ME_MOD_V90 && g_v90;
+            current = current && v90_cp_rx_window_locked();
             pthread_mutex_unlock(&g_state_mtx);
 
             input_bits_delta = v90_cp_live_counter_delta64(
@@ -9723,11 +9819,13 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reneg_responding = false;
     g_v90_b1_wait_from_samples = 0;
     v34_ff_reset_locked();
+    v90_upstream_adapt_reset_locked();
     g_v90_reneg_cp_rx_marked = false;
     g_v90_reneg_cp_ack_seen = false;
     g_v34_retrain_probe_done = false;
     g_tx_disrupt_logged = 0;
     g_tx_noise_on = false;
+    g_tx_noise_data_samples = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -9852,6 +9950,202 @@ static bool restart_v34_phase2_locked(const char *reason)
            reason ? reason : "restart requested", baud, bps);
     trace_phase("V34 restart Phase2: %d/%d", baud, bps);
     return true;
+}
+
+/* V.90 upstream rate control by §9.6 ("can be initiated at any time during
+ * data mode"), the digital modem's counterpart of the V.34 11.6 controller
+ * (v34_fall_forward_check_locked()).  The upstream rate was fixed once, by
+ * a 300 ms 4-point measurement before MP (v90_upstream_measure_locked()),
+ * and afterwards only ever lowered after the receiver had already lost the
+ * constellation.  The T/3 receiver now keeps the data-mode SNR the V.34 data
+ * mode does (v34_get_data_snr_db()), so:
+ *   - below the current rate's threshold less ME_V34_FALL_BACK_MARGIN_DB for
+ *     ME_V34_FALL_BACK_HOLD_MS, renegotiate down while it still decodes;
+ *   - above a higher rate's threshold plus ME_V34_FALL_FORWARD_MARGIN_DB for
+ *     ME_V34_FALL_FORWARD_HOLD_MS, renegotiate up, and confirm the new rate by
+ *     its own reading or step back and keep a ceiling one N below it.
+ * Our MP's bits 24:27 carry the new maximum (§9.4.2.4; v90_set_upstream_
+ * rate_limit()), and the analogue modem transmits the highest rate both
+ * enable.  ME_V90_UPSTREAM_ADAPT=0 disables it; it shares the §9.6 per-call
+ * cap with every other renegotiation. */
+static int g_v90_ua_probe_bps = 0;
+static int g_v90_ua_prev_bps = 0;
+static int g_v90_ua_ceiling_bps = 0;
+static int g_v90_ua_attempts = 0;
+static int g_v90_ua_pending_bps = 0;     /* asked, not yet in data */
+static int64_t g_v90_ua_low_since_ms = 0;
+static int64_t g_v90_ua_good_since_ms = 0;
+static int64_t g_v90_ua_last_ms = 0;
+static int64_t g_v90_ua_data_since_ms = 0;
+static int64_t g_v90_ua_log_ms = 0;
+
+static void v90_upstream_adapt_reset_locked(void)
+{
+    g_v90_ua_probe_bps = 0;
+    g_v90_ua_prev_bps = 0;
+    g_v90_ua_ceiling_bps = 0;
+    g_v90_ua_attempts = 0;
+    g_v90_ua_pending_bps = 0;
+    g_v90_ua_low_since_ms = 0;
+    g_v90_ua_good_since_ms = 0;
+    g_v90_ua_last_ms = 0;
+    g_v90_ua_data_since_ms = 0;
+    g_v90_ua_log_ms = 0;
+    g_v90_ua_test_first_used = false;
+    g_v90_ua_peer_ignores_rd = false;
+}
+
+static bool v90_upstream_adapt_ask_locked(int bps, const char *why, float snr, int cur)
+{
+    if (v90_rate_renegotiation_count(g_v90) >= ME_V90_MAX_RENEGOTIATIONS)
+        return false;
+    v90_set_upstream_rate_limit(g_v90, bps);
+    if (!v90_request_rate_renegotiation(g_v90))
+        return false;
+    g_v90_ua_pending_bps = bps;
+    g_v90_ua_last_ms = trace_now_ms();
+    g_v90_ua_low_since_ms = 0;
+    g_v90_ua_good_since_ms = 0;
+    g_v90_ua_data_since_ms = 0;
+    ME_LOG("[ME] V.90 upstream %s: data mode reads %.1f dB at %d bps; asking "
+           "%d bps by a §9.6 rate renegotiation\n", why, snr, cur, bps);
+    trace_phase("V90 upstream %s %d -> %d (%.1f dB)", why, cur, bps, snr);
+    return true;
+}
+
+static bool v90_upstream_adapt_locked(void)
+{
+    static int enabled = -1;
+    int cur;
+    int top;
+    int baud;
+    int symbols = 0;
+    float snr;
+    float need;
+    float up_margin;
+    float down_margin;
+    int64_t now;
+
+    if (enabled < 0)
+        enabled = parse_env_int("ME_V90_UPSTREAM_ADAPT", 1) ? 1 : 0;
+    if (!enabled || !g_v34 || !g_v90 || g_v92_active || g_state != ME_DATA
+        || g_v42_detecting || !g_v34_upstream_data_started
+        || g_v90_upstream_prepared_bps <= 0
+        || v90_rate_renegotiation_active(g_v90)
+        || v90_rate_renegotiation_pending(g_v90)
+        || v34_v90_upstream_carrier_lost(g_v34))
+        return false;
+    now = trace_now_ms();
+    cur = g_v90_upstream_prepared_bps;
+    if (g_v90_ua_data_since_ms == 0)
+        g_v90_ua_data_since_ms = now;
+    if (g_v90_ua_pending_bps) {
+        if (cur != g_v90_ua_pending_bps)
+            ME_LOG("[ME] V.90 upstream renegotiation settled at %d bps, not %d\n",
+                   cur, g_v90_ua_pending_bps);
+        g_v90_ua_pending_bps = 0;
+        if (g_v90_ua_probe_bps && cur != g_v90_ua_probe_bps)
+            g_v90_ua_probe_bps = 0;
+    }
+    if (v34_get_data_snr_db(g_v34, &snr, &symbols) != 0)
+        return false;
+    need = (float) v34_rx_data_snr_threshold_db(g_v34, cur);
+    if (now - g_v90_ua_log_ms >= 10000) {
+        g_v90_ua_log_ms = now;
+        ME_LOG("[ME] V.90 upstream data mode reads %.1f dB at %d bps (needs %.1f)\n",
+               snr, cur, need);
+    }
+    up_margin = me_v34_ff_margin_db();
+    {
+        const char *fbm = getenv("ME_V34_FALL_BACK_MARGIN_DB");
+        down_margin = (fbm && *fbm) ? (float) atof(fbm) : 1.0f;
+    }
+    baud = v90_selected_upstream_baud_locked() == 3 ? 3000 : 3200;
+
+    if (g_v90_ua_probe_bps) {
+        if (snr >= need - up_margin) {
+            ME_LOG("[ME] V.90 upstream fall-forward to %d bps confirmed: data "
+                   "mode reads %.1f dB (needs %.1f)\n", cur, snr, need);
+            trace_phase("V90 upstream fall-forward %d confirmed %.1f dB", cur, snr);
+            g_v90_ua_probe_bps = 0;
+            g_v90_ua_last_ms = now;
+            return false;
+        }
+        g_v90_ua_ceiling_bps = g_v90_ua_probe_bps - 2400;
+        ME_LOG("[ME] V.90 upstream fall-forward to %d bps failed (%.1f dB, needs "
+               "%.1f); %d bps is this call's ceiling\n", g_v90_ua_probe_bps,
+               snr, need, g_v90_ua_ceiling_bps);
+        g_v90_ua_probe_bps = 0;
+        return v90_upstream_adapt_ask_locked(g_v90_ua_prev_bps, "step back",
+                                             snr, cur);
+    }
+
+    /* Down. */
+    if (need > 0.0f && snr < need - down_margin && cur > 4800) {
+        if (g_v90_ua_low_since_ms == 0)
+            g_v90_ua_low_since_ms = now;
+        if (now - g_v90_ua_low_since_ms
+                < parse_env_int("ME_V34_FALL_BACK_HOLD_MS", 2000))
+            return false;
+        {
+            int target = v34_rx_data_snr_rate(g_v34, snr - up_margin);
+            int floor_bps = (g_lim[LIM_MIN_RX] > 4800) ? g_lim[LIM_MIN_RX] : 4800;
+
+            if (target >= cur || target <= 0)
+                target = cur - 2400;
+            if (target < floor_bps)
+                target = floor_bps;
+            if (target >= cur)
+                return false;
+            g_v90_ua_ceiling_bps = 0;
+            return v90_upstream_adapt_ask_locked(target, "fall-back", snr, cur);
+        }
+    }
+    g_v90_ua_low_since_ms = 0;
+
+    /* Up. */
+    if (g_v90_ua_peer_ignores_rd
+        || g_v90_ua_attempts >= parse_env_int("ME_V34_FALL_FORWARD_MAX", 3)
+        || now - g_v90_ua_data_since_ms
+               < parse_env_int("ME_V34_FALL_FORWARD_AFTER_MS", 8000)
+        || (g_v90_ua_last_ms
+            && now - g_v90_ua_last_ms
+                   < parse_env_int("ME_V34_FALL_FORWARD_DWELL_MS", 20000)))
+        return false;
+    top = v90_upstream_baud_max_bps(v90_selected_upstream_baud_locked());
+    {
+        int ceiling = me_v90_upstream_cap(top);
+        if (ceiling > 0 && top > ceiling)
+            top = ceiling;
+    }
+    if (g_lim[LIM_MAX_RX] > 0 && top > g_lim[LIM_MAX_RX])
+        top = g_lim[LIM_MAX_RX];
+    if (g_v90_ua_ceiling_bps > 0 && top > g_v90_ua_ceiling_bps)
+        top = g_v90_ua_ceiling_bps;
+    {
+        int target = v34_rx_data_snr_rate(g_v34, snr - up_margin);
+
+        (void) baud;
+        if (target > top)
+            target = top;
+        if (target <= cur) {
+            g_v90_ua_good_since_ms = 0;
+            return false;
+        }
+        if (g_v90_ua_good_since_ms == 0) {
+            g_v90_ua_good_since_ms = now;
+            return false;
+        }
+        if (now - g_v90_ua_good_since_ms
+                < parse_env_int("ME_V34_FALL_FORWARD_HOLD_MS", 3000))
+            return false;
+        if (!v90_upstream_adapt_ask_locked(target, "fall-forward", snr, cur))
+            return false;
+        g_v90_ua_attempts++;
+        g_v90_ua_probe_bps = target;
+        g_v90_ua_prev_bps = cur;
+        return true;
+    }
 }
 
 static bool restart_v90_phase2_locked(const char *reason)
@@ -16796,8 +17090,8 @@ skip_8k_codewords:
 
     case ME_TRAINING:
     case ME_DATA:
-        if (state == ME_TRAINING && mod == ME_MOD_V90)
-            v90_cp_live_capture_append(amp, len);
+        if (mod == ME_MOD_V90)
+            v90_cp_live_capture_append(amp, len, state == ME_TRAINING);
         /* RX energy diagnostic — log every second during training */
         if (state == ME_TRAINING) {
             for (int i = 0; i < len; i++)
@@ -17373,8 +17667,8 @@ skip_8k_codewords:
                              * Not gated on me_v90_reneg_enabled(): that knob
                              * says whether to START one, and §9.6.1.2 is a
                              * "shall" regardless.  The detector behind the
-                             * event is itself off unless
-                             * ME_V90_RENEG_RESPOND=1. */
+                             * event is on by default; only the diagnostic
+                             * ME_V90_RENEG_RESPOND=0 disables it. */
                             g_v90_reneg_respond_pending = true;
                             g_v90_reneg_respond_s_samples = g_rx_audio_samples;
                             ME_LOG("[ME] V.90: peer opened a §9.6 rate "
@@ -17643,6 +17937,13 @@ skip_8k_codewords:
                          * the retrain procedure." */
                         if (v34_reneg_timed_out_locked()) {
                             v34_reneg_clear_locked();
+                            if (loss_hangup_due_locked()) {
+                                /* A bundle member: a retrain is what
+                                   ME_V34_LOSS_HANGUP_AFTER_MS exists to avoid. */
+                                loss_hangup_locked("rate renegotiation produced no E");
+                                pthread_mutex_unlock(&g_state_mtx);
+                                return;
+                            }
                             ME_LOG("[ME] V.34 §11.6 rate renegotiation "
                                    "produced no E; falling back to a §11.5 "
                                    "retrain\n");
@@ -17686,8 +17987,35 @@ skip_8k_codewords:
                         }
                     } else if (v34_data_carrier_lost(g_v34)
                                && loss_hangup_due_locked()) {
+                        /* A bundle member that stops decoding gets ONE 11.6
+                         * first: S, S-bar, TRN, MP, E and B1 are ~2 s and
+                         * keep the link, where the 11.5 retrain that made
+                         * hanging up necessary (2ff37ab6) costs 10-20 s.  If
+                         * that renegotiation produces no E, or the loss comes
+                         * back within ME_V34_LOSS_HANGUP_RENEG_MS, hang up. */
+                        static int reneg_ms = -1;
+                        int64_t now = trace_now_ms();
+
+                        if (reneg_ms < 0)
+                            reneg_ms = parse_env_int("ME_V34_LOSS_HANGUP_RENEG_MS", 30000);
                         v34_clear_data_carrier_lost(g_v34);
-                        loss_hangup_locked("data mode stopped decoding");
+                        if (reneg_ms > 0 && me_v34_reneg_enabled()
+                            && !g_v34_peer_ignores_reneg
+                            && (g_v34_bundle_reneg_ms == 0
+                                || now - g_v34_bundle_reneg_ms >= reneg_ms)
+                            && v34_start_rate_renegotiation(g_v34) == 0) {
+                            g_v34_bundle_reneg_ms = now;
+                            v34_rx_rate_backoff_locked();
+                            g_data_loss_recovering = true;
+                            ds_set_fallback_buffered(&g_data_stack, false);
+                            ds_set_alternative(&g_data_stack, false);
+                            ME_LOG("[ME] V.34 data mode has stopped decoding on a "
+                                   "bundle member; one §11.6 before hanging up\n");
+                            trace_phase("V34 bundle loss reneg");
+                            v34_reneg_begin_locked();
+                        } else {
+                            loss_hangup_locked("data mode stopped decoding");
+                        }
                     } else if (v34_data_carrier_lost(g_v34)
                                && retrain_on_loss_due(
                                       me_v34_max_loss_retrains())) {
@@ -19357,8 +19685,16 @@ static void enter_v90_phase4_rx_locked(void)
         /* The peer picks its upstream rate from the mask our MP offers, and
          * at 31200 the symbols arrive with 3-4 units of error against a
          * constellation spacing of 2 -- too dense for this path to decode. */
+        /* A §9.6 the upstream rate controller asked for carries its own
+         * target: the current bit rate is the rate being LEFT, so taking it
+         * as the cap made every renegotiation settle where it started
+         * (v90_upstream_adapt_locked()). */
+        if (g_v90_ua_pending_bps > 0)
+            limit = g_v90_ua_pending_bps < baud_limit ? g_v90_ua_pending_bps
+                                                      : baud_limit;
         limit = me_v90_upstream_cap(limit);
-        if (g_v90_upstream_learnt_cap > 0 && g_v90_upstream_learnt_cap < limit)
+        if (g_v90_upstream_learnt_cap > 0 && g_v90_upstream_learnt_cap < limit
+            && g_v90_ua_pending_bps <= 0)
             limit = g_v90_upstream_learnt_cap;
         /* V.250 6.4.1 +MS: the upstream is our receive direction. */
         if (g_lim[LIM_MAX_RX] > 0 && (limit <= 0 || limit > g_lim[LIM_MAX_RX]))
@@ -19370,6 +19706,14 @@ static void enter_v90_phase4_rx_locked(void)
                v34_get_rx_high_carrier(g_v34) ? "high" : "low");
     }
     if (!g_v92_active) {
+        if (v90_rate_renegotiation_active(g_v90)) {
+            /* §9.6 starts a fresh CP exchange, not a continuation of startup.
+             * Invalidate outstanding batch work and the synchronous framer's
+             * old CP/CP' bits before accepting this exchange's parameters. */
+            v90_cp_live_capture_reset_locked();
+            v90_cp_rx_init(&g_v90_cp_rx, 4, g_law == ME_LAW_ALAW,
+                           v90_live_cp_frame, NULL);
+        }
         v90_cp_live_note_phase4_hint_locked();
         v34_force_v90_phase4_cp_rx(g_v34);
     } else {
@@ -19518,6 +19862,14 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
 
         if (v90_rate_renegotiation_timed_out(g_v90)) {
             v90_reneg_cp_report_locked("timeout");
+            if (g_v90_ua_pending_bps > 0 && !g_v90_ua_peer_ignores_rd) {
+                /* The rate still changes, by the retrain below; but the
+                   next one this controller would start costs a retrain too,
+                   so it starts no more step-ups on this call. */
+                g_v90_ua_peer_ignores_rd = true;
+                ME_LOG("[ME] V.90: peer did not answer our §9.6; no more "
+                       "upstream step-ups from us this call\n");
+            }
             (void) restart_v90_phase2_locked("rate renegotiation timeout");
             return false;
         }
@@ -19544,6 +19896,10 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                    "§9.6 rate renegotiation\n");
             trace_phase("V90 reneg probe");
             (void) v90_request_rate_renegotiation(g_v90);
+        }
+
+        if (v90_upstream_adapt_locked()) {
+            /* §9.6 to the upstream rate the data mode supports. */
         }
 
         /* A receiver that was settled and then stepped abruptly off the

@@ -1381,3 +1381,22 @@ drives V.34 rates in both directions, and the controller is on by default
   start no more 11.6s on that call.
 - **11.6.2 timeout.** It now uses the round trip Phase 2 measured, two of them
   for the initiator and three for the responder, instead of a fixed 250 ms.
+
+### B1 seeds the fall-forward; bundle members renegotiate (2026-11-09)
+
+- **B1 seeds the fall-forward.** B1 reads the same line moments after
+  training, and reads it like the data mode does (36.9 dB where the first MP
+  asked 14400), so a B1 rate above the negotiated one goes to the
+  fall-forward. It opens that rate by 11.6 as soon as V.42 detection is over,
+  not after the data mode's own 8 s wait and 3 s hold. Engine pair from 14400:
+  31200 asked 0.6 s into data and confirmed at 37.8 dB 7 s later.
+  The B1 step-down now goes by 11.6 too (`ME_V34_B1_RENEG=1`), unless the peer
+  has already shown it ignores 11.6.
+- **Bundle members renegotiate before they hang up.** A member that stops
+  decoding gets one 11.6 (about 2 s, link kept) before
+  `ME_V34_LOSS_HANGUP_AFTER_MS` hangs it up. It is hung up if that 11.6
+  produces no E, or if the loss comes back within 30 s. A peer 11.5 retrain
+  still hangs up. Engine pair with another line busy and 150 RMS noise:
+  31200 lost, one 11.6 to 19200, fall-forward to 21600 confirmed, call kept.
+  Against a peer that ignores 11.6 the member is hung up at the 11.6.2
+  timeout instead of retraining.

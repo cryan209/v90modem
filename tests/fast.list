@@ -849,6 +849,8 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./v90_analogue_tx_test
 ./v90_analogue_rx_test
 ./v90_reneg_silence_test
+# §9.6 keeps ME_DATA: fresh CP capture, CP not CPt, stale-worker exclusion.
+./v90_reneg_engine_test
 ./v90_analogue_sd_test
 ./v34_pp_fit_test
 ./vpcm_loopback_test --all-tests
@@ -1041,10 +1043,19 @@ sh -c 'V90_REPLAY_QUIET=1 ./v90_upstream_replay reference-data/artifacts/cx93001
 # call that started at 14400; our MP asks what the data mode supports (a
 # fall-forward probe), not the renegotiation TRN's reading, and holds 14400
 # when fall-forward is off.
-./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=1 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "(fall-forward probe)" --call-log "bps confirmed" --both-nolog "bps failed (" --both-nolog "falling back to a §11.5"
-./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=0 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "MP asks 14400 bps for our receive direction" --both-nolog "falling back to a §11.5"
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=1 --call-env ME_V34_B1_FALL_FORWARD=0 --answer-env ME_V34_FALL_FORWARD=0 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "(fall-forward probe)" --call-log "bps confirmed" --both-nolog "bps failed (" --both-nolog "falling back to a §11.5"
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=0 --answer-env ME_V34_FALL_FORWARD=0 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "MP asks 14400 bps for our receive direction" --both-nolog "falling back to a §11.5"
 # V.34 11.6 fall-back: noise on the far transmitter drops our data-mode SNR
 # below 31200's threshold while it still decodes; step down by 11.6, no retrain.
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --answer-env ME_TX_NOISE_AFTER_MS=6000 --answer-env ME_TX_NOISE_RMS=80 --hold-seconds 25 --seconds 100 --call-log "fall-back to 26400 bps settled at 26400 bps" --both-nolog "produced no E"
 # ...and a peer that ignores our 11.6 costs one retrain, then no more 11.6s from us.
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --answer-env ME_TX_NOISE_AFTER_MS=6000 --answer-env ME_TX_NOISE_RMS=80 --answer-env ME_V34_TEST_IGNORE_RENEG=1 --hold-seconds 45 --seconds 130 --call-log "no more rate renegotiations from us"
+# V.34 fall-forward seeded from B1: a first MP of 14400 on a 31200 line asks
+# 31200 by 11.6 as soon as V.42 detection is over, not 11 s in.
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --hold-seconds 20 --seconds 90 --call-log "B1 supports 31200 bps" --call-log "fall-forward to 31200 bps confirmed" --both-nolog "bps failed ("
+# A bundle member (another line busy, ME_V34_LOSS_HANGUP_AFTER_MS) that stops
+# decoding gets one 11.6 before it is hung up, and here keeps the call.
+sh -c 'mkdir -p "$TMPDIR/busy"; sleep 300 & echo $! > "$TMPDIR/busy/line9"; ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --both-env ME_LINE_BUSY_DIR="$TMPDIR/busy" --both-env ME_V34_LOSS_HANGUP_AFTER_MS=3000 --answer-env ME_TX_NOISE_AFTER_MS=8000 --answer-env ME_TX_NOISE_RMS=150 --hold-seconds 30 --seconds 100 --call-log "one §11.6 before hanging up" --both-nolog "hanging up instead of retraining"; rc=$?; kill $(cat "$TMPDIR/busy/line9"); exit $rc'
+# V.90 upstream rate control: a first MP of 19200 on a 31200 upstream steps
+# up by 9.6 (a retrain here: our analogue role does not answer Rd) and confirms.
+./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_UPSTREAM_TEST_FIRST_BPS=19200 --hold-seconds 45 --seconds 160 --answer-log "upstream fall-forward to 31200 bps confirmed"

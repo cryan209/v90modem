@@ -13261,6 +13261,35 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             float e_im = t_im - y.im;
             float energy = 1e-6f;
 
+            /* The data-mode SNR the T/2 path keeps (v34rx_data.c), so
+               v34_get_data_snr_db() also reads the V.90 upstream.  The same
+               odd-integer lattice, but only on the scale it can be read at:
+               a diverged receiver's output is exactly on the float grid above
+               2^24 and reads hundreds of dB (docs/v90_upstream_rate_matrix:
+               1.5e20 symbol power read "222.9 dB").  No V.34 point is
+               anywhere near 128 from the origin. */
+            if (fabsf(y.re) < 128.0f  &&  fabsf(y.im) < 128.0f)
+            {
+                float d = e_re*e_re + e_im*e_im;
+                float p = t_re*t_re + t_im*t_im;
+
+                if (s->data_snr_symbols == 0)
+                {
+                    s->data_snr_err_ema = d;
+                    s->data_snr_sig_ema = p;
+                }
+                else
+                {
+                    s->data_snr_err_ema += (d - s->data_snr_err_ema)/V34_DATA_SNR_EMA_SYMBOLS;
+                    s->data_snr_sig_ema += (p - s->data_snr_sig_ema)/V34_DATA_SNR_EMA_SYMBOLS;
+                }
+                /*endif*/
+                if (s->data_snr_symbols < 1000000000)
+                    s->data_snr_symbols++;
+                /*endif*/
+            }
+            /*endif*/
+
             for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
             {
                 complexf_t x = v90_t3_raw_get_frac(
@@ -15138,6 +15167,9 @@ commit:
     s->v90_t3_err_base = 0.0f;
     s->v90_t3_err_base_n = 0;
     s->v90_t3_lost_run = 0;
+    s->data_snr_symbols = 0;
+    s->data_snr_err_ema = 0.0f;
+    s->data_snr_sig_ema = 0.0f;
     s->v90_t3_resync_misses = 0;
     s->v90_t3_resync_required = false;
     s->v90_t3_lost_reported = 0;
@@ -15558,15 +15590,13 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
  *
  * Covers both stacks -- V.90 9.6.2 and plain V.34 11.6 send the same S.
  *
- * Default ON for plain V.34 and OFF for V.90 9.6 (see the function).  It was
- * off for both because it had never been exercised against a peer that starts
- * one.  Before the RasFinder, nothing in the recorded corpus renegotiated -- every
- * capture is of a call that either held data mode or died -- so the only
- * measurement available is the negative one: over the twelve recorded
- * rate-matrix calls, more than twenty minutes of live data-mode audio, this
- * detector fires zero times.  That bounds the false-positive rate and says
- * nothing at all about the true-positive rate.  A false detection would take
- * down a working call, so it stays behind the knob until a peer proves it.
+ * V.90 §9.6.1.2 and V.34 §11.6.1.2 require a response, independently of
+ * whether we initiate renegotiations. Default ON for both. The Courier's
+ * retained S/S-bar request was ignored with the V.90 default off; it then
+ * retrained, which the receiver mistook for a data-channel failure and used
+ * to lower its rate. ME_V90_RENEG_RESPOND=0 remains a diagnostic control,
+ * not a production interoperability profile. This does not by itself qualify
+ * the subsequent CP/MP/E/B1 exchange against physical hardware.
  */
 static int v34_reneg_respond_enabled(const v34_rx_state_t *s)
 {
@@ -15582,14 +15612,8 @@ static int v34_reneg_respond_enabled(const v34_rx_state_t *s)
     if (cached >= 0)
         return cached;
     /*endif*/
-    /* Unset: on for plain V.34 (including a V.90 call that fell back to it),
-       off for V.90's 9.6.  The plain V.34 half has now met a peer that starts
-       one: the RasFinder opens an 11.6 renegotiation ~20 s into every data
-       mode, and answered (with v34_answer_rate_renegotiation()'s conditioning
-       and the B1 fallback in v34rx_data.c) a 300 s call held throughout where
-       every call before died at the first one -- 10 of 11 completed, the
-       other recovering through 11.5 (artifacts/rf-bbs-6).  V.90 9.6 has not. */
-    return (!s->v90_mode  ||  s->v90_v34_fallback)  ?  1  :  0;
+    (void)s;
+    return 1;
 }
 /*- End of function --------------------------------------------------------*/
 
