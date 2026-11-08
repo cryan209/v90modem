@@ -7854,6 +7854,70 @@ static bool v90_reneg_probe_due_locked(void)
     return data_mode_elapsed_ms() >= me_v90_reneg_after_ms();
 }
 
+/* V.90 §9.4.1: "The digital modem shall initiate a retrain during Phase 4
+ * according to 9.5.1.1 if it does not receive B1 within 15 s plus 5
+ * round-trip delays after receiving INFO1a in 9.2.1.1.8."
+ *
+ * Without it a Phase 4 that stalls (no decodable CPt, an MP the peer never
+ * acknowledges, no E) sat until the 60 s training timeout and then fell back
+ * to V.22bis, which an analogue modem in V.90 Phase 4 cannot follow -- and
+ * the Win95 modems on the v90ras rig give up at about 55 s, so that fallback
+ * never even ran.  On 2026-11-08 one of them, handed an unusable CPt, sat in
+ * Phase 4 and retrained itself after 17 s; we would not have.
+ *
+ * The clock is g_rx_audio_samples (received audio, not host time) from the
+ * CRC-valid INFO1a that started this attempt's Phase 3; it stops when the
+ * upstream receiver acquires B1.  The round trip is Phase 2's estimate where
+ * there is one; v34 measures it only on V.92's short Phase 2 (9.4.1.1.4).
+ * With none, each round trip is taken as 1000 ms (ME_V90_B1_DEADLINE_RTD_MS),
+ * so the limit is 20 s.  That is a margin, not a delay estimate: the MT5634
+ * recording in reference-data/artifacts/rf-mt5634-v90-b1 is a working call
+ * whose B1 comes 16.5-17.0 s after INFO1a (about 700 MP before its CP'), and
+ * at 200 ms a round trip (16 s) the deadline retrained it.  The Win95 modems
+ * on the v90ras rig (7800 tap of 2026-11-08 17:11) take 11.1-11.3 s.
+ * ME_V90_B1_DEADLINE_MS replaces the 15 s (0 disables the deadline). */
+static uint64_t g_v90_b1_wait_from_samples = 0;
+
+static int me_v90_b1_deadline_ms(void)
+{
+    static int cached = -2;
+
+    if (cached == -2)
+        cached = parse_env_int("ME_V90_B1_DEADLINE_MS", 15000);
+    return cached;
+}
+
+/* True once §9.4.1's deadline has passed with no B1; it then disarms itself,
+ * so the caller retrains exactly once per attempt. */
+static bool v90_b1_deadline_expired_locked(void)
+{
+    uint64_t limit;
+    int rtd;
+
+    if (g_v90_b1_wait_from_samples == 0 || !g_v34 || g_v92_active
+        || me_v90_analogue_role() || me_v90_b1_deadline_ms() <= 0)
+        return false;
+    if (v34_v90_upstream_rx_acquired(g_v34)) {
+        g_v90_b1_wait_from_samples = 0;
+        return false;
+    }
+    rtd = v34_get_round_trip_delay_samples(g_v34);
+    if (rtd <= 0)
+        rtd = parse_env_int("ME_V90_B1_DEADLINE_RTD_MS", 1000)*8;
+    limit = (uint64_t)me_v90_b1_deadline_ms()*8
+          + 5*(uint64_t)(rtd > 0 ? rtd : 0);
+    if (g_rx_audio_samples - g_v90_b1_wait_from_samples < limit)
+        return false;
+    ME_LOG("[ME] V.90 §9.4.1: no B1 %llu ms after INFO1a (limit %d ms + 5 x "
+           "%d ms round trip); initiating a §9.5.1.1 retrain\n",
+           (unsigned long long)((g_rx_audio_samples
+                                 - g_v90_b1_wait_from_samples)/8),
+           me_v90_b1_deadline_ms(), rtd/8);
+    trace_phase("V90 9.4.1 B1 deadline -> retrain");
+    g_v90_b1_wait_from_samples = 0;
+    return true;
+}
+
 /* ME_V90_RETRAIN_AFTER_MS=<n> initiates a 9.5.1.1 retrain n ms after the call
  * reaches V.90/V.92 data mode, once.  A TEST HOOK, the sibling of
  * ME_V34_RETRAIN_AFTER_MS and ME_V90_RENEG_AFTER_MS: a healthy call never
@@ -9227,6 +9291,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reneg_await_s = false;
     g_v90_reneg_respond_pending = false;
     g_v90_reneg_responding = false;
+    g_v90_b1_wait_from_samples = 0;
     g_v90_reneg_cp_rx_marked = false;
     g_v90_reneg_cp_ack_seen = false;
     g_v34_retrain_probe_done = false;
@@ -9392,6 +9457,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_reneg_await_s = false;
     g_v90_reneg_respond_pending = false;
     g_v90_reneg_responding = false;
+    g_v90_b1_wait_from_samples = 0;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_reject_info1a_logged = false;
@@ -18583,6 +18649,7 @@ static void prepare_v90_phase3_locked(void)
             }
             v90_start_phase3(g_v90, info1a.u_info);
             g_v90_phase3_started = true;
+            g_v90_b1_wait_from_samples = g_rx_audio_samples ? g_rx_audio_samples : 1;
             if (g_v90_phase3_first_samples == 0)
                 g_v90_phase3_first_samples = g_rx_audio_samples;
             g_v90_completion_deferred_logged = false;
@@ -18860,6 +18927,11 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         prepare_v90_phase3_locked();
         if (!g_v90_phase3_started || !g_v90)
             return false;
+        if (v90_b1_deadline_expired_locked()) {
+            (void) restart_v90_phase2_locked("no B1 within the 9.4.1 deadline "
+                                             "after INFO1a");
+            return false;
+        }
 
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
@@ -18958,6 +19030,13 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
 
         if (!g_v90)
             return false;
+        /* §9.4.1.5 lets downstream DATA start at B1d, before the peer's B1
+         * (§9.4.1.6), so the deadline has to be watched here too. */
+        if (v90_b1_deadline_expired_locked()) {
+            (void) restart_v90_phase2_locked("no B1 within the 9.4.1 deadline "
+                                             "after INFO1a");
+            return false;
+        }
 
         /* §9.6.1: a rate renegotiation that does not produce an E is
          * abandoned for a full retrain.  The engine owns the retrain, so it

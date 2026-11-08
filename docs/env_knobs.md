@@ -68,6 +68,8 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_LINE_BUSY_DIR` | modem_engine.c, sip_modem.c | directory where each `--lines` worker keeps `line<i>` (its pid) while it has a call; lets `ME_V34_LOSS_HANGUP_AFTER_MS` tell a lone call from a bundle member. Unset by default; `/run/v90ras/busy` on rig/v90ras. |
 | `ME_V34_RETRAIN_ON_LOSS` | modem_engine.c | Per-call cap on V.34 retrains when the receiver stops decoding (default 4). |
 | `ME_V90_RETRAIN_ON_LOSS_DWELL_MS` | modem_engine.c | Minimum time between those retrains. |
+| `ME_V90_B1_DEADLINE_MS` | modem_engine.c | V.90 9.4.1: retrain (9.5.1.1) if no B1 this many ms plus 5 round trips after INFO1a. Default 15000; 0 disables. |
+| `ME_V90_B1_DEADLINE_RTD_MS` | modem_engine.c | Round trip assumed for that deadline when Phase 2 measured none (always, on V.90). Default 1000, so 20 s in all: the MT5634 fixture's B1 comes 16.5-17.0 s after INFO1a. |
 | `ME_V90_MAX_DOWNSTREAM_RATE` | v90.c | V.90 downstream ceiling in bit/s (AT+MS does the same per call). |
 | `ME_V90_DATA_LEAN` | v34rx_data.c | 1 drops the V.90 data-mode measurement work (embedded targets). |
 | `ME_DUMP_DIR` | line_supervisor.c, modem_engine.c, spandsp-master/src/v34rx.c | Non-empty enables asynchronous engine training PCM dumps and scopes other Phase 3 diagnostics; `--lines` supplies an isolated directory per worker ([multi-line](multi_line.md)). |
