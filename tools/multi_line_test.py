@@ -128,20 +128,48 @@ def write_all(fd, data, timeout=10):
         pending = pending[count:]
 
 
+def pty_target(path):
+    """The symlink's target plus its own identity: a recycled worker can be
+    handed the same tty number, but it always makes a new symlink."""
+    try:
+        st = os.lstat(path)
+        return (os.readlink(path), st.st_ino, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
 def line_echo(path, stop, connected, idx):
-    """A line's DTE: after CONNECT, echo every byte back."""
+    """A line's DTE: after CONNECT, echo every byte back.
+
+    Attached to the PTY the symlink names, and only that one.  A killed
+    worker's slave can still be opened through a symlink it has not yet
+    replaced, reads nothing for ever (the restarted line then echoed 0 of
+    416 bytes), and under load its tty number can already belong to another
+    process's PTY, whose bytes this thread then echoes (455 of 452).  So never
+    reopen the target that died, and follow the symlink when it moves."""
     fd = None
     seen = b''
+    attached = dead = None
     try:
         while not stop.is_set():
             if fd is None:
+                target = pty_target(path)
+                if target is None or target == dead:
+                    time.sleep(0.01)
+                    continue
                 try:
                     fd = open_pty(path, timeout=1)
                 except (SystemExit, OSError):
                     continue
+                attached = target
             try:
                 data = os.read(fd, 4096)
             except BlockingIOError:
+                if pty_target(path) != attached:
+                    # A replacement worker owns the line now.
+                    os.close(fd)
+                    fd, seen, dead = None, b'', attached
+                    continue
                 time.sleep(0.01)
                 continue
             except OSError:
@@ -151,7 +179,7 @@ def line_echo(path, stop, connected, idx):
                 # worker has already replaced the symlink. Do not keep the
                 # dead descriptor just because that pathname exists again.
                 os.close(fd)
-                fd, seen = None, b''
+                fd, seen, dead = None, b'', attached
                 time.sleep(0.01)
                 continue
             if b'CONNECT' not in seen:
