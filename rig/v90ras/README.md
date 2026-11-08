@@ -521,3 +521,28 @@ MP at 512T, before our receiver had trained: TRN read 5-8 dB there, against
 33-34 dB from the refit 2 s later. PPP still came up, over V.14 with no
 error correction. 1cb06bc6 holds TRN until our receiver has trained
 (V.34 11.4.1.1.2) and asks the measured rate (`ME_V90_FALLBACK_TRN_RATE`).
+
+2026-11-08 16:06-17:20 (1cb06bc6), 28 calls from 7800/7801/7802. PPP came up
+(16:08, V.90 52000/16800), but no V.90 data period lasted. Three recurring
+failures:
+- **7800: every V.90 data period ends at 31.4-31.5 s** (about 40 periods
+  since 11:37, so before and after `ME_LEC_NO_TRACK`). The sequence
+  (line0-242133, 17:11): the upstream is clean (symbol error 0.008, 0 bad
+  shell frames, 75% ones = LAPM flag idle) until **28.6 s**. Then the eye
+  drops in one step (lattice distance 0.838), our slip search corrects +0.17
+  sample, the eye reopens (0.010), but the bits read **41% ones**, so the
+  framing is wrong. V0 parity is lost at the same moment. At 31.4 s the error
+  rises again, we request the §9.6 resync (Rd), and the modem answers
+  with a full retrain 100 ms later. After two or three of these it falls
+  back to V.34. NOT the peer's timing: `tools/measure_timing_slips.py` finds
+  no whole-sample step in its transmitter (the epoch drifts smoothly, about
+  104 ppm). NOT the transport: RTP had 0 loss and 0 gaps in 25833 packets.
+  Loop timing holds (RX +60.2 ppm, TX +66.7 ppm against the host over
+  516 s). A replay (`--sync`, the rig's env) cannot judge it: its MP asks
+  12000 against the live 16800, so B1 never acquires. OPEN, and probably ours,
+  because it lands at the same data time on every call.
+- 7801: V.90 data ends at 10.5 s the same way, and V.42 detection fails.
+  Its V.34 fallbacks go white 2-4 s into data, or after 25-48 s.
+- V.34 fallbacks with LAPM run for minutes, then a peer 11.5 retrain hangs
+  that member up (`ME_V34_LOSS_HANGUP_AFTER_MS`), and the client drops the
+  other links about 1 s later.
