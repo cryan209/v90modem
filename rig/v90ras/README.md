@@ -546,3 +546,25 @@ failures:
 - V.34 fallbacks with LAPM run for minutes, then a peer 11.5 retrain hangs
   that member up (`ME_V34_LOSS_HANGUP_AFTER_MS`), and the client drops the
   other links about 1 s later.
+
+**Cause of the 31.4 s retrain: the modem's own §9.6 renegotiation, which we
+did not answer.** A replay with `--echo-ref` reproduces the live call exactly
+(it asks the live 16800, and logs the same "0.838 -> 0.414" and "71 of 448"),
+and the equalized-symbol dump (`ME_V90_UPSTREAM_SYM_DUMP`) shows the cause.
+At symbol 90897 (28.6 s) the error steps from 0.01 to 1.77 in one symbol,
+because the modem starts sending V.34 S: about 100 symbols that alternate
+(+4,+4)/(-4,+4). There is no change in the input level, no timing step and no
+equalizer drift (tap centroid 8.80-8.82 over the whole period). V.90 §9.6 lets
+the analogue modem start a renegotiation, and also lets it retrain its own echo
+canceller that way (CPs, bit 30). Our S-in-DATA responder is off by default
+for V.90 (`ME_V90_RENEG_RESPOND`, on only for V.34), so the slip search took
+the S for a timing step and moved the timing +0.17 sample. Framing was lost,
+we sent our own Rd at 31.4 s, and the modem gave up and retrained. With
+`ME_V90_RENEG_RESPOND=1` the replay detects the S at 28.6 s, with no false
+detection in the 28 s of data before it, and answers with Rd, R-bar-d,
+TRN2d and MP (§9.6.1.2.2; the instant "CPt accepted" there is only a log line,
+because TRN2d comes before the new CP). A replay cannot judge what follows our
+answer, so the rig now sets `ME_V90_RENEG_RESPOND=1` as a live A/B. A
+remaining nit: the responder sends Rd at once instead of waiting for the
+S-to-S-bar transition (§9.6.1.2.1). 7801's 10.5 s loss is probably the same
+thing and is unchecked.

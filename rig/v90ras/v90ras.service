@@ -49,6 +49,13 @@ Environment=ME_V90_DIL_AUTOTERMINATE_CYCLES=0
 # data period stays at 0.008 until the recording diverges.  What the tracker
 # locks onto at ~250 ms is not yet known.
 Environment=ME_LEC_NO_TRACK=1
+# Answer an analogue-initiated V.90 9.6 rate renegotiation (9.6.1.2); off by
+# default for V.90.  7800 sends S 28.6 s into every V.90 data period
+# (line0-242133, symbol 90897); unanswered, our slip search took it for a
+# timing step, framing was lost, and the modem retrained at 31.4 s.  A replay
+# detects that S with no false detection in the 28 s before it.  Live A/B
+# from 2026-11-08 18:5x (CT 117 drop-in v90-reneg-respond.conf).
+Environment=ME_V90_RENEG_RESPOND=1
 # G.711 taps per call: %L is the line, %P the worker's PID (one worker per
 # call under --recycle). Disposable; delete old calls/ entries by hand.
 Environment=VPCM_G711_TAP_DIR=/var/tmp/v90ras/calls/line%%L-%%P
