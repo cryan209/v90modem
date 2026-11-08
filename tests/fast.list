@@ -1042,4 +1042,9 @@ sh -c 'V90_REPLAY_QUIET=1 ./v90_upstream_replay reference-data/artifacts/cx93001
 # fall-forward probe), not the renegotiation TRN's reading, and holds 14400
 # when fall-forward is off.
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=1 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "(fall-forward probe)" --call-log "bps confirmed" --both-nolog "bps failed (" --both-nolog "falling back to a §11.5"
-./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "MP asks 14400 bps for our receive direction" --both-nolog "falling back to a §11.5"
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=0 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "MP asks 14400 bps for our receive direction" --both-nolog "falling back to a §11.5"
+# V.34 11.6 fall-back: noise on the far transmitter drops our data-mode SNR
+# below 31200's threshold while it still decodes; step down by 11.6, no retrain.
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --answer-env ME_TX_NOISE_AFTER_MS=6000 --answer-env ME_TX_NOISE_RMS=80 --hold-seconds 25 --seconds 100 --call-log "fall-back to 26400 bps settled at 26400 bps" --both-nolog "produced no E"
+# ...and a peer that ignores our 11.6 costs one retrain, then no more 11.6s from us.
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --answer-env ME_TX_NOISE_AFTER_MS=6000 --answer-env ME_TX_NOISE_RMS=80 --answer-env ME_V34_TEST_IGNORE_RENEG=1 --hold-seconds 45 --seconds 130 --call-log "no more rate renegotiations from us"

@@ -1354,3 +1354,30 @@ Engine pair, clean line, first MP held at 14400 by `ME_V34_TEST_FIRST_MP_BPS`
 (36 dB) the table gives 28800 at 3200 baud; 31200 needs 36.4 with the margin.
 **Not yet tried live.** The failure path (a probe that does not hold) has not
 been exercised: a clean pair carries every rate.
+
+## Rate control both ways, and answering the peer's 11.6 (2026-11-09)
+
+The data mode is the only measurement of the receiver we keep using, so it now
+drives V.34 rates in both directions, and the controller is on by default
+(`ME_V34_FALL_FORWARD`, docs/env_knobs.md).
+
+- **Answering the peer's 11.6 (11.6.1.2.2).** Our MP's receive rate came
+  from the renegotiation's own TRN: at most 2000 ms, 4-point. On the v90ras
+  Win95 modems (2026-11-07 21:13) it read 3.0 dB on a line whose data mode
+  read 25.7-26.2 dB, so we asked 7200, the peer went quiet in MP and the call
+  fell to an 11.5 retrain. We now ask the data-mode SNR's rate: never below
+  the current rate while the data mode supports it, and above it only as a
+  fall-forward probe. Engine pair from 14400: asks 24000 at 28.4 dB,
+  confirmed at 37.5 dB.
+- **Fall-back.** A data mode reading more than 1.0 dB below its rate's
+  threshold for 2 s steps down by 11.6 while it still decodes, instead of
+  riding into errors and a retrain. The 1.0 dB down and 0.5 dB up margins give
+  1.5 dB of hysteresis. Engine pair with 80 RMS noise on the far transmitter:
+  32.0 dB at 31200 (needs 35.9) settles at 26400 with no retrain. Above about
+  150 RMS the data mode stops decoding first, and the existing loss back-off
+  takes over (26400 asked, 19200 negotiated, fall-forward to 21600 confirmed).
+- **Peers without 11.6.** The first of our 11.6s that runs into the 11.6.2
+  timeout costs one retrain (the RasFinder, rf-tower-fb-11/-13), then we
+  start no more 11.6s on that call.
+- **11.6.2 timeout.** It now uses the round trip Phase 2 measured, two of them
+  for the initiator and three for the responder, instead of a fixed 250 ms.

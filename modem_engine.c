@@ -7572,9 +7572,14 @@ static bool v34_b1_rate_check_locked(void)
  * and in every case puts a ceiling one N below the failed rate for the rest
  * of the call.
  *
- * ME_V34_FALL_FORWARD=1 enables it.  Off by default, like ME_V34_B1_RENEG,
- * because an 11.6 the peer ignores costs a retrain (the RasFinder ignored
- * ours, rf-tower-fb-11/-13); the Win95 modems answer 11.6 both ways. */
+ * The same controller steps DOWN by 11.6 when the data mode reads below its
+ * own rate's threshold (fall-back, below), so a degrading line changes rate
+ * while it still decodes instead of failing into an 11.5 retrain.
+ *
+ * On by default (ME_V34_FALL_FORWARD=0 disables it).  An 11.6 the peer ignores
+ * costs a retrain (the RasFinder ignored ours, rf-tower-fb-11/-13), so the
+ * first one that runs into the 11.6.2 timeout ends our 11.6s for the call
+ * (g_v34_peer_ignores_reneg); the Win95 modems answer 11.6 both ways. */
 static int g_v34_ff_attempts = 0;
 static int g_v34_ff_ceiling_n = 0;      /* 0 = none */
 static int g_v34_ff_probe_n = 0;        /* rate being proved, 0 = none */
@@ -7582,6 +7587,10 @@ static int g_v34_ff_prev_n = 0;         /* the rate the probe came from */
 static int64_t g_v34_ff_good_since_ms = 0;
 static int64_t g_v34_ff_last_ms = 0;
 static bool g_v34_answer_ask_pending = false; /* see v34_answer_reneg_ask_locked() */
+static bool g_v34_peer_ignores_reneg = false;  /* our 11.6 timed out (11.6.2) */
+static bool g_v34_reneg_ours = false;          /* the open 11.6 is one we started */
+static int64_t g_v34_fb_low_since_ms = 0;      /* data mode below its rate */
+static int g_v34_fb_to_n = 0;                  /* fall-back in flight, 0 = none */
 
 static int me_v34_ff_param(const char *name, int fallback)
 {
@@ -7593,8 +7602,10 @@ static bool me_v34_ff_enabled(void)
     static int cached = -1;
 
     if (cached < 0)
-        cached = me_v34_ff_param("ME_V34_FALL_FORWARD", 0) ? 1 : 0;
-    return cached && me_v34_reneg_enabled();
+        cached = me_v34_ff_param("ME_V34_FALL_FORWARD", 1) ? 1 : 0;
+    /* A peer that let one of our 11.6s run into the 11.6.2 timeout gets no
+       more of them this call: each one would cost a retrain. */
+    return cached && me_v34_reneg_enabled() && !g_v34_peer_ignores_reneg;
 }
 
 static float me_v34_ff_margin_db(void)
@@ -7616,6 +7627,10 @@ static void v34_ff_reset_locked(void)
     g_v34_ff_good_since_ms = 0;
     g_v34_ff_last_ms = 0;
     g_v34_answer_ask_pending = false;
+    g_v34_fb_to_n = 0;
+    g_v34_peer_ignores_reneg = false;
+    g_v34_reneg_ours = false;
+    g_v34_fb_low_since_ms = 0;
     if (g_v34)
         v34_set_mp_rx_data_rate(g_v34, 0);
 }
@@ -7647,6 +7662,7 @@ static void v34_ff_abandon_locked(const char *why)
     v34_ff_fail_locked(why);
     g_v34_ff_good_since_ms = 0;
     g_v34_answer_ask_pending = false;
+    g_v34_fb_to_n = 0;
     if (g_v34)
         v34_set_mp_rx_data_rate(g_v34, 0);
 }
@@ -7694,6 +7710,16 @@ static bool v34_fall_forward_check_locked(void)
     margin = me_v34_ff_margin_db();
     now = trace_now_ms();
 
+    if (g_v34_fb_to_n) {
+        ME_LOG("[ME] V.34 fall-back to %d bps settled at %d bps\n",
+               g_v34_fb_to_n*2400, cur*2400);
+        trace_phase("V34 fall-back settled %d", cur*2400);
+        g_v34_fb_to_n = 0;
+        v34_set_mp_rx_data_rate(g_v34, 0);
+        g_v34_ff_last_ms = now;
+        return false;
+    }
+
     if (g_v34_ff_probe_n) {
         float need;
 
@@ -7739,10 +7765,53 @@ static bool v34_fall_forward_check_locked(void)
                 ME_LOG("[ME] V.34 fall-forward: back to %d bps by §11.6\n",
                        back*2400);
                 v34_reneg_begin_locked();
+                g_v34_reneg_ours = true;
                 return true;
             }
         }
         return false;
+    }
+
+    /* Fall back (11.6, "to change to a new data signalling rate"): the data
+       mode has read below its own rate's threshold, less
+       ME_V34_FALL_BACK_MARGIN_DB, for ME_V34_FALL_BACK_HOLD_MS.  Step to the
+       rate it does support while it still decodes, instead of riding the
+       rate into errors and an 11.5 retrain. */
+    if (!v34_data_carrier_lost(g_v34)
+        && v34_get_data_snr_db(g_v34, &snr, &symbols) == 0) {
+        float need = (float) v34_rx_data_snr_threshold_db(g_v34, cur*2400);
+        const char *fbm = getenv("ME_V34_FALL_BACK_MARGIN_DB");
+        float fb_margin = (fbm && *fbm) ? (float) atof(fbm) : 1.0f;
+
+        if (need > 0.0f && snr < need - fb_margin && cur > 1) {
+            if (g_v34_fb_low_since_ms == 0) {
+                g_v34_fb_low_since_ms = now;
+            } else if (now - g_v34_fb_low_since_ms
+                       >= me_v34_ff_param("ME_V34_FALL_BACK_HOLD_MS", 2000)) {
+                target = v34_data_snr_target_n(snr - margin);
+                if (target <= 0 || target >= cur)
+                    target = cur - 1;
+                if (v34_start_rate_renegotiation(g_v34) == 0) {
+                    v34_set_mp_rx_data_rate(g_v34, target);
+                    v34_set_mp_rate_policy(g_v34, ours == &a_to_c ? target : 14,
+                                           ours == &a_to_c ? 14 : target);
+                    g_v34_fb_low_since_ms = 0;
+                    g_v34_ff_good_since_ms = 0;
+                    g_v34_ff_last_ms = now;
+                    g_v34_fb_to_n = target;
+                    ME_LOG("[ME] V.34 fall-back: data mode reads %.1f dB at %d "
+                           "bps (needs %.1f); asking %d bps by a §11.6 rate "
+                           "renegotiation\n", snr, cur*2400, need, target*2400);
+                    trace_phase("V34 fall-back %d -> %d (%.1f dB)", cur*2400,
+                                target*2400, snr);
+                    v34_reneg_begin_locked();
+                    g_v34_reneg_ours = true;
+                    return true;
+                }
+            }
+            return false;
+        }
+        g_v34_fb_low_since_ms = 0;
     }
 
     if (g_v34_ff_attempts >= me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3))
@@ -7787,6 +7856,7 @@ static bool v34_fall_forward_check_locked(void)
            me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3));
     trace_phase("V34 fall-forward %d -> %d (%.1f dB)", cur*2400, target*2400, snr);
     v34_reneg_begin_locked();
+    g_v34_reneg_ours = true;
     return true;
 }
 /*- End of function --------------------------------------------------------*/
@@ -7936,6 +8006,7 @@ static void v34_reneg_begin_locked(void)
 {
     g_v34_reneg_start_ms = trace_now_ms();
     g_v34_reneg_start_samples = g_rx_audio_samples;
+    g_v34_reneg_ours = true;    /* the peer-initiated path clears it */
 }
 
 /* ME_V34_RENEG_AFTER_MS=<n> opens a §11.6 rate renegotiation n ms after the
@@ -8288,6 +8359,50 @@ static int me_tx_disrupt_ms(void)
     return cached;
 }
 
+/* ME_TX_NOISE_AFTER_MS=<n> and ME_TX_NOISE_RMS=<r>: a TEST HOOK that adds
+ * white noise of RMS r (linear 16-bit units) to everything we transmit from
+ * n ms into data mode for the rest of the call, so the far receiver's data
+ * mode degrades on demand (the V.34 fall-back has no other way to be seen).
+ * Transmit side only: the received stream is never touched.  Off (0) by
+ * default. */
+static uint32_t g_tx_noise_seed = 0x2545f491u;
+static bool g_tx_noise_on = false;
+
+static bool tx_noise_apply(int16_t *amp, int len)
+{
+    static int after_ms = -1;
+    static int rms = 0;
+    int i;
+
+    if (after_ms < 0) {
+        after_ms = parse_env_int("ME_TX_NOISE_AFTER_MS", 0);
+        rms = parse_env_int("ME_TX_NOISE_RMS", 0);
+    }
+    if (after_ms <= 0 || rms <= 0)
+        return false;
+    if (!g_tx_noise_on) {
+        if (g_state != ME_DATA || data_mode_elapsed_ms() < after_ms)
+            return false;
+        g_tx_noise_on = true;
+        ME_LOG("[ME] TX NOISE: adding %d RMS white noise (ME_TX_NOISE_RMS)\n", rms);
+    }
+    for (i = 0; i < len; i++) {
+        /* Sum of four uniforms: near-Gaussian, variance 4/12 of the span^2. */
+        int32_t acc = 0;
+        int k;
+        int32_t v;
+
+        for (k = 0; k < 4; k++) {
+            g_tx_noise_seed = g_tx_noise_seed*1664525u + 1013904223u;
+            acc += (int32_t) (g_tx_noise_seed >> 16) - 32768;
+        }
+        /* acc's RMS is 2*32768/sqrt(3) = 37837. */
+        v = amp[i] + (int32_t) ((int64_t) acc*rms/37837);
+        amp[i] = (int16_t) (v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+    }
+    return true;
+}
+
 static bool tx_disrupt_active(void)
 {
     int64_t since;
@@ -8327,10 +8442,17 @@ static bool v34_reneg_timed_out_locked(void)
                                         - g_v34_reneg_start_samples) / 8);
         int limit_ms;
 
+        /* 11.6.2.1 counts two round trips for the initiator, 11.6.2.2 three
+         * for the responder.  The round trip is the one Phase 2 measured
+         * (10.1.2.3), 250 ms where there is none. */
+        int rtd_ms = g_v34 ? v34_get_round_trip_delay_samples(g_v34)/8 : 0;
+
+        if (rtd_ms <= 0)
+            rtd_ms = 250;
         if (g_v34 && v34_get_far_cme(g_v34))
             limit_ms = 30000;
         else
-            limit_ms = 2500 + 2 * 250 + 150;
+            limit_ms = 2500 + (g_v34_reneg_ours ? 2 : 3) * rtd_ms + 150;
         return elapsed_ms >= limit_ms;
     }
 }
@@ -9605,6 +9727,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reneg_cp_ack_seen = false;
     g_v34_retrain_probe_done = false;
     g_tx_disrupt_logged = 0;
+    g_tx_noise_on = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -17487,6 +17610,12 @@ skip_8k_codewords:
                          * S is already detected, which is all §11.6.1.2.1
                          * asks for before §11.6.1.2.2 starts ours. */
                         v34_clear_peer_reneg_s_event(g_v34);
+                        /* ME_V34_TEST_IGNORE_RENEG=1: a TEST HOOK that plays a
+                         * peer without 11.6.1.2 (the RasFinder, rf-tower-fb-11)
+                         * so the 11.6.2 timeout and its gate can be exercised. */
+                        if (parse_env_int("ME_V34_TEST_IGNORE_RENEG", 0)) {
+                            /* keep sending data */
+                        } else {
                         if (!v34_rate_renegotiation_active(g_v34))
                             v34_answer_reneg_ask_locked();
                         if (!v34_rate_renegotiation_active(g_v34)
@@ -17495,6 +17624,8 @@ skip_8k_codewords:
                                    "renegotiation; answering with S/S-bar/TRN/MP\n");
                             trace_phase("V34 answering peer rate renegotiation");
                             v34_reneg_begin_locked();
+                            g_v34_reneg_ours = false;
+                        }
                         }
                     } else if (v34_cleardown_complete(g_v34)) {
                         /* §11.7.1.4/11.7.2.3: MP' sent and received on a
@@ -17515,6 +17646,14 @@ skip_8k_codewords:
                             ME_LOG("[ME] V.34 §11.6 rate renegotiation "
                                    "produced no E; falling back to a §11.5 "
                                    "retrain\n");
+                            if (g_v34_reneg_ours && !g_v34_peer_ignores_reneg) {
+                                /* It ignored ours: rate changes on this call
+                                   go by retrain from now on. */
+                                g_v34_peer_ignores_reneg = true;
+                                ME_LOG("[ME] V.34: peer did not answer our "
+                                       "§11.6; no more rate renegotiations "
+                                       "from us this call\n");
+                            }
                             if (g_v90_fallback_v34_logged) {
                                 /* V.90 9.2.1.1.8: retrains use V.90 Phase 2. */
                                 g_mod = ME_MOD_V90;
@@ -20017,6 +20156,8 @@ static void me_tx_audio_impl(int16_t *amp, int len)
         ME_LOG("[ME] TX DISRUPT: ended, carrier restored\n");
     }
 
+    (void) tx_noise_apply(amp, len);
+
     /* Buffer TX samples for the echo canceller.
        Must happen after TX generation so me_rx_audio can subtract
        our echo from the received signal. */
@@ -22017,6 +22158,11 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             }
             for (int i = 0; i < chunk; i++)
                 linear[i] = pcm_to_linear(codewords[offset + i]);
+            if (tx_noise_apply(linear, chunk)) {
+                /* ME_TX_NOISE_* test hook only: re-encode the noisy line. */
+                for (int i = 0; i < chunk; i++)
+                    codewords[offset + i] = linear_to_pcm(linear[i]);
+            }
             buffer_tx_samples_for_echo(linear, chunk);
             raw_octets += (uint64_t)chunk;
         } else {

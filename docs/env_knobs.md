@@ -61,9 +61,12 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V8_CI_REPEATS` | v8.c | CI repetitions while ringing a hunt group. |
 | `ME_V34_ECHO` | modem_engine.c | Receive-path echo handling: none, notch or canceller. |
 | `ME_V34_RENEG` | modem_engine.c | 0 never initiates a V.34 11.6 rate renegotiation (answering one is unaffected). |
-| `ME_V34_FALL_FORWARD` | modem_engine.c | 1: in V.34 data mode, once V.42 detection is over, renegotiate UP by 11.6 to the rate the data-mode SNR supports (`v34_rx_data_snr_rate()`, calibrated in docs/v34_data_mode_rates.md); a rate that does not then hold is stepped back and becomes the call's ceiling. Default 0; on in rig/v90ras. |
+| `ME_V34_FALL_FORWARD` | modem_engine.c | The V.34 data-mode rate controller: once V.42 detection is over, renegotiate by 11.6 UP to the rate the data-mode SNR supports (`v34_rx_data_snr_rate()`, calibrated in docs/v34_data_mode_rates.md), and DOWN when it reads below the current rate's threshold; a raised rate that does not hold is stepped back and becomes the call's ceiling. A peer that lets one of our 11.6s time out (11.6.2) gets no more this call. Default 1 (0 disables both directions). |
 | `ME_V34_FALL_FORWARD_MARGIN_DB` | modem_engine.c | Margin over the data-mode SNR table, to ask and to confirm. Default 0.5. |
 | `ME_V34_FALL_FORWARD_AFTER_MS` / `_HOLD_MS` / `_DWELL_MS` / `_MAX` | modem_engine.c | Earliest attempt after data entry (8000), how long the reading must hold (3000), gap between attempts (20000), attempts per call (3). |
+| `ME_V34_FALL_BACK_MARGIN_DB` / `ME_V34_FALL_BACK_HOLD_MS` | modem_engine.c | Step down when the data-mode SNR reads more than this below the current rate's threshold (1.0 dB) for this long (2000 ms). |
+| `ME_TX_NOISE_AFTER_MS` / `ME_TX_NOISE_RMS` | modem_engine.c | TEST HOOK: add white noise of this RMS (16-bit linear) to everything we transmit, from this far into data mode. Transmit side only. Default off. |
+| `ME_V34_TEST_IGNORE_RENEG` | modem_engine.c | TEST HOOK: 1 ignores the peer's 11.6 S, playing a peer without 11.6.1.2. Default 0. |
 | `ME_V34_TEST_FIRST_MP_BPS` | modem_engine.c | TEST HOOK: starts the V.34 rate policy at this rate, as an under-reading TRN would, so the fall-forward has something to lift. |
 | `ME_V34_B1_RENEG` | modem_engine.c | 1: when B1 says the rate is too high, ask for the lower one by a 11.6 renegotiation (falls back to an 11.5 retrain on the 11.6.2.1 timeout). Default 0; live A/B on rig/v90ras. |
 | `ME_V34_B1_V42_DEFER_MS` | modem_engine.c | The B1 rate check waits while V.42 detection (8.10) runs, up to this many ms of data mode, so a 11.6 does not take the data channel away from the peer's ODP. Default 4000; 0 checks at once (before 95bf13ee). |
