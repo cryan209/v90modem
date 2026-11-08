@@ -19392,7 +19392,19 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                            projection / ceiling and v34_b1_rate_check_locked()
                            retrains down to what B1 measured if that was too
                            high. */
-                        v34_set_trn_rate_selection(g_v34, false);
+                        /* Superseded by the measurement taken after the
+                           receiver has trained (v34tx.c: the fallback's
+                           Phase 4 TRN now waits for it, V.34 11.4.1.1.2).
+                           The 4800 above was MP built at 512T, before the
+                           answerer's TRN had converged: on the Win95 modems
+                           that reading was 5-8 dB against 33-34 dB from the
+                           refit 2 s later, and without it MP asked the
+                           31200 ceiling, entered DATA white and lost V.42
+                           detection to it (rig/v90ras, 2026-11-08 15:38).
+                           ME_V90_FALLBACK_TRN_RATE=0 restores the ceiling
+                           ask and the 512T MP. */
+                        v34_set_trn_rate_selection(
+                            g_v34, parse_env_int("ME_V90_FALLBACK_TRN_RATE", 1) != 0);
 
                         /* The 1200 Hz notch belongs to V.90's Phase 2 CC echo
                            removal.  For plain V.34 at 3200 baud it sits at

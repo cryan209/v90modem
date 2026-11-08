@@ -8595,11 +8595,26 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 mp_or_mph_baud_init(s);
             }
             else if (s->tx.v90_v34_fallback
-                && s->tx.tone_duration >= PHASE4_TRN_BAUDS)
+                && s->tx.tone_duration >= PHASE4_TRN_BAUDS
+                && (!s->tx.trn_rate_select
+                    ||  s->rx.stage == V34_RX_STAGE_PHASE4_MP
+                    ||  s->rx.received_event == V34_EVENT_PHASE4_TRN_READY
+                    ||  (phase4_trn_hard_cap_bauds(s) > 0
+                         &&  s->tx.tone_duration >= phase4_trn_hard_cap_bauds(s))))
             {
                 /* V.34 fallback call-modem role: our TRN follows our own J'
                    (§11.4.1.1.1); there is no far-end J' to wait for -- the
-                   answerer moves to MP off our TRN.  512T minimum then MP. */
+                   answerer moves to MP off our TRN.
+                   11.4.1.1.2: after 512T the call modem "may continue sending
+                   TRN for up to 2000 ms" and sends MP "after training
+                   adequately".  When the MP's receive rate is to come from
+                   the TRN measurement, keep TRN on until our receiver has
+                   trained (it has moved on to scanning for MP; the stage is
+                   durable where the event slot is shared) or the 11.4 bound.
+                   At 512T the measurement is taken before the answerer's TRN
+                   has converged: against the Win95 modems on the Cisco FXS it
+                   read 5-8 dB where the refit installed ~2 s later read
+                   33-34 dB (rig/v90ras, 2026-11-08). */
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4 (V.34 fallback): TRN complete (%d bauds), starting MP\n",
                          s->tx.tone_duration);
