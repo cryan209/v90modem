@@ -7012,6 +7012,18 @@ static int g_v90_upstream_e_run = 0;
 /* E must come from a CRC-qualified streaming decoder, not merely from a
  * receiver whose parameters were supplied by the independent batch path. */
 static bool g_v90_upstream_stream_valid = false;
+/* g_g711_rx_octets when an accepted data-mode CP' left a qualified tap
+ * watching for E; 0 when no such watch is open.  See
+ * V90_E_WATCH_DEADLINE_SAMPLES. */
+static uint64_t g_v90_e_watch_since = 0;
+/* V.90 9.4.2.4-.5: E, then B1, follow the analogue modem's CP' at once, so a
+ * qualified tap that has not shown E 500 ms later is reading the wrong thing.
+ * Live on the 2911 FXS (2026-11-08 13:22, line0-65885) the tap stayed
+ * qualified after CP' -- no rejected frame came to disqualify it -- E never
+ * arrived, nothing started the upstream receiver, and the modem retrained 31 s
+ * later having never been heard.  The replay of the same recording happened
+ * to see a rejected frame and acquired B1 at once. */
+#define V90_E_WATCH_DEADLINE_SAMPLES 4000
 
 /* How many §9.6 rate renegotiations one call may run.  Each costs the best
  * part of a second of downstream (384T of Rd, 24T of R̄d, TRN2d, the MP
@@ -7947,6 +7959,7 @@ static void v90_reset_upstream_data_arming(void)
     g_v34_upstream_data_started = false;
     g_v90_upstream_e_run = 0;
     g_v90_upstream_stream_valid = false;
+    g_v90_e_watch_since = 0;
     g_v90_up_snr_started = false;
     g_v90_up_snr_done = false;
     g_v90_upstream_prepared_bps = 0;
@@ -8242,6 +8255,12 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
         ME_LOG("[ME] V.90 upstream: CRC-valid CP' starts B1 search; carrier remains gated on B1 validation\n");
         trace_phase("V90 upstream CP' -> validated B1 search");
     }
+    /* Otherwise the qualified tap now watches for E: give it a deadline. */
+    if (accepted && frame->v90_compatibility && frame->acknowledge
+        && !frame->silence_request && g_v34_upstream_data_armed
+        && !g_v34_upstream_data_started && g_v90_upstream_stream_valid
+        && g_v90_e_watch_since == 0)
+        g_v90_e_watch_since = g_g711_rx_octets ? g_g711_rx_octets : 1;
     return accepted;
 }
 
@@ -8258,6 +8277,20 @@ static void v90_live_cp_bit(void *user_data, int bit)
     uint32_t sync_before;
 
     (void)user_data;
+    if (g_v90_e_watch_since && g_v34_upstream_data_armed
+        && !g_v34_upstream_data_started && g_v34 && !g_v92_active
+        && g_g711_rx_octets - g_v90_e_watch_since >= V90_E_WATCH_DEADLINE_SAMPLES) {
+        g_v90_e_watch_since = 0;
+        if (v34_v90_begin_b1_search(g_v34) == 0) {
+            g_v34_upstream_data_started = true;
+            g_v90_upstream_e_run = 0;
+            ME_LOG("[ME] V.90 upstream: no E on the CP tap %d ms after CP'; "
+                   "starting validated B1 search (9.4.2.4-.5)\n",
+                   V90_E_WATCH_DEADLINE_SAMPLES/8);
+            trace_phase("V90 upstream E deadline -> validated B1 search");
+            return;
+        }
+    }
     /* V.90 9.4.1.6: receive E (20 consecutive ones), then B1. CP preambles
      * are only 17 ones + 0, but an incorrect demodulator can produce any
      * run length; qualify this tap with its own CRC-valid CP first. */
