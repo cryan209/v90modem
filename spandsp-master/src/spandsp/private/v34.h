@@ -1481,6 +1481,12 @@ typedef struct
     int reneg_s_samples;
     int reneg_s_blocks;
     bool reneg_s_reported;
+    /* Consecutive tonal blocks, NOT reset when the S event is cleared, so the
+       end of the run -- V.90 9.6.1.2.1's S-to-S-bar transition, to within one
+       block -- is still seen after the engine has consumed the S event. */
+    int reneg_s_run;
+    /* Durable: a run of >= 3 tonal blocks has ended since the last S report. */
+    bool reneg_s_ended;
     /* V.90 §9.6.1.1.1: armed while WE have opened a rate renegotiation and are
        waiting for the analogue modem's S answer (Figure 8/V.90).  The
        ME_V90_RENEG_RESPOND knob governs RESPONDING to a peer-initiated one;

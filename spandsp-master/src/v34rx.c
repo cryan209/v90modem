@@ -15575,6 +15575,7 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
         s->reneg_s_samples = 0;
         s->reneg_s_blocks = 0;
         s->reneg_s_reported = false;
+        s->reneg_s_run = 0;
         return;
     }
     /*endif*/
@@ -15629,9 +15630,31 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
             }
             /*endif*/
             if (tonal)
+            {
                 s->reneg_s_blocks++;
+                s->reneg_s_run++;
+            }
             else
+            {
+                /* V.90 9.6.2.1.1-.2 / 10.1.3.7: S for 128T, then S-bar for
+                   16T, then SCR or CP.  S-bar is S rotated 180 degrees, so a
+                   block that straddles the junction loses its coherence in
+                   these bins, and SCR/CP spread over the band: the first
+                   non-tonal block after a qualifying run is the S-to-S-bar
+                   transition to within one block (10 ms) plus S-bar (16T,
+                   5-7 ms). */
+                if (s->reneg_s_run >= 3  &&  !s->reneg_s_ended)
+                {
+                    s->reneg_s_ended = true;
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - S ended after %d ms (S-to-S-bar transition, "
+                             "9.6.1.2.1/11.6.1.2.1)\n",
+                             s->reneg_s_run*block/8);
+                }
+                /*endif*/
                 s->reneg_s_blocks = 0;
+                s->reneg_s_run = 0;
+            }
             /*endif*/
             {
                 /* Opt-in, and it caches its getenv: what the bins actually
@@ -15665,6 +15688,7 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
             if (s->reneg_s_blocks >= 3  &&  !s->reneg_s_reported)
             {
                 s->reneg_s_reported = true;
+                s->reneg_s_ended = false;
                 s->received_event = V34_EVENT_PEER_RENEG_S;
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - S detected in DATA (%d ms at %.0f/%.0f/%.0f Hz); "
@@ -17787,6 +17811,8 @@ SPAN_DECLARE(void) v34_v90_watch_reneg_s(v34_state_t *s, int on)
     /*endif*/
     s->rx.reneg_s_watch = (on != 0);
     s->rx.reneg_s_reported = false;
+    s->rx.reneg_s_ended = false;
+    s->rx.reneg_s_run = 0;
     s->rx.reneg_s_blocks = 0;
     s->rx.reneg_s_samples = 0;
     s->rx.reneg_s_energy = 0.0f;
@@ -18021,6 +18047,12 @@ SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s)
     /*endif*/
     s->rx.reneg_s_blocks = 0;
     s->rx.reneg_s_reported = false;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_peer_reneg_s_ended(v34_state_t *s)
+{
+    return (s)  ?  s->rx.reneg_s_ended  :  false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -19522,6 +19554,20 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase34_cc_im, 0, sizeof(s->rx.phase34_cc_im));
     s->rx.phase3_energy_samples = 0;
     s->rx.phase3_energy_retrain_reported = false;
+    /* The data-mode S watch (V.90 9.6 / V.34 11.6).  reneg_s_watch is armed
+       across OUR Rd and lets the detector run outside DATA; it was never
+       cleared by a restart, so after a renegotiation that ended in a retrain
+       it stayed armed into the next Phase 3 and reported Phase 3's own S as a
+       peer renegotiation (replay of the 2026-11-08 17:11 7800 call, +52.9 s). */
+    s->rx.reneg_s_watch = false;
+    s->rx.reneg_s_reported = false;
+    s->rx.reneg_s_ended = false;
+    s->rx.reneg_s_blocks = 0;
+    s->rx.reneg_s_run = 0;
+    s->rx.reneg_s_samples = 0;
+    s->rx.reneg_s_energy = 0.0f;
+    memset(s->rx.reneg_s_g1, 0, sizeof(s->rx.reneg_s_g1));
+    memset(s->rx.reneg_s_g2, 0, sizeof(s->rx.reneg_s_g2));
 
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     /* Phase 2 INFO exchange: answerer RX at 1200 Hz (tone B), caller RX at 2400 Hz (tone A).

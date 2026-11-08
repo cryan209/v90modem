@@ -565,6 +565,13 @@ detection in the 28 s of data before it, and answers with Rd, R-bar-d,
 TRN2d and MP (§9.6.1.2.2; the instant "CPt accepted" there is only a log line,
 because TRN2d comes before the new CP). A replay cannot judge what follows our
 answer, so the rig now sets `ME_V90_RENEG_RESPOND=1` as a live A/B. A
-remaining nit: the responder sends Rd at once instead of waiting for the
-S-to-S-bar transition (§9.6.1.2.1). 7801's 10.5 s loss is probably the same
+remaining nit (the responder sent Rd at once instead of waiting for the
+S-to-S-bar transition, §9.6.1.2.1) is fixed: it now waits for the end of the
+peer's S run, which the replay sees 20 ms after S is reported (S read 30-40
+ms, 128T at 3200 baud = 40 ms), with an 80 ms fallback. The same replay found
+a worse defect of ours: answering also armed §9.6.1.1.1's wait for an S answer
+(the S we were answering, already past), nothing cleared it across the retrain
+that followed, and at +52.9 s it reported Phase 3's own S as a new peer
+renegotiation, mid-startup. Restarts now clear the watch, the responder no
+longer arms it, and only an S seen in DATA is answered. 7801's 10.5 s loss is probably the same
 thing and is unchecked.

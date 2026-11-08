@@ -586,6 +586,11 @@ SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s);
 
+/* V.90 9.6.1.2.1: true once the peer's S (reported as V34_EVENT_PEER_RENEG_S)
+   has ended, i.e. the S-to-S-bar transition has gone by.  Durable until the
+   next S report or receiver restart. */
+SPAN_DECLARE(bool) v34_peer_reneg_s_ended(v34_state_t *s);
+
 /*! \brief Start a V.34 11.6 rate renegotiation from data mode.  The spec
            offers this as the way to "resynchronize the receiver without going
            through a complete retrain": it re-runs Phase 4's S, S-bar, TRN, MP,

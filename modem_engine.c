@@ -7765,6 +7765,19 @@ static void v90_upstream_step_down_locked(void)
 /* §9.6.1.1.1: set while the receiver is watching for the peer's S/S-bar
  * answer to Rd, cleared when it hands over to the CP search. */
 static bool g_v90_reneg_await_s = false;
+/* §9.6.1.2: the PEER opened a renegotiation.  Pending from its S until the
+ * S-to-S-bar transition (§9.6.1.2.1-.2), then "responding" until our Rd
+ * starts, so that start does not arm §9.6.1.1.1's wait for an S answer --
+ * the peer's S is what we are answering, and it has already gone by. */
+static bool g_v90_reneg_respond_pending = false;
+static uint64_t g_v90_reneg_respond_s_samples = 0;
+static bool g_v90_reneg_responding = false;
+/* Fallback if the end of S is never seen: S is 128T and S-bar 16T, 60 ms at
+ * 2400 baud, and the detector reports S 30 ms in, so 80 ms after the report
+ * is past any S-bar.  The peer has been listening for Rd since its S began
+ * (§9.6.2.1.1) and sends SCR for up to 2000 ms before CP, so a late Rd only
+ * costs SCR time. */
+#define ME_V90_RENEG_RESPOND_SBAR_TIMEOUT_SAMPLES 640
 
 /* §9.6's CP window, measured rather than inferred.  "The peer does not send
  * CP" and "we do not decode it" look identical from the engine's own logs,
@@ -9212,6 +9225,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_upstream_learnt_cap = 0;
     g_v90_retrain_probe_done = false;
     g_v90_reneg_await_s = false;
+    g_v90_reneg_respond_pending = false;
+    g_v90_reneg_responding = false;
     g_v90_reneg_cp_rx_marked = false;
     g_v90_reneg_cp_ack_seen = false;
     g_v34_retrain_probe_done = false;
@@ -9371,6 +9386,12 @@ static bool restart_v90_phase2_locked(const char *reason)
         g_v90 = NULL;
     }
     g_v90_phase3_started = false;
+    /* v34_restart() has cleared the receiver's S watch; the engine's half
+     * goes with it, or a renegotiation that ended in this retrain leaves it
+     * waiting for an S that the next Phase 3 supplies. */
+    g_v90_reneg_await_s = false;
+    g_v90_reneg_respond_pending = false;
+    g_v90_reneg_responding = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_reject_info1a_logged = false;
@@ -16811,39 +16832,44 @@ skip_8k_codewords:
                     }
                     if (rx_event == V34_EVENT_PEER_RENEG_S
                         && g_v90 && !g_v92_active
-                        && !v90_rate_renegotiation_active(g_v90)) {
+                        && !v90_rate_renegotiation_active(g_v90)
+                        && !g_v90_reneg_await_s) {
                         /* §9.6.1.2 responds to a renegotiation the PEER
                          * opened.  While one of OURS is running, the same S
                          * is Figure 8/V.90's answer to our Rd, not a new
                          * request -- responding to it would open a second
                          * renegotiation inside the first. */
-                        /* §9.6.1.2: "After detecting S, the digital modem
-                         * shall clamp circuit 104 ... After detecting the
-                         * S-to-S-bar transition, the digital modem shall
-                         * transmit signal Rd for 384T and R-bar-d for 24T ...
-                         * and condition its receiver to receive CP."
-                         *
-                         * That transmit sequence is identical to the one
-                         * §9.6.1.1.1 sends when we initiate, so it is the
-                         * same machinery: arm the request, and the transmit
-                         * path starts it at the next data frame boundary,
-                         * which §9.6 requires anyway.  The S-to-S-bar
-                         * transition is not separately detected -- S is 128T
-                         * and S-bar 24T, and the peer then runs SCR and CP
-                         * for up to 2 s, so the boundary we start on is well
-                         * inside the window it is waiting in.
-                         *
-                         * Not gated on me_v90_reneg_enabled(): that knob says
-                         * whether to START one, and §9.6.1.2 is a "shall"
-                         * regardless.  The detector behind the event is
-                         * itself off unless ME_V90_RENEG_RESPOND=1. */
                         v34_clear_peer_reneg_s_event(g_v34);
-                        if (!v90_rate_renegotiation_active(g_v90)) {
+                        if (rx_stage != V34_RX_STAGE_DATA) {
+                            /* §9.6.1.2 is a data-mode procedure: an S seen
+                             * anywhere else (Phase 3's own S, through a
+                             * stale watch) is not a renegotiation. */
+                            ME_LOG("[ME] V.90: S reported outside DATA "
+                                   "(rx=%s); not a §9.6 renegotiation\n",
+                                   v34_rx_stage_name(rx_stage));
+                        } else if (!g_v90_reneg_respond_pending) {
+                            /* §9.6.1.2.1: "After detecting S, the digital
+                             * modem shall clamp circuit 104 to binary one and
+                             * condition its receiver to detect the S-to-S-bar
+                             * transition."  §9.6.1.2.2: "After detecting the
+                             * S-to-S-bar transition, the digital modem shall
+                             * transmit signal Rd ..."  The transmit sequence
+                             * is §9.6.1.1.1's, so it is the same machinery,
+                             * started from generate_v90_raw_codewords_locked()
+                             * once v34_peer_reneg_s_ended() reports the end
+                             * of S.
+                             *
+                             * Not gated on me_v90_reneg_enabled(): that knob
+                             * says whether to START one, and §9.6.1.2 is a
+                             * "shall" regardless.  The detector behind the
+                             * event is itself off unless
+                             * ME_V90_RENEG_RESPOND=1. */
+                            g_v90_reneg_respond_pending = true;
+                            g_v90_reneg_respond_s_samples = g_rx_audio_samples;
                             ME_LOG("[ME] V.90: peer opened a §9.6 rate "
-                                   "renegotiation; answering with Rd at the "
-                                   "next data frame boundary\n");
-                            trace_phase("V90 answering peer rate renegotiation");
-                            (void) v90_request_rate_renegotiation(g_v90);
+                                   "renegotiation; waiting for its S-to-S-bar "
+                                   "transition before Rd (§9.6.1.2.1)\n");
+                            trace_phase("V90 peer reneg S, awaiting S-bar");
                         }
                     }
                     if (new_e_event && g_v90 && !g_v92_active) {
@@ -19061,6 +19087,31 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
              * as usable carrier without any new training (9.5.1.1/9.6). */
         }
 
+        /* §9.6.1.2.2: answer a peer-opened renegotiation once its S has
+         * ended (the S-to-S-bar transition), or after the fallback if the end
+         * of S is never seen. */
+        if (g_v90_reneg_respond_pending && g_v34) {
+            bool ended = v34_peer_reneg_s_ended(g_v34);
+            uint64_t waited = g_rx_audio_samples - g_v90_reneg_respond_s_samples;
+
+            if (v90_rate_renegotiation_active(g_v90)) {
+                g_v90_reneg_respond_pending = false;
+            } else if (ended
+                       || waited >= ME_V90_RENEG_RESPOND_SBAR_TIMEOUT_SAMPLES) {
+                g_v90_reneg_respond_pending = false;
+                ME_LOG("[ME] V.90 §9.6.1.2.2: %s %llu ms after S was "
+                       "reported; answering with Rd at the next data frame "
+                       "boundary\n",
+                       ended ? "S-to-S-bar transition seen"
+                             : "no end of S seen (fallback)",
+                       (unsigned long long)(waited/8));
+                trace_phase("V90 answering peer rate renegotiation (%s)",
+                            ended ? "S-bar" : "timeout");
+                if (v90_request_rate_renegotiation(g_v90))
+                    g_v90_reneg_responding = true;
+            }
+        }
+
         /* §9.6: "Rate renegotiation shall be initiated by the digital modem's
          * transmitter only on the boundary of a data frame."  This is that
          * boundary -- the point at which the next frame would be mapped. */
@@ -19083,7 +19134,18 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                  * block energy in §10.1.3.7's three bins, and we logged no S
                  * detection of any kind. */
                 enter_v90_phase4_rx_locked();
-                if (!g_v92_active) {
+                if (g_v90_reneg_responding) {
+                    /* §9.6.1.2.2: "... and condition its receiver to receive
+                     * CP."  The S that §9.6.1.1.1 waits for is the one we
+                     * are answering, already past; arming that wait left it
+                     * armed through the retrain that followed, and it then
+                     * fired on Phase 3's S.  enter_v90_phase4_rx_locked()
+                     * has already put the receiver on the CP search, and the
+                     * peer's SCR (up to 2000 ms) comes before its CP. */
+                    g_v90_reneg_responding = false;
+                    ME_LOG("[ME] V.90 §9.6.1.2.2: responding; receiver "
+                           "conditioned for CP\n");
+                } else if (!g_v92_active) {
                     /* Leave the receiver in DATA and watch for S spectrally.
                      * The constellation detector in V34_RX_STAGE_PHASE4_S
                      * declared S on ordinary data-mode symbols 140 ms after
