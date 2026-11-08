@@ -133,6 +133,7 @@ Where to start:
 
 | Note | Topic |
 |---|---|
+| [cisco2811_isdn.md](cisco2811_isdn.md) | Cisco 2811 PCMCIA BRI gateway, Ethernet and 2600–2699 routes |
 | [eicon_soak_ppp.md](eicon_soak_ppp.md) | Eicon Diva sustained transfers, PPP and HTTP |
 | [eicon_mlppp_20261107.md](eicon_mlppp_20261107.md) | Multilink PPP over ISDN digital B channels and V.90 to the Eicon; HDLC 400-octet cap and analogue-retrain LAPM fixes; open retrain issues |
 | [v90_hardware_interop.md](v90_hardware_interop.md) | Physical-modem procedure, CX93001 interop and USB serial mode checks |
