@@ -32,6 +32,17 @@ def async_octets(packed):
     return bytes(out)
 
 
+def native_payload_chunks(message, chunk_bytes):
+    """Bound unflow-controlled DTE bursts; Courier schedules chunks 1.5 s apart."""
+    if chunk_bytes < 0:
+        raise ValueError('native chunk size must be nonnegative')
+    if not message:
+        return []
+    if not chunk_bytes:
+        return [message]
+    return [message[i:i + chunk_bytes] for i in range(0, len(message), chunk_bytes)]
+
+
 def read_serial_capture(native, path):
     """Only a complete capture is eligible for payload delivery checks."""
     if path.exists():
@@ -48,6 +59,10 @@ def read_serial_capture(native, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--engine', type=Path, default=ROOT / 'v90_engine_peer',
+                        help='engine executable (use a pinned copy for matched controls)')
+    parser.add_argument('--modulation', choices=['x2', 'v90'], default='x2',
+                        help='requested analog modulation; rejects fallback in validation')
     parser.add_argument('--instructions', type=int, default=180000000)
     parser.add_argument('--fast', action='store_true')
     parser.add_argument('--message', default='COURIER-X2-HOST-0123456789\r\n')
@@ -82,6 +97,9 @@ def main():
                              'repeatable')
     parser.add_argument('--fixed-native-rate', action='store_true',
                         help='retain the old diagnostic &U26&N39 Courier rate clamp')
+    parser.add_argument('--native-chunk-bytes', type=int, default=0,
+                        help='split native DTE source into chunks scheduled 1.5 guest seconds '
+                             'apart (0: legacy burst); bounds offered load with &H0')
     parser.add_argument('--capture-native', action='store_true',
                         help='read-only capture of Courier upstream mapper points')
     parser.add_argument('--capture-receiver', action='store_true',
@@ -89,6 +107,8 @@ def main():
     parser.add_argument('--capture-rate', action='store_true',
                         help='read-only capture of Courier 403 rate metric and ceilings')
     args = parser.parse_args()
+    if args.native_chunk_bytes < 0:
+        parser.error('--native-chunk-bytes must be nonnegative')
     if args.capture_rate and (args.capture_native or args.capture_receiver):
         parser.error('--capture-rate cannot be combined with other capture modes')
     if args.host_after_rate_change and not args.pty_source:
@@ -213,20 +233,26 @@ def main():
         probe.EnginePeer = PtyPeer
 
     def native_payload(command, *a, **kw):
-        if str(command[0]) == str(ROOT / 'v90_engine_peer') and not args.pty_source:
+        if str(command[0]) == str(args.engine) and not args.pty_source:
             command = [*command, '--tx-file', str(source), '--tx-at', str(args.host_at)]
         if '--at' in command:
             command = list(command)
             pos = command.index('--at') + 1
-            command[pos] = command[pos].replace('ATX1', 'ATE0&M0&H0X1')
+            # Sustained V.90 must let the modem stop the host during
+            # firmware buffer pressure/retrain. The analog emulator observes
+            # the real active-low CS/CTS latch; disabling it loses DTE bytes
+            # above the UART without an OE indication. Retain x2's old profile.
+            flow = '&H1' if args.modulation == 'v90' else '&H0'
+            command[pos] = command[pos].replace('ATX1', f'ATE0&M0{flow}X1')
             if args.courier_at:
                 command[pos] = command[pos].replace('DT', args.courier_at + 'DT', 1)
             if not args.fixed_native_rate:
                 command[pos] = command[pos].replace('&U26&N39', '')
             if args.dsp_watch and '--dsp-write-watch' in command:
                 command[command.index('--dsp-write-watch') + 1] = args.dsp_watch
-            command += ['--send-after-connect', args.message, *args.native_arg,
-                        '--serial-output', str(output / 'courier-dte.bin')]
+            for chunk in native_payload_chunks(args.message, args.native_chunk_bytes):
+                command += ['--send-after-connect', chunk]
+            command += [*args.native_arg, '--serial-output', str(output / 'courier-dte.bin')]
             if args.capture_native or args.capture_receiver or args.capture_rate:
                 assert command[1:3] == ['-m', 'courier_emu']
                 command = [command[0], str(ROOT / 'tools/x2_courier_capture.py'),
@@ -234,8 +260,9 @@ def main():
         return launch(command, *a, **kw)
 
     probe.subprocess.Popen = native_payload
-    options = argparse.Namespace(output=output, engine=ROOT / 'v90_engine_peer',
-                                 instructions=args.instructions, fast=args.fast)
+    options = argparse.Namespace(output=output, engine=args.engine,
+                                 instructions=args.instructions, fast=args.fast,
+                                 modulation=args.modulation)
     try:
         probe.analog(options)
     finally:
@@ -248,7 +275,15 @@ def main():
         'diagnostic_tx_gain': os.environ.get('X2_HOST_DIAGNOSTIC_TX_GAIN'),
         'diagnostic_library': os.environ.get('X2_HOST_CAPTURE_LIBRARY'),
     }
-    native = json.loads((output / 'analog-result.json').read_text())
+    try:
+        native = json.loads((output / 'analog-result.json').read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        result['validation_status'] = 'invalid_capture'
+        result['validation_error'] = f'native summary missing or incomplete: {exc}'
+        result['checks'] = {'capture_valid': False}
+        (output / 'call.json').write_text(json.dumps(result, indent=2) + '\n')
+        print(f'INVALID TEST: {result["validation_error"]}', file=sys.stderr)
+        return 2
     try:
         serial = read_serial_capture(native, output / 'courier-dte.bin')
     except ValueError as exc:
@@ -263,13 +298,22 @@ def main():
                                 'bytes': len(serial),
                                 'report_truncated': native.get('serial_truncated', False)}
     received = bytes.fromhex(result['engine'].get('dte_hex', '')) if args.pty_source else decoded
-    checks = {'marker_4d': '4d' in result['engine']['accepted_markers'],
-              'native_connect_x2': b'/x2/' in serial and b'CONNECT ' in serial,
+    serial_data = bytes(value & 0x7f for value in serial)
+    checks = {'native_connect_requested_modulation':
+                  (b'/' + args.modulation.encode() + b'/') in serial_data.lower()
+                  and b'CONNECT ' in serial_data,
               'engine_exit_ok': result['engine']['engine_exit'] == 0,
               'native_to_host_complete': args.message.encode() in received,
               # Courier's DTE is 7E1; retain the untouched wire octets too.
               'host_to_native_complete': args.host_message.encode() in
                   bytes(value & 0x7f for value in serial)}
+    result['requested_modulation'] = args.modulation
+    if args.modulation == 'x2':
+        checks['marker_4d'] = '4d' in result['engine']['accepted_markers']
+        checks['native_connect_x2'] = checks['native_connect_requested_modulation']
+    else:
+        checks['engine_selected_v90'] = 'V8 selected V90' in (
+            output / 'engine.log').read_text(errors='replace')
     # Exact delivery: after the CONNECT line, the DTE must see the source and
     # nothing else (a trailing result code such as NO CARRIER is allowed).
     # "Contains the message" let 71 KB of post-collapse noise pass.
@@ -296,6 +340,7 @@ def main():
     result['checks'] = checks
     result['courier_at'] = args.courier_at
     result['payload'] = {'expected': args.message,
+                         'native_chunk_bytes': args.native_chunk_bytes,
                          'host_pace_samples': args.host_pace_samples,
                          'host_expected': args.host_message,
                          'host_source_at_sample': args.host_at,

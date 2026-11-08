@@ -276,6 +276,44 @@ static bool v90_cp_live_repair_first_cpt(const uint8_t *observed,
     return true;
 }
 
+/* §9.4.1.4 / §9.6.1.2.3: a CRC-valid CP' supersedes CP across ALL
+ * timing hypotheses, not just within a single decoded bitstream. Choosing a
+ * lower phase-error plain CP discarded a valid acknowledgement and left MP'
+ * repeating until the peer retrained. Quality ranks only the same kind. */
+static bool v90_cp_live_direct_candidate_better(bool found,
+                                                const vpcm_cp_diag_t *candidate,
+                                                const vpcm_cp_diag_t *best,
+                                                double quality,
+                                                double best_quality,
+                                                bool candidate_e,
+                                                bool best_e)
+{
+    if (!found)
+        return true;
+    if (candidate->frame.acknowledge != best->frame.acknowledge)
+        return candidate->frame.acknowledge;
+    if (candidate_e != best_e)
+        return candidate_e;
+    return quality < best_quality;
+}
+
+/* §8.5.3: E is 20 consecutive binary ones on the CP modulation. Qualify
+ * this bitstream with its OWN complete CRC-valid CP, and require adjacency
+ * at that frame's exact end. A CP preamble is only 17 ones then zero. CPs
+ * is followed by SCR (§9.6.2.1.6), so it must never qualify this E watch. */
+static int v90_cp_live_adjacent_e(const uint8_t *bits, int bit_count,
+                                 int last_offset, const vpcm_cp_diag_t *cp)
+{
+    int first = last_offset + 1;
+    if (!cp->valid || cp->crc_remainder != 0 || !cp->frame.v90_compatibility
+        || cp->frame.silence_request || first < 0 || first + 20 > bit_count)
+        return -1;
+    for (int i = 0; i < 20; i++)
+        if (bits[first + i] != 1)
+            return -1;
+    return first;
+}
+
 static bool v90_cp_live_decode_bits(const uint8_t *bits,
                                     int bit_count,
                                     int expected_compatibility,
@@ -900,6 +938,8 @@ static bool v90_cp_live_direct_recover(const int16_t *samples,
         }
         if (candidate.valid) {
             int last_offset = candidate_offset + candidate.nbits - 1;
+            int e_offset = v90_cp_live_adjacent_e(bits, bit_count,
+                                                 last_offset, &candidate);
             int first_symbol = candidate_offset / 2;
             int last_symbol = last_offset / 2;
             double phase_error = 0.0;
@@ -914,11 +954,16 @@ static bool v90_cp_live_direct_recover(const int16_t *samples,
             if (phase_error_count > 0)
                 phase_error /= phase_error_count;
             quality = 10.0 * candidate_repair_cost + phase_error;
-            if (!found || quality < best_quality) {
+            if (v90_cp_live_direct_candidate_better(found, &candidate,
+                                                    &best_candidate,
+                                                    quality, best_quality,
+                                                    e_offset >= 0,
+                                                    found && best_meta.e_sample >= 0)) {
                 best_candidate = candidate;
                 memset(&best_meta, 0, sizeof(best_meta));
                 best_meta.frame_sample = bit_samples[candidate_offset];
                 best_meta.last_sample = bit_samples[last_offset];
+                best_meta.e_sample = e_offset >= 0 ? bit_samples[e_offset] : -1;
                 best_meta.carrier_sel = carrier_sel;
                 best_meta.timing_index = timing;
                 best_meta.carrier_step = direct_carrier_step;
@@ -1174,8 +1219,10 @@ bool v90_cp_live_recover(const int16_t *samples,
         return false;
     }
     memset(out, 0, sizeof(*out));
-    if (meta)
+    if (meta) {
         memset(meta, 0, sizeof(*meta));
+        meta->e_sample = -1;
+    }
 
     /* Preserve enough Phase-3 history to train the RRC/CMA front end while
      * bounding a retry's CPU cost.  CPt on the SmartLink path begins close

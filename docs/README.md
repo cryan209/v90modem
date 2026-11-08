@@ -70,6 +70,7 @@ Where to start:
 | [v90_v92_ja_review_plan.md](v90_v92_ja_review_plan.md) | Ja review |
 | [v90_analogue_role.md](v90_analogue_role.md) | Our analogue (client) role |
 | [retrain_and_resync.md](retrain_and_resync.md) | Retrain and resync (V.90 9.5/9.6, V.34 11.5/11.6) |
+| [v90_courier_rate_renegotiation.md](v90_courier_rate_renegotiation.md) | Courier short renegotiation, fresh receiver state, strict CP/E, and removal of spurious rate reductions (software qualification) |
 | [v90_hardware_interop.md](v90_hardware_interop.md) | Hardware procedure and results matrix |
 | [v90_rasfinder_phase4.md](v90_rasfinder_phase4.md) | RasFinder Phase 4 and data-mode measurements |
 | [pcm_loopback_testing.md](pcm_loopback_testing.md) | PCM loopback measurements and their limits |

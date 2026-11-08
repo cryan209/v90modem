@@ -4,6 +4,18 @@ Both Recommendations give a modem two ways to recover a receiver that has
 stopped working, and this note records which of them exist here, which do
 not, and what each was measured to be worth.
 
+## Current Courier V.90 qualification
+
+See [v90_courier_rate_renegotiation.md](v90_courier_rate_renegotiation.md):
+the V.90 responder is now on by default, uses fresh CP/DATA receiver state,
+accepts changed rate parameters, and observes actual E on the strict batch
+hypothesis. The first 600M-instruction emulator run completed a short
+52000-to-54666 downstream renegotiation with new validated B1, exact 38400-byte
+duplex payload, unchanged 31200 upstream and no full retrain. Physical Courier
+interop is not established. Historical two-tone S and default-off claims in
+older sections below are superseded by that note and the later 90-degree
+S correction.
+
 ## What the specs offer
 
 **Retrain** — V.90 §9.5, V.34 §11.5.  "Turn OFF circuit 106, clamp circuit
@@ -33,11 +45,11 @@ every V.34 modem has.
 | §9.5.1.2 respond | V.90 digital | yes, in every stage including DATA |
 | §9.5.2.1/.2 | V.90 analogue | yes (Phase 3/4 deadlines) |
 | §9.6.1.1 initiate | V.90 digital | built; **default off**, see below |
-| §9.6.1.2 respond | V.90 digital | yes, `ME_V90_RENEG_RESPOND=1`; **default off**, unverified against a peer |
+| §9.6.1.2 respond | V.90 digital | **on by default**; completed short renegotiation against software Courier, physical hardware unqualified |
 | §11.5.1.1/§11.5.2.1 initiate | plain V.34 | yes, on a receiver that has stopped decoding; bounded |
 | §11.5.1.2/§11.5.2.2 respond | plain V.34 | yes, in every stage including DATA |
 | §11.6.1.1 initiate | plain V.34 | yes, **on by default** — verified live, see below |
-| §11.6.1.2 respond | plain V.34 | yes, `ME_V90_RENEG_RESPOND=1`; **default off** |
+| §11.6.1.2 respond | plain V.34 | **on by default**; diagnostic `ME_V90_RENEG_RESPOND=0` disables |
 | §11.6.2.1 recovery | plain V.34 | yes — no E within the timeout falls back to a §11.5 retrain |
 
 `ME_V90_RENEG=1` enables §9.6 initiation.  It is off by default because it is

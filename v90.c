@@ -607,6 +607,7 @@ struct v90_state_s {
      * (docs/v90_upstream_data_path.md). */
     bool             reneg_pending;             /* asked for, waiting for a frame boundary */
     bool             reneg_active;              /* Rd sent, sequence running */
+    uint8_t          reneg_r_ucodes[V90_FRAME_LEN]; /* §8.6.4: per-interval R magnitude */
     bool             reneg_wait_e;              /* §9.6.1 deadline outlives downstream B1d */
     bool             reneg_timed_out;           /* §9.6.1: no upstream E in time, retrain owed */
     bool             reneg_answer_seen;         /* peer's S, or a CP frame, observed */
@@ -848,12 +849,36 @@ static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
  * selected magnitude.  The barred R that terminates it is four repetitions
  * of ---+++.  Ri uses U_INFO for every data-frame interval and neither
  * sequence is scrambled or differentially encoded. */
-/* §9.4.1.1 gives startup's Ri "at least 192T"; §9.6.1.1 gives a rate
-   renegotiation's Rd exactly 384T.  Same signal, different duration, so the
-   length is a function of which procedure is running. */
+/* §9.4.1.1 gives startup's Ri "at least 192T"; §9.6.1.1 gives Rd
+   exactly 384T. Both use the R sign pattern, but §8.6.4 selects different
+   magnitudes; length and magnitude depend on the procedure. */
 static int v90_ri_length(const v90_state_t *s)
 {
     return s->reneg_active ? V90_RD_RENEG_SYMBOLS : V90_RI_SYMBOLS;
+}
+
+/* V.90 §8.6.4: Rd uses the highest-power point of each DATA constellation;
+ * Rt uses the TRAINING constellation. Snapshot before the new CP can replace
+ * the data parameters, and retain the six-interval order through barred R. */
+static bool v90_snapshot_r_constellation(v90_state_t *s,
+                                        const vpcm_cp_frame_t *cp)
+{
+    uint8_t ucodes[V90_FRAME_LEN];
+
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int c = cp->dfi[i];
+        int u;
+        if (c < 0 || c >= cp->constellation_count)
+            return false;
+        for (u = VPCM_CP_MASK_BITS - 1; u >= 0; u--)
+            if (vpcm_cp_mask_get(cp->masks[c], u))
+                break;
+        if (u < 0)
+            return false;
+        ucodes[i] = (uint8_t)u;
+    }
+    memcpy(s->reneg_r_ucodes, ucodes, sizeof(ucodes));
+    return true;
 }
 
 static inline uint8_t v90_ri_codeword(v90_state_t *s,
@@ -864,7 +889,9 @@ static inline uint8_t v90_ri_codeword(v90_state_t *s,
 
     if (barred)
         positive = !positive;
-    return v90_pcm_signed_codeword(s->law, s->u_info, positive);
+    int ucode = s->reneg_active
+              ? s->reneg_r_ucodes[symbol_pos % V90_FRAME_LEN] : s->u_info;
+    return v90_pcm_signed_codeword(s->law, ucode, positive);
 }
 
 uint8_t v90_codeword_compose(v90_law_t law, int ucode, int sign)
@@ -4341,9 +4368,9 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
         if (s->sample_count < V90_RI_POST_CP_SYMBOLS) {
-            /* Ri is defined by U_INFO and the negotiated bearer law, not by
-             * the CPt constellation law.  Its barred form must retain the
-             * exact magnitude of the preceding unbarred Ri. */
+            /* §8.6.4: barred R retains the preceding unbarred signal's
+             * per-interval magnitudes (U_INFO for Ri, snapshotted DATA/TRAINING
+             * maxima for Rd/Rt), as well as the negotiated bearer law. */
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, true);
 
             if (s->sample_count == 0 && s->reneg_active
@@ -4378,8 +4405,16 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     (void) v90_build_mp_type0(s, false);
                     fprintf(stderr, "[V90] Rate renegotiation %d: Rt-bar "
                             "complete; MP (§9.6.1.2.6)\n", s->reneg_count);
-                } else if (s->tx_phase == V90_TX_RI_ACK)
+                } else if (s->tx_phase == V90_TX_RI_ACK) {
+                    /* §8.6.5 applies on EVERY TRN2d, including §9.6:
+                     * startup's old scrambler/differential/shaper state must
+                     * not leak into this exchange's first mapped frame. */
+                    v90_scrambler_init(&s->phase4_scrambler);
+                    s->phase4_prev_sign = 0;
+                    memset(&s->phase4_shaper, 0, sizeof(s->phase4_shaper));
+                    s->phase4_frame_pos = V90_FRAME_LEN;
                     s->tx_phase = V90_TX_TRN2D;
+                }
             }
             return codeword;
         }
@@ -4638,6 +4673,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * position is sample_count modulo the frame length).  §9.6.1.2.6:
          * Rt starts on a frame boundary once a CP with bit 30 clear is in. */
         if (s->reneg_rt_pending && (s->sample_count % V90_FRAME_LEN) == 0) {
+            if (!v90_snapshot_r_constellation(s, &s->cp_frame))
+                return v90_pcm_signed_codeword(s->law, 0, 1);
             s->reneg_rt_pending = false;
             s->reneg_silence_req = false;
             s->reneg_rt = true;
@@ -6303,6 +6340,8 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
 {
     if (!s || !s->reneg_pending)
         return false;
+    if (!v90_snapshot_r_constellation(s, &s->data_cp_frame))
+        return false;
     s->reneg_pending = false;
     s->reneg_active = true;
     s->reneg_wait_e = true;
@@ -6334,6 +6373,11 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
      * the Rd defect above -- startup state carried into §9.6. */
     s->cp_ack_received = false;
     s->data_cp_received = false;
+    /* §9.6 permits new rate/constellation/shaping parameters in CP. Keep
+     * CPt's training mapper, but do not compare this exchange's first CP
+     * against the preceding DATA CP as though it were a duplicate. Rd's
+     * preceding-DATA magnitudes have already been snapshotted above. */
+    s->data_mapper_ready = false;
     s->reneg_silence_req = false;
     s->reneg_rt_pending = false;
     s->reneg_rt = false;

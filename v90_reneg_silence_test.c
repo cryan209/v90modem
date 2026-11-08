@@ -116,8 +116,67 @@ static void test_missing_e(v90_law_t law, int e_at)
     v90_free(s);
 }
 
+/* §8.6.4: startup Ri is U_INFO, but Rd MUST use the highest codeword in
+ * each of the preceding data constellations. Checking against ri_codeword()
+ * itself concealed the old U_INFO-for-Rd defect. Use independent expectations
+ * with six distinct constellations, both laws and the complete 384T/24T. */
+static void test_rd_magnitudes(v90_law_t law)
+{
+    v90_state_t *s = v90_init_data_pump(law);
+    vpcm_cp_frame_t cpt = make_cp(false, false);
+    vpcm_cp_frame_t cp = make_cp(false, false);
+    assert(s);
+    cpt.v90_compatibility = false;
+    cpt.drn = 4;
+    assert(v90_set_phase4_cp(s, &cpt));
+    cp.constellation_count = 6;
+    memset(cp.masks, 0, sizeof(cp.masks));
+    for (int i = 0; i < 6; i++) {
+        cp.dfi[i] = i;
+        for (int u = 20 + 12*i; u <= 35 + 12*i; u++)
+            vpcm_cp_mask_set(cp.masks[i], u, true);
+    }
+    assert(v90_set_phase4_cp(s, &cp));
+    /* Leave genuine nonzero mapper memories, as the preceding startup does. */
+    for (int i = 0; i < 606; i++)
+        (void)v90_phase4_codeword(s, V90_PHASE4_INPUT_ONES);
+    for (int i = 0; i < 6; i++)
+        assert(v90_ri_codeword(s, i, false)
+               == v90_codeword_compose(law, s->u_info, i < 3));
+    s->training_complete = true;
+    s->tx_phase = V90_TX_DATA;
+    assert(v90_request_rate_renegotiation(s));
+    assert(v90_rate_renegotiation_start(s));
+    /* A later CP cannot change an Rd already in progress. */
+    memset(s->data_cp_frame.masks, 0, sizeof(s->data_cp_frame.masks));
+    for (int i = 0; i < 384; i++)
+        assert(next_cw(s) == v90_codeword_compose(law, 35+12*(i%6), i%6 < 3));
+    for (int i = 0; i < 24; i++)
+        assert(next_cw(s) == v90_codeword_compose(law, 35+12*(i%6), i%6 >= 3));
+    {
+        v90_state_t *reference = v90_init_data_pump(law);
+        assert(reference && v90_set_phase4_cp(reference, &cpt));
+        /* §8.6.5: first TRN2d frame is the zero-initialized mapping, not
+         * the continuation of the previous exchange's mapper memories. */
+        for (int i = 0; i < V90_FRAME_LEN; i++)
+            assert(next_cw(s) == v90_phase4_codeword(reference, V90_PHASE4_INPUT_ONES));
+        v90_free(reference);
+    }
+    run_until(s, V90_TX_MP, 20000);
+    /* §9.6 explicitly permits a new rate: do not reject a fresh CP as a
+     * mismatching repeat of the preceding startup's CP. */
+    cp.drn = 9;
+    assert(v90_set_phase4_cp(s, &cp));
+    assert(v90_data_bits_per_frame(s) == 29);
+    cp.acknowledge = true;
+    assert(v90_set_phase4_cp(s, &cp));
+    v90_free(s);
+}
+
 int main(void)
 {
+    test_rd_magnitudes(V90_LAW_ULAW);
+    test_rd_magnitudes(V90_LAW_ALAW);
     for (int e_at = 0; e_at < 3; e_at++) {
         test_missing_e(V90_LAW_ULAW, e_at);
         test_missing_e(V90_LAW_ALAW, e_at);

@@ -76,12 +76,15 @@ if rate_capture:
                  0x31c, *range(0x940, 0x944), *range(0xcf2c, 0xcf3b)]
 if os.environ.get('X2_HOST_CAPTURE_PC'):
     capture_pc = int(os.environ['X2_HOST_CAPTURE_PC'], 16)
+if os.environ.get('X2_HOST_CAPTURE_ADDRESSES'):
+    addresses = [int(a, 16) for a in os.environ['X2_HOST_CAPTURE_ADDRESSES'].split(',')]
+program_dumped = False
 if tx_writes:
     if not codec_capture:
         raise SystemExit('TX write capture requires X2_HOST_CAPTURE_CODEC=1')
     capture_pc = 0x80e1 if gain_capture else 0xb461 if pulse_capture else 0x818f
 def step(self, *a, _original, **kw):
-    global codec_cursor, codec_events
+    global codec_cursor, codec_events, program_dumped
     if not getattr(self, '_x2_host_capture', False):
         self.set_pc_capture(capture_pc, addresses)
         if tx_writes:
@@ -116,12 +119,23 @@ def step(self, *a, _original, **kw):
         codec_generations[-1]['samples'] = count
     keep = not tx_writes or 180000 <= codec_cursor <= 200000
     if keep:
-        rows.extend(r for r in self.pc_captures() if len(rows) < 100000)
+        after_cycle = int(os.environ.get('X2_HOST_CAPTURE_AFTER_CYCLE', '0'))
+        rows.extend(r for r in self.pc_captures()
+                    if r[0] >= after_cycle and len(rows) < 100000)
     if tx_writes:
         if keep or gain_capture:
             write_events.extend(self.data_events())
         self.trace_data_writes(clear=True)
     self.clear_pc_captures()
+    # Optional passive snapshot just after the selected instruction executes.
+    # A shutdown dump may contain a different overlay at these addresses.
+    if rows and not program_dumped and os.environ.get('X2_HOST_CAPTURE_PROGRAM'):
+        destination = Path(os.environ['X2_HOST_CAPTURE_PROGRAM'])
+        destination.with_suffix('.program.bin').write_bytes(b''.join(
+            self.program(a).to_bytes(2, 'little') for a in range(0x10000)))
+        destination.with_suffix('.data.bin').write_bytes(b''.join(
+            self.data(a).to_bytes(2, 'little') for a in range(0x10000)))
+        program_dumped = True
     return result
 # The modern bearer advances by cycles, and its native fast path can also
 # call service_step. Hook every entry point; drained captures are cleared,

@@ -18,6 +18,9 @@
 typedef struct {
     int frame_sample;
     int last_sample;
+    /* First sample of an actual 20-one E immediately following this strict
+     * data CP on the SAME demodulation hypothesis; -1 if absent. §8.5.3. */
+    int e_sample;
     int carrier_sel;
     int timing_index;
     int carrier_step;

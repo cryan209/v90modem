@@ -9134,6 +9134,25 @@ static void *v90_cp_live_worker(void *user_data)
                     }
                 }
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
+                if (accepted && meta.e_sample >= 0
+                    && v90_handle_rx_event(g_v90, V90_RX_EVENT_E)) {
+                    /* §9.4.1.4 (also §9.6): CP' OR E releases Ed. This E
+                     * was actually demodulated immediately after a strict CP
+                     * on the SAME batch hypothesis, not inferred from CP or
+                     * used to qualify the independent SpanDSP bit tap. */
+                    ME_LOG("[ME] V.90 strict batch E at sample %d after "
+                           "CRC-valid CP; conditioning for validated B1\n",
+                           meta.e_sample);
+                    trace_phase("V90 strict batch E");
+                    if (g_v34_upstream_data_armed
+                        && !g_v34_upstream_data_started && g_v34
+                        && v34_v90_begin_b1_search(g_v34) == 0)
+                        g_v34_upstream_data_started = true;
+                    pthread_mutex_lock(&g_v90_cp_live_mtx);
+                    g_v90_cp_live_next_request = -1;
+                    g_v90_cp_live_reneg = false;
+                    pthread_mutex_unlock(&g_v90_cp_live_mtx);
+                }
             }
             pthread_mutex_unlock(&g_state_mtx);
         } else if (snapshot && expected_compatibility && cpt_accept_sample >= 0
@@ -19715,7 +19734,16 @@ static void enter_v90_phase4_rx_locked(void)
                            v90_live_cp_frame, NULL);
         }
         v90_cp_live_note_phase4_hint_locked();
-        v34_force_v90_phase4_cp_rx(g_v34);
+        if (v90_rate_renegotiation_active(g_v90)) {
+            /* §9.6 replaces DATA with SCR/CP and a NEW E/B1. Startup's
+             * conditioning preserves the already-acquired T/3 data decoder:
+             * it kept decoding CP as old DATA, then reported a discontinuity
+             * and needlessly lowered the rate. Use the same fresh conditioning
+             * as the digital-initiated renegotiation's S handoff. */
+            v34_v90_force_reneg_cp_rx(g_v34);
+        } else {
+            v34_force_v90_phase4_cp_rx(g_v34);
+        }
     } else {
         v34_force_phase4(g_v34);
         g_v92_v34_rx_parked = true;
