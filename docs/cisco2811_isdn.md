@@ -56,3 +56,77 @@ Port line power reported ON. Nominal fixed playout is 40 ms; IOS requires
 a maximum greater than nominal, so maximum is 60 ms. The unsupported
 voice-port `station-id number` setting was not installed; caller identity
 comes from the terminal's Q.931 setup.
+
+## Legacy X-CCD compatibility, 2026-11-08
+
+The PCMCIA card brought BRI0/2/0 Layer 1 ACTIVE and Layer 2 to TEI 64,
+SAPI 0, MULTIPLE_FRAME_ESTABLISHED. Initial 7920 attempts failed with Q.850
+cause 63. A subsequent 7940 capture showed the 2811 offering X-CCD/8000
+(PT125) and PCMA/8000 (PT8), and Asterisk answering **PCMA**. Eicon
+controller 3 logged the resulting incoming calls as **CIP 1 (speech)** in
+`diva-sip-gateway`, while 7940's PPP process never received CONNECT. This
+was a speech fallback, not a successful digital PPP connection.
+
+Added `tools/asterisk/codec_xccd.c`: registers X-CCD and maps to/from
+CLEARMODE by copying opaque DS0 bytes unchanged (RFC 4040 section 3).
+The target PBX builds it in `/opt/asterisk/codecs` and loads the installed
+`/usr/lib/asterisk/modules/codec_xccd.so`; no live PBX restart was required.
+`xccd test` passed **512 frames / 206848 bytes**, every codeword and unchanged
+sample counts, in both an isolated instance and live Asterisk 22.5.1.
+
+`isdn2811` now permits x-ccd/clearmode/alaw and uses context
+`from-isdn2811`. Its `_79[0-5]0` route checks `CHANNEL(audionativeformat)`: X-CCD or
+CLEARMODE calls use endpoint `isdn2811-digital-out`, allowing **CLEARMODE
+only**, to TopRouter 192.168.88.62. Speech calls and other numbers include
+the existing `from-cisco` context.
+Original shared 7940 routing for other callers is unchanged. Backups:
+`/etc/asterisk/{pjsip,extensions}.conf.before-xccd-7940-20261108`.
+
+The PPP answerer `eicon-7940-7` uses ttyds7, binds Diva controller 3
+(`AT+iQ=a3`), accepts MSN 7940 (`AT+iA7940`), and uses `AT&F14` protocol
+autodetection. Its expected interface is **e79p8**, local 10.254.118.1,
+peer 10.254.118.2. The peer-file comment claiming controller 7 / 7930 is
+stale; the active chat script specifies controller 3 / 7940.
+
+A real digital probe from wired CT117 to 17940 passed at **64000 bit/s**,
+LCP/PAP/IPCP and **3/3 pings (0% loss)** in 15.5 seconds. Eicon assigned
+10.254.118.2 (local server 10.254.118.1); `eicon-7940-7` recorded the
+negotiation. This supersedes the old 6 November destination timeout for
+that digital path. It does **not** yet qualify the PCMCIA/X-CCD leg.
+Provenance: CT117 `/var/tmp/7940-digital-probe-20261108/result.json`.
+The harness summary labels mode `v34` from its default argument, but the
+explicit override was `AT+MS=CLEAR,0`, with `ME_CLEARMODE=1` and
+`ME_DATA_FRAMING=ppp`; the trace explicitly negotiated CLEARMODE.
+
+### Final route and voice sharing checks
+
+A PCMCIA retry at 19:00:37 reached Asterisk on 7940 with X-CCD/PCMA
+offered. The digital-only outgoing offer (CLEARMODE with no telephone-event)
+was rejected by TopRouter with **SIP 488 / Q.850 cause 65**, producing the
+Windows 770 failure before Eicon PPP received a call. The final dedicated
+endpoint still allows **CLEARMODE only** but uses `dtmf_mode=rfc4733` (a
+separate telephone-event SDP entry). A real wired probe through that exact
+endpoint passed **64000 bit/s, LCP, PAP, IPCP and 3/3 pings, 0% loss**, in
+15.5 seconds. The earlier first pass used shared endpoint 6501.
+Provenance: CT117 `/var/tmp/7940-digital-probe-20261108-r5/result.json`.
+The temporary validation extension 17941 was removed afterward.
+
+A CAPI listener on Eicon controller 3 also claimed speech calls to MSN
+7940 and forwarded them to SIP. Added repeatable `--ignore-isdn-number`
+to `/usr/local/sbin/diva_sip_gateway.py` and configured only 7940 in
+`/etc/systemd/system/diva-sip-gateway.service.d/local-answerer.conf`. CAPI
+2.0 Part I section 5.6 specifies CONNECT_RESP Reject=1 as **ignore**, leaving
+the call available to the tty answerer, rather than rejecting it on the
+network. The patch is `tools/eicon/diva_sip_gateway-local-answerer.patch`.
+The service had no active calls when restarted. Backup:
+`/usr/local/sbin/diva_sip_gateway.py.before-ignore7940-20261108`.
+Spec: https://capi.org/wp-content/uploads/capi20-5-I.pdf
+
+A voice test reached the local modem, connected at **31200 bit/s**, and
+received LCP. It then retrained/stalled, never authenticated, and ended
+after 50.1 seconds. Thus speech routing and modem answer are established;
+a successful voice PPP session is **not** claimed.
+Provenance: CT117 `/var/tmp/7940-voice-probe-20261108/result.json`.
+
+The PCMCIA/X-CCD path still requires its own successful PPP verification;
+controlled wired CLEARMODE tests alone do not establish it.

@@ -1,0 +1,24 @@
+--- a/diva_sip_gateway.py
++++ b/diva_sip_gateway.py
+@@ -710,6 +710,12 @@
+         r = message.reader()
+         plci, cip = r.take('<I'), r.take('<H')
+         called, calling = called_digits(r.struct()), calling_digits(r.struct())
++        # CAPI 2.0 Part I section 5.6: Reject=1 ignores this application,
++        # leaving the call available to another local answerer (e.g. ttyds).
++        if called in self.args.ignore_isdn_number:
++            LOG.info('Leaving ISDN call to %s for local answerer (PLCI %#x)', called, plci)
++            self.capi.send(CONNECT, RESP, connect_resp(plci, 1), message.number)
++            return
+         target = called or self.args.default_extension
+         busy = sum(c.state != 'gone' for c in self.calls.values()) >= self.args.max_calls
+         LOG.info('ISDN %s -> SIP %s (CIP %d, PLCI %#x)', calling or '?', target or '?', cip, plci)
+@@ -1096,6 +1102,8 @@
+                     help='CIP for calls to ISDN: 1 speech, 4 3.1 kHz audio (default)')
+     ap.add_argument('--isdn-number', default='',
+                     help='called number when the SIP request names only the gateway')
++    ap.add_argument('--ignore-isdn-number', action='append', default=[],
++                    help='leave this incoming ISDN number for another local answerer (repeatable)')
+     ap.add_argument('--default-extension', default='',
+                     help='SIP target for ISDN calls that carry no called number')
+     ap.add_argument('--bind', default='0.0.0.0')
