@@ -1037,3 +1037,9 @@ sh -c 'V90_REPLAY_QUIET=1 ./v90_upstream_replay reference-data/artifacts/cx93001
 # V.34 11.6 fall-forward: start at 14400 on a clean line (test hook), climb by
 # the data-mode SNR to 31200 both ways with LAPM kept (docs/v34_data_mode_rates.md).
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --both-env ME_V34_FALL_FORWARD=1 --both-env ME_V34_FALL_FORWARD_AFTER_MS=3000 --both-env ME_V34_FALL_FORWARD_HOLD_MS=1000 --both-env ME_V34_FALL_FORWARD_DWELL_MS=3000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 40 --seconds 120 --call-log "fall-forward to 31200 bps confirmed" --both-nolog "bps failed ("
+# V.34 11.6 answered from the data-mode SNR: the peer opens a renegotiation on a
+# call that started at 14400; our MP asks what the data mode supports (a
+# fall-forward probe), not the renegotiation TRN's reading, and holds 14400
+# when fall-forward is off.
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --call-env ME_V34_FALL_FORWARD=1 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "(fall-forward probe)" --call-log "bps confirmed" --both-nolog "bps failed (" --both-nolog "falling back to a §11.5"
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --answer-env ME_V34_RENEG_AFTER_MS=6000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 20 --seconds 90 --call-log "MP asks 14400 bps for our receive direction" --both-nolog "falling back to a §11.5"

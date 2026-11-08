@@ -7581,6 +7581,7 @@ static int g_v34_ff_probe_n = 0;        /* rate being proved, 0 = none */
 static int g_v34_ff_prev_n = 0;         /* the rate the probe came from */
 static int64_t g_v34_ff_good_since_ms = 0;
 static int64_t g_v34_ff_last_ms = 0;
+static bool g_v34_answer_ask_pending = false; /* see v34_answer_reneg_ask_locked() */
 
 static int me_v34_ff_param(const char *name, int fallback)
 {
@@ -7614,6 +7615,7 @@ static void v34_ff_reset_locked(void)
     g_v34_ff_prev_n = 0;
     g_v34_ff_good_since_ms = 0;
     g_v34_ff_last_ms = 0;
+    g_v34_answer_ask_pending = false;
     if (g_v34)
         v34_set_mp_rx_data_rate(g_v34, 0);
 }
@@ -7644,8 +7646,29 @@ static void v34_ff_abandon_locked(const char *why)
 {
     v34_ff_fail_locked(why);
     g_v34_ff_good_since_ms = 0;
+    g_v34_answer_ask_pending = false;
     if (g_v34)
         v34_set_mp_rx_data_rate(g_v34, 0);
+}
+
+/* The receive rate the data mode's SNR supports, in 2400 bit/s units,
+ * capped by the symbol rate, +MS and this call's fall-forward ceiling;
+ * 0 when there is no symbol rate to cap it by. */
+static int v34_data_snr_target_n(float snr)
+{
+    static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+    int code = v34_get_rx_baud_rate(g_v34);
+    int target = v34_rx_data_snr_rate(g_v34, snr)/2400;
+    int top;
+
+    if (code < 0 || code >= 6)
+        return 0;
+    top = max_v34_bps_for_baud(baud_by_code[code])/2400;
+    if (g_lim[LIM_MAX_RX] > 0 && top > g_lim[LIM_MAX_RX]/2400)
+        top = g_lim[LIM_MAX_RX]/2400;
+    if (g_v34_ff_ceiling_n > 0 && top > g_v34_ff_ceiling_n)
+        top = g_v34_ff_ceiling_n;
+    return target > top ? top : target;
 }
 
 /* Returns true when it started a renegotiation. */
@@ -7656,7 +7679,6 @@ static bool v34_fall_forward_check_locked(void)
     int *ours;
     int cur;
     int target;
-    int top;
     int symbols = 0;
     float snr;
     float margin;
@@ -7735,21 +7757,9 @@ static bool v34_fall_forward_check_locked(void)
         g_v34_ff_good_since_ms = 0;
         return false;
     }
-    target = v34_rx_data_snr_rate(g_v34, snr - margin)/2400;
-    {
-        static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
-        int code = v34_get_rx_baud_rate(g_v34);
-
-        if (code < 0 || code >= 6)
-            return false;
-        top = max_v34_bps_for_baud(baud_by_code[code])/2400;
-    }
-    if (g_lim[LIM_MAX_RX] > 0 && top > g_lim[LIM_MAX_RX]/2400)
-        top = g_lim[LIM_MAX_RX]/2400;
-    if (g_v34_ff_ceiling_n > 0 && top > g_v34_ff_ceiling_n)
-        top = g_v34_ff_ceiling_n;
-    if (target > top)
-        target = top;
+    target = v34_data_snr_target_n(snr - margin);
+    if (target <= 0)
+        return false;
     if (target <= cur) {
         g_v34_ff_good_since_ms = 0;
         return false;
@@ -7780,6 +7790,73 @@ static bool v34_fall_forward_check_locked(void)
     return true;
 }
 /*- End of function --------------------------------------------------------*/
+
+/* §11.6.1.2.2: our MP when the PEER opens a rate renegotiation.  Without
+ * this its receive rate came from the renegotiation's own TRN -- at most
+ * 2000 ms of the 4-point constellation -- and on the v90ras Win95 modems
+ * (2026-11-07 21:13) that TRN read 3.0 dB on a line whose data mode read
+ * 25.7-26.2 dB, so we asked 7200 again, the peer went quiet in MP and the
+ * call fell to a §11.5 retrain.  The data mode measures the receiver we
+ * will keep using, at the data constellation, over seconds: ask the rate it
+ * supports.  Never below the current rate while the data mode still
+ * supports that rate, and above it only as a fall-forward probe
+ * (ME_V34_FALL_FORWARD), which is confirmed or stepped back like our own. */
+static void v34_answer_reneg_ask_locked(void)
+{
+    int a_to_c;
+    int c_to_a;
+    int *ours;
+    int cur;
+    int target;
+    int symbols = 0;
+    float snr;
+
+    if (!g_v34 || g_state != ME_DATA
+        || v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
+        return;
+    ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
+    cur = *ours;
+    if (v34_data_carrier_lost(g_v34)
+        || v34_get_data_snr_db(g_v34, &snr, &symbols) != 0) {
+        ME_LOG("[ME] V.34 §11.6 answer: no data-mode SNR yet; MP keeps the "
+               "TRN reading\n");
+        return;
+    }
+    target = v34_data_snr_target_n(snr - me_v34_ff_margin_db());
+    if (target <= 0)
+        return;
+    if (target < cur && snr >= (float) v34_rx_data_snr_threshold_db(g_v34, cur*2400))
+        target = cur;
+    if (target > cur) {
+        if (me_v34_ff_enabled() && !g_v34_ff_probe_n
+            && g_v34_ff_attempts < me_v34_ff_param("ME_V34_FALL_FORWARD_MAX", 3)) {
+            v34_set_mp_rate_policy(g_v34, ours == &a_to_c ? target : 14,
+                                   ours == &a_to_c ? 14 : target);
+            g_v34_ff_attempts++;
+            g_v34_ff_probe_n = target;
+            g_v34_ff_prev_n = cur;
+            g_v34_ff_good_since_ms = 0;
+        } else {
+            target = cur;
+        }
+    }
+    v34_set_mp_rx_data_rate(g_v34, target);
+    g_v34_answer_ask_pending = true;
+    ME_LOG("[ME] V.34 §11.6 answer: data mode reads %.1f dB at %d bps; MP "
+           "asks %d bps for our receive direction%s\n", snr, cur*2400,
+           target*2400, (target > cur) ? " (fall-forward probe)" : "");
+    trace_phase("V34 11.6 answer ask %d (%.1f dB)", target*2400, snr);
+}
+
+/* The answered renegotiation is over: later MPs measure afresh. */
+static void v34_answer_reneg_done_locked(void)
+{
+    if (!g_v34_answer_ask_pending)
+        return;
+    g_v34_answer_ask_pending = false;
+    if (g_v34 && !g_v34_ff_probe_n)
+        v34_set_mp_rx_data_rate(g_v34, 0);
+}
 
 static bool retrain_on_loss_due(int cap)
 {
@@ -17410,6 +17487,8 @@ skip_8k_codewords:
                          * S is already detected, which is all §11.6.1.2.1
                          * asks for before §11.6.1.2.2 starts ours. */
                         v34_clear_peer_reneg_s_event(g_v34);
+                        if (!v34_rate_renegotiation_active(g_v34))
+                            v34_answer_reneg_ask_locked();
                         if (!v34_rate_renegotiation_active(g_v34)
                             && v34_answer_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34: peer opened a §11.6 rate "
@@ -17446,6 +17525,7 @@ skip_8k_codewords:
                                     "rate renegotiation timeout");
                             }
                         }
+                    } else if ((v34_answer_reneg_done_locked(), false)) {
                     } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
                         /* Retrained at a rate B1 says this line carries. */
                     } else if (g_mod == ME_MOD_V34 && v34_fall_forward_check_locked()) {
