@@ -38,9 +38,14 @@ transcoded; add an A-law set if that is needed.
 | `/etc/ppp/pap-secrets` | an unused `v90dial` line from before `noauth` (backup `pap-secrets.before-v90ras-20261107`) |
 
 Bundle: server 10.254.200.1, client 10.254.200.2, interface `v90ras0`,
-`ms-dns 192.168.88.1`. There is no NAT or forwarding, so a client reaches
-only 10.254.200.1 (run `tools/eicon/http_test_server.py --bind 10.254.200.1`
-there for transfers).
+`ms-dns 192.168.88.1`. Since 2026-11-08 16:10 the CT forwards and NATs the
+client to the LAN and the internet: `/etc/sysctl.d/90-v90ras-forward.conf`
+(`net.ipv4.ip_forward = 1`) and table `ip v90ras_nat` in `/etc/nftables.conf`
+(masquerade 10.254.200.0/24 out eth0, with a counter; the stock file is
+`nftables.conf.before-v90ras-nat-20261108`). The dial-in is still `noauth`,
+so anyone who dials 2950 gets that access. Before this a client reached only
+10.254.200.1 (`tools/eicon/http_test_server.py --bind 10.254.200.1` serves
+transfers there).
 
 Operate:
 
