@@ -3356,8 +3356,15 @@ before MP, and only lowered after the receiver had lost the constellation.
   rate, and the CP acceptance used the same rate as the "receiver ceiling",
   so any step-up was refused and hung up. A pending step-up's target now
   sets both.
-- **Engine pair only, by retrain.** Our analogue role does not answer the
-  digital modem's Rd (the existing discontinuity resync times out the same
-  way), so offline the change lands by retrain: 19200 to 31200, confirmed at
-  37.3 dB. Real peers answer 9.6: it completed live on 3/3 calls on 2026-08-28.
-  The thresholds have not been checked against a real modem's upstream.
+- **Engine pair: by 9.6, not retrain.** Our analogue role answers the
+  digital modem's Rd with S/S-bar (9.6.1.2), and the step-up completes in
+  the renegotiation: 19200 to 31200, confirmed at 37.2 dB, with no retrain
+  and no "no answer" timeout (fast row, `ME_V90_UPSTREAM_TEST_FIRST_BPS=19200`).
+  Real peers answer 9.6 too: it completed live on 3/3 calls on 2026-08-28.
+- **Thresholds against real upstreams.** 59 live taps (RasFinder, Eicon,
+  MultiTech, Apple, slmodemd, Win95) replayed with the controller on. Every
+  replay that reached upstream data read 35.7-36.5 dB at 19200-31200, and
+  none triggered a fall-back. The tightest is RasFinder at 31200: 35.7-35.8 dB
+  against a 35.9 dB need, still 0.9 dB above the 34.9 dB fall-back trigger,
+  so it neither falls back nor probes up. While the carrier is lost the
+  controller does nothing; the discontinuity path owns that case.
