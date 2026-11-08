@@ -162,3 +162,32 @@ at **104.5 kbit/s download / 106.6 kbit/s upload**. The existing two-channel
 2690 card session stayed Up. Details and reproducible configuration:
 [7940 repair](../rig/eicon-7940/README.md). The card's own 7940 retry is
 still required for final hardware confirmation.
+
+## Cisco per-port caller identity defaults
+
+Updated 2026-11-08: incoming voice-port translation profiles now fill only
+an empty caller number on the 2811, at the source:
+
+| BRI port | Translation profile | Default caller number |
+|---|---|---|
+| 0/1/0 | CID2600 | 2600 |
+| 0/1/1 | CID2610 | 2610 |
+| 0/2/0 | CID2620 | 2620 |
+| 0/2/1 | CID2630 | 2630 |
+
+Each rule is `rule 1 /^$/ /NUMBER/`. IOS `test voice translation-rule`
+verified empty input maps to the four assigned numbers and supplied
+**2625 does not match** any rule, so a supplied number is preserved.
+The profiles are attached with `translation-profile incoming CIDNUMBER`.
+Configuration fragment: [callerid-defaults.cfg](../rig/cisco2811/callerid-defaults.cfg).
+Cisco reference (empty-string match and profile direction):
+https://www.cisco.com/c/en/us/support/docs/voice/call-routing-dial-plans/64020-number-voice-translation-profiles.html
+
+These changes apply to new calls. Existing two-channel calls to 7930
+remained Up during the update. The Asterisk missing-number fallback is
+retained as a harmless last resort; it only runs if the Cisco still sends
+no caller number. A fresh call is needed to verify the caller number at
+the PBX before that fallback runs. No media processing was changed.
+
+`write memory` completed; `show startup-config` verified all four rules,
+profiles, and incoming voice-port attachments persisted.
