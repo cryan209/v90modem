@@ -499,3 +499,10 @@ gate, which skipped V.90-to-V.34 fallbacks; f938b387 fixes it, see
 - The modem retrains about 30 s into V.90 data (52.7 s at 14:34, 50.6 s at
   14:43) while the upstream is clean (0.009). At 14:43 it came back to data
   in 13 s and PPP survived.
+
+2026-11-08 15:02 (f938b387): the line 1 fallback decoded (0.09 from the
+grid, 36 dB) and joined the bundle as a second link, ping 2/2. But V.42
+detection failed: our B1 check opened a 11.6 (31200 -> 28800) 40 ms into
+data, over the modem's ODP, so the link ran V.14 with no error correction.
+95bf13ee makes the B1 check wait for detection
+(`ME_V34_B1_V42_DEFER_MS`, default 4000).

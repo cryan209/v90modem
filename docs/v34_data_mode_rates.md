@@ -1294,3 +1294,6 @@ at 28800 and 31200 on entry, and at 21600 after our 11.6 (lines 0 and 2,
 also covers `v90_v34_fallback`, the test the other plain-V.34 sites already
 use. The rate tables still test `v90_mode` alone. The engine replay of the
 14:42 tap cannot check this: its Phase 3 fails where the live one succeeded.
+Live at 15:02, the first fallback after the fix (line 1, 31200 then 11.6 to
+28800) decoded at 0.088-0.12 from the grid, 35-36 dB, where before it was
+0.65-0.68.
