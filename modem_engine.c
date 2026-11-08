@@ -370,6 +370,9 @@ static volatile bool g_data_link_failed = false;
    not decoding, so the next data-mode entry must run detection again rather
    than resume a link that was never established.  See DS_LINK_UNSUPPORTED. */
 static volatile bool g_data_link_redetect = false;
+/* V.42 8.10 detection is running: DS_LINK_DETECTING until an event resolves
+   it.  Cleared per call and at every data_stack_start_online(). */
+static bool g_v42_detecting = false;
 /* Set while a physical-layer recovery started by v34_data_carrier_lost() is in
    flight, so a V.42 verdict reached over those bits is not treated as final. */
 static volatile bool g_data_loss_recovering = false;
@@ -820,9 +823,11 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
     switch (event) {
     case DS_LINK_DETECTING:
         ME_LOG("[ME] V.42 detection started\n");
+        g_v42_detecting = true;
         break;
     case DS_LINK_DETECTED:
         ME_LOG("[ME] V.42 detection succeeded; entering LAPM establishment\n");
+        g_v42_detecting = false;
         break;
     case DS_LINK_XID_NEGOTIATED:
     {
@@ -863,11 +868,13 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         break;
     }
     case DS_LINK_ALTERNATIVE:
+        g_v42_detecting = false;
         ME_LOG("[ME] V.42 detection found no LAPM peer; %s (V.42 Annex A)\n",
                g_data_stack.calling_party ? "trying the MNP alternative procedure (LR)"
                                           : "the caller sent an MNP LR, answering it");
         break;
     case DS_LINK_FALLBACK:
+        g_v42_detecting = false;
         /* +ES says error control is optional: carry on without it. */
         ME_LOG("[ME] no error-control peer (V.42 detection%s); continuing in "
                "buffered V.14 mode (+ES fallback)\n",
@@ -884,6 +891,7 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     case DS_LINK_CONNECTED:
+        g_v42_detecting = false;
         if (g_data_stack.framing == DS_FRAMING_MNP && g_data_stack.mnp) {
             mnp_stats_t st;
 
@@ -901,6 +909,7 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     case DS_LINK_UNSUPPORTED:
+        g_v42_detecting = false;
         /* V.42 6.1's detection phase is an exchange of ODP and ADP over the
            data channel, so its verdict is only worth anything if the data
            channel was carrying bits.  When the physical receiver has stopped
@@ -925,11 +934,13 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         g_data_link_failed = true;
         break;
     case DS_LINK_DISCONNECTED:
+        g_v42_detecting = false;
         ME_LOG("[ME] %s disconnected\n",
                g_data_stack.framing == DS_FRAMING_MNP ? "MNP" : "V.42 LAPM");
         g_data_link_failed = true;
         break;
     case DS_LINK_ERROR:
+        g_v42_detecting = false;
         ME_LOG("[ME] V.42 LAPM link error\n");
         g_data_link_failed = true;
         break;
@@ -1020,6 +1031,7 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     g_data_connect_rate = bit_rate;
     g_data_connect_reported = false;
     g_data_link_failed = false;
+    g_v42_detecting = false;
     g_report_tx_rate = g_report_rx_rate = 0;
     if (g_data_framing == DS_FRAMING_V42 && detect && me_v92_odp_bypass()) {
         detect = false;
@@ -7390,6 +7402,23 @@ static bool v34_b1_rate_check_locked(void)
 
     if (g_v34_b1_rate_checked || !g_v34 || v34_get_b1_snr_db(g_v34, &snr) != 0)
         return false;
+    /* Let V.42 detection (8.10) finish first.  The calling modem sends its
+       ODP straight after B1 and stops at its T400; a 11.6 opened 40 ms into
+       data takes the data channel away for the ~2 s that window lasts.
+       Against the Win95 modems on the Cisco FXS (rig/v90ras, 2026-11-08
+       15:02) a V.34 fallback that then decoded at 0.09 from the grid at
+       36 dB lost detection that way and ran V.14 with no error control.
+       After LAPM is up a renegotiation keeps the link (11.6), so the rate
+       change loses nothing by waiting.  Bounded by ME_V34_B1_V42_DEFER_MS
+       (default 4000; 0 restores the immediate check). */
+    if (g_v42_detecting) {
+        static int defer_ms = -1;
+
+        if (defer_ms < 0)
+            defer_ms = parse_env_int("ME_V34_B1_V42_DEFER_MS", 4000);
+        if (defer_ms > 0 && data_mode_elapsed_ms() < defer_ms)
+            return false;
+    }
     g_v34_b1_rate_checked = true;
     if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
         return false;
@@ -9171,6 +9200,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_call_baud_cap = 0;
     g_v34_rx_rate_backoff_n = 0;
     g_data_link_redetect = false;
+    g_v42_detecting = false;
     g_data_loss_recovering = false;
     g_last_loss_retrain_ms = 0;
     g_retrain_from_data = false;
