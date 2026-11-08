@@ -1,0 +1,42 @@
+# PPP over synchronous HDLC on the DS0 (RFC 1662), async HDLC on each PTY.
+# Options shared by digital bundle members 0 and 1 (RFC 1990).
+# Mirrors the eicon420 members: the name, address pair and ifname are the
+# bundle identity and must be identical on every member, or a link raises its
+# own session instead of joining the bundle (RFC 1990).
+115200
+# A PTY has no modem-control lines: sip_v90_modem auto-answers (S0=2), the
+# chat below waits for CONNECT, and the worker closing the PTY ends the link.
+local
+nocrtscts
+nolock
+connect "/usr/sbin/chat -t 86400 CONNECT \\c"
+nodetach
+nopersist
+maxfail 1
+# Home test rig: accept any caller, any (or no) login.  A client that
+# still sends PAP is simply not asked for it.
+noauth
+name v90isdn
+passive
+nodefaultroute
+noproxyarp
+noipv6
+noccp
+novj
+asyncmap 0
+lcp-echo-interval 10
+lcp-echo-failure 6
+debug
+multilink
+mrru 1500
+# Accept the client's endpoint discriminator (no `noendpoint`).  Win95 DUN
+# keeps a first link whose endpoint we ConfRej, but every member added after
+# IP is up gets an immediate LCP TermReq (2026-11-07 22:36 x3, 23:26 x2).
+# Within one dial session Win95 sends the same 16-byte endpoint on every
+# link.  The one mismatch seen (21:00, "Couldn't create ppp interface
+# v90isdn0: File exists") was a 15-byte retransmitted ConfReq on a first link
+# that took 20 s to get LCP through, during the white-data decoder era.
+# If "File exists" comes back on clean links, compare the endpoints first.
+ms-dns 192.168.88.1
+10.254.201.1:10.254.201.2
+ifname v90isdn0

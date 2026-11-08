@@ -1,0 +1,21 @@
+[Unit]
+Description=v90modem two-line ISDN digital PPP server (2690 pilot)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Environment=ME_CLEARMODE=1
+Environment=ME_DATA_FRAMING=ppp
+Environment=ME_JB_MS=40
+Environment=VPCM_ME_VERBOSE=1
+RuntimeDirectory=v90isdn
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/v90ras/sip_v90_modem --lines 2 --recycle --no-register --sip-server asterisk.net.cryan.nz --username 2691,2692 --local-port 5400 --rtp-port 33000 --pty-link /run/v90isdn/line --profile /etc/v90isdn/profile
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

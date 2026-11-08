@@ -1,0 +1,5 @@
+power-on-profile 0
+profile 0
+ s-register 0 1
+ +MS CLEAR,0
+!

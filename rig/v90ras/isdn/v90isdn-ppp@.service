@@ -1,0 +1,14 @@
+[Unit]
+Description=v90modem digital PPP bundle member %i
+After=v90isdn.service
+PartOf=v90isdn.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=/bin/sh -c 'until [ -e /run/v90isdn/line.%i ]; do sleep 1; done'
+ExecStart=/usr/sbin/pppd /run/v90isdn/line.%i file /etc/ppp/v90isdn-options linkname v90isdn-%i ipparam v90isdn-%i
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=v90isdn.service

@@ -1,0 +1,7 @@
+# Add this table without flushing the existing ruleset.
+table ip v90isdn_nat {
+ chain postrouting {
+  type nat hook postrouting priority srcnat;
+  ip saddr 10.254.201.0/24 oifname "eth0" counter masquerade
+ }
+}

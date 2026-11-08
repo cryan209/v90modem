@@ -22,7 +22,9 @@ https://www.cisco.com/c/en/us/support/docs/voice/digital-ccs/15415-bri-voice-por
 | 2600–2609 | 0/1/0 |
 | 2610–2619 | 0/1/1 |
 | 2620–2629 | 0/2/0 |
-| 2630–2699 | 0/2/1 |
+| 2630–2689, 2693–2699 | 0/2/1 |
+| 2690 | Dedicated digital v90modem PPP pilot |
+| 2691, 2692 | Dedicated digital v90modem PPP lines |
 
 Numbers are MSNs/aliases on the listed bus, not extra B channels. Each
 BRI has two B channels. Set the card to Euro-ISDN/DSS1 and an MSN from
@@ -130,3 +132,15 @@ Provenance: CT117 `/var/tmp/7940-voice-probe-20261108/result.json`.
 
 The PCMCIA/X-CCD path still requires its own successful PPP verification;
 controlled wired CLEARMODE tests alone do not establish it.
+
+## Direct v90modem digital PPP comparison
+
+Added the separate [2690 digital server](../rig/v90ras/isdn/README.md) on
+wired CT117 to bypass TopRouter/Eicon while testing the PCMCIA input.
+Two CLEAR/HDLC workers and noauth multilink PPP answer on 2691/2692;
+2690 hunts both. The first server-side test passed at **64000 bit/s**,
+LCP/IPCP and **3/3 pings (0% loss)**. The client/server shared a host,
+so the ping result does not establish payload transfer over the DS0.
+Two test calls also joined one multilink bundle in **10.3 s**.
+No actual PCMCIA pass is inferred
+from this controlled wired test. See the linked deployment note.
