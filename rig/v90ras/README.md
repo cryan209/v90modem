@@ -666,3 +666,11 @@ On top of 6d798ffa: the full V.90 Phase 2 measures RTDEd (9.2.1.1.4), used
 only to extend the 9.2.1.2.4 third-reversal deadline to 900 ms + RTD. At a
 bare 900 ms it fired 20 ms before the Diva's reversal (RTDEd 148 ms over
 ISDN and SIP). The previous binary is `/opt/v90ras/sip_v90_modem.6d798ffa`.
+
+## Deployed 63a0c4d8 (2026-11-10 08:32)
+
+On top of fcdb8284: the pre-MP upstream 4-point SNR takes the best of the
+newest window and windows up to 400 symbols older. Live, the newest window
+ran past the Diva's CPt repeats and read 10.3 dB (36.7 dB in replay), so no
+MP rate was offered and the Diva chose V.34 on the restarted Phase 2. The
+previous binary is `/opt/v90ras/sip_v90_modem.fcdb8284`.
