@@ -18945,6 +18945,8 @@ SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
     int64_t base;
     int64_t end;
     float err;
+    float best;
+    int back;
 
     if (!s  ||  !s->rx.v90_t3_active  ||  symbols <= 0)
         return 0.0f;
@@ -18953,16 +18955,30 @@ SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
     if (oldest < pre + 4)
         oldest = pre + 4;
     /*endif*/
-    end = s->rx.v90_t3_raw_count - pre - 8;
-    base = end - 3*(int64_t) symbols;
-    if (base < oldest)
-        return 0.0f;
-    /*endif*/
-    err = v90_t3_train_4point(&s->rx, base, end, w, &phase);
-    if (!(err > 0.0f))
-        return 0.0f;
-    /*endif*/
-    return -10.0f*log10f(err);
+    /* The analogue modem's 4-point signal (CPt, then SCR/CP) does not run to
+       a fixed point of our TRN2d: on an Eicon Diva V90A call its CPt repeats
+       stopped ~100 ms before the newest 600 symbols ended live (the RTP
+       arrival moved our TRN2d start 80 ms later than in the replay), and the
+       measurement read 10.3 dB against the replay's 36.7 dB on the same
+       audio, so no MP rate was offered and Phase 2 restarted.  Try the
+       newest window and windows up to 400 symbols older, and keep the best:
+       content that is not the 4-point signal only adds decision error. */
+    best = 0.0f;
+    for (back = 0;  back <= 400;  back += 100)
+    {
+        end = s->rx.v90_t3_raw_count - pre - 8 - 3*(int64_t) back;
+        base = end - 3*(int64_t) symbols;
+        if (base < oldest)
+            break;
+        /*endif*/
+        phase = 0;
+        err = v90_t3_train_4point(&s->rx, base, end, w, &phase);
+        if (err > 0.0f  &&  -10.0f*log10f(err) > best)
+            best = -10.0f*log10f(err);
+        /*endif*/
+    }
+    /*endfor*/
+    return best;
 }
 /*- End of function --------------------------------------------------------*/
 
