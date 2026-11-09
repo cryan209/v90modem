@@ -575,3 +575,18 @@ that followed, and at +52.9 s it reported Phase 3's own S as a new peer
 renegotiation, mid-startup. Restarts now clear the watch, the responder no
 longer arms it, and only an S seen in DATA is answered. 7801's 10.5 s loss is probably the same
 thing and is unchecked.
+
+## Deployed 8f918728 (2026-11-09 19:10)
+
+The rig was on 1cb06bc6 (2026-11-08). This adds the 2026-11-09 V.34 work, none
+of it live-verified yet:
+- 11.6 with peers that send no TRN, in both roles (884ad606). These Win95
+  modems send none.
+- Our own 11.5 retrain waits for the caller's silence (4cd143f5).
+- 11.6 keeps the symbol clock running from DATA into S (3110aeb6).
+- Calibrated TRN rate tables at 2400-3000 baud (209cd307, 8f918728).
+- The data-mode timing steer holds the main tap at low rates (d793e687).
+
+The old binary is `/opt/v90ras/sip_v90_modem.1cb06bc6`. Only `v90ras` was
+restarted. The v90isdn server shares `/opt/v90ras/sip_v90_modem`, and its
+running supervisor still has the old file mapped.
