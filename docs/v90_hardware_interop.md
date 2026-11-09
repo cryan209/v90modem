@@ -1408,37 +1408,38 @@ through Tone A events while that framing is armed. The wait's getbaud already
 handled an INFO1a arriving there. Not verifiable offline: the replayed
 transmitter drifts ~450 ms from the live one, so this needs live calls.
 
-## Upstream 14400 never decodes from Lucent/Agere modems (2026-11-09)
+## Lucent/Agere V.90 upstream never decodes on v90ras (2026-11-09)
 
-Every v90ras call since 8 November whose V.90 upstream ran at **14400** had a
-B1 template fit of **0%** and white data (no V.42, the peer retrains and drops
-to V.34); every one at **16800 or 19200** fit **100%** -- the same modems, the
-same Cisco FXS ports. The 14400 calls are all the Lucent MultiTech on 7801 and
-the Agere MT9234ZBA-USB on this Mac's 7803 (13 calls, both carriers), which
-are one DSP lineage.
+Per line since 1 November, the V.90 upstream B1 template fit is all or
+nothing by **modem family, not rate**: 7800 fits 36/36 (16800 and 19200),
+the Courier on 7802 1/1 (19200), our own analogue client on 2903 2/2
+(31200); the Lucent MultiTech on 7801 fits **0/12** (14400, both carriers)
+and this Mac's Agere MT9234ZBA-USB on 7803 **0/2** (14400 and 16800, high
+carrier). A first reading grouped journal lines by RING across concurrent
+lines and blamed 14400; c7d77d0d stopped offering 14400 at 3200 baud on that
+premise and was reverted (the 16800 Agere call is just as white).
 
 What is known:
 
-* The symbols are clean. A replay of 7801's 22:43 call
-  (`ME_V90_UPSTREAM_SYM_DUMP`) uses exactly the 32 points of the 3200-baud
-  minimum constellation (V.34 Table 10: b = 36, K = 24, M = 8, q = 0), about
-  equally, 0.15 mean squared from the grid. Equalizer, carrier and timing are
-  not the fault.
+* The symbols are clean. Replays (`ME_V90_UPSTREAM_SYM_DUMP`) of a 14400 call
+  use exactly the 32 points of V.34 Table 10 (b = 36, K = 24, M = 8) at 0.15
+  mean squared from the grid; the 16800 call uses all 56 points at 0.21.
+  Equalizer, carrier and timing are not the fault.
 * No mapping fits: replays at every rate 4800-31200, high or low carrier,
-  GPA or GPC, 3000 baud and expanded shaping (M = 10) all stay at 18-28% fit.
-* Our own analogue transmitter at 14400 fits **100%** through the same
-  receiver, and the shell-mapping tables for M = 8 recompute exactly. Whatever
-  differs is shared by our transmitter and receiver, or is the peer's.
-* 14400 at 3200 is the only dense-baud rate whose shell mapping fills
-  M^8 = 2^K exactly (24000 is the other K = 24 case and has never run).
+  GPA or GPC, 3000 baud and expanded shaping stay at 18-28% fit, and the
+  receiver as of 1cb06bc6 fails the same taps.
+* The pre-MP 4-point SNR reads 22.4 dB for these modems against 24.8 (7800)
+  and 26 (7802).
+* The same modems reached V.90 data through the AudioCodes path with older
+  servers (MT5634 31200, MT9234 26400, 28 Oct - 1 Nov).
+* Leads: Lucent does not reset its scrambler before B1 (our K56flex receiver
+  needed an MP'/E-anchored B1 search); the E-anchored B1 start ("-22 from E",
+  then "B1 ended after 1 data frames, frame error 38.9"); the data-frame
+  phase sweep steps only whole frames.
 
-14400 was only ever chosen by the pre-MP 4-point measurement, which read
-22.4-22.5 dB on calls whose data mode then read 30.6 dB. So 14400 at 3200 baud
-is no longer offered (`v90_set_upstream_rate_excluded()`): a 14400 measured
-cap asks for 16800, a §9.6 step down from 16800 goes to 12000, and
-`ME_V90_UPSTREAM_ALLOW_14400=1` restores it for an A/B. The upstream
-fall-back also no longer acts on rates with no measured threshold (below
-14400 `v34_rx_data_snr_threshold_db()` returns 99): it walked a clean 12000
-down to 4800 one renegotiation at a time.
+Kept from c7d77d0d: the §9.6 upstream fall-back no longer acts on rates with
+no measured threshold (below 14400 `v34_rx_data_snr_threshold_db()` returns
+99), which walked a clean 12000 down to 4800 one renegotiation at a time.
 
-Not explained, and not verified live yet.
+After the white upstream these modems fall back to `CONNECT 4800 NoEC`, which
+corrupted every PPP frame (bad FCS) in the MT9234 soak -- a separate defect.

@@ -8618,28 +8618,9 @@ static bool v90_upstream_measure_locked(void)
     g_v90_up_snr_done = true;
     snr = v34_v90_upstream_4point_snr(g_v34, 600);
     {
+        int offer = v90_mp_upstream_max_bps(g_v90);
         int baud = v90_selected_upstream_baud_locked() == 3 ? 3000 : 3200;
-        int offer;
         int cap = me_v90_upstream_rate_for_snr(snr, baud);
-
-        /* 14400 at 3200 symbols/s (V.34 Table 8 b = 36, Table 10 K = 24,
-         * M = 8: the one dense-baud rate whose shell mapping fills M^8 = 2^K
-         * exactly) never decoded from a real analogue modem: 0 of 13 v90ras
-         * calls from the Lucent MultiTech (7801) and the Agere MT9234ZBA
-         * (7803), 8-9 November 2026, against 100% B1 fit at 16800 and 19200
-         * from the same modems.  The symbols are clean (all 32 points of the
-         * minimum constellation, 0.15 from the grid) but no B1 template or
-         * frame phase fits, while our own analogue transmitter at 14400
-         * fits 100%.  Until the difference is found, never offer it: the
-         * 4-point reading that asks for 14400 here read 22.5 dB on calls
-         * whose data mode then read 30.6 dB, so ask for 16800 instead, and
-         * let a renegotiation step from 16800 go straight to 12000. */
-        if (baud == 3200 && !getenv("ME_V90_UPSTREAM_ALLOW_14400")) {
-            v90_set_upstream_rate_excluded(g_v90, 14400);
-            if (cap == 14400)
-                cap = 16800;
-        }
-        offer = v90_mp_upstream_max_bps(g_v90);
 
         /* V.90 9.4.2.4 / Table 16: MP's maximum and capability mask govern
          * the peer's selected upstream. Invalid/missing channel evidence or
@@ -10053,10 +10034,6 @@ static bool v90_upstream_adapt_ask_locked(int bps, const char *why, float snr, i
     if (v90_rate_renegotiation_count(g_v90) >= ME_V90_MAX_RENEGOTIATIONS)
         return false;
     v90_set_upstream_rate_limit(g_v90, bps);
-    /* An excluded rate (v90_set_upstream_rate_excluded()) can leave the MP
-     * offering the rate already running: no renegotiation for nothing. */
-    if (v90_mp_upstream_max_bps(g_v90) == cur)
-        return false;
     if (!v90_request_rate_renegotiation(g_v90))
         return false;
     g_v90_ua_pending_bps = bps;

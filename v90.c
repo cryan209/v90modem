@@ -636,7 +636,6 @@ struct v90_state_s {
     bool             b1_received;
     int              upstream_rate_limit_bps;   /* actual V.34 upstream rate; 0 = no cap */
     int              upstream_rate_floor_bps;   /* V.250 +MS receive minimum; 0 = none */
-    uint16_t         upstream_rate_excluded;    /* MP mask bits never offered */
 
     /* V.90 Phase 4 Type-0 MP and CPt-selected modulus/shaping mapper. */
     uint8_t          mp_bits[V90_MP_MAX_BITS];
@@ -1520,7 +1519,7 @@ static int v90_upstream_mask_max_drn(uint16_t mask)
  * (i+2)*2400 bit/s. */
 static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
 {
-    uint16_t mask = s->cp_frame.upstream_rate_mask & (uint16_t) ~s->upstream_rate_excluded;
+    uint16_t mask = s->cp_frame.upstream_rate_mask;
     uint16_t limited = 0;
 
     if (s->upstream_rate_limit_bps <= 0 && s->upstream_rate_floor_bps <= 0)
@@ -1550,21 +1549,6 @@ int v90_mp_upstream_max_bps(const v90_state_t *s)
     return v90_upstream_mask_max_drn(v90_capped_upstream_mask(s))*2400;
 }
 
-static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge);
-
-void v90_set_upstream_rate_excluded(v90_state_t *s, int bps)
-{
-    if (!s || bps < 4800 || bps > 33600 || bps % 2400)
-        return;
-    if (!(s->upstream_rate_excluded & (1U << (bps/2400 - 2))))
-        fprintf(stderr, "[V90] MP upstream: %d bps is never offered\n", bps);
-    s->upstream_rate_excluded |= (uint16_t) (1U << (bps/2400 - 2));
-    /* As v90_set_upstream_rate_limit(): the first MP was built at CPt. */
-    if (!s->v92_mode && s->phase4_mapper_ready
-        && (s->tx_phase == V90_TX_TRN2D || s->tx_phase == V90_TX_RI_ACK))
-        (void) v90_build_mp_type0(s, false);
-}
-
 void v90_set_upstream_rate_floor(v90_state_t *s, int bps)
 {
     if (!s || bps < 0)
@@ -1583,6 +1567,7 @@ int v90_copy_jd_bits(const v90_state_t *s, uint8_t *bits, int max_bits)
     return n;
 }
 
+static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge);
 
 void v90_set_upstream_rate_limit(v90_state_t *s, int bps)
 {

@@ -396,7 +396,9 @@ def main():
     ap.add_argument('--dial', default='2950')
     ap.add_argument('--hold', type=float, default=300)
     ap.add_argument('--wait', type=float, default=120, help='seconds to wait for CONNECT')
-    ap.add_argument('--size', type=int, default=512, help='ICMP body bytes per ping')
+    ap.add_argument('--size', type=int, default=128,
+                    help='ICMP body bytes per ping (512 a second flooded a 4800 fallback '
+                         'and the MT9234 bridge died on a stalled USB write)')
     ap.add_argument('--at', action='append', default=[], help='AT command before dialling')
     ap.add_argument('--report', action='append', default=[], help='AT query after hangup')
     a = ap.parse_args()
