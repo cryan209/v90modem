@@ -1123,6 +1123,10 @@ typedef struct
     bool v92_short_a_seen;
     int v92_short_count;
     span_sample_timer_t v92_short_rev_time;
+    /*! V.90 9.2.1.1.3: when our first Tone B reversal went out, for RTDEd (9.2.1.1.4). */
+    span_sample_timer_t v90_b_rev_time;
+    /*! V.90 9.2.1.1.4 RTDEd in samples, used only for the 9.2.1.2.4 deadline. */
+    int v90_rtded;
     bool v92_info1d_mode;
     /*! \brief V.92 INFO1d Table 17 bit 70: PCM upstream supported by this
         digital endpoint.  Off by default -- the upstream data path is still

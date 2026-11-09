@@ -330,6 +330,9 @@ static bool v90_tone_a_reversal_recovery_due(const v34_state_t *s)
     rtd_samples = (s->rx.round_trip_delay_estimate > 0)
                   ? s->rx.round_trip_delay_estimate
                   : 0;
+    if (s->tx.v90_rtded > rtd_samples)
+        rtd_samples = s->tx.v90_rtded;
+    /*endif*/
     deadline_samples = (SAMPLE_RATE*900 + 500)/1000 + rtd_samples;
     if (s->rx.tone_ab_hop_time > 0
         &&  s->tx.sample_time >= s->rx.tone_ab_hop_time)
@@ -4267,6 +4270,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         {
             /* 40ms has passed - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.v90_b_rev_time = s->rx.sample_time;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_B;
         }
@@ -4333,6 +4337,27 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: second Tone A reversal transaction completed; receiving analogue L1/L2\n");
             v90_phase2_consume_reversal(s);
+            /* V.90 9.2.1.1.4: RTDEd is from our Tone B reversal at the line
+               to the second Tone A reversal, less the analogue modem's 40 ms.
+               The full procedure never measured it, so 9.2.1.2.4's deadline
+               (900 ms + RTD) ran at a bare 900 ms and, against an Eicon Diva
+               over ISDN and SIP, fired 20 ms before the Diva's third reversal:
+               our Tone B reversal then went out before the Diva was listening
+               for it (9.2.2.1.6/9.2.2.1.7), it ignored our L1/L2 and INFO1d,
+               and Phase 2 repeated for 30 s.  Kept apart from
+               round_trip_delay_estimate, which the engine's echo canceller
+               and later deadlines read and have always seen as 0 on V.90. */
+            s->tx.v90_rtded = 0;
+            if (s->tx.v90_b_rev_time > 0
+                &&  s->rx.tone_ab_hop_time > s->tx.v90_b_rev_time + 40*(SAMPLE_RATE/1000))
+            {
+                s->tx.v90_rtded =
+                    (int) (s->rx.tone_ab_hop_time - s->tx.v90_b_rev_time - 40*(SAMPLE_RATE/1000));
+            }
+            /*endif*/
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90 9.2.1.1.4: RTDEd %d samples\n",
+                     s->tx.v90_rtded);
             s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
