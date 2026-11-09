@@ -12810,6 +12810,11 @@ int main(int argc, char **argv)
     v91_law_t v92_e2e_law;
     int i;
 
+    /* These are frame- and sequence-level tests: they post CPt after the
+       192T Ri floor of 9.4.1.1.  The live startup Ri is longer (v90.c,
+       v90_ri_length()); keep the floor here unless the caller sets it. */
+    setenv("V90_RI_MIN_SYMBOLS", "192", 0);
+
     verbose_env = getenv("VPCM_VERBOSE");
     g_vpcm_verbose = (verbose_env != NULL && verbose_env[0] != '\0' && strcmp(verbose_env, "0") != 0);
     run_sessions = true;

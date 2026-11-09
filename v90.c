@@ -852,9 +852,32 @@ static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
 /* §9.4.1.1 gives startup's Ri "at least 192T"; §9.6.1.1 gives Rd
    exactly 384T. Both use the R sign pattern, but §8.6.4 selects different
    magnitudes; length and magnitude depend on the procedure. */
+/* How long startup Ri runs before a received CPt is acknowledged with R-bar-i.
+   The analogue modem repeats CPt until it detects the Ri-to-R-bar-i
+   transition (9.4.2.1, 9.4.2.2), so a longer Ri costs only time.  At the
+   192T floor the transition came ~160 ms into Ri, on the first CPt, and an
+   Eicon Diva V90A caller never saw it: it repeated CPt through our TRN2d and
+   MP and retrained (2026-11-10).  1600T (500 ms) gives its receiver time to
+   settle on Ri first.  V90_RI_MIN_SYMBOLS overrides it (192 = the floor). */
+static int v90_ri_startup_symbols(void)
+{
+    static int symbols = -1;
+
+    if (symbols < 0) {
+        const char *e = getenv("V90_RI_MIN_SYMBOLS");
+
+        symbols = 1600;
+        if (e && *e)
+            symbols = atoi(e);
+        if (symbols < V90_RI_SYMBOLS)
+            symbols = V90_RI_SYMBOLS;
+    }
+    return symbols;
+}
+
 static int v90_ri_length(const v90_state_t *s)
 {
-    return s->reneg_active ? V90_RD_RENEG_SYMBOLS : V90_RI_SYMBOLS;
+    return s->reneg_active ? V90_RD_RENEG_SYMBOLS : v90_ri_startup_symbols();
 }
 
 /* V.90 §8.6.4: Rd uses the highest-power point of each DATA constellation;
