@@ -644,3 +644,18 @@ over all eight symbol offsets. The Agere MT9234 starts B1 7 symbols after the
 4-point signal, not the 9 the blind placement assumed, so the Lucent (7801)
 and Agere (7803) upstreams had decoded white at every rate. The previous
 binary is `/opt/v90ras/sip_v90_modem.c7d77d0d`. Only `v90ras` was restarted.
+
+## Deployed 6d798ffa (2026-11-10 08:16)
+
+On top of 2288b8fc: the V.90 digital side sends INFO1d as soon as it sees the
+analogue modem's 9.2.2.1.8 Tone A, without the guard/carrier "still holding
+Tone A" hold. That hold had delayed INFO1d by 650 ms on every Phase 2 of an
+Eicon Diva V90A call (eicon420 ttyds6, controller 4, dialling 2950), and the
+Diva never answered with INFO1a. The previous binary is
+`/opt/v90ras/sip_v90_modem.2288b8fc`. Only `v90ras` was restarted.
+
+Diva V90A caller recipe (eicon420, spare `/dev/ttyds6`; only controllers
+3, 4, 7 and 8 reach the Cisco, the others answer NO DIALTONE):
+`AT&F5`, `AT+iQ=o4`, `AT+iO7911`, `AT+MS=V90A,0`, `ATX4`, `AT&D0&K0`, then
+`ATD2950`. `tools/soak/ppp_ping_soak.py --pty /dev/ttyds6 --at ...` runs there
+unchanged (copy it to eicon420; it needs only python3 and sudo).
