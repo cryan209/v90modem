@@ -1441,10 +1441,78 @@ Weaknesses this exposed, all still open:
   remaining bad calls are mostly 24-900 errors per 1M, but 2743/9600 at a
   17.6-17.9 dB reading ran at 6-8% BER on some delays and clean on others.
   The outcome swings with channel delay at the same reading.
-- **2400 bit/s is broken.** At 2400 baud it errs (1-8%) at a 20 dB reading,
-  where 4800 is clean from 12.4. The tables never offer it; the floor is 4800.
+- ~~**2400 bit/s is broken.**~~ Fixed the same day: those 1M-bit runs (417 s
+  at 2400 bit/s) outlasted the data-mode timing collapse in the next section.
+  2400 bit/s is now the floor at 2400 baud.
 - **The receiver is weak at low SNR.** 2400/7200 (3 bits a symbol) runs at
   about 15% BER at a 13 dB reading.
 - **The top rates come out white:** 2743/24000-26400, 2800/26400 and
   3000/28800 run at about 47% errors even at 44 dB, and 3000/9600 fails
   up to 18.4 dB where 12000 is clean from 16.8. None of these is offered.
+
+## Data-mode timing steer: the main tap, not the energy centroid (2026-11-09)
+
+The DATA timing steer (`v34rx_data.c`, from the RasFinder section above) held
+the equalizer's tap-energy centroid still. On a noisy line that is not a
+timing measure. A T/2 fractionally spaced equalizer has a null space: the band
+above the symbol rate's Nyquist edge carries no signal, so noise random-walks
+the tap tails there without changing the output. The centroid follows that
+walk and the steer chases it as timing error. At 3000/9600, 20 dB, 0 ppm the
+centroid went 63.0 -> 66.0 taps in 128 s, `timing_corr` reached 4600 with no
+clock offset at all, and the receiver went white once the main tap reached the
+span edge. It collapses after minutes, not seconds, so only long runs show it.
+The 1M-bit calibration runs at 2400 bit/s were 417 s, which is where "2400
+bit/s is broken" came from.
+
+Turning the steer off fixes 0 ppm but loses +/-20 ppm, and reversing its sign
+does the opposite, so the steer is right and the measure is wrong. A 1e-5 DATA
+tap leak bounded the walk but moved the centroid ~30 taps and broke the high
+rates.
+
+**Fix:**
+- **What it steers on.** At low rates the steer holds the interpolated main tap
+  (`v34_rx_tap_peak()`), which only moves when the sampling instant does.
+  `v34_rx_steer_on_peak()` uses it below 6.5 bits a symbol at 2400-3000 baud
+  (14400 and below at 2400, 19200 and below at 3000), and the centroid
+  everywhere else. Neither measure is right everywhere:
+  - The peak lost 2400 baud at 16800-21600 on clean lines (delay 13, both
+    directions), where the centroid was clean.
+  - At 3429 half duplex the peak walks the wrong way: `v34_hdx_test` 3429 9600
+    A-law, peak 62.77 -> 61.60, centroid 63.38 -> 67.02, 917 errors.
+  - The noise that drives the wander is also what limits the rate, so bits a
+    symbol separates the two.
+- **Integral path.** The steer is now proportional plus integral (0.25 per
+  update). Proportional alone sits off the reference by the clock offset's
+  worth of error, 0.1 tap (1/20 symbol) at 20 ppm and 3000 baud, which costs a
+  26400 eye. Gains of 0.05 and 1.0 both lost more calls.
+- **Peak outliers.** A peak reading more than one tap off the reference is
+  ignored. The peak can hop to a spurious tap for one reading (20.9 and 7.8
+  against 63.0 at 2400/7200, 18 dB, -20 ppm), and one such reading through
+  the integral reversed the steer.
+
+**Scored** with `v34_duplex_test` on 20 configurations: 2400-3429 baud,
+2400-28800 bit/s, 16-50 dB, -20/0/+10/+20 ppm, delays 0-13, 150-450 s each.
+
+| | runs clean both ways |
+|---|---|
+| centroid steer (HEAD) | 10/20 |
+| new steer | 20/20 |
+
+The old steer lost every 450 s 2400-baud run (2400-9600 bit/s at 16-22 dB) and
+3000/14400 at 24 dB +20 ppm. 2400/2400 is now clean on 1M bits each way at
+every reading down to 9.3 dB (8 dB injected, delays 0/7/23). It is the floor
+of the 2400-baud rate table (`v34_rx_training_rate()`): automatic rate picks
+it per direction below 4800's threshold (10 dB injected -> 2400/2400).
+
+Regression rows:
+- `tests/slow.list`: 2400/2400 at 18 dB, 2400/7200 at 18 dB -20 ppm, and
+  3000/9600 at 22 dB -20 ppm. Each failed both directions on the old steer.
+- `tests/fast.list`: the 10 dB automatic-rate row.
+
+**Still open:**
+- 2743/21600 at 42 dB loses delays 5 and 13 on either measure.
+- `v90_engine_replay` of `rf-bbs-2` no longer reaches data mode (it diverges
+  in training with today's 11.5/11.6 changes), so the RasFinder drift case
+  has no offline check. It runs at 3200 baud, so it stays on the
+  centroid, now with the integral path. It needs a live call.
+

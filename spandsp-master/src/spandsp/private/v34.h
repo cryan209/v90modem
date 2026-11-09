@@ -2627,6 +2627,10 @@ typedef struct
        steering the sampling instant back to it (v34rx_data.c). */
     float data_tap_centroid_ref;
     int data_centroid_count;
+    /*! Integral path of the DATA timing steer: units of eq_put_step per update. */
+    float data_steer_rate;
+    /*! Fractional eq_put_step carried between updates. */
+    float data_steer_frac;
     /*! The last B1 that matched its template (normalized correlation >= 0.9):
         its search offset and conjugation, reused when a later B1 does not. */
     bool b1_good_valid;

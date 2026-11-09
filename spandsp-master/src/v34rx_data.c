@@ -157,6 +157,51 @@ static int v34_rx_b1_search_symbols(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Main-tap position, in taps, parabolically interpolated between the peak
+   and its neighbours.  This, not the energy centroid, is what the DATA-mode
+   timing steer holds still.  A T/2 fractionally spaced equalizer has a null
+   space (the band above the symbol rate's Nyquist edge carries no signal),
+   so on a noisy line the tap tails random-walk there without changing the
+   output; the energy centroid follows that walk (63.0 -> 66.0 taps over
+   128 s at 3000 baud, 20 dB SNR), the steer chased it as if it were timing
+   error (timing_corr 4600 with a 0 ppm clock) and the receiver collapsed
+   when the taps reached the span edge.  The main tap only moves when the
+   sampling instant does: it holds at 63.0 +/- 0.1 there and still tracks
+   +/-20 ppm. */
+static float v34_rx_tap_peak(const v34_rx_state_t *s)
+{
+    const int n = V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;
+    float best = -1.0f;
+    int k = 0;
+
+    for (int i = 0;  i < n;  i++)
+    {
+        float p = s->eq_coeff[i].re*s->eq_coeff[i].re + s->eq_coeff[i].im*s->eq_coeff[i].im;
+
+        if (p > best)
+        {
+            best = p;
+            k = i;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    if (k > 0  &&  k < n - 1)
+    {
+        float a = sqrtf(s->eq_coeff[k - 1].re*s->eq_coeff[k - 1].re + s->eq_coeff[k - 1].im*s->eq_coeff[k - 1].im);
+        float b = sqrtf(best);
+        float c = sqrtf(s->eq_coeff[k + 1].re*s->eq_coeff[k + 1].re + s->eq_coeff[k + 1].im*s->eq_coeff[k + 1].im);
+        float den = a - 2.0f*b + c;
+
+        if (den < 0.0f)
+            return (float) k + 0.5f*(a - c)/den;
+        /*endif*/
+    }
+    /*endif*/
+    return (float) k;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Energy centroid of the equalizer taps, in taps. */
 static float v34_rx_tap_centroid(const v34_rx_state_t *s)
 {
@@ -172,6 +217,42 @@ static float v34_rx_tap_centroid(const v34_rx_state_t *s)
     }
     /*endfor*/
     return (e > 0.0f)  ?  m/e  :  0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Whether the DATA timing steer holds the interpolated main tap
+   (v34_rx_tap_peak()) rather than the energy centroid.  Neither is right
+   everywhere, so this follows what each was measured to do
+   (v34_duplex_test, 150-450 s runs over V34_DUPLEX_DELAY):
+
+   - the centroid is dragged through the FSE null space by noise, so on the
+     noisy lines the low rates exist for it collapses: 2400 baud at
+     2400-9600 bit/s, 16-22 dB, 450 s, 0/8 clean on the centroid, 8/8 on
+     the peak; 2743-3000 baud at 9600, 20-22 dB, 150 s, 11/18 -> 18/18;
+   - the peak is the worse measure of a wide main lobe on a clean line:
+     2400 baud at 16800-21600, 36-50 dB, delay 13 lost both directions on
+     the peak and nothing on the centroid, and 2743/21600 and 2800/24000
+     were no better on it;
+   - at 3200 and 3429 (reached off the dense path only in half duplex) the
+     peak walks the WRONG way: v34_hdx_test 3429 9600 A-law moved it 62.77
+     -> 61.60 while the centroid went 63.38 -> 67.02 (917 errors); on the
+     centroid it holds 63.37 -> 63.41 with none.
+
+   The noise that drives the wander is what limits the rate, so bits per
+   symbol separates the two: the peak below 6.5 (19200 at 3000 baud, 14400
+   at 2400), the centroid from there up. */
+static bool v34_rx_steer_on_peak(const v34_rx_state_t *s)
+{
+    int baud = baud_rate_parameters[s->baud_rate].baud_rate;
+    int bps = (s->bit_rate/2 + 1)*2400;
+
+    return baud <= 3000  &&  2*bps < 13*baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float v34_rx_steer_position(const v34_rx_state_t *s)
+{
+    return v34_rx_steer_on_peak(s)  ?  v34_rx_tap_peak(s)  :  v34_rx_tap_centroid(s);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -198,9 +279,13 @@ static float v34_rx_b1_fallback_threshold(void)
    on its own -- its tap-energy centroid walked 63.1 -> 66.1 T/2 taps, the
    measured 3.4 samples -- until the main tap ran out of span and the call
    collapsed (0.08 -> 0.38 from the grid; freezing Godard changes nothing).
-   So the centroid is the timing error: hold it where the settled data mode
-   put it by moving the sampling instant (eq_put_step, 1/192 sample per
-   unit).  The reference is latched 2048 symbols after B1 (see there).
+   So the main-tap position is the timing error: hold it where the settled
+   data mode put it by moving the sampling instant (eq_put_step, 1/192
+   sample per unit).  The reference is latched 2048 symbols after B1 (see
+   there).  At the low rates of 2400-3000 baud it is measured by the
+   interpolated tap peak, not the energy centroid, which a noisy line drags
+   through the FSE null space with no timing change at all
+   (v34_rx_steer_on_peak()).
 
    Default -1: proportional, one unit per 0.05 tap of centroid error every
    256 symbols, capped at 8 (65 ppm at 3200 baud).  Measured on that
@@ -516,6 +601,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    the sampling instant off the eye.  < 0 means not latched. */
                 s->data_tap_centroid_ref = -1.0f;
                 s->data_centroid_count = 256 - 2048;
+                s->data_steer_rate = 0.0f;
+                s->data_steer_frac = 0.0f;
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
@@ -726,22 +813,47 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 &&  !s->b1_replaying
                 &&  ++s->data_centroid_count >= 256)
             {
-                float d = v34_rx_tap_centroid(s) - s->data_tap_centroid_ref;
+                float d = v34_rx_steer_position(s) - s->data_tap_centroid_ref;
                 int st;
-
                 s->data_centroid_count = 0;
                 if (s->data_tap_centroid_ref < 0.0f)
                 {
-                    s->data_tap_centroid_ref = v34_rx_tap_centroid(s);
+                    s->data_tap_centroid_ref = v34_rx_steer_position(s);
                 }
                 else if (v34_rx_centroid_steer() < 0)
                 {
-                    st = (int) (d/0.05f);
+                    float u;
+
+                    /* Proportional plus integral.  Proportional alone has to
+                       sit off the reference by the clock offset's worth of
+                       error (0.1 tap at 20 ppm, 3000 baud) -- 1/20 of a
+                       symbol, which costs a 26400 eye.  The integral learns
+                       the clock offset as a steady rate and takes that error
+                       to zero, in about 100 updates (gain 0.25: 0.05 and 1.0
+                       both lost more calls at 20 ppm). */
+                    /* The peak can hop to a spurious tap for one reading
+                       (20.9 and 7.8 against a reference of 63.0, 2400/7200
+                       at 18 dB, -20 ppm), and one such reading through the
+                       integral reversed the steer and lost the call.  The
+                       steer never lets the real main tap get a whole tap
+                       away, so a reading that far is not timing. */
+                    if (v34_rx_steer_on_peak(s)  &&  fabsf(d) > 1.0f)
+                        d = 0.0f;
+                    /*endif*/
+                    s->data_steer_rate += 0.25f*d;
+                    if (s->data_steer_rate > 8.0f)
+                        s->data_steer_rate = 8.0f;
+                    else if (s->data_steer_rate < -8.0f)
+                        s->data_steer_rate = -8.0f;
+                    /*endif*/
+                    u = d/0.05f + s->data_steer_rate + s->data_steer_frac;
+                    st = (int) lrintf(u);
                     if (st > 8)
                         st = 8;
                     else if (st < -8)
                         st = -8;
                     /*endif*/
+                    s->data_steer_frac = fminf(fmaxf(u - (float) st, -0.5f), 0.5f);
                     s->eq_put_step += st;
                     s->total_baud_timing_correction += st;
                 }
@@ -1080,11 +1192,12 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     {
                         fprintf(stderr,
                                 "[V34T] dist %.4f timing_corr %d baud_phase %.1f "
-                                "tap_centroid %.3f (ref %.3f) carrier %+.5f deg/sym "
+                                "tap_centroid %.3f peak %.3f (ref %.3f) carrier %+.5f deg/sym "
                                 "agc %.5f\n",
                                 dist, s->total_baud_timing_correction,
                                 (double) s->pri_ted.baud_phase,
                                 (double) v34_rx_tap_centroid(s),
+                                (double) v34_rx_tap_peak(s),
                                 (double) s->data_tap_centroid_ref,
                                 (double) s->phase4_da_derot_rate*180.0/2147483648.0,
                                 (double) s->agc_scaling);

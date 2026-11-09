@@ -3319,9 +3319,13 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
    Left out, because they have fewer than 10 clean readings above their
    highest failure: 2743/24000-26400, 2800/26400 and 3000/28800, which are
    white (about 47% errors) even at 44 dB, and 3000/9600, which fails to
-   18.4 dB while 12000 is clean from 16.8.  2400 bit/s is left out at every
-   baud: at 2400 baud it errs at 20 dB (1-8%) where 4800 is clean from 12.4,
-   so the floor is 4800.  Zero entries end a row. */
+   18.4 dB while 12000 is clean from 16.8.  Zero entries end a row.  Below
+   a row the floor is 2400 bit/s at 2400 baud (Table 2/V.34 has it at no
+   other symbol rate), clean on 1M bits each way at every reading down to
+   9.3 dB (8 dB injected, delays 0/7/23), and 4800 elsewhere.  2400 bit/s
+   once looked broken here (1-8% errors at 20 dB): those runs outlasted the
+   data-mode timing steer's collapse on noisy lines, fixed in v34rx_data.c
+   (v34_rx_steer_on_peak()). */
 /* The thresholds are the measured edge; out of sample (delays 1/11) 8 of
    112 automatic-rate calls read within 0.2 dB above one and carried 27-8421
    errors per million bits.  Ask for this much above it. */
@@ -3360,8 +3364,8 @@ SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
             /*endif*/
         }
         /*endfor*/
-        /* Below the table: the 4800 floor (nothing lower was clean). */
-        return 4800;
+        /* Below the table: the floor. */
+        return (s->rx.baud_rate == V34_BAUD_RATE_2400)  ?  2400  :  4800;
     }
     /*endif*/
     if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3429)
