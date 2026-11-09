@@ -601,3 +601,13 @@ On top of 8f918728:
 The previous binary is `/opt/v90ras/sip_v90_modem.8f918728`. Again only
 `v90ras` was restarted.
 
+
+## Deployed 66365f34 (2026-11-09 20:47)
+
+On top of f03cd55b: INFO1a reserved bits 12:17 and 32:33 are no longer
+checked (V.90 Table 10, "not interpreted by the digital modem"). The Win95
+modem on 7801 sets bit 33, so its V.90 requests had been rejected and every
+call from 7801 fell back to V.34.
+
+The previous binary is `/opt/v90ras/sip_v90_modem.f03cd55b`. Only `v90ras`
+was restarted; the v90isdn server still has the older file mapped.
