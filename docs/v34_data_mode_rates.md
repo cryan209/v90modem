@@ -1560,8 +1560,21 @@ it made one correction in 24 s live, and that freezing it changed nothing.
 The rates that were "white even at 44 dB" in the TRN tables section are clean
 at 50 dB on delays 0/7/13 over 60 s, 12/12: 2743/24000, 2743/26400,
 2800/26400 and 3000/28800. Their ceiling was this runaway, not the channel.
-They are still not in `v34_rx_training_rate()`'s tables; calibrating them is
-next.
+They were then calibrated (1M bits, delays 0/7/23, both laws, 29-44 dB
+injected):
+
+| rate | highest failing reading | clean readings above it | result |
+|---|---|---|---|
+| 2743/24000 | 32.6 dB | 54 | in the table at 32.7 |
+| 2800/26400 | 34.8 dB | 17 | in the table at 34.9 |
+| 2743/26400 | | 5 | left out |
+| 3000/28800 | | 3 | left out |
+
+The two left out still carry 30-3700 errors per million at 44 dB, where the
+TRN reading tops out near 35 dB. That is the G.711 ceiling. On 12
+automatic-rate calls at delays 1/11 that were not in the calibration set,
+there were no errors: 2743 asks 24000 from a 33.2 dB reading, and 2800 asks
+26400 at 35.5.
 
 Regression row in `tests/slow.list`: 2743/21600 at 42 dB, delay 5.
 

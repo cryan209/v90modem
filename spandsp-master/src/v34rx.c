@@ -3316,9 +3316,13 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
    (fails to 17.8) and 12000 from 17.0 (fails to 19.9), and asked 35.0 dB for
    19200 (clean from 29.9) and 41.0 for 21600 (clean from 33.6).
 
-   Left out, because they have fewer than 10 clean readings above their
-   highest failure: 2743/24000-26400, 2800/26400 and 3000/28800, which are
-   white (about 47% errors) even at 44 dB.  Zero entries end a row.
+   2743/24000 and 2800/26400 were white (about 47% errors) even at 44 dB
+   until the Godard loop left DATA (4945aba4); calibrated then at 29-44 dB
+   injected, they are clean above 32.6 and 34.8.  Left out, because they
+   have fewer than 10 clean readings above their highest failure:
+   2743/26400 (5) and 3000/28800 (3), which still carry 30-3700 errors per
+   million at 44 dB, where the TRN reading tops out near 35 dB -- the G.711
+   ceiling.  Zero entries end a row.
    2800/9600 and 3000/9600 were recalibrated (same method, 12-17 dB
    injected) after the data-mode timing fix: 18.6 -> 15.8, and 3000/9600,
    left out at "fails to 18.4", is clean above 14.3.  Below
@@ -3340,9 +3344,9 @@ static const struct
 {
     /* 2400 */ {{21600, 33.6f}, {19200, 29.9f}, {16800, 27.4f}, {14400, 23.8f},
                 {12000, 20.0f}, {9600, 17.9f}, {7200, 16.2f}, {4800, 12.4f}},
-    /* 2743 */ {{21600, 30.7f}, {19200, 26.8f}, {16800, 23.3f}, {14400, 21.0f},
+    /* 2743 */ {{24000, 32.7f}, {21600, 30.7f}, {19200, 26.8f}, {16800, 23.3f}, {14400, 21.0f},
                 {12000, 18.9f}, {9600, 17.1f}, {7200, 15.1f}},
-    /* 2800 */ {{24000, 32.0f}, {21600, 31.8f}, {19200, 26.1f}, {16800, 22.6f},
+    /* 2800 */ {{26400, 34.9f}, {24000, 32.0f}, {21600, 31.8f}, {19200, 26.1f}, {16800, 22.6f},
                 {14400, 19.0f}, {12000, 18.6f}, {9600, 15.8f}, {7200, 14.8f}},
     /* 3000 */ {{26400, 33.2f}, {24000, 30.3f}, {21600, 26.3f}, {19200, 24.3f},
                 {16800, 22.3f}, {14400, 18.7f}, {12000, 16.8f}, {9600, 14.4f},
