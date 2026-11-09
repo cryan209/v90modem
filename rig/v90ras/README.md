@@ -619,3 +619,11 @@ out of range or that projects 0 bit/s for the rate it selects. A CRC-valid
 frame like that came out of the MultiTech's Tone A and dropped a V.90 call to
 V.34. The previous binary is `/opt/v90ras/sip_v90_modem.66365f34`. Only
 `v90ras` was restarted.
+
+## Deployed 2aa392b9 (2026-11-09 22:35)
+
+On top of 8bfd6695: the V.90 digital side keeps INFO1a framing armed while it
+waits for Tone A (§9.2.1.1.7). The Courier on 7802 sends INFO1a before our
+INFO1d, and the disarmed framer lost it, so its first Phase 2 timed out and
+restarted. The previous binary is `/opt/v90ras/sip_v90_modem.8bfd6695`. Only
+`v90ras` was restarted; v90isdn still runs an older binary.
