@@ -18419,13 +18419,14 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
         }
         return false;
     }
-    /* V.92 Table 19 bit 33 (raw 2) is the upstream carrier, which a short
-     * Phase 2 has no INFO1d to carry (9.4); the V.90 Table 10 reserves it. */
-    return received.raw_12_17 == 0
-        && (received.raw_32_33 == 0
-            || (received.raw_32_33 == 2 && g_v92_info0_mutual
-                && g_v92_info0_peer_short_phase2 && me_short_phase2_enabled()))
-        && received.u_info > 0
+    /* V.90 Table 10: bits 12:17 and 32:33 are "set to 0 by the analogue
+     * modem and are not interpreted by the digital modem".  Not interpreted
+     * means not checked: the Win95 modem on 7801 sets bit 33 (raw 32:33 = 2,
+     * V.92 Table 19's upstream-carrier bit) in an otherwise ordinary V.90
+     * INFO1a -- U_INFO=78, upstream 3200, downstream PCM -- and rejecting it
+     * dropped 2 of 2 live calls to V.34 (2026-11-09).  The CRC protects the
+     * frame; the fields we act on are checked below. */
+    return received.u_info > 0
         && received.upstream_symbol_rate_code >= 3
         && received.upstream_symbol_rate_code <= 4
         && received.downstream_rate_code == 6

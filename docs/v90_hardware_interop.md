@@ -1365,3 +1365,14 @@ new call. Do not classify that arm as merely another compression insertion
 or retry an uncertain bulk-OUT prefix. Further probes isolate USB read sizes
 and retain a raw pre-PTY bulk-IN tap; they are not yet qualified fixes.
 Local provenance: `artifacts/usb-endurance/uart4-{b1,a1,a2}/`.
+
+## INFO1a reserved bits are not checked (2026-11-09)
+
+The Win95 modem on FXS 7801 sends a V.90 INFO1a with bit 33 set
+(raw 32:33 = 2; it is V.92 Table 19's upstream-carrier bit) and otherwise a
+normal request: U_INFO=78, upstream 3200, downstream PCM. We required bits
+12:17 and 32:33 to be zero and rejected it, so 2 of 2 live calls from 7801
+fell back to V.34. V.90 Table 10 says those bits are "not interpreted by the
+digital modem". The acceptance test now ignores them and keeps checking only
+the fields we act on (U_INFO, upstream rate 3/4, downstream 6, ranges); the CRC
+still guards the frame. Fixture: `reference-data/artifacts/win95-7801-info1a-bit33-20261109`.
