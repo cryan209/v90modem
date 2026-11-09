@@ -681,3 +681,11 @@ On top of 63a0c4d8: startup Ri runs 1600T (500 ms) before R-bar-i
 acknowledges CPt (`V90_RI_MIN_SYMBOLS`, floor 192). At 192T the Diva kept
 repeating CPt through our TRN2d and MP and retrained. The previous binary is
 `/opt/v90ras/sip_v90_modem.63a0c4d8`.
+
+## Deployed 89575b3e (2026-11-10 10:27)
+
+On top of e350541e: loop timing starts each call at the frequency the last
+call from the same caller converged to (`/var/tmp/v90ras/sip_v90_modem-tx-clock.tsv`;
+7911 = +63.97 ppm). `ME_PCMU_ALAW_BEARER` is available but not set. Removed
+the temporary `ME_V90_MAX_TX_DBM0_CODE=23` and `ME_V90_TRN2D_SYMBOLS=6000`
+from `sip.env`. The previous binary is `/opt/v90ras/sip_v90_modem.e350541e`.
