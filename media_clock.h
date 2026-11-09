@@ -70,5 +70,11 @@ void    media_clock_rx(media_clock_t *mc, uint32_t rtp_ts, int64_t now_ns);
 /* Period until the next tick, in ns. */
 double  media_clock_period_ns(const media_clock_t *mc);
 double  media_clock_ppm(const media_clock_t *mc);
+/* Start the loop at this frequency (ppm) instead of 0: the integrator holds
+   it, so a far end whose clock is already known is tracked from the first
+   tick rather than after the ~80 s acquisition.  Call after reset. */
+void    media_clock_seed(media_clock_t *mc, double ppm);
+/* The loop's frequency estimate (the integrator, without the phase term). */
+double  media_clock_freq_ppm(const media_clock_t *mc);
 
 #endif

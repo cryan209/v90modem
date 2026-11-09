@@ -52,6 +52,22 @@ double media_clock_ppm(const media_clock_t *mc)
     return mc->ppm;
 }
 
+void media_clock_seed(media_clock_t *mc, double ppm)
+{
+    if (ppm > mc->max_ppm)
+        ppm = mc->max_ppm;
+    if (ppm < -mc->max_ppm)
+        ppm = -mc->max_ppm;
+    mc->integ = ppm;
+    mc->ppm = ppm;
+    mc->period_ns = 1e9 * mc->samples_per_frame / mc->sample_rate / (1.0 + ppm * 1e-6);
+}
+
+double media_clock_freq_ppm(const media_clock_t *mc)
+{
+    return mc->integ;
+}
+
 void media_clock_tick(media_clock_t *mc, int64_t now_ns)
 {
     mc->ticks++;

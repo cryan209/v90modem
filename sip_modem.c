@@ -34,6 +34,9 @@
 #include <limits.h>
 
 #include <pjsua-lib/pjsua.h>
+#include <spandsp/telephony.h>
+#include <spandsp/bit_operations.h>
+#include <spandsp/g711.h>
 #include <pjmedia-codec/passthrough.h>
 #include <pjmedia-audiodev/audiodev.h>
 #include <pjmedia/frame.h>
@@ -76,6 +79,79 @@ static bool             g_exit_after_call = false;
 static bool             g_had_call = false;
 static pj_bool_t        g_media_connected = PJ_FALSE;
 static pj_bool_t        g_passthrough_enabled = PJ_FALSE;
+
+/* PCMU leg whose far-end codec is A-law (ME_PCMU_ALAW_BEARER=1).
+ *
+ * V.90 needs the digital modem's codewords to reach the analogue modem's
+ * codec unchanged, and INFO0d bit 39 tells it which law that codec uses.
+ * Where the gateway transcodes our PCMU to an A-law ISDN B channel, both
+ * fail: an Eicon Diva V90A caller (2026-11-10) read its A-law B channel as
+ * the mu-law we declared, so our Ri at mu-law 0xb1 arrived as A-law 0x98,
+ * which as mu-law is 11900 rather than 3772. The card never reported Ri
+ * detected (state 00c2) and repeated CPt until it retrained, on every call.
+ * Its CPt also declared a mu-law codec (bit 35), echoing our declaration.
+ *
+ * The gateway on that path (measured on the Diva's received audio) converts
+ * by decoding to linear and re-encoding, linear_to_alaw(ulaw_to_linear(u)),
+ * not by Table 3/G.711: our mu-law 0xa1 arrived as A-law 0x88 where the
+ * table gives 0x8b.  So the engine runs A-law and each A-law codeword goes
+ * out as the mu-law codeword that THAT conversion returns to it; received
+ * octets are mapped back the same way.  The engine, and its G.711 taps, see
+ * A-law throughout; replay those taps as alaw. */
+static pj_bool_t        g_pcmu_alaw_bearer = PJ_FALSE;
+static uint8_t          g_bearer_a2u[256];   /* A-law we mean -> mu-law we send */
+static uint8_t          g_bearer_u2a[256];   /* mu-law received -> A-law it was */
+
+static void bearer_maps_init(void)
+{
+    static pj_bool_t done = PJ_FALSE;
+
+    if (done)
+        return;
+    for (int a = 0; a < 256; a++) {
+        int target = alaw_to_linear((uint8_t) a), best = -1, best_err = 0;
+
+        for (int u = 0; u < 256; u++) {
+            int lin = ulaw_to_linear((uint8_t) u);
+            int err = abs(lin - target);
+
+            if (linear_to_alaw((int16_t) lin) == a && (best < 0 || err < best_err)) {
+                best = u;
+                best_err = err;
+            }
+        }
+        /* No mu-law codeword lands on it: the closest one is all we can do. */
+        g_bearer_a2u[a] = (uint8_t) (best >= 0 ? best : linear_to_ulaw((int16_t) target));
+    }
+    for (int u = 0; u < 256; u++) {
+        int target = ulaw_to_linear((uint8_t) u), best = -1, best_err = 0;
+
+        for (int a = 0; a < 256; a++) {
+            int lin = alaw_to_linear((uint8_t) a);
+            int err = abs(lin - target);
+
+            if (linear_to_ulaw((int16_t) lin) == u && (best < 0 || err < best_err)) {
+                best = a;
+                best_err = err;
+            }
+        }
+        g_bearer_u2a[u] = (uint8_t) (best >= 0 ? best : linear_to_alaw((int16_t) target));
+    }
+    done = PJ_TRUE;
+}
+
+static void rx_g711(const uint8_t *octets, int count)
+{
+    static uint8_t conv[2048];
+
+    if (g_pcmu_alaw_bearer && octets && count > 0
+        && count <= (int) sizeof(conv)) {
+        for (int i = 0; i < count; i++)
+            conv[i] = g_bearer_u2a[octets[i]];
+        octets = conv;
+    }
+    me_rx_g711(octets, count);
+}
 
 typedef struct modem_passthrough_port_s {
     pjmedia_port base;
@@ -147,6 +223,9 @@ static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
 
     if (me_tx_g711(port->tx_payload, (int)count) != (int)count)
         return PJ_EBUG;
+    if (g_pcmu_alaw_bearer)
+        for (unsigned k = 0; k < count; k++)
+            port->tx_payload[k] = g_bearer_a2u[port->tx_payload[k]];
 
     memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
     tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
@@ -243,11 +322,11 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             if (i == 0 && adj > 0 && sf_bytes < PJ_ARRAY_SIZE(adj_g711_buf)) {
                 memcpy(adj_g711_buf, sf->data, sf_bytes);
                 adj_g711_buf[sf_bytes] = ((const uint8_t *) sf->data)[sf_bytes - 1];
-                me_rx_g711(adj_g711_buf, (int) sf_bytes + 1);
+                rx_g711(adj_g711_buf, (int) sf_bytes + 1);
             } else if (i == 0 && adj < 0 && sf_bytes > 1) {
-                me_rx_g711((const uint8_t *)sf->data, (int) sf_bytes - 1);
+                rx_g711((const uint8_t *)sf->data, (int) sf_bytes - 1);
             } else {
-                me_rx_g711((const uint8_t *)sf->data, (int)sf_bytes);
+                rx_g711((const uint8_t *)sf->data, (int)sf_bytes);
             }
         }
     } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
@@ -263,11 +342,11 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
         if (adj > 0 && sz < PJ_ARRAY_SIZE(adj_g711_buf) && sz > 0) {
             memcpy(adj_g711_buf, rx_ext->base.buf, sz);
             adj_g711_buf[sz] = ((const uint8_t *) rx_ext->base.buf)[sz - 1];
-            me_rx_g711(adj_g711_buf, (int) sz + 1);
+            rx_g711(adj_g711_buf, (int) sz + 1);
         } else if (adj < 0 && sz > 1) {
-            me_rx_g711((const uint8_t *)rx_ext->base.buf, (int) sz - 1);
+            rx_g711((const uint8_t *)rx_ext->base.buf, (int) sz - 1);
         } else {
-            me_rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
+            rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
         }
     }
 
@@ -293,11 +372,14 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
     if (!fed) {
         static uint8_t fill_buf[PJ_ARRAY_SIZE(g_tx_linear)];
         unsigned n = port->payload_samples_per_frame;
-        uint8_t fill = (me_get_law() == ME_LAW_ALAW) ? 0xD5 : 0xFF;
+        /* Fill is a wire octet: rx_g711() maps a mu-law leg's 0xFF to A-law
+           when the bearer behind it is A-law. */
+        uint8_t fill = (me_get_law() == ME_LAW_ALAW && !g_pcmu_alaw_bearer)
+                       ? 0xD5 : 0xFF;
 
         if (n > 0 && n <= PJ_ARRAY_SIZE(fill_buf)) {
             memset(fill_buf, fill, n);
-            me_rx_g711(fill_buf, (int) n);
+            rx_g711(fill_buf, (int) n);
             g_rx_concealed_frames++;
         }
     }
@@ -372,13 +454,104 @@ static int64_t mclock_now_ns(void)
     return (int64_t) ts.tv_sec * 1000000000LL + (int64_t) ts.tv_nsec;
 }
 
-static void mclock_reset(void)
+/* The far end's clock, remembered per caller.  The loop needs ~80 s to
+   acquire from 0 ppm, and V.90 Phase 3 runs inside that: on the Eicon rig we
+   sent at +86 ppm against the Cisco's +60 through TRN1d/Jd (the integrator's
+   overshoot), and the Diva's received PCM lost a sample every ~3.7 s there
+   (48375 -> 48372).  A gateway's offset is stable from call to call (+62.3
+   +/- 0.4 ppm over 25 calls), so start each call where the last call from
+   the same number converged (V.90 5.2: the PCM is network-timed from its
+   first sample).  An unknown caller starts at 0 ppm as before. */
+static void caller_from_remote(const pj_str_t *remote, char *number, size_t nlen,
+                               char *name, size_t namelen);
+#define MCLOCK_SEEDS 64
+#define MCLOCK_SEED_MIN_WINDOWS 90  /* ~1 s windows: past acquisition */
+static char g_mclock_caller[64];
+
+/* `--recycle` runs each call in a fresh process, so the seeds live in a
+   file: ME_TX_CLOCK_SEED_FILE, default $TMPDIR/sip_v90_modem-tx-clock.tsv,
+   one "caller<TAB>ppm" line each.  Lines race harmlessly: the worst case is
+   a seed one call older. */
+static void mclock_seed_path(char *path, size_t len)
 {
+    const char *f = getenv("ME_TX_CLOCK_SEED_FILE");
+    const char *dir = getenv("TMPDIR");
+
+    if (f && *f)
+        snprintf(path, len, "%s", f);
+    else
+        snprintf(path, len, "%s/sip_v90_modem-tx-clock.tsv", dir && *dir ? dir : "/tmp");
+}
+
+static int mclock_seed_load(const char *caller, double *ppm)
+{
+    char path[512], line[160], who[64];
+    double v;
+    int found = 0;
+    FILE *f;
+
+    if (!caller || !*caller)
+        return 0;
+    mclock_seed_path(path, sizeof(path));
+    if (!(f = fopen(path, "r")))
+        return 0;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%63[^\t]\t%lf", who, &v) == 2 && !strcmp(who, caller)) {
+            *ppm = v;
+            found = 1;
+        }
+    fclose(f);
+    return found;
+}
+
+static void mclock_seed_store(const char *caller, double ppm)
+{
+    char path[512], tmp[540], line[160], who[MCLOCK_SEEDS][64];
+    double val[MCLOCK_SEEDS], v;
+    int n = 0, i;
+    FILE *f;
+
+    if (!caller || !*caller)
+        return;
+    mclock_seed_path(path, sizeof(path));
+    if ((f = fopen(path, "r"))) {
+        while (n < MCLOCK_SEEDS - 1 && fgets(line, sizeof(line), f))
+            if (sscanf(line, "%63[^\t]\t%lf", who[n], &v) == 2 && strcmp(who[n], caller))
+                val[n++] = v;
+        fclose(f);
+    }
+    snprintf(who[n], sizeof(who[n]), "%s", caller);
+    val[n++] = ppm;
+    snprintf(tmp, sizeof(tmp), "%s.%d", path, (int) getpid());
+    if (!(f = fopen(tmp, "w")))
+        return;
+    for (i = 0; i < n; i++)
+        fprintf(f, "%s\t%.3f\n", who[i], val[i]);
+    if (fclose(f) == 0)
+        rename(tmp, path);
+    else
+        remove(tmp);
+}
+
+/* A new call from `caller` (may be empty): reset, then seed from this
+   caller's last converged clock. */
+static void mclock_reset(const char *caller)
+{
+    double seed = 0.0;
+    int have = 0;
+
     if (!g_loop_timing)
         return;
+    have = mclock_seed_load(caller, &seed);
     pthread_mutex_lock(&g_mclock_lock);
     media_clock_reset(&g_mclock);
+    snprintf(g_mclock_caller, sizeof(g_mclock_caller), "%s", caller ? caller : "");
+    if (have)
+        media_clock_seed(&g_mclock, seed);
     pthread_mutex_unlock(&g_mclock_lock);
+    if (have)
+        PJ_LOG(3, ("sip_modem", "TX loop timing: seeded %+.2f ppm from caller %s's last call",
+                   seed, caller));
 }
 
 static void mclock_rx(uint32_t rtp_ts, int64_t now_ns)
@@ -426,12 +599,22 @@ static void *mclock_main(void *arg)
         pthread_mutex_lock(&g_mclock_lock);
         media_clock_tick(&g_mclock, now);
         period = media_clock_period_ns(&g_mclock);
+        int store = 0;
+        double store_ppm = 0.0;
+        char store_caller[64];
         if (now - g_mclock_last_log_ns >= 30000000000LL && g_mclock.windows > 0) {
             g_mclock_last_log_ns = now;
             PJ_LOG(4, ("sip_modem", "TX loop timing: %+.2f ppm (fill error %+.1f samples)",
                        media_clock_ppm(&g_mclock), g_mclock.last_err));
+            if (g_mclock.windows >= MCLOCK_SEED_MIN_WINDOWS && g_mclock_caller[0]) {
+                store = 1;
+                store_ppm = media_clock_freq_ppm(&g_mclock);
+                snprintf(store_caller, sizeof(store_caller), "%s", g_mclock_caller);
+            }
         }
         pthread_mutex_unlock(&g_mclock_lock);
+        if (store)
+            mclock_seed_store(store_caller, store_ppm);
 
         /* What pjmedia_master_port's clock_callback does with a null port:
            silence into port 0, then pull port 0 -- which runs the bridge,
@@ -844,7 +1027,16 @@ static pjmedia_transport *on_create_media_transport(pjsua_call_id call_id,
         pj_grp_lock_add_handler(base_tp->grp_lock, pool, tap, &rtp_tap_on_destroy);
     }
 
-    mclock_reset();   /* a new call is a new far-end clock */
+    {
+        /* A new call is a new far-end clock; seed it if this caller's
+           gateway is known. */
+        pjsua_call_info ci;
+        char number[64] = "", name[64];
+
+        if (pjsua_call_get_info(call_id, &ci) == PJ_SUCCESS)
+            caller_from_remote(&ci.remote_info, number, sizeof(number), name, sizeof(name));
+        mclock_reset(number);
+    }
     PJ_LOG(3, ("sip_modem", "RTP clock-recovery tap installed on call %d media %d",
                call_id, media_idx));
     return &tap->base;
@@ -939,6 +1131,26 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 static uint64_t     g_last_rtp_rx_octets = 0;
 static pj_time_val  g_last_rtp_rx_time = {0, 0};
 
+
+/* ME_PCMU_ALAW_BEARER: "1" for every PCMU call, or a comma list of caller
+ * numbers whose PCMU leg is transcoded to an A-law codec. */
+static pj_bool_t pcmu_alaw_bearer_for(const pj_str_t *remote)
+{
+    const char *ab = getenv("ME_PCMU_ALAW_BEARER");
+    char number[64], name[64], list[256];
+
+    if (!ab || !*ab || !strcmp(ab, "0"))
+        return PJ_FALSE;
+    if (!strcmp(ab, "1"))
+        return PJ_TRUE;
+    caller_from_remote(remote, number, sizeof(number), name, sizeof(name));
+    snprintf(list, sizeof(list), "%s", ab);
+    for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ","))
+        if (number[0] && !strcmp(tok, number))
+            return PJ_TRUE;
+    return PJ_FALSE;
+}
+
 static void on_call_media_state(pjsua_call_id call_id)
 {
     pjsua_call_info ci;
@@ -955,6 +1167,7 @@ static void on_call_media_state(pjsua_call_id call_id)
             if (pjsua_call_get_stream_info(call_id, i, &si) == PJ_SUCCESS &&
                 si.type == PJMEDIA_TYPE_AUDIO) {
                 pj_str_t pcma_name = pj_str("PCMA");
+                g_pcmu_alaw_bearer = PJ_FALSE;
                 if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
                     me_set_law(ME_LAW_ALAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law passthrough)"));
@@ -962,8 +1175,16 @@ static void on_call_media_state(pjsua_call_id call_id)
                     me_set_law(ME_LAW_ULAW);   /* octets are opaque; fill value only */
                     PJ_LOG(3, ("sip_modem", "Codec: CLEARMODE (RFC 4040, octets passed unmodified)"));
                 } else {
-                    me_set_law(ME_LAW_ULAW);
-                    PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
+                    g_pcmu_alaw_bearer = pcmu_alaw_bearer_for(&ci.remote_info);
+                    if (g_pcmu_alaw_bearer) {
+                        bearer_maps_init();
+                        me_set_law(ME_LAW_ALAW);
+                        PJ_LOG(3, ("sip_modem", "Codec: PCMU carrying an A-law bearer "
+                                   "(engine runs A-law, octets mapped per G.711)"));
+                    } else {
+                        me_set_law(ME_LAW_ULAW);
+                        PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
+                    }
                 }
             }
             /* The null sound device supplies the media clock, but PJSUA does
