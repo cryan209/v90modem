@@ -1376,3 +1376,18 @@ fell back to V.34. V.90 Table 10 says those bits are "not interpreted by the
 digital modem". The acceptance test now ignores them and keeps checking only
 the fields we act on (U_INFO, upstream rate 3/4, downstream 6, ranges); the CRC
 still guards the frame. Fixture: `reference-data/artifacts/win95-7801-info1a-bit33-20261109`.
+
+## A CRC-valid INFO1a out of Tone A (2026-11-09)
+
+After the 7801 fix above, the MultiTech's next call lost V.90 another way.
+While the receiver was still in TONE_A during the peer's Tone A retrain, a
+54-bit frame (raw `00 80 02 00 a0 54 35`) passed the CRC and decoded as a
+V.90 Table 11 "V.34 selected" INFO1a: 2400/2400 baud, pre-emphasis 10,
+projected rate 0. Table 16 defines a projected rate of 0 as "the symbol rate
+cannot be used", so selecting that rate contradicts itself. We switched to
+V.34 on it, and the peer retrained and hung up. SpanDSP now rejects a Table 11
+INFO1a with an out-of-range field or a projected rate of 0, as the plain
+V.34 path already did for out-of-range fields. Every caller now honours that
+result, including the boundary-shift and local-slip recovery paths, which
+search several alignments for a CRC match and so raise the false-accept rate.
+Fixture: `reference-data/artifacts/multitech-7801-info1a-tone-a-false-20261109`.

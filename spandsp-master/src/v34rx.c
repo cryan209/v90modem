@@ -4904,6 +4904,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
 
     if (s->v90_mode)
     {
+        saved_info1a = *info1a;
         /* V.90 §8.2.3.2 Table 10: INFO1a from analog modem when V.90 is selected.
            Different field layout from V.34 INFO1a. */
         /* 12:17    Reserved for ITU (set to 0 by analog modem) */
@@ -4959,6 +4960,34 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             info1a->freq_offset = (int) raw_freq;
             if ((info1a->freq_offset & 0x200))
                 info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+            /*endif*/
+            /* V.90 Table 11 / V.34 Table 16: symbol rates 0..5, pre-emphasis
+               0..10, projected rate 0..14 -- and Table 16 defines a projected
+               rate of 0 as "the symbol rate cannot be used", so a frame that
+               SELECTS a symbol rate and projects 0 for it contradicts itself.
+               Live (MultiTech on 7801, 2026-11-09): raw 00 80 02 00 a0 54 35
+               passed the CRC while the receiver sat in TONE_A during the
+               peer's Tone A retrain -- 2400/2400 baud, pre-emphasis 10, rate
+               0 -- and acting on it dropped a V.90 call into V.34.  Reject
+               such a frame whole, like the V.34 path below, and keep looking
+               for the real INFO1a. */
+            if (info1a->baud_rate_a_to_c > V34_BAUD_RATE_3429
+                || info1a->preemphasis_filter > 10
+                || info1a->max_data_rate == 0
+                || info1a->max_data_rate > 14)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                           "Rx INFO1a (V.90 Table 11) rejected: incoherent selection (a2c baud %d, c2a baud %d, "
+                           "pre-emphasis %d, projected rate %d)\n",
+                           info1a->baud_rate_a_to_c, info1a->baud_rate_c_to_a,
+                           info1a->preemphasis_filter, info1a->max_data_rate);
+                fprintf(stderr, "[V34] INFO1a rejected: V.34 selection with a2c baud %d, c2a baud %d, "
+                        "pre-emphasis %d, projected rate %d is not coherent (V.90 Table 11)\n",
+                        info1a->baud_rate_a_to_c, info1a->baud_rate_c_to_a,
+                        info1a->preemphasis_filter, info1a->max_data_rate);
+                *info1a = saved_info1a;
+                return -1;
+            }
             /*endif*/
             s->v90_v34_fallback = true;
 
@@ -6271,7 +6300,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 case V34_RX_STAGE_INFO0:
                     if (v90_info1a_search)
                     {
-                        process_rx_info1a(s, &s->info1a, s->info_buf);
+                        if (process_rx_info1a(s, &s->info1a, s->info_buf) < 0)
+                        {
+                            s->received_event = V34_EVENT_NONE;
+                            break;
+                        }
+                        /*endif*/
                         if (s->v90_mode)
                         {
                             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -6411,7 +6445,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - INFO1a boundary recovery succeeded with %d-bit shift\n",
                              recovery_shift);
-                    process_rx_info1a(s, &s->info1a, recovered_info);
+                    if (process_rx_info1a(s, &s->info1a, recovered_info) < 0)
+                    {
+                        s->bit_count = 0;
+                        return;
+                    }
+                    /*endif*/
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a, switching to Phase 3 primary channel RX\n");
                     v90_enter_phase3_from_info1a(s);
@@ -6427,7 +6466,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              "Rx - INFO1a local-slip recovery succeeded at bit %d with suffix shift %d\n",
                              recovery_pivot,
                              recovery_shift);
-                    process_rx_info1a(s, &s->info1a, recovered_info);
+                    if (process_rx_info1a(s, &s->info1a, recovered_info) < 0)
+                    {
+                        s->bit_count = 0;
+                        return;
+                    }
+                    /*endif*/
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a via local-slip recovery, switching to Phase 3 primary channel RX\n");
                     v90_enter_phase3_from_info1a(s);

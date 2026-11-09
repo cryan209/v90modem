@@ -1079,3 +1079,4 @@ V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=15 V34_DUPLEX_EXPECT_RATES=9600,9600 
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=44 V34_DUPLEX_EXPECT_RATES=24000,24000 ./v34_duplex_test 2743 26400 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=14 V34_DUPLEX_EXPECT_MAX_RATES=9600,9600 ./v34_duplex_test 2743 26400 alaw
 sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/win95-7801-info1a-bit33-20261109/live-rx.g711 ulaw --fast --sync --sip-answer 2>&1 | grep -q "valid INFO1a U_INFO=78 MD=0 upstream_code=4 downstream_code=6"'
+sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/multitech-7801-info1a-tone-a-false-20261109/live-rx.g711 ulaw --fast --sync --sip-answer > "$TMPDIR/i1af.log" 2>&1; grep -q "INFO1a rejected: V.34 selection with a2c baud 0, c2a baud 0, pre-emphasis 10, projected rate 0" "$TMPDIR/i1af.log" && ! grep -q "INFO1a: c2a (our TX) baud=0" "$TMPDIR/i1af.log"'
