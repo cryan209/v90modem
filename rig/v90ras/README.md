@@ -627,3 +627,11 @@ waits for Tone A (§9.2.1.1.7). The Courier on 7802 sends INFO1a before our
 INFO1d, and the disarmed framer lost it, so its first Phase 2 timed out and
 restarted. The previous binary is `/opt/v90ras/sip_v90_modem.8bfd6695`. Only
 `v90ras` was restarted; v90isdn still runs an older binary.
+
+## Deployed c7d77d0d (2026-11-09 23:11)
+
+On top of 2aa392b9: the V.90 upstream never offers 14400 at 3200 baud (a
+14400 measured cap asks for 16800), and the upstream fall-back no longer acts
+on rates with no measured SNR threshold. Every 14400 upstream from the Lucent
+(7801) and Agere (7803) MultiTechs had decoded white. The previous binary is
+`/opt/v90ras/sip_v90_modem.2aa392b9`. Only `v90ras` was restarted.
