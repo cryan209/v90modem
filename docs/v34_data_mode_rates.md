@@ -1400,3 +1400,51 @@ drives V.34 rates in both directions, and the controller is on by default
   31200 lost, one 11.6 to 19200, fall-forward to 21600 confirmed, call kept.
   Against a peer that ignores 11.6 the member is hung up at the 11.6.2
   timeout instead of retraining.
+
+## TRN rate tables for 2400-3000 baud (2026-11-09)
+
+`v34_rx_training_rate()` had calibrated tables only for 3200 and 3429 baud. At
+2400, 2743, 2800 and 3000 baud it used the `(SNR+13)/6` formula, which is wrong
+in both directions. Forced rates in `v34_duplex_test`, 1M PRBS bits each way,
+both laws, delays 0/7/23, injected noise 8-44 dB (2400 runs; each direction is
+scored on its own receiver's TRN reading). Some examples:
+
+| baud/rate | formula offers from | highest failing TRN | new threshold |
+|---|---|---|---|
+| 2400/9600 | 11.0 dB | 17.8 | 17.9 |
+| 2400/12000 | 17.0 | 19.9 | 20.0 |
+| 2743/12000 | 13.2 | 18.8 | 18.9 |
+| 2400/19200 | 35.0 | 29.8 | 29.9 |
+| 2400/21600 | 41.0 | 33.5 | 33.6 |
+| 3000/24000 | 35.0 | 30.2 | 30.3 |
+
+Each threshold is 0.1 dB above the highest failing reading, made
+non-decreasing in rate, with a further 0.5 dB asked at run time
+(`V34_TRN_RATE_MARGIN_DB`). The margin is there because, out of sample, 8 of 112
+automatic-rate calls read within 0.2 dB above a bare threshold and had errors.
+
+Scored on 384 automatic-rate calls that were not in the calibration set
+(delays 1/4/11/17, odd noise levels 15-37 dB, both laws):
+
+| | old formula | new tables |
+|---|---|---|
+| calls with any bit error | 101 | 30 |
+| calls above 1% BER | 36 | 5 |
+| mean rate, all | 16344 | 16356 |
+| mean rate, >= 29 dB injected | 18975 | 20775 |
+
+The new `v34_get_mp_trn_snr_db()` returns the reading MP was chosen on, and
+`v34_duplex_test` prints it.
+
+Weaknesses this exposed, all still open:
+- **TRN SNR predicts data-mode errors only loosely at low SNR.** The 30
+  remaining bad calls are mostly 24-900 errors per 1M, but 2743/9600 at a
+  17.6-17.9 dB reading ran at 6-8% BER on some delays and clean on others.
+  The outcome swings with channel delay at the same reading.
+- **2400 bit/s is broken.** At 2400 baud it errs (1-8%) at a 20 dB reading,
+  where 4800 is clean from 12.4. The tables never offer it; the floor is 4800.
+- **The receiver is weak at low SNR.** 2400/7200 (3 bits a symbol) runs at
+  about 15% BER at a 13 dB reading.
+- **The top rates come out white:** 2743/24000-26400, 2800/26400 and
+  3000/28800 run at about 47% errors even at 44 dB, and 3000/9600 fails
+  up to 18.4 dB where 12000 is clean from 16.8. None of these is offered.

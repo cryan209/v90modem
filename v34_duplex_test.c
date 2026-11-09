@@ -829,6 +829,13 @@ static int run_case(int baud, int bps, bool alaw)
         (void) v34_get_b1_snr_db(call_modem, &b1_snr[0]);
         (void) v34_get_b1_snr_db(answer_modem, &b1_snr[1]);
         printf("  B1 SNR: caller %.1f dB, answer %.1f dB\n", b1_snr[0], b1_snr[1]);
+        {
+            float trn_snr[2] = {-99.0f, -99.0f};
+
+            (void) v34_get_mp_trn_snr_db(call_modem, &trn_snr[0]);
+            (void) v34_get_mp_trn_snr_db(answer_modem, &trn_snr[1]);
+            printf("  TRN SNR: caller %.1f dB, answer %.1f dB\n", trn_snr[0], trn_snr[1]);
+        }
     }
     printf("  stages: caller rx=%d tx=%d event=%d; answer rx=%d tx=%d event=%d\n",
            v34_get_rx_stage(call_modem), v34_get_tx_stage(call_modem),

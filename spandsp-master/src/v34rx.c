@@ -3305,12 +3305,65 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* TRN SNR needed per rate at 2400/2743/2800/3000 baud, which until
+   2026-11-09 ran on the (SNR+13)/6 formula alone.  Measured the way the 3200
+   and 3429 rows below were: v34_duplex_test, forced rates, one million PRBS
+   bits each way, both laws, delays 0/7/23, injected noise 8-44 dB (2400
+   runs, each direction scored on its own receiver's TRN reading).  Each
+   threshold is 0.1 dB above the highest reading at which that direction had
+   any bit error or failed to sync, then made non-decreasing in rate.  The
+   formula was wrong both ways: it offered 9600 at 2400 baud from 11.0 dB
+   (fails to 17.8) and 12000 from 17.0 (fails to 19.9), and asked 35.0 dB for
+   19200 (clean from 29.9) and 41.0 for 21600 (clean from 33.6).
+
+   Left out, because they have fewer than 10 clean readings above their
+   highest failure: 2743/24000-26400, 2800/26400 and 3000/28800, which are
+   white (about 47% errors) even at 44 dB, and 3000/9600, which fails to
+   18.4 dB while 12000 is clean from 16.8.  2400 bit/s is left out at every
+   baud: at 2400 baud it errs at 20 dB (1-8%) where 4800 is clean from 12.4,
+   so the floor is 4800.  Zero entries end a row. */
+/* The thresholds are the measured edge; out of sample (delays 1/11) 8 of
+   112 automatic-rate calls read within 0.2 dB above one and carried 27-8421
+   errors per million bits.  Ask for this much above it. */
+#define V34_TRN_RATE_MARGIN_DB          0.5f
+static const struct
+{
+    int bps;
+    float need_db;
+} v34_trn_rate_table[4][10] =
+{
+    /* 2400 */ {{21600, 33.6f}, {19200, 29.9f}, {16800, 27.4f}, {14400, 23.8f},
+                {12000, 20.0f}, {9600, 17.9f}, {7200, 16.2f}, {4800, 12.4f}},
+    /* 2743 */ {{21600, 30.7f}, {19200, 26.8f}, {16800, 23.3f}, {14400, 21.0f},
+                {12000, 18.9f}, {9600, 17.1f}, {7200, 15.1f}},
+    /* 2800 */ {{24000, 32.0f}, {21600, 31.8f}, {19200, 26.1f}, {16800, 22.6f},
+                {14400, 19.0f}, {12000, 18.6f}, {9600, 18.6f}, {7200, 14.8f}},
+    /* 3000 */ {{26400, 33.2f}, {24000, 30.3f}, {21600, 26.3f}, {19200, 24.3f},
+                {16800, 22.3f}, {14400, 18.7f}, {12000, 16.8f}, {7200, 12.9f}},
+};
+
 SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
 {
     int n;
     if (!s || !isfinite(snr_db) || s->rx.baud_rate < V34_BAUD_RATE_2400
         || s->rx.baud_rate > V34_BAUD_RATE_3429)
         return 0;
+    if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate <= V34_BAUD_RATE_3000)
+    {
+        int b = s->rx.baud_rate - V34_BAUD_RATE_2400;
+        int i;
+
+        for (i = 0;  i < 10  &&  v34_trn_rate_table[b][i].bps;  i++)
+        {
+            if (snr_db >= v34_trn_rate_table[b][i].need_db + V34_TRN_RATE_MARGIN_DB)
+                return v34_trn_rate_table[b][i].bps;
+            /*endif*/
+        }
+        /*endfor*/
+        /* Below the table: the 4800 floor (nothing lower was clean). */
+        return 4800;
+    }
+    /*endif*/
     if (s->rx.duplex && !s->rx.v90_mode && s->rx.baud_rate == V34_BAUD_RATE_3429)
     {
         if (snr_db >= 31.5f) return 33600;

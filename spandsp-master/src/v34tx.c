@@ -8873,6 +8873,16 @@ SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_mp_trn_snr_db(v34_state_t *s, float *snr_db)
+{
+    if (!s  ||  !snr_db  ||  !s->tx.mp_trn_snr_valid)
+        return -1;
+    /*endif*/
+    *snr_db = s->tx.mp_trn_snr_db;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
 {
     int a_to_c;
@@ -8938,6 +8948,8 @@ static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, i
 
         if (measured > 0)
         {
+            s->tx.mp_trn_snr_db = snr_db;
+            s->tx.mp_trn_snr_valid = true;
             /* Our receive direction: answer-to-call for the call modem. */
             int *mine = (s->calling_party  ||  s->tx.v90_v34_fallback)
                       ? &a_to_c : &c_to_a;

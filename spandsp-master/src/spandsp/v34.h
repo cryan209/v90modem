@@ -309,6 +309,11 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db);
     \param enable True to apply it. */
 SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable);
 
+/*! Get the Phase-4 TRN SNR this modem read when it chose its MP receive rate
+    (V.34 11.4).
+    \return 0 and the reading in *snr_db, or -1 if none was taken. */
+SPAN_DECLARE(int) v34_get_mp_trn_snr_db(v34_state_t *s, float *snr_db);
+
 /*! Initialise a V.34 modem context. This must be called before the first
     use of the context, to initialise its contents.
     \brief Initialise a V.34 modem context.

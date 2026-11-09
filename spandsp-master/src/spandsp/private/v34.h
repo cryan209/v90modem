@@ -1095,6 +1095,9 @@ typedef struct
     /* Let the Phase-4 TRN SNR cap the receive rate this modem asks for in
        MP (v34_set_trn_rate_selection()). */
     bool trn_rate_select;
+    /* Phase-4 TRN SNR read when MP's receive rate was chosen (11.4); -99 if none. */
+    float mp_trn_snr_db;
+    bool mp_trn_snr_valid;
     /*! \brief This Phase 2 was entered by a V.34 11.5 / V.90 9.5 retrain, in
         which the INFO0 exchange is omitted.  FIRST_A's plain-V.34 condition
         is otherwise "INFO0c received", which on a retrain never happens --

@@ -1067,3 +1067,11 @@ V34_TEST_RENEG_NO_TRN=answer V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_dupl
 # V.34 11.5 retrain with LAPM payload, each role initiating (2026-11-09): the answerer's Tone B gate waits for the caller's 11.5.1.2 silence
 ./engine_pair_test --seconds 90 --hold-seconds 30 --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3000 --answer-env ME_V34_RETRAIN_AFTER_MS=2000 --payload-printable RR --payload-reps 300 --both-log 'resuming the existing data link'
 ./engine_pair_test --seconds 90 --hold-seconds 30 --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_RETRAIN_AFTER_MS=2000 --payload-printable RR --payload-reps 300 --both-log 'resuming the existing data link'
+# V.34 11.4 receive-rate choice from the Phase-4 TRN SNR at 2400-3000 baud,
+# calibrated 2026-11-09 against one million PRBS bits per forced rate.  At
+# 35 dB injected noise 2400 baud asks 19200 (the old (SNR+13)/6 formula asked
+# 16800).  At 14 dB injected, 2743 baud falls to the 4800 floor and is
+# error-free, where the formula asked 12000 and came out white.  Both are
+# stable over delays 0-7.
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=35 V34_DUPLEX_EXPECT_RATES=19200,19200 ./v34_duplex_test 2400 21600 ulaw
+V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=14 V34_DUPLEX_EXPECT_MAX_RATES=9600,9600 ./v34_duplex_test 2743 26400 alaw
