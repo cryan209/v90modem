@@ -133,6 +133,16 @@ int main(void)
         run(62.3, 1000u, 60.0, 62.3, 5.0, 40.0, &ppm, &swing, &dev);
         run(62.3, 1000u, 60.0, 0.0, 5.0, 40.0, &ppm0, &swing0, &dev0);
         int ok = dev < 10.0 && swing < 8.0 && dev0 > 2.0 * dev;
+        /* The tick RATE, not just the estimate, must stay near the far
+           end's: a gateway on fixed playout slips on rate excursions. */
+        double ppm2, swing2, dev2;
+        run(62.3, 1000u, 60.0, 62.3, 5.0, 40.0, &ppm2, &swing2, &dev2);
+        printf("seeded: 5-40 s tick rate %+.2f ppm (far +62.30)\n", ppm2);
+        ok = ok && fabs(ppm2 - 62.3) < 3.0;
+        /* A seed 3 ppm off the truth still holds phase within a few samples. */
+        run(62.3, 1000u, 600.0, 59.3, 300.0, 600.0, &ppm2, &swing2, &dev2);
+        printf("seed 3 ppm off: 300-600 s ticked at %+.2f ppm, fill swing %.1f samples\n", ppm2, swing2);
+        ok = ok && fabs(ppm2 - 62.3) < 3.0 && swing2 < 40.0;
         printf("seeded 62.3 ppm: over 5-40 s the frequency estimate is off by at most %.1f ppm, fill swing %.1f "
                "samples (unseeded: %.1f ppm, %.1f)  %s\n", dev, swing, dev0, swing0, ok ? "ok" : "FAIL");
         failures += !ok;

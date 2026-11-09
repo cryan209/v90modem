@@ -689,3 +689,11 @@ call from the same caller converged to (`/var/tmp/v90ras/sip_v90_modem-tx-clock.
 7911 = +63.97 ppm). `ME_PCMU_ALAW_BEARER` is available but not set. Removed
 the temporary `ME_V90_MAX_TX_DBM0_CODE=23` and `ME_V90_TRN2D_SYMBOLS=6000`
 from `sip.env`. The previous binary is `/opt/v90ras/sip_v90_modem.e350541e`.
+
+## Deployed deferred send (2026-11-10 11:40)
+
+On top of 89575b3e: each frame is sent at the start of the next media tick
+(`ME_TX_DEFER`). A seeded loop steers at 0.005 rad/s. A `TX tick stall`
+line is logged when a tick starts late plus its bridge pass exceeds 25 ms.
+`sip.env` again carries `ME_V90_MAX_TX_DBM0_CODE=23` and
+`ME_V90_TRN2D_SYMBOLS=6000` (the 9 October Eicon recipe, all callers).

@@ -32,6 +32,8 @@ void media_clock_init(media_clock_t *mc, int sample_rate, int samples_per_frame)
 
 void media_clock_reset(media_clock_t *mc)
 {
+    mc->kp = 12.5;      /* acquisition gains; media_clock_seed() narrows them */
+    mc->ki = 0.3125;
     mc->have_rx = 0;
     mc->have_ref = 0;
     mc->integ = 0.0;
@@ -60,6 +62,16 @@ void media_clock_seed(media_clock_t *mc, double ppm)
         ppm = -mc->max_ppm;
     mc->integ = ppm;
     mc->ppm = ppm;
+    /* The frequency is already known, so steer phase at a tenth of the
+       acquisition bandwidth (0.005 rad/s, still critically damped):
+       kp 1.25 ppm/sample, ki 0.003125 ppm/(sample s).  At the acquisition
+       gains a few samples of startup fill error (jitter in the first
+       window that sets the reference) became +60 ppm for 15 s -- +128 ppm
+       against the Cisco's +68 on the Eicon rig -- and the gateway deleted
+       a sample 95 ms into our Ri (V.90 9.4.1.1).  A gateway on fixed
+       playout does not care where its fill sits; it slips on rate. */
+    mc->kp = 1.25;
+    mc->ki = 0.003125;
     mc->period_ns = 1e9 * mc->samples_per_frame / mc->sample_rate / (1.0 + ppm * 1e-6);
 }
 

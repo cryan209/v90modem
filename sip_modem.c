@@ -195,6 +195,41 @@ static void clamp_linear_payload_samples(unsigned *count, unsigned max)
         *count = max;
 }
 
+/* Deferred transmit (loop timing only).  The bridge pass that produces a
+ * frame also runs the receiver for the same tick, and it took 2-24 ms here
+ * depending on the phase; sending at the end of it made every packet leave
+ * that much after its tick.  When the work fell away at the start of V.90
+ * TRN1d our packets arrived ~15 ms earlier than before, and the Cisco
+ * (TopRouter, fixed 40 ms playout) deleted a sample 0.31 s into TRN1d: the
+ * Diva lost Sd's frame alignment (V.90 8.4.4) and never took Jd.  So the
+ * frame made in one tick is sent at the start of the next, before any work:
+ * a constant 20 ms of transmit latency, and send instants that only move
+ * with the media clock. */
+static pthread_mutex_t g_tx_defer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pjmedia_port *g_tx_defer_dst;       /* stream the deferred frame goes to */
+static int g_tx_defer_have;
+static uint8_t g_tx_defer_buf[2048];
+static int tx_defer_enabled(void);
+
+static void tx_defer_flush(void)
+{
+    pthread_mutex_lock(&g_tx_defer_lock);
+    if (g_tx_defer_have && g_tx_defer_dst)
+        pjmedia_port_put_frame(g_tx_defer_dst, (pjmedia_frame *) g_tx_defer_buf);
+    g_tx_defer_have = 0;
+    pthread_mutex_unlock(&g_tx_defer_lock);
+}
+
+static void tx_defer_forget(pjmedia_port *dst)
+{
+    pthread_mutex_lock(&g_tx_defer_lock);
+    if (!dst || g_tx_defer_dst == dst) {
+        g_tx_defer_dst = NULL;
+        g_tx_defer_have = 0;
+    }
+    pthread_mutex_unlock(&g_tx_defer_lock);
+}
+
 static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
                                                pjmedia_frame *frame)
 {
@@ -235,6 +270,14 @@ static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
                                       port->payload_samples_per_frame * 8U,
                                       (pj_uint16_t) port->payload_samples_per_frame);
 
+    if (tx_defer_enabled()) {
+        pthread_mutex_lock(&g_tx_defer_lock);
+        memcpy(g_tx_defer_buf, port->tx_ext_buf, sizeof(g_tx_defer_buf));
+        g_tx_defer_dst = port->downstream_port;
+        g_tx_defer_have = 1;
+        pthread_mutex_unlock(&g_tx_defer_lock);
+        return PJ_SUCCESS;
+    }
     return pjmedia_port_put_frame(port->downstream_port, (pjmedia_frame *) tx_ext);
 }
 
@@ -392,6 +435,8 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 static pj_status_t modem_passthrough_on_destroy(pjmedia_port *this_port)
 {
     modem_passthrough_port_t *port = (modem_passthrough_port_t *) this_port;
+    if (port)
+        tx_defer_forget(port->downstream_port);
     if (port && port->pool)
         pj_pool_release(port->pool);
     return PJ_SUCCESS;
@@ -445,6 +490,12 @@ static pthread_mutex_t g_mclock_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_mclock_thread;
 static volatile int g_mclock_run;
 static pjmedia_port *g_mclock_conf;
+static int g_tx_defer = 1;   /* ME_TX_DEFER=0 sends at the end of the bridge pass */
+
+static int tx_defer_enabled(void)
+{
+    return g_loop_timing && g_mclock_run && g_tx_defer;
+}
 static int64_t g_mclock_last_log_ns;
 
 static int64_t mclock_now_ns(void)
@@ -616,6 +667,10 @@ static void *mclock_main(void *arg)
         if (store)
             mclock_seed_store(store_caller, store_ppm);
 
+        /* The frame the previous tick made goes out now, before this
+           tick's work (see g_tx_defer_lock). */
+        tx_defer_flush();
+
         /* What pjmedia_master_port's clock_callback does with a null port:
            silence into port 0, then pull port 0 -- which runs the bridge,
            receiving and transmitting every connected call. */
@@ -629,7 +684,21 @@ static void *mclock_main(void *arg)
         f.buf = buf;
         f.size = fsz;
         f.timestamp.u64 = (pj_uint64_t) g_mclock.ticks * spf;
-        pjmedia_port_get_frame(g_mclock_conf, &f);
+        {
+            /* A tick that starts late or a bridge pass that runs long delays
+               the RTP send; a gateway with fixed playout (TopRouter, 40 ms)
+               conceals any gap past its buffer, inside the far modem's
+               training.  Report both so a stall can be placed. */
+            int64_t t_bridge = mclock_now_ns();
+            int64_t late_ns = now - (int64_t) next;
+            int64_t bridge_ns;
+
+            pjmedia_port_get_frame(g_mclock_conf, &f);
+            bridge_ns = mclock_now_ns() - t_bridge;
+            if (late_ns + bridge_ns > 25000000LL)
+                PJ_LOG(3, ("sip_modem", "TX tick stall: started %.1f ms late, bridge pass %.1f ms",
+                           late_ns / 1e6, bridge_ns / 1e6));
+        }
 
         next += period;
     }
@@ -646,6 +715,9 @@ static pj_status_t mclock_install(void)
 
     if (v && *v)
         g_loop_timing = atoi(v) != 0;
+    v = getenv("ME_TX_DEFER");
+    if (v && *v)
+        g_tx_defer = atoi(v) != 0;
     if (!g_loop_timing) {
         PJ_LOG(3, ("sip_modem", "TX timing: host clock (null sound device)"));
         return pjsua_set_null_snd_dev();

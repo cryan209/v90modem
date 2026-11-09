@@ -128,6 +128,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_RX_CLOCK_SLIP` | modem_engine.c |  | sdh | the connection and closes no loop, so it is off unless asked for. |
 | `ME_SLOW_CALLBACK_US` | modem_engine.c |  | d | ME_SLOW_CALLBACK_US lowers the threshold (diagnostic): a replay on a |
 | `ME_TX_LOOP_TIMING` | sip_modem.c |  | d | 0 transmits on the host clock (null sound device); default 1 paces sends to the received RTP clock, starting each call at the frequency the last call from the same caller converged to |
+| `ME_TX_DEFER` | sip_modem.c | 1 | d | 0 sends each frame at the end of its bridge pass instead of at the start of the next tick (loop timing only) |
 | `ME_TX_CLOCK_SEED_FILE` | sip_modem.c | $TMPDIR/sip_v90_modem-tx-clock.tsv | s | where loop timing keeps each caller's converged clock (caller TAB ppm) to seed that caller's next call |
 | `ME_PCMU_ALAW_BEARER` | sip_modem.c |  | s | `1` or a comma list of caller numbers: the PCMU leg carries an A-law bearer (the gateway transcodes mu->A linearly), so the engine runs A-law and maps through the gateway's measured transform; default off |
 | `ME_V34_DENSE_3200` | v34rx.c |  | d | 3200 baud on the 3429 dense path (B1 fit, TRN refit with its own 3200 rate table, MM timing); default 1 since the live Eicon A/B, 0 returns 3200 to the TRN LMS taps: docs/v34_data_mode_rates.md |
