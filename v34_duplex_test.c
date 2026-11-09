@@ -682,7 +682,9 @@ static int run_case(int baud, int bps, bool alaw)
                 if (v34_get_rx_event(answer_modem) == 20
                     && !v34_rate_renegotiation_active(answer_modem)) {
                     v34_clear_peer_reneg_s_event(answer_modem);
-                    if (v34_start_rate_renegotiation(answer_modem) == 0)
+                    /* The engine's responder call (modem_engine.c), not the
+                       initiator's: the two condition the receiver differently. */
+                    if (v34_answer_rate_renegotiation(answer_modem) == 0)
                         fprintf(stderr,
                                 "[RENEG] block=%d answerer detected S and "
                                 "responded per 11.6.1.2\n", block);

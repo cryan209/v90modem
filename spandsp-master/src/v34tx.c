@@ -8440,6 +8440,17 @@ static int v34_reneg_trn_bauds(const v34_state_t *s)
        it again: BinModem measured a provider modem pool that could not read
        256 symbols and never acknowledged an MP, while it sends 1.85 s of its
        own. */
+    /* TEST HOOK V34_TEST_RENEG_NO_TRN=caller|answer|both: this role sends
+       MP straight after S-bar, as 11.6.1.1.1/11.6.1.2.2 allow and the Win95
+       modems on rig/v90ras do, so a pair can play that peer. */
+    {
+        const char *e = getenv("V34_TEST_RENEG_NO_TRN");
+
+        if (e  &&  (strcmp(e, "both") == 0
+                    ||  strcmp(e, s->tx.calling_party  ?  "caller"  :  "answer") == 0))
+            return 0;
+        /*endif*/
+    }
     bauds = PHASE4_TRN_BAUDS;
     if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
     {
@@ -8580,19 +8591,27 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 return zero;
             }
             /*endif*/
-            if (s->tx.reneg_active
-                && s->tx.tone_duration >= v34_reneg_trn_bauds(s))
+            if (s->tx.reneg_active)
             {
-                /* V.34 11.6.1.1.1/11.6.1.2.2: "The modem may then transmit
-                   signal TRN for a maximum of 2000 ms, followed by sequence
-                   MP."  A renegotiation has no J and no J', so the
-                   far-end-confirmation branch below cannot fire and would
-                   hold TRN until the guard; the length is ours to choose,
-                   and the Phase 4 minimum is what retrains the peer. */
-                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - 11.6 rate renegotiation: TRN complete (%d bauds), starting MP\n",
-                         s->tx.tone_duration);
-                mp_or_mph_baud_init(s);
+                /* The 11.6 TRN length is ours alone.  The startup branches
+                   below step to MP on PHASE4_TRN_READY, which is OUR receiver's
+                   event; in a renegotiation it cut our TRN to 512T as soon as
+                   our receiver started its MP search (v34_duplex_test
+                   2743/9600: 10/10 -> 7/10 over V34_DUPLEX_DELAY). */
+                if (s->tx.tone_duration >= v34_reneg_trn_bauds(s))
+                {
+                    /* V.34 11.6.1.1.1/11.6.1.2.2: "The modem may then transmit
+                       signal TRN for a maximum of 2000 ms, followed by sequence
+                       MP."  A renegotiation has no J and no J', so the
+                       far-end-confirmation branch below cannot fire and would
+                       hold TRN until the guard; the length is ours to choose,
+                       and the Phase 4 minimum is what retrains the peer. */
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - 11.6 rate renegotiation: TRN complete (%d bauds), starting MP\n",
+                             s->tx.tone_duration);
+                    mp_or_mph_baud_init(s);
+                }
+                /*endif*/
             }
             else if (s->tx.v90_v34_fallback
                 && s->tx.tone_duration >= PHASE4_TRN_BAUDS
@@ -11636,21 +11655,11 @@ static int reneg_answer_mode(void)
 SPAN_DECLARE(int) v34_answer_rate_renegotiation(v34_state_t *s)
 {
     int mode = reneg_answer_mode();
-    int rc;
 
-    rc = start_rate_renegotiation(s,
-                                  (mode >= 2)  ?  V34_RX_STAGE_PHASE4_TRN  :  V34_RX_STAGE_PHASE4_S,
-                                  (mode & 1) != 0,
-                                  "11.6.1.2 answering the peer's rate renegotiation");
-    /* 11.6.1.1.1: the initiator "may" send TRN, so MP can follow its S-bar
-       directly (the Win95 modems on rig/v90ras do).  Responder only: its
-       receiver is already in PHASE4_TRN on the initiator's S and reads a real
-       TRN at 92-100% by baud 256, where the initiator's own S-handoff entry
-       reads the responder's TRN at ~66% that early. */
-    if (rc == 0)
-        s->rx.reneg_trn_optional = true;
-    /*endif*/
-    return rc;
+    return start_rate_renegotiation(s,
+                                    (mode >= 2)  ?  V34_RX_STAGE_PHASE4_TRN  :  V34_RX_STAGE_PHASE4_S,
+                                    (mode & 1) != 0,
+                                    "11.6.1.2 answering the peer's rate renegotiation");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11702,6 +11711,10 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
        it arrives the peer is still sending DATA. */
     s->rx.phase4_reneg_wait_s = (rx_stage == V34_RX_STAGE_PHASE4_S);
     s->rx.reneg_frontend_retained = retain_frontend;
+    /* 11.6.1.1.1/11.6.1.2.2: either end "may" send TRN, so the far end's MP
+       can follow its S-bar directly (the Win95 modems on rig/v90ras do).
+       11.7 cleardown runs the same sequence, so it applies there too. */
+    s->rx.reneg_trn_optional = true;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

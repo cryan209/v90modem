@@ -758,14 +758,17 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             (s->reneg_trn_optional
              && s->duration >= PHASE4_RENEG_MP_SEARCH_BAUD
              && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE
+             && (s->duration % 64) == 0
+             && v34_rx_phase4_trn_ring_snr_db(s) >= PHASE4_RENEG_NO_TRN_SNR_DB
              && !phase4_reneg_trn_gate_forced()))
         {
             if (s->reneg_trn_optional
                 && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%% at baud %d); "
-                         "searching for MP\n",
-                         s->phase4_trn_lock_score, s->duration);
+                         "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%% on %.1f dB symbols "
+                         "at baud %d); searching for MP\n",
+                         s->phase4_trn_lock_score, v34_rx_phase4_trn_ring_snr_db(s),
+                         s->duration);
             /*endif*/
             int h;
             int domain_idx;

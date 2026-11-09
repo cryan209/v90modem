@@ -1891,36 +1891,49 @@ short-phase fallback, negotiated-rate bounds and retrain-ceiling checks. Logs
 are under `test-logs/v90-recovery-matrix/`; the measured result is local engine
 and controller coverage, not packet-loss or physical-hardware qualification.
 
-## 11.6 responder: TRN is optional, MP can follow S-bar (2026-11-09)
+## 11.6: TRN is optional, MP can follow S-bar (2026-11-09)
 
 The Win95 modems on the v90ras rig (Cisco 2911 FXS) open 11.6 with S, S-bar
-and then **MP straight away, without TRN**. 11.6.1.1.1 allows it: the
-initiator "may then transmit signal TRN for a maximum of 2000 ms plus a round
-trip delay, followed by sequence MP".
+and then **MP straight away, without TRN**. 11.6.1.1.1 and 11.6.1.2.2 allow
+it: either end "may then transmit signal TRN for a maximum of 2000 ms ...
+followed by sequence MP".
 
-Our responder ran the startup Phase 4 gate: at least 4800 bauds of TRN and
-65% descrambled ones before any MP search. Repeated MP descrambles to about
-53% ones, so the gate never opened. The receiver sat in PHASE4_TRN, timed out
+Our receiver ran the startup Phase 4 gate: at least 4800 bauds of TRN and
+65% descrambled ones before any MP search. Repeated MP descrambles to 53-64%
+ones, so the gate never opened. The receiver sat in PHASE4_TRN, timed out
 3 s later ("Training failed"), and 11.6 fell back to an 11.5 retrain. That is
-the rig's "after a peer 11.6 our receiver ends white / retrains" defect.
-It also took a J' out of the peer's S, but there is no J' in 11.6.
+the rig's "after the peer's 11.6 our receiver never comes back".
 
-Tap b0 (2026-11-07 20:31): before the fix the TRN read 29.5 dB, 53% ones,
-and no MP was found in 3 s. With the fix the receiver reads 63% at baud 256
-(`PHASE4_RENEG_MP_SEARCH_BAUD`, past the rest of the peer's S and S-bar),
-starts the MP search, locks MP with an 18/18 preamble and returns to DATA
-1.7 s after the peer's S. Anything after that diverges from the live call,
-because live we never sent MP'.
+**The rule** (`rx.reneg_trn_optional`, set by `start_rate_renegotiation()`
+for both roles, cleared by Phase 4 conditioning): at baud 512 of PHASE4_TRN
+(`PHASE4_RENEG_MP_SEARCH_BAUD`), if the ones-lock is under 80%
+(`PHASE4_RENEG_NO_TRN_SCORE`) **and** the TRN ring reads at least 20 dB on
+the 4-point grid (`PHASE4_RENEG_NO_TRN_SNR_DB`), search for MP. MP is 4-point
+too, so clean symbols that do not descramble to ones are MP. Ones-lock alone
+misfires: a receiver still converging reads a real TRN at 59% and 11.5 dB
+(2743/9600, `V34_DUPLEX_DELAY=0`) and needs the TRN to converge, and leaving
+TRN early dropped 2743/9600 from 10/10 to 7/10 over delay.
 
-The no-TRN path is taken only when TRN is absent: ones-lock under 80%
-(`PHASE4_RENEG_NO_TRN_SCORE`) at baud 256. A real TRN reads 92-100% there.
-Otherwise the startup gate stays, because it also paces our own TRN-to-MP
-step through `PHASE4_TRN_READY`. Opening it on every 11.6 cut our TRN short
-and broke `v34_duplex_test 2743 9600` with `V34_DUPLEX_RENEG`.
+**Our TRN length is our own.** In an 11.6 the transmitter used to step to MP
+on `PHASE4_TRN_READY`, which is our *receiver's* event, so our TRN was cut
+to 512T whenever our receiver moved on. The 11.6 transmitter now ignores it
+(`v34tx.c`, `get_phase4_baud`).
 
-**Responder only** (`rx.reneg_trn_optional`, set by
-`v34_answer_rate_renegotiation()`, cleared by Phase 4 conditioning). As
-initiator, our receiver enters TRN on a loose S-handoff rule and reads the
-responder's real TRN at only ~66% by baud 256, so the same test would
-misfire there. A responder that skips TRN, with us as initiator, is still
-open. `V34_RENEG_TRN_GATE=1` restores the old gate for an A/B.
+**Measured:**
+- Tap b0 (2026-11-07 20:31): the old code found no MP in 3 s. Now it reads
+  ones 63% on 28.4 dB symbols at baud 512, locks MP 18/18 and is back in
+  DATA 1.7 s after the peer's S. Anything after that diverges from the live
+  call.
+- `v34_duplex_test` with `V34_DUPLEX_RENEG=4000` over `V34_DUPLEX_DELAY`
+  0-40: 2743/19200 8/10, 2743/9600 10/10, 3200/24000 10/10, identical to the
+  old gate.
+- Against a peer that skips TRN (`V34_TEST_RENEG_NO_TRN=caller|answer`, a
+  test hook in `v34_reneg_trn_bauds()`): the old gate is 0/6. Now 23/24 over
+  2400-3429 baud and delays 0/5/20. The one failure is a 2743 initiator
+  that reads 11 dB symbols on a clean channel (a 2743 acquisition weakness:
+  the old gate fails it too).
+- The duplex test's responder now calls `v34_answer_rate_renegotiation()`,
+  as the engine does. It used the initiator's call before, so it never
+  exercised the responder's conditioning.
+
+`V34_RENEG_TRN_GATE=1` restores the old gate for an A/B.

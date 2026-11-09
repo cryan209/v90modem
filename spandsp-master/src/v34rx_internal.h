@@ -86,17 +86,24 @@ int v34_rx_trace_diagnostics(void);
    Left at the measured value, and noted here so the next attempt to shorten it
    starts from the sweep rather than from the clause. */
 #define PHASE4_TRN_READY_MIN_BAUD       4800
-/* 11.6: bauds into PHASE4_TRN before an MP search starts whatever TRN has
-   shown -- past the rest of the peer's S (128T, detected ~96T in) and its
-   16T S-bar.  TRN is optional there, and MP's own preamble search does not
-   lock on TRN (descrambled ones carry no start bit). */
-#define PHASE4_RENEG_MP_SEARCH_BAUD     256
+/* 11.6: bauds into PHASE4_TRN at which to judge whether the peer sent TRN
+   at all -- past the rest of its S (128T, detected ~96T in), its 16T S-bar
+   and enough symbols for the SNR ring.  TRN is optional there. */
+#define PHASE4_RENEG_MP_SEARCH_BAUD     512
 /* ...and only when TRN is absent.  Real TRN descrambles to ones and scores
    92% by baud 256 (v34_duplex_test 2743/9600); repeated MP scores 53-64%
    (rig/v90ras tap b0).  Under this, take it that MP followed S-bar.  A TRN
    that IS there keeps the startup gate, which also paces our own TRN-to-MP
    step through PHASE4_TRN_READY. */
 #define PHASE4_RENEG_NO_TRN_SCORE       80
+/* ...on symbols that are clean on the 4-point grid: MP is 4-point too, so
+   clean symbols that do not descramble to ones are MP.  A receiver still
+   converging reads a real TRN badly AND noisily (11.5 dB, 59% ones at
+   2743/9600 V34_DUPLEX_DELAY=0) and must keep training on it; tap b0's MP
+   read 29.5 dB.  Judged at PHASE4_RENEG_MP_SEARCH_BAUD. */
+#define PHASE4_RENEG_NO_TRN_SNR_DB      20.0f
+
+float v34_rx_phase4_trn_ring_snr_db(const v34_rx_state_t *s);
 #define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_J_PROGRESS_LOG_INTERVAL  32

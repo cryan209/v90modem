@@ -1059,3 +1059,6 @@ sh -c 'mkdir -p "$TMPDIR/busy"; sleep 300 & echo $! > "$TMPDIR/busy/line9"; ./en
 # V.90 upstream rate control: a first MP of 19200 on a 31200 upstream steps
 # up by 9.6 (a retrain here: our analogue role does not answer Rd) and confirms.
 ./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_UPSTREAM_TEST_FIRST_BPS=19200 --hold-seconds 45 --seconds 160 --answer-log "upstream fall-forward to 31200 bps confirmed"
+# V.34 11.6.1.1.1/11.6.1.2.2: TRN is optional; a peer that sends MP right after S-bar (Win95 modems, rig/v90ras), as initiator and as responder
+V34_TEST_RENEG_NO_TRN=caller V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 24000 ulaw
+V34_TEST_RENEG_NO_TRN=answer V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 24000 ulaw

@@ -3393,23 +3393,19 @@ SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
    and modulo 90 is all that is needed, because the measurement is symmetric
    in the four points.  Rotate the tail onto (+/-a, +/-a) and the per-axis mean
    and variance give the ratio directly. */
-int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
+/* The 4-point TRN SNR over the ring (v34_phase4_trn_measured_rate_n's
+   computation, without the log).  Returns -1000 when too little is filled. */
+static double phase4_trn_ring_snr(const v34_rx_state_t *s, int *blocks_out)
 {
-    v34_rx_state_t *s = &st->rx;
     double sig_sum;
     double noise_sum;
-    double snr;
     int n;
     int blocks;
     int b;
-    int rate_n;
 
-    if (snr_db)
-        *snr_db = 0.0f;
-    /*endif*/
     n = s->phase4_trn_snr_fill;
     if (n < PHASE4_TRN_SNR_BLOCK)
-        return 0;
+        return -1000.0;
     /*endif*/
     /* The residual carrier this receiver cannot remove before data mode is
        about 0.1 degrees per symbol (docs/v34_data_mode_rates.md), which is
@@ -3485,9 +3481,35 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
     }
     /*endfor*/
     if (sig_sum <= 0.0  ||  noise_sum <= 0.0)
+        return -1000.0;
+    /*endif*/
+    if (blocks_out)
+        *blocks_out = blocks;
+    /*endif*/
+    return 10.0*log10(sig_sum/noise_sum);
+}
+/*- End of function --------------------------------------------------------*/
+
+float v34_rx_phase4_trn_ring_snr_db(const v34_rx_state_t *s)
+{
+    return (float) phase4_trn_ring_snr(s, NULL);
+}
+/*- End of function --------------------------------------------------------*/
+
+int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
+{
+    v34_rx_state_t *s = &st->rx;
+    double snr;
+    int blocks;
+    int rate_n;
+
+    if (snr_db)
+        *snr_db = 0.0f;
+    /*endif*/
+    snr = phase4_trn_ring_snr(s, &blocks);
+    if (snr <= -999.0)
         return 0;
     /*endif*/
-    snr = 10.0*log10(sig_sum/noise_sum);
     V34_RX_LOG(&st->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4 TRN SNR: %.1f dB over %d symbols (%d blocks), after_j=%d\n",
              snr, blocks*PHASE4_TRN_SNR_BLOCK, blocks, s->phase4_trn_after_j);
