@@ -1817,6 +1817,10 @@ typedef struct
        instant data mode was decoding at is the right one, so the T/2
        eye-phase chooser leaves it alone (v34rx.c). */
     bool reneg_frontend_retained;
+    /* V.34 11.6.1.1.1/11.6.1.2.2: in a rate renegotiation TRN is optional
+       ("may then transmit signal TRN"), so MP can follow S-bar directly and
+       the startup TRN ones-lock gate must not hold the receiver. */
+    bool reneg_trn_optional;
     /*! \brief Phase 4 S/S-bar alternation tracker for a caller that entered
         Phase 4 too late to see the junction: the previous differential
         dibit, the current and longest runs of strict +90/-90 alternation,

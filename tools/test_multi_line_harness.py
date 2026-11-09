@@ -59,6 +59,10 @@ class HarnessTest(unittest.TestCase):
         reads = {10: 0, 11: 0}
         output = []
 
+        # line_echo follows the symlink's target: the first worker's PTY,
+        # then, once that master is dead, the replacement's.
+        target = [('/dev/ttys010', 1, 1)]
+
         def read(fd, count):
             reads[fd] += 1
             if reads[fd] == 1:
@@ -66,6 +70,7 @@ class HarnessTest(unittest.TestCase):
             if fd == 10:
                 if reads[fd] > 8:
                     stop.set()  # Bound the negative arm's old retry loop.
+                target[0] = ('/dev/ttys011', 2, 2)
                 raise OSError(errno.EIO, 'old PTY master closed')
             return b'own-line-payload'
 
@@ -77,6 +82,7 @@ class HarnessTest(unittest.TestCase):
              patch.object(harness.os, 'read', side_effect=read), \
              patch.object(harness.os, 'close') as closed, \
              patch.object(harness.os.path, 'exists', return_value=True), \
+             patch.object(harness, 'pty_target', side_effect=lambda p: target[0]), \
              patch.object(harness.time, 'sleep'), \
              patch.object(harness, 'write_all', side_effect=write):
             harness.line_echo('/unused/line.0', stop, {}, 0)

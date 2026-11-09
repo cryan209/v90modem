@@ -206,6 +206,23 @@ static bool phase4_trn_dibits_are_spread(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V34_RENEG_TRN_GATE=1 restores the startup TRN ones-lock gate inside an
+   11.6, for A/B against a peer that does send TRN there. */
+static bool phase4_reneg_trn_gate_forced(void)
+{
+    static int forced = -1;
+
+    if (forced < 0)
+    {
+        const char *e = getenv("V34_RENEG_TRN_GATE");
+
+        forced = (e  &&  atoi(e) > 0)  ?  1  :  0;
+    }
+    /*endif*/
+    return forced != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool phase4_trn_dibit_spread_required(void)
 {
     return true;
@@ -732,12 +749,24 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
            Per V.34 §11.4, TRN is at least 512T and up to 2000ms+RTD.
            We train on TRN for ~1.5-2s to lock the equalizer and scrambler
            before scanning for MP. */
-        if (s->phase4_j_seen
-            && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
-            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
-            && (!phase4_trn_dibit_spread_required()
-                || phase4_trn_dibits_are_spread(s)))
+        if ((s->phase4_j_seen
+             && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
+             && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
+             && (!phase4_trn_dibit_spread_required()
+                 || phase4_trn_dibits_are_spread(s)))
+            ||
+            (s->reneg_trn_optional
+             && s->duration >= PHASE4_RENEG_MP_SEARCH_BAUD
+             && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE
+             && !phase4_reneg_trn_gate_forced()))
         {
+            if (s->reneg_trn_optional
+                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%% at baud %d); "
+                         "searching for MP\n",
+                         s->phase4_trn_lock_score, s->duration);
+            /*endif*/
             int h;
             int domain_idx;
             int tap_idx;

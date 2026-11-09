@@ -193,6 +193,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_INFO1C_FO_NO_DEADBAND` | v34tx.c |  | d |  |
 | `V34_INFO1C_MD` | modem_engine.c, v34tx.c | 0 | d | V.34 11.3.1.1.4: send the MD that our INFO1c announced |
 | `V34_L1L2_BLOCKS` | v34rx.c |  | d | We now have 160 samples, so process the 3 cycles we should have in the buffer. |
+| `V34_RENEG_TRN_GATE` | v34rx_phase4_trn.c |  | d | 1 restores the startup TRN ones-lock gate inside an 11.6 (A/B only: TRN is optional there, see retrain_and_resync.md). |
 | `V34_TONEA_RUN` | v34tx.c |  | d | Held for four blocks (160 ms), not seen in one: the answer modem sends |
 | `V34_TONEA_RUN1` | v34tx.c |  | d | Held for four blocks (160 ms), not seen in one: the answer modem sends |
 | `V90A_CP_LOAD` | v90_analogue_phase3.c |  | d | a replay of one call and wrong for a server taking many. |

@@ -8692,6 +8692,7 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
     s->rx.phase4_s_bar_left = -1;
     s->rx.phase4_reneg_wait_s = false;
     s->rx.reneg_frontend_retained = false;
+    s->rx.reneg_trn_optional = false;
     s->rx.phase4_s_last_step = -1;
     s->rx.phase4_s_alt_prev = -1;
     s->rx.phase4_s_alt_run = 0;
@@ -11635,11 +11636,21 @@ static int reneg_answer_mode(void)
 SPAN_DECLARE(int) v34_answer_rate_renegotiation(v34_state_t *s)
 {
     int mode = reneg_answer_mode();
+    int rc;
 
-    return start_rate_renegotiation(s,
-                                    (mode >= 2)  ?  V34_RX_STAGE_PHASE4_TRN  :  V34_RX_STAGE_PHASE4_S,
-                                    (mode & 1) != 0,
-                                    "11.6.1.2 answering the peer's rate renegotiation");
+    rc = start_rate_renegotiation(s,
+                                  (mode >= 2)  ?  V34_RX_STAGE_PHASE4_TRN  :  V34_RX_STAGE_PHASE4_S,
+                                  (mode & 1) != 0,
+                                  "11.6.1.2 answering the peer's rate renegotiation");
+    /* 11.6.1.1.1: the initiator "may" send TRN, so MP can follow its S-bar
+       directly (the Win95 modems on rig/v90ras do).  Responder only: its
+       receiver is already in PHASE4_TRN on the initiator's S and reads a real
+       TRN at 92-100% by baud 256, where the initiator's own S-handoff entry
+       reads the responder's TRN at ~66% that early. */
+    if (rc == 0)
+        s->rx.reneg_trn_optional = true;
+    /*endif*/
+    return rc;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -1890,3 +1890,37 @@ modem-on-hold/retrain. This includes both laws, reversed roles, Quick Connect,
 short-phase fallback, negotiated-rate bounds and retrain-ceiling checks. Logs
 are under `test-logs/v90-recovery-matrix/`; the measured result is local engine
 and controller coverage, not packet-loss or physical-hardware qualification.
+
+## 11.6 responder: TRN is optional, MP can follow S-bar (2026-11-09)
+
+The Win95 modems on the v90ras rig (Cisco 2911 FXS) open 11.6 with S, S-bar
+and then **MP straight away, without TRN**. 11.6.1.1.1 allows it: the
+initiator "may then transmit signal TRN for a maximum of 2000 ms plus a round
+trip delay, followed by sequence MP".
+
+Our responder ran the startup Phase 4 gate: at least 4800 bauds of TRN and
+65% descrambled ones before any MP search. Repeated MP descrambles to about
+53% ones, so the gate never opened. The receiver sat in PHASE4_TRN, timed out
+3 s later ("Training failed"), and 11.6 fell back to an 11.5 retrain. That is
+the rig's "after a peer 11.6 our receiver ends white / retrains" defect.
+It also took a J' out of the peer's S, but there is no J' in 11.6.
+
+Tap b0 (2026-11-07 20:31): before the fix the TRN read 29.5 dB, 53% ones,
+and no MP was found in 3 s. With the fix the receiver reads 63% at baud 256
+(`PHASE4_RENEG_MP_SEARCH_BAUD`, past the rest of the peer's S and S-bar),
+starts the MP search, locks MP with an 18/18 preamble and returns to DATA
+1.7 s after the peer's S. Anything after that diverges from the live call,
+because live we never sent MP'.
+
+The no-TRN path is taken only when TRN is absent: ones-lock under 80%
+(`PHASE4_RENEG_NO_TRN_SCORE`) at baud 256. A real TRN reads 92-100% there.
+Otherwise the startup gate stays, because it also paces our own TRN-to-MP
+step through `PHASE4_TRN_READY`. Opening it on every 11.6 cut our TRN short
+and broke `v34_duplex_test 2743 9600` with `V34_DUPLEX_RENEG`.
+
+**Responder only** (`rx.reneg_trn_optional`, set by
+`v34_answer_rate_renegotiation()`, cleared by Phase 4 conditioning). As
+initiator, our receiver enters TRN on a loose S-handoff rule and reads the
+responder's real TRN at only ~66% by baud 256, so the same test would
+misfire there. A responder that skips TRN, with us as initiator, is still
+open. `V34_RENEG_TRN_GATE=1` restores the old gate for an A/B.
