@@ -5194,31 +5194,17 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                         tone_a_evidence = (s->rx.received_event == V34_EVENT_TONE_SEEN
                                         || s->rx.received_event == V34_EVENT_REVERSAL_1
                                         || s->rx.received_event == V34_EVENT_REVERSAL_3);
-                        /* ...but not while the peer is still *holding* Tone A.
-                           Measured over 8 calls, the guard/carrier ratio at this
-                           decision separates the outcomes completely:
-
-                             INFO1a received   -5.9 -5.0 -4.2 -5.9 -4.6 -5.9
-                                               -6.0 -4.0 -5.1   (all negative)
-                             INFO1a never came +0.2 +7.0 +4.4   (all positive)
-
-                           Negative is the INFO configuration (10.1.2.3), i.e.
-                           the peer has finished with Tone A and is ready to
-                           exchange INFO; positive is Tone A itself (10.1.2.1),
-                           i.e. it is still mid-§9.2.1.1.6 and INFO1d sent now
-                           lands too early and is ignored.  Every reading here
-                           carried event=REVERSAL_3, so the event flags cannot
-                           tell these two apart -- only the ratio can. */
-                        if (tone_a_evidence
-                            &&  s->rx.guard_carrier_valid
-                            &&  s->rx.guard_carrier_db > -2.5f)
-                        {
-                            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                                     "Tx - V.90: end of PCM L2 but peer still holds Tone A (guard %+.1f dB); waiting rather than sending INFO1d early\n",
-                                     s->rx.guard_carrier_db);
-                            tone_a_evidence = false;
-                        }
-                        /*endif*/
+                        /* No hold while the peer "still holds Tone A": in
+                           9.2.2.1.8 the analogue modem transmits Tone A
+                           precisely to say it has received our L2 and is
+                           listening for INFO1d, and 9.2.1.1.7 sends INFO1d on
+                           detecting it.  A guard/carrier hold here (753c520e,
+                           never shown to help) delayed INFO1d 650 ms on every
+                           call from an Eicon Diva V90A caller (guard -0.9 dB,
+                           2026-11-10), up against the analogue modem's own
+                           9.2.2.2.4 INFO1d deadline (2000 ms + 2 RTD from its
+                           Tone B detection); the Diva never answered with
+                           INFO1a and every Phase 2 repeated until it hung up. */
                         if (tone_a_evidence)
                         {
                             /* The expected third Tone A reversal can complete
@@ -5935,31 +5921,6 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     /*endif*/
 
     ++s->tx.tone_duration;
-    /* Same rule as the end-of-L2 gate above: while the peer is still holding
-       Tone A (guard/carrier positive) it is not ready for INFO1d, so keep
-       waiting.  Only use the ratio while carrier is actually present.  The
-       estimator retains its last completed block after signal-down; treating
-       that stale positive value as current Tone A made us wait the full 650 ms
-       after a CX93001 had gone silent to await INFO1d.  V.90 9.2.1.1.7 requires
-       INFO1d after Tone A has been detected and the local echo of L2 received;
-       post-Tone-A silence is therefore readiness, not continued Tone A. */
-    if (s->rx.signal_present
-        &&  s->rx.guard_carrier_valid
-        &&  s->rx.guard_carrier_db > -2.5f
-        &&  s->tx.tone_duration < timeout_bauds)
-    {
-        if ((s->tx.tone_duration % 120) == 0)
-        {
-            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: holding INFO1d, peer still in Tone A (guard %+.1f dB) at %d bauds\n",
-                     s->rx.guard_carrier_db,
-                     s->tx.tone_duration);
-        }
-        /*endif*/
-        s->rx.received_event = V34_EVENT_NONE;
-        return zero;
-    }
-    /*endif*/
     /* The "edge missed" shortcut below takes 30 bauds without a Tone A event
        to mean the tone came and went.  That is only true of silence.  A
        signal that is present but is not a 2400 Hz line is the analogue
