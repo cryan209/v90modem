@@ -611,3 +611,11 @@ call from 7801 fell back to V.34.
 
 The previous binary is `/opt/v90ras/sip_v90_modem.f03cd55b`. Only `v90ras`
 was restarted; the v90isdn server still has the older file mapped.
+
+## Deployed 8bfd6695 (2026-11-09 21:03)
+
+On top of 66365f34: SpanDSP rejects a V.90 Table 11 INFO1a whose fields are
+out of range or that projects 0 bit/s for the rate it selects. A CRC-valid
+frame like that came out of the MultiTech's Tone A and dropped a V.90 call to
+V.34. The previous binary is `/opt/v90ras/sip_v90_modem.66365f34`. Only
+`v90ras` was restarted.
