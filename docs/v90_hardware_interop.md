@@ -1407,3 +1407,38 @@ restarted Phase 2. The wait now keeps the receiver framing the 54-bit INFO1a
 through Tone A events while that framing is armed. The wait's getbaud already
 handled an INFO1a arriving there. Not verifiable offline: the replayed
 transmitter drifts ~450 ms from the live one, so this needs live calls.
+
+## Upstream 14400 never decodes from Lucent/Agere modems (2026-11-09)
+
+Every v90ras call since 8 November whose V.90 upstream ran at **14400** had a
+B1 template fit of **0%** and white data (no V.42, the peer retrains and drops
+to V.34); every one at **16800 or 19200** fit **100%** -- the same modems, the
+same Cisco FXS ports. The 14400 calls are all the Lucent MultiTech on 7801 and
+the Agere MT9234ZBA-USB on this Mac's 7803 (13 calls, both carriers), which
+are one DSP lineage.
+
+What is known:
+
+* The symbols are clean. A replay of 7801's 22:43 call
+  (`ME_V90_UPSTREAM_SYM_DUMP`) uses exactly the 32 points of the 3200-baud
+  minimum constellation (V.34 Table 10: b = 36, K = 24, M = 8, q = 0), about
+  equally, 0.15 mean squared from the grid. Equalizer, carrier and timing are
+  not the fault.
+* No mapping fits: replays at every rate 4800-31200, high or low carrier,
+  GPA or GPC, 3000 baud and expanded shaping (M = 10) all stay at 18-28% fit.
+* Our own analogue transmitter at 14400 fits **100%** through the same
+  receiver, and the shell-mapping tables for M = 8 recompute exactly. Whatever
+  differs is shared by our transmitter and receiver, or is the peer's.
+* 14400 at 3200 is the only dense-baud rate whose shell mapping fills
+  M^8 = 2^K exactly (24000 is the other K = 24 case and has never run).
+
+14400 was only ever chosen by the pre-MP 4-point measurement, which read
+22.4-22.5 dB on calls whose data mode then read 30.6 dB. So 14400 at 3200 baud
+is no longer offered (`v90_set_upstream_rate_excluded()`): a 14400 measured
+cap asks for 16800, a §9.6 step down from 16800 goes to 12000, and
+`ME_V90_UPSTREAM_ALLOW_14400=1` restores it for an A/B. The upstream
+fall-back also no longer acts on rates with no measured threshold (below
+14400 `v34_rx_data_snr_threshold_db()` returns 99): it walked a clean 12000
+down to 4800 one renegotiation at a time.
+
+Not explained, and not verified live yet.

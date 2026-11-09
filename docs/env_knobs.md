@@ -167,6 +167,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_T3_NO_PRELUDE` | v34rx.c |  | d |  |
 | `ME_V90_TRN1D_SYMBOLS` | v90.c |  | sdh | 24796T (3.1 s) of Jd wait. |
 | `ME_V90_TRN2D_SYMBOLS` | v90.c |  | tsdh |  |
+| `ME_V90_UPSTREAM_ALLOW_14400` | modem_engine.c |  | d | offer 14400 at 3200 baud again; it never decoded from Lucent/Agere modems (docs/v90_hardware_interop.md). |
 | `ME_V90_UPSTREAM_MAX_BPS` | modem_engine.c |  | tsd | for the whole call. |
 | `ME_V90_UPSTREAM_NO_SNR_CAP` | modem_engine.c |  | d | an empty common set must not silently preserve the initial ceiling. |
 | `ME_V90_UPSTREAM_STEP` | modem_engine.c |  | d | A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0 |

@@ -430,6 +430,9 @@ int v90_mp_upstream_max_bps(const v90_state_t *s);
 /* V.250 6.4.1 +MS receive minimum: MP's upstream mask then leaves out the
  * rates below it.  0 clears it. */
 void v90_set_upstream_rate_floor(v90_state_t *s, int bps);
+/* Leave one upstream rate out of every MP's capability mask and maximum
+ * (Table 16 bits 24:27 and 36:49) for the rest of the call. */
+void v90_set_upstream_rate_excluded(v90_state_t *s, int bps);
 /* The 72 Jd bits (Table 13) as built for Phase 3, one per byte.  For tests. */
 int v90_copy_jd_bits(const v90_state_t *s, uint8_t *bits, int max_bits);
 
