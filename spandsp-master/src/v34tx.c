@@ -11694,10 +11694,13 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
     s->tx.current_getbaud = get_phase4_baud;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP),
                                     TRAINING_SCALE(0.0f));
-    s->tx.baud_phase = 0;
-    s->tx.rrc_filter_step = 0;
-    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
-    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+    /* The symbol clock and the pulse shaper run on from DATA: S is the next
+       symbol, in the same modulator (11.6.1.1.1).  Resetting baud_phase and
+       zeroing the RRC filter here cut the data off and put half a filter
+       span of near-silence (~3 ms) and a symbol-clock jump on the line just
+       where the peer, its timing retained from data mode, has to find S: at
+       2743 baud its S came out 54 degrees apart instead of 90, with 0-degree
+       (slipped) steps, and the 11.6 failed on 4 of 10 channel delays. */
 
     /* The previous exchange's MP must not be read as this one's.  The rest of
        the MP state is rebuilt by mp_or_mph_baud_init() at the TRN seam and

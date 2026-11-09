@@ -1971,3 +1971,40 @@ Result: answer- and call-initiated retrains with payload pass 24/24 over
 answer-initiated retrain we ran completed. At 3000 baud,
 answer-initiated, it passes 6/6 repeats. Two `tests/fast.list` rows cover it
 (3000 answer, 3200 call). Live coverage: none yet.
+
+## 11.6 at 2743 baud was our transmitter, not acquisition luck (2026-11-09)
+
+The 2743-baud 11.6 rows in `tests/fast.list` were pinned or left out as
+"acquisition luck". Sweeping `V34_DUPLEX_RENEG=4000` over channel delays 0-9,
+every rate and both laws:
+
+| | 9600 | top rate (21600-31200) |
+|---|---|---|
+| before | 115/120 (2743 A-law 6/10, u-law 9/10) | 114/120 (2400 9/10, 3429 8/10 per law) |
+| after | 120/120 | 120/120 |
+
+The failing receiver went into TRN 20 ms into the peer's 128T S and scored
+TRN at 50% ones, which is white, for good. A per-baud dump of its S search
+showed why:
+- about 10 bauds of near-silence between the peer's data and its S;
+- S points 54 degrees apart instead of 90;
+- runs of 0-degree steps (repeated symbols) inside S.
+
+The silence was ours. `start_rate_renegotiation()` reset `tx.baud_phase` and
+zeroed the RRC filter before S, and the transmit tap showed it: RMS 20, then
+603, for about 3 ms between the data and the S, on both roles. That cut off the
+data, left half a filter span of near-silence and restarted our symbol clock
+at an arbitrary phase. The peer's receiver keeps its data-mode timing through
+an 11.6 (`frontend=retained`), so that is exactly where it lost the symbol.
+11.6.1.1.1 just sends S next in the same modulator, so the clock and the
+shaper now run on. 11.7 cleardown shares the path.
+
+Two receive-side gates were also tried: requiring a 16-step alternation run
+before the S-to-S-bar junction, and dropping the 24-of-32 threshold confirm in
+an 11.6. Once the transmitter was fixed neither changed anything, at 14 and
+18 dB SNR either. Dropping the threshold made the gapped case worse, and the
+junction run moved the `V34_TEST_LOST_MP_PRIME` 3200 A-law row from 11/16 to
+10/16 passing delays. Both were left out.
+
+Separate and unchanged: that lost-MP row passes only 11 of 16 delays
+(0/3/5/11/17/23/31/40 per law) with or without this change.
