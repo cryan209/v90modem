@@ -659,3 +659,10 @@ Diva V90A caller recipe (eicon420, spare `/dev/ttyds6`; only controllers
 `AT&F5`, `AT+iQ=o4`, `AT+iO7911`, `AT+MS=V90A,0`, `ATX4`, `AT&D0&K0`, then
 `ATD2950`. `tools/soak/ppp_ping_soak.py --pty /dev/ttyds6 --at ...` runs there
 unchanged (copy it to eicon420; it needs only python3 and sudo).
+
+## Deployed fcdb8284 (2026-11-10 08:26)
+
+On top of 6d798ffa: the full V.90 Phase 2 measures RTDEd (9.2.1.1.4), used
+only to extend the 9.2.1.2.4 third-reversal deadline to 900 ms + RTD. At a
+bare 900 ms it fired 20 ms before the Diva's reversal (RTDEd 148 ms over
+ISDN and SIP). The previous binary is `/opt/v90ras/sip_v90_modem.6d798ffa`.
