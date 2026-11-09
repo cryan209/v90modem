@@ -1449,6 +1449,19 @@ Weaknesses this exposed, all still open:
 - **The top rates come out white:** 2743/24000-26400, 2800/26400 and
   3000/28800 run at about 47% errors even at 44 dB, and 3000/9600 fails
   up to 18.4 dB where 12000 is clean from 16.8. None of these is offered.
+  (3000/9600: fixed by the timing steer below, and now offered.)
+
+**Recalibrated after the timing fix (2026-11-09):** with the collapse gone,
+spot checks 2 dB under each low-rate threshold still failed, except at 9600.
+The same method (1M bits, delays 0/7/23, both laws, 12-17 dB injected) moves:
+- 2800/9600 from 18.6 to 15.8 dB (highest failing reading 15.7).
+- 3000/9600 into the table at 14.4 dB (highest failing reading 14.3).
+
+On 24 automatic-rate calls at delays 1/11 that were not in the calibration
+set, there were no errors. 2800 now asks 9600 from a 16.6 dB reading (it
+used to stay at 7200 until 19.1), and 3000 asks 9600 at 15.4. 2400/7200 is
+clean at a 14.6 dB reading and runs at 0.1-0.3% at 13, where it used to run
+at about 15%.
 
 ## Data-mode timing steer: the main tap, not the energy centroid (2026-11-09)
 

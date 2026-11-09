@@ -3318,8 +3318,10 @@ SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
 
    Left out, because they have fewer than 10 clean readings above their
    highest failure: 2743/24000-26400, 2800/26400 and 3000/28800, which are
-   white (about 47% errors) even at 44 dB, and 3000/9600, which fails to
-   18.4 dB while 12000 is clean from 16.8.  Zero entries end a row.  Below
+   white (about 47% errors) even at 44 dB.  Zero entries end a row.
+   2800/9600 and 3000/9600 were recalibrated (same method, 12-17 dB
+   injected) after the data-mode timing fix: 18.6 -> 15.8, and 3000/9600,
+   left out at "fails to 18.4", is clean above 14.3.  Below
    a row the floor is 2400 bit/s at 2400 baud (Table 2/V.34 has it at no
    other symbol rate), clean on 1M bits each way at every reading down to
    9.3 dB (8 dB injected, delays 0/7/23), and 4800 elsewhere.  2400 bit/s
@@ -3341,9 +3343,10 @@ static const struct
     /* 2743 */ {{21600, 30.7f}, {19200, 26.8f}, {16800, 23.3f}, {14400, 21.0f},
                 {12000, 18.9f}, {9600, 17.1f}, {7200, 15.1f}},
     /* 2800 */ {{24000, 32.0f}, {21600, 31.8f}, {19200, 26.1f}, {16800, 22.6f},
-                {14400, 19.0f}, {12000, 18.6f}, {9600, 18.6f}, {7200, 14.8f}},
+                {14400, 19.0f}, {12000, 18.6f}, {9600, 15.8f}, {7200, 14.8f}},
     /* 3000 */ {{26400, 33.2f}, {24000, 30.3f}, {21600, 26.3f}, {19200, 24.3f},
-                {16800, 22.3f}, {14400, 18.7f}, {12000, 16.8f}, {7200, 12.9f}},
+                {16800, 22.3f}, {14400, 18.7f}, {12000, 16.8f}, {9600, 14.4f},
+                {7200, 12.9f}},
 };
 
 SPAN_DECLARE(int) v34_rx_training_rate(v34_state_t *s, float snr_db)
