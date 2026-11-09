@@ -635,3 +635,12 @@ On top of 2aa392b9: the V.90 upstream never offers 14400 at 3200 baud (a
 on rates with no measured SNR threshold. Every 14400 upstream from the Lucent
 (7801) and Agere (7803) MultiTechs had decoded white. The previous binary is
 `/opt/v90ras/sip_v90_modem.2aa392b9`. Only `v90ras` was restarted.
+
+## Deployed 2288b8fc (2026-11-10 08:02)
+
+On top of c7d77d0d, reverting its 14400 exclusion (45a71e6e; the fall-back
+guard stays): a blind-placed V.90 upstream B1 that decodes white is searched
+over all eight symbol offsets. The Agere MT9234 starts B1 7 symbols after the
+4-point signal, not the 9 the blind placement assumed, so the Lucent (7801)
+and Agere (7803) upstreams had decoded white at every rate. The previous
+binary is `/opt/v90ras/sip_v90_modem.c7d77d0d`. Only `v90ras` was restarted.
