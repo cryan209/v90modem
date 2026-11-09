@@ -674,3 +674,10 @@ newest window and windows up to 400 symbols older. Live, the newest window
 ran past the Diva's CPt repeats and read 10.3 dB (36.7 dB in replay), so no
 MP rate was offered and the Diva chose V.34 on the restarted Phase 2. The
 previous binary is `/opt/v90ras/sip_v90_modem.fcdb8284`.
+
+## Deployed e350541e (2026-11-10 08:50)
+
+On top of 63a0c4d8: startup Ri runs 1600T (500 ms) before R-bar-i
+acknowledges CPt (`V90_RI_MIN_SYMBOLS`, floor 192). At 192T the Diva kept
+repeating CPt through our TRN2d and MP and retrained. The previous binary is
+`/opt/v90ras/sip_v90_modem.63a0c4d8`.
