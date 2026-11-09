@@ -1523,9 +1523,45 @@ Regression rows:
 - `tests/fast.list`: the 10 dB automatic-rate row.
 
 **Still open:**
-- 2743/21600 at 42 dB loses delays 5 and 13 on either measure.
+- ~~2743/21600 at 42 dB loses delays 5 and 13 on either measure.~~ That was
+  the Godard loop (next section).
 - `v90_engine_replay` of `rf-bbs-2` no longer reaches data mode (it diverges
   in training with today's 11.5/11.6 changes), so the RasFinder drift case
   has no offline check. It runs at 3200 baud, so it stays on the
   centroid, now with the integral path. It needs a live call.
+
+## The Godard loop is out of DATA on the plain V.34 path (2026-11-09)
+
+**Symptom.** 2743/21600 at 42 dB ran 63 s at 0.06 from the grid and then went
+white in about 200 symbols, and stayed white. A 16-symbol trace showed the
+cause:
+- Carrier phase, AGC, scale and the taps all held steady.
+- Only the timing correction moved: single steps from 47 to 68 in ~200
+  symbols (0.11 sample), starting while the error was still normal.
+- These were Godard band-edge steps (`pri_symbol_sync()`). The data-mode
+  timing steer moves at most 8 per 256 symbols, and the M&M loop is off on
+  this path.
+- After the steps, the error passed twice its baseline. The DD-LMS then
+  froze on its health gate, and the steer, measuring frozen taps, could not
+  see the timing error. Nothing was left to bring it back.
+
+**Fix.** In DATA on the plain V.34 T/2 path (`v34_rx_t2_data_path()`), Godard
+no longer runs; the steer tracks the clock (`v34_data_godard_yields()`).
+`ME_V34_DATA_GODARD=1` puts it back. The RasFinder work had already found that
+it made one correction in 24 s live, and that freezing it changed nothing.
+
+**Results**, `v34_duplex_test`, 150 s runs:
+
+| runs | Godard on | Godard off |
+|---|---|---|
+| 8 cases: 2400-3000 baud, 9600-26400, -20..+20 ppm | 3/8 clean | 8/8 |
+| the 20-case timing matrix above, plus 6 high-rate cases | - | 26/26 |
+
+The rates that were "white even at 44 dB" in the TRN tables section are clean
+at 50 dB on delays 0/7/13 over 60 s, 12/12: 2743/24000, 2743/26400,
+2800/26400 and 3000/28800. Their ceiling was this runaway, not the channel.
+They are still not in `v34_rx_training_rate()`'s tables; calibrating them is
+next.
+
+Regression row in `tests/slow.list`: 2743/21600 at 42 dB, delay 5.
 

@@ -6907,6 +6907,28 @@ static int v34_data_timing_diag_freeze(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* In DATA on the plain V.34 T/2 path the data-mode timing steer
+   (v34rx_data.c) tracks the clock, and the Godard band-edge loop only adds
+   data-driven steps.  On a dense constellation a burst of them is fatal:
+   2743/21600 at 42 dB ran 63 s at 0.06 from the grid, then Godard stepped
+   21 times in ~200 symbols (0.11 sample), the error passed twice its
+   baseline, the DD-LMS froze on its health gate, the steer (on frozen taps)
+   could not see it, and the call stayed white.  With Godard out of DATA:
+   8/8 clean of 150 s runs at 2400-3000 baud, 9600-26400, -20..+20 ppm,
+   against 3/8 with it (it had also failed 2800/24000 at +20 ppm both ways).
+   The RasFinder work found it made one correction in 24 s live and
+   freezing it changed nothing there.  ME_V34_DATA_GODARD=1 keeps it. */
+static bool v34_data_godard_yields(const v34_rx_state_t *s)
+{
+    static int keep = -1;
+
+    if (keep < 0)
+        keep = (getenv("ME_V34_DATA_GODARD") != NULL);
+    /*endif*/
+    return !keep  &&  v34_rx_t2_data_path(s);
+}
+/*- End of function --------------------------------------------------------*/
+
 static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
 {
     int i;
@@ -11856,7 +11878,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     }
     /*endif*/
     if (!v34_rx_caller_hearing_own_phase3_m(s, 8)
-        &&  !(s->stage == V34_RX_STAGE_DATA  &&  v34_data_timing_diag_freeze()))
+        &&  !(s->stage == V34_RX_STAGE_DATA
+              &&  (v34_data_timing_diag_freeze()  ||  v34_data_godard_yields(s))))
         pri_symbol_sync(s);
     /*endif*/
     eq_sample = equalizer_get(s);
