@@ -6137,7 +6137,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                               we can lock immediately after the 10 ms A-bar period. */
                            (s->v90_mode
                             && !s->calling_party
-                            && s->v90_info1d_sent
+                            && (s->v90_info1d_sent
+                                /* ...or while waiting for Tone A before
+                                   INFO1d with INFO1a framing armed: some
+                                   analogue modems (Courier) send INFO1a
+                                   before our INFO1d (v90_wait_tone_a_init). */
+                                || s->target_bits == (70 - (4 + 8 + 4)))
                             && (s->stage == V34_RX_STAGE_TONE_A
                                 || s->stage == V34_RX_STAGE_TONE_B
                                 || s->stage == V34_RX_STAGE_L1_L2

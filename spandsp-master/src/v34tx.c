@@ -6514,7 +6514,20 @@ static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
        Must also switch demodulator to TONES — if L1/L2 analysis is still running,
        the tone detector won't fire. */
     s->rx.current_demodulator = V34_MODULATION_TONES;
-    s->rx.stage = V34_RX_STAGE_TONE_A;
+    /* Keep the receiver framing INFO1a through this wait.  The spec has the
+       analogue modem send INFO1a after our INFO1d (9.2.2.1.9), but the
+       Courier on 7802 sends it while we are still here waiting for its
+       Tone A: on 2026-11-09 its INFO1a ended ~8.36 s into the call, inside
+       this 7.87-8.47 s wait, and was lost because this init dropped the
+       receiver back to TONE_A with INFO1d "not sent", which switches the
+       INFO1a framing off.  Every first Phase 2 from that modem then timed
+       out and restarted -- the audibly ragged start.  The getbaud above
+       already handles an INFO1a that arrives here; give it the frame.  Like
+       v90_wait_info1a_init, do not yank an INFO1a already accumulating. */
+    s->rx.target_bits = 70 - (4 + 8 + 4);
+    if (s->rx.stage != V34_RX_STAGE_INFO1A  ||  s->rx.bit_count == 0)
+        s->rx.stage = V34_RX_STAGE_TONE_A;
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -1391,3 +1391,19 @@ V.34 path already did for out-of-range fields. Every caller now honours that
 result, including the boundary-shift and local-slip recovery paths, which
 search several alignments for a CRC match and so raise the false-accept rate.
 Fixture: `reference-data/artifacts/multitech-7801-info1a-tone-a-false-20261109`.
+
+## The Courier sends INFO1a before our INFO1d (2026-11-09)
+
+Every first Phase 2 from the Courier on 7802 failed and restarted, which is
+the ragged-sounding start. On the second attempt we went straight from
+SECOND_NOT_B to INFO1d, and the INFO1a decoded. On the first we took the
+§9.2.1.1.7 "wait for Tone A before INFO1d" branch (V90_WAIT_TONE_A, 7.87-8.47 s
+on the 20:50 call). The Courier sent its INFO1a inside that wait: a replay of
+the recording places its end at ~8.36 s. `v90_wait_tone_a_init` had reset the
+receiver to TONE_A with `v90_info1d_sent` false, which turns INFO1a framing
+off, so the frame was never decoded. We then timed out on INFO1d twice and
+restarted Phase 2. The wait now keeps the receiver framing the 54-bit INFO1a
+(and keeps any frame already accumulating), and the sync search stays on
+through Tone A events while that framing is armed. The wait's getbaud already
+handled an INFO1a arriving there. Not verifiable offline: the replayed
+transmitter drifts ~450 ms from the live one, so this needs live calls.
