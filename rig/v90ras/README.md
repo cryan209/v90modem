@@ -590,3 +590,14 @@ of it live-verified yet:
 The old binary is `/opt/v90ras/sip_v90_modem.1cb06bc6`. Only `v90ras` was
 restarted. The v90isdn server shares `/opt/v90ras/sip_v90_modem`, and its
 running supervisor still has the old file mapped.
+
+## Deployed f03cd55b (2026-11-09)
+
+On top of 8f918728:
+- Godard timing is out of DATA on the plain V.34 path (4945aba4). It caused
+  sudden permanent white-outs on long calls.
+- 2743/24000 and 2800/26400 are in the rate tables (f03cd55b).
+
+The previous binary is `/opt/v90ras/sip_v90_modem.8f918728`. Again only
+`v90ras` was restarted.
+
