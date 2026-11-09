@@ -194,9 +194,10 @@ sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e
 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2400 9600 ulaw
 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 2400 9600 ulaw
 V34_DUPLEX_DELAY=5 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 3200 9600 alaw
-# Delay 23: at delay 0 this recovery row sits on a knife edge across the
-# 11.3.1.2.6 Phase 4 S wait (docs/slmodemd_vs_hardware_20261029.md).
-V34_DUPLEX_DELAY=23 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 3200 9600 alaw
+# Once pinned to delay 23 as a "knife edge": the hook sent only three plain
+# MP frames, so at some delays the peer decoded none (2026-11-09).
+V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 3200 9600 alaw
+V34_DUPLEX_DELAY=17 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2743 9600 alaw
 ./v34_duplex_test 2400 9600 alaw
 ./v34_duplex_test 2743 9600 ulaw
 ./v34_duplex_test 2743 9600 alaw

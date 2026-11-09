@@ -9261,12 +9261,17 @@ static void phase4_wait_init(v34_state_t *s)
    began: that gives the far end two or three MP' frames.  Bounded at 8
    frames in case the far end has stopped sending MP'. */
 /* V34_TEST_LOST_MP_PRIME=1: the first modem in the process to receive an MP
-   sends three more plain MP frames and then damages every MP' it sends (a
-   CRC-covered bit flipped in the reused buffer), still ending with E once the
-   peer's MP' arrives.  The peer therefore decodes MP frames, never an MP', and
-   then sees E: the 11.4.1.x.3 "E in place of the peer's MP'" case.  Test hook. */
+   keeps sending plain MP until the peer's MP' (acknowledge bit set) shows the
+   peer has decoded one, and then damages every MP' it sends (a CRC-covered
+   bit flipped in the reused buffer), still ending with E once a fresh peer
+   MP' arrives.  The peer therefore decodes MP frames, never an MP', and then
+   sees E: the 11.4.1.x.3 "E in place of the peer's MP'" case.  Test hook.
+
+   It used to send a fixed three plain frames.  On 5 of 16 channel delays
+   (3200 baud) the peer's MP lock came after those three, so the peer never
+   decoded ANY of our MP and could not train at all -- a case no modem can
+   recover, not the one under test. */
 static const v34_state_t *lost_mp_prime_owner = NULL;
-static int lost_mp_prime_plain = 0;
 
 static bool lost_mp_prime_hook_defer(const v34_state_t *s)
 {
@@ -9276,7 +9281,7 @@ static bool lost_mp_prime_hook_defer(const v34_state_t *s)
     if (!lost_mp_prime_owner)
         lost_mp_prime_owner = s;
     /*endif*/
-    return lost_mp_prime_owner == s  &&  lost_mp_prime_plain++ < 3;
+    return lost_mp_prime_owner == s  &&  s->rx.mp_remote_ack_count == 0;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -385,7 +385,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_CALL_P3_S_AFTER_MS` | v34tx.c |  | d | Experiment (default off): the 7910 card sometimes gives up on a |
 | `V34_DA_HOLD_AFTER_SILENCE` | v34rx.c |  | - | The analogue modem goes quiet for seconds between CPt and |
 | `V34_INFO1C_FORCE_HIGH` | v34tx.c |  | d |  |
-| `V34_TEST_LOST_MP_PRIME` | v34tx.c |  | td | V34_TEST_LOST_MP_PRIME=1: the first modem in the process to receive an MP |
+| `V34_TEST_LOST_MP_PRIME` | v34tx.c |  | td | V34_TEST_LOST_MP_PRIME=1: the first modem in the process to receive an MP sends plain MP until the peer acknowledges, then only damaged MP' |
 | `V90_T3_SYMBOL_PROBE` | v34rx.c |  | dh | V90_T3_SYMBOL_PROBE=<data symbol index>: everything that went into |
 | `V91_TEST_ESCAPE_AFTER_MS` | modem_engine.c |  | sd | cadence phase (0..5). |
 | `V91_TEST_RETRAIN_AFTER_MS` | modem_engine.c |  | sd |  |

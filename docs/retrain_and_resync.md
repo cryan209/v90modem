@@ -2006,5 +2006,18 @@ an 11.6. Once the transmitter was fixed neither changed anything, at 14 and
 junction run moved the `V34_TEST_LOST_MP_PRIME` 3200 A-law row from 11/16 to
 10/16 passing delays. Both were left out.
 
-Separate and unchanged: that lost-MP row passes only 11 of 16 delays
-(0/3/5/11/17/23/31/40 per law) with or without this change.
+That lost-MP row's 11 of 16 was the test hook, not the modem (next section).
+
+## `V34_TEST_LOST_MP_PRIME`: the hook, not the modem (2026-11-09)
+
+The 11.4.1.x.3 recovery row (E arriving in place of the peer's MP') passed
+11 of 16 delays at 3200 baud and was pinned to delay 23 as a knife edge. Plain
+startup passes all 16. In every failure the hook was to blame: its owner sent
+three plain MP frames and then corrupted every MP'. When the peer's MP lock came
+later than that (at delay 0, A-law, baud 437, 80 ms after the third frame), the
+peer never decoded any MP from us, and no modem can train from that. The hook
+now keeps sending plain MP until the peer's MP' (acknowledge bit 33) shows the
+peer has decoded one, and only then corrupts. The case under test still
+happens: "E after 108 bits on the MP frame grid with no peer MP' decoded".
+Result: 96/96 over all six symbol rates x {u,A}-law x 8 delays. The row runs
+at delay 0 again, and a 2743 row has been added.
