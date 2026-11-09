@@ -1408,34 +1408,41 @@ through Tone A events while that framing is armed. The wait's getbaud already
 handled an INFO1a arriving there. Not verifiable offline: the replayed
 transmitter drifts ~450 ms from the live one, so this needs live calls.
 
-## Lucent/Agere V.90 upstream never decodes on v90ras (2026-11-09)
+## Lucent/Agere V.90 upstream: B1 is not 9 symbols after the 4-point signal (2026-11-09)
 
-Per line since 1 November, the V.90 upstream B1 template fit is all or
-nothing by **modem family, not rate**: 7800 fits 36/36 (16800 and 19200),
-the Courier on 7802 1/1 (19200), our own analogue client on 2903 2/2
-(31200); the Lucent MultiTech on 7801 fits **0/12** (14400, both carriers)
-and this Mac's Agere MT9234ZBA-USB on 7803 **0/2** (14400 and 16800, high
-carrier). A first reading grouped journal lines by RING across concurrent
-lines and blamed 14400; c7d77d0d stopped offering 14400 at 3200 baud on that
-premise and was reverted (the 16800 Agere call is just as white).
+Per line since 1 November, the V.90 upstream was all or nothing by **modem
+family, not rate**: 7800 decoded 36/36 (16800 and 19200), the Courier on 7802
+1/1, our own analogue client on 2903 2/2; the Lucent MultiTech on 7801 **0/12**
+(14400, both carriers) and this Mac's Agere MT9234ZBA-USB on 7803 **0/2**
+(14400 and 16800). (A first reading grouped journal lines by RING across
+concurrent lines and blamed 14400; c7d77d0d stopped offering it and was
+reverted.)
 
-What is known:
+The symbols were clean (all 32 points of Table 10 at 0.15 from the grid; 56
+at 0.21 for 16800) and descrambled white on every superframe phase. These
+modems' B1 template never fits (their scrambler is not reset, as on the
+MT5634SMI), so B1 is placed from the end of the 4-point CP'/E signal
+(`v90_t3_blind_acquire()`), at a fixed **9 symbols** after it -- the
+MT5634SMI's figure. The Agere starts B1 **7** symbols after it (MT9234 call
+of 23:25, 16800 high carrier): a gap sweep 1-16 decodes only at 7 and 15,
+where the stream is the peer's continuous HDLC flags (`11111001...`, a
+rotation of 0x7E, 75% ones); every other gap reads 48-52%. Off by a symbol,
+every mapping frame (V.34 9.4/9.5) straddles two, which the frame-phase
+sweep (whole data frames) cannot repair. There is no visible silence between
+the two signals on this modem to place B1 by power.
 
-* The symbols are clean. Replays (`ME_V90_UPSTREAM_SYM_DUMP`) of a 14400 call
-  use exactly the 32 points of V.34 Table 10 (b = 36, K = 24, M = 8) at 0.15
-  mean squared from the grid; the 16800 call uses all 56 points at 0.21.
-  Equalizer, carrier and timing are not the fault.
-* No mapping fits: replays at every rate 4800-31200, high or low carrier,
-  GPA or GPC, 3000 baud and expanded shaping stay at 18-28% fit, and the
-  receiver as of 1cb06bc6 fails the same taps.
-* The pre-MP 4-point SNR reads 22.4 dB for these modems against 24.8 (7800)
-  and 26 (7802).
-* The same modems reached V.90 data through the AudioCodes path with older
-  servers (MT5634 31200, MT9234 26400, 28 Oct - 1 Nov).
-* Leads: Lucent does not reset its scrambler before B1 (our K56flex receiver
-  needed an MP'/E-anchored B1 search); the E-anchored B1 start ("-22 from E",
-  then "B1 ended after 1 data frames, frame error 38.9"); the data-frame
-  phase sweep steps only whole frames.
+Fix: while a 4-point-placed B1 decodes white, the DATA path tries the eight
+symbol offsets, one window (~0.07 s) each, skipping one symbol from the
+stream per step -- equivalent to moving B1, since the scrambler is
+self-synchronising and the quadrant differentially coded. A reading 20% from
+white is kept at once (10% for the offset B1 gave); otherwise the clearest of
+the eight, else up to three passes, because a timing-loop sample slip inside
+a window can drop even the right offset to 54-59%. On the replays: the
+MT9234 tap locks at +6 on pass 2 (1.1 s), the Lucent 7801 tap (14400 low
+carrier, 22:43) at +7 -- both then carry flags until the point where the live
+peer gave up. Regression: `tools/v90_b1_offset_test.py`
+(`reference-data/artifacts/mt9234-v90ras-b1-offset-20261109`). Not yet
+verified live.
 
 Kept from c7d77d0d: the §9.6 upstream fall-back no longer acts on rates with
 no measured threshold (below 14400 `v34_rx_data_snr_threshold_db()` returns

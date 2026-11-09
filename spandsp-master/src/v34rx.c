@@ -1087,6 +1087,88 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                noise -- see V34_V90_T3_SHELL_BAD_PCT -- and releasing on them
                was throwing away working locks the moment the peer's DTE said
                anything. */
+            /* The symbol offset of a B1 placed from the 4-point signal's
+               end (v90_t3_blind_acquire()) is that peer family's gap, and
+               the gap differs between families: 9 on the MT5634SMI, 7 on
+               the Agere MT9234ZBA.  One symbol out, every mapping frame
+               (V.34 9.4/9.5, 8 symbols) straddles two, so the decode is
+               white at EVERY superframe phase and the frame sweep below,
+               which relabels whole data frames only, cannot recover it.
+               The scrambler is self-synchronising and the quadrant is
+               differentially coded (V.34 9.4/9.5), so dropping one symbol
+               from the stream is the same as moving B1 one symbol on.
+               Try the eight offsets, one window each, before the frame
+               sweep is let loose. */
+            if (s->v90_t3_sym_search  &&  !s->v90_t3_sf_locked)
+            {
+                int alt_pct = 100*s->v90_t3_alt_ones/s->v90_t3_bit_count;
+                int dev = abs(ones_pct - 50);
+                int alt_dev = abs(alt_pct - 50);
+                int step = s->v90_t3_sym_steps;
+
+                if (alt_dev > dev)
+                    dev = alt_dev;
+                /*endif*/
+                if (v14_ratio >= 20  &&  dev < 20)
+                    dev = 20;
+                /*endif*/
+                /* One window per offset.  A strong reading is kept at once;
+                   otherwise the best of the eight wins, and only a clear
+                   one: a timing slip inside a window costs even the right
+                   offset most of its structure (57% against 75% around it,
+                   live tap 2026-11-09), so the first-past-a-threshold walk
+                   stepped straight past it. */
+                if (step == 0  ||  dev > s->v90_t3_sym_best_dev)
+                {
+                    s->v90_t3_sym_best_dev = dev;
+                    s->v90_t3_sym_best = step;
+                }
+                /*endif*/
+                /* Where B1 put it is right on every other peer measured, so
+                   it keeps on moderate evidence; the rest need strong. */
+                if (step == 0  &&  s->v90_t3_sym_pass == 0  &&  dev >= 10)
+                    dev = 20;
+                /*endif*/
+                if (dev < 20  &&  step >= 7  &&  s->v90_t3_sym_best_dev < 10
+                    &&  ++s->v90_t3_sym_pass < 3)
+                {
+                    /* Nothing clear: the slip can land on the right offset's
+                       window, so go round again from the start rather than
+                       give up on a single unlucky pass. */
+                    s->v90_t3_next_symbol -= 3*step;
+                    s->v90_t3_sym_steps = 0;
+                    s->v90_t3_sym_best = 0;
+                    s->v90_t3_sym_best_dev = 0;
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream symbol offset: no clear "
+                             "winner, pass %d\n", s->v90_t3_sym_pass + 1);
+                }
+                else if (dev >= 20  ||  step >= 7)
+                {
+                    int target = (s->v90_t3_sym_best_dev >= 10)
+                               ? s->v90_t3_sym_best  :  0;
+
+                    s->v90_t3_sym_search = false;
+                    s->v90_t3_next_symbol += 3*(target - step);
+                    s->v90_t3_sym_steps = target;
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream symbol offset +%d chosen "
+                             "(%d%% from white; +%d read %d%%/%d%% ones)\n",
+                             target, s->v90_t3_sym_best_dev, step,
+                             ones_pct, alt_pct);
+                }
+                else
+                {
+                    s->v90_t3_next_symbol += 3;
+                    s->v90_t3_sym_steps++;
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream symbol offset +%d reads "
+                             "%d%%/%d%% ones; trying +%d\n",
+                             step, ones_pct, alt_pct, step + 1);
+                }
+                /*endif*/
+            }
+            /*endif*/
             if (s->v90_t3_sf_locked
                 &&
                 v90_t3_phase_evidence_ok(s)
@@ -1254,7 +1336,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     }
                     /*endif*/
                 }
-                else if (v90_t3_phase_sweep_enabled()
+                else if (!s->v90_t3_sym_search
+                         &&
+                         v90_t3_phase_sweep_enabled()
                          &&
                          v90_t3_phase_evidence_ok(s)
                          &&
@@ -14481,7 +14565,11 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
        the plain V.34 B1 search finds this peer puts between E and B1.  Where
        the silence is not quite silent, looking for it finds the wrong
        symbol, and B1 must be found to the symbol: the frame-phase search
-       downstream only relabels whole mapping frames. */
+       downstream only relabels whole mapping frames.  Nine is that peer's
+       figure, not the Recommendation's: the Agere MT9234ZBA starts B1 SEVEN
+       symbols after it (v90ras 2026-11-09, white at every other gap), so
+       the data path still searches the symbol offset while the decode is
+       white (v90_t3_sym_search). */
     first = qend + 3*9;
     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 T/3 4-point training: %d symbols, decision error "
@@ -15321,6 +15409,13 @@ commit:
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
     s->v90_t3_b1_start = best_first;
+    /* Only a B1 placed from the 4-point signal's end is uncertain to the
+       symbol; a template fit pins it. */
+    s->v90_t3_sym_search = blind;
+    s->v90_t3_sym_steps = 0;
+    s->v90_t3_sym_best = 0;
+    s->v90_t3_sym_best_dev = 0;
+    s->v90_t3_sym_pass = 0;
     if (!blind && best_initial_state != 0)
     {
         int prior = (s->viterbi.ptr - 1) & 0xF;

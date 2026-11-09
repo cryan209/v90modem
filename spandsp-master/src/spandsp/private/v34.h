@@ -1669,6 +1669,13 @@ typedef struct
     /* v34_begin_b1_search_after_mp_ack(): a B1 that the 4-point MP'/E
        training has placed is final; the templates are not tried. */
     bool v90_t3_4point_final;
+    /*! A 4-point-placed B1's symbol offset is still being searched
+        (v34rx.c, the DATA window): one symbol skipped per white window. */
+    bool v90_t3_sym_search;
+    int v90_t3_sym_steps;
+    int v90_t3_sym_best;
+    int v90_t3_sym_best_dev;
+    int v90_t3_sym_pass;
     int64_t v90_t3_acq_retry_at;
     /*! Window of the current fast retry (-1 when none): see
         V34_V90_T3_ACQ_FAST_GAP.  fast_start..fast_end replaces the
