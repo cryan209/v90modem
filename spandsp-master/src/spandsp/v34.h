@@ -559,6 +559,10 @@ SPAN_DECLARE(void) v34_v90_retrain_first_b_silence(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s);
 
+/*! Mark the retrain just started by v34_start_retrain() as OURS (11.5.1.1 /
+    11.5.2.1) rather than a response to the peer's (11.5.1.2 / 11.5.2.2). */
+SPAN_DECLARE(void) v34_retrain_initiated(v34_state_t *s);
+
 /*! \brief Which arithmetic this library was compiled with.  Reported at
            startup so a live A/B of the two datapaths can confirm from the log
            which arm ran, and so a libspandsp built one way against an

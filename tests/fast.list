@@ -1062,3 +1062,6 @@ sh -c 'mkdir -p "$TMPDIR/busy"; sleep 300 & echo $! > "$TMPDIR/busy/line9"; ./en
 # V.34 11.6.1.1.1/11.6.1.2.2: TRN is optional; a peer that sends MP right after S-bar (Win95 modems, rig/v90ras), as initiator and as responder
 V34_TEST_RENEG_NO_TRN=caller V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 24000 ulaw
 V34_TEST_RENEG_NO_TRN=answer V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 24000 ulaw
+# V.34 11.5 retrain with LAPM payload, each role initiating (2026-11-09): the answerer's Tone B gate waits for the caller's 11.5.1.2 silence
+./engine_pair_test --seconds 90 --hold-seconds 30 --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3000 --answer-env ME_V34_RETRAIN_AFTER_MS=2000 --payload-printable RR --payload-reps 300 --both-log 'resuming the existing data link'
+./engine_pair_test --seconds 90 --hold-seconds 30 --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_RETRAIN_AFTER_MS=2000 --payload-printable RR --payload-reps 300 --both-log 'resuming the existing data link'

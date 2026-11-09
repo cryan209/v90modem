@@ -11871,6 +11871,35 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
+    /* FIRST_A reverses on "Tone B is detected" (11.5.2.1, 11.2.1.2.3), and
+       tone_b_present was still true from the startup Phase 2: an answer
+       modem's retrain reversed Tone A 60 ms after it began, before the call
+       modem had even heard Tone A for its 11.5.1.2 50 ms, so the call modem
+       missed the reversal and the retrain never completed (engine_pair
+       ME_V34_RETRAIN_AFTER_MS on the answerer; the half-duplex branch above
+       already clears these). */
+    s->rx.tone_b_present = false;
+    s->rx.tone_b_ended = false;
+    s->rx.retrain_wait_peer_gap = false;
+    s->rx.retrain_peer_gap_seen = false;
+    s->rx.retrain_peer_gap_bits = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_retrain_initiated(v34_state_t *s)
+{
+    if (!s  ||  s->calling_party)
+        return;
+    /*endif*/
+    /* 11.5.2.1 has us send Tone A and reverse it once "Tone B is detected";
+       the call modem gets there by 11.5.1.2: Tone A for 50 ms, 70 ms of
+       silence, then Tone B.  Until it notices our Tone A it is still sending
+       DATA, and at 3000 baud A-law that passed the Tone B detector 40 ms in,
+       so our reversal went out before the call modem was listening and the
+       retrain never completed.  Take Tone B only after its silence. */
+    s->rx.retrain_wait_peer_gap = true;
+    s->rx.retrain_peer_gap_seen = false;
+    s->rx.retrain_peer_gap_bits = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

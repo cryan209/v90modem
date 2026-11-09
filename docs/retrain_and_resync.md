@@ -1937,3 +1937,37 @@ to 512T whenever our receiver moved on. The 11.6 transmitter now ignores it
   exercised the responder's conditioning.
 
 `V34_RENEG_TRN_GATE=1` restores the old gate for an A/B.
+
+## 11.5: an answer modem's own retrain never completed (2026-11-09)
+
+Offline, `engine_pair_test` with `ME_V34_RETRAIN_AFTER_MS` on the answerer and
+LAPM payload running: the retrain never got back to DATA (the caller retrained
+fine). Three defects of ours, all in how the answer modem decides that the call
+modem's Tone B has started (11.5.2.1: send Tone A and reverse it "after Tone B
+is detected and Tone A has been transmitted for at least 50 ms"):
+
+1. **Stale Tone B.** `rx.tone_b_present` was still true from the startup
+   Phase 2, so FIRST_A reversed 60 ms into the retrain, before the call modem
+   had heard 50 ms of Tone A (11.5.1.2). `v34_start_retrain()` now clears it
+   in duplex too (the half-duplex branch already did).
+2. **Data read as Tone B.** Until it detects our Tone A the call modem is still
+   sending DATA, and at 3000 baud that passed the 20-bit Tone B detector. The
+   call modem sends 70 ms of silence before Tone B (11.5.1.2), so the answer
+   modem that initiated (`v34_retrain_initiated()`, called only when the
+   retrain is ours) now accepts Tone B only after 40 ms (24 bits) of
+   continuous no-carrier. A one-bit carrier dip in the data is not enough;
+   that dip passed the first version of this gate.
+3. **Data read as a Tone B reversal.** The persistence counter behind
+   "reversal 1 in tone B" ran on the call modem's data too, and FIRST_A's
+   "reversal seen, INFO0 already received" branch took it, because
+   `info0_received` is still set from the startup. The same gap gate now
+   applies to the reversal.
+
+The engine's two peer-response paths call `respond_v34_retrain_locked()`, which
+leaves the gate off, because a responding answerer hears Tone B straight away.
+
+Result: answer- and call-initiated retrains with payload pass 24/24 over
+2400/2743/2800/3000/3200/3429 baud in µ-law and A-law. Before the fix, no
+answer-initiated retrain we ran completed. At 3000 baud,
+answer-initiated, it passes 6/6 repeats. Two `tests/fast.list` rows cover it
+(3000 answer, 3200 call). Live coverage: none yet.

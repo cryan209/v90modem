@@ -1803,6 +1803,13 @@ typedef struct
         has the call modem go silent exactly when it is ready to receive the
         answer modem's L1/L2, so the falling edge is a readiness signal. */
     bool tone_b_ended;
+    /* 11.5.2.1: an answer modem that INITIATED a retrain takes Tone B only
+       after the call modem's 11.5.1.2 silence; until then a still-in-data
+       call modem's signal can pass for 20 bits of Tone B. */
+    bool retrain_wait_peer_gap;
+    bool retrain_peer_gap_seen;
+    /* Consecutive no-carrier bits (600 bit/s) counted towards that gap. */
+    int retrain_peer_gap_bits;
     /*! \brief Previous +/-90 step seen in Phase 4 S, for spotting the
         S-to-S-bar junction (the one place the alternation repeats). */
     int phase4_s_last_step;

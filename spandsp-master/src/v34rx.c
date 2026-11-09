@@ -5868,6 +5868,26 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         break;
     case V34_RX_STAGE_TONE_B:
         /* Answering side */
+        /* 11.5.1.2: the responding call modem sends 70 ms of silence
+           before Tone B.  A carrier dip of a few bits inside its data is
+           not that silence (at 3000 baud one tripped the gate and our
+           reversal went out 100 ms before its Tone B), so count 40 ms
+           (24 bits at 600 bit/s) of continuous silence, and start the
+           Tone B persistence count afresh after it. */
+        if (s->retrain_wait_peer_gap  &&  !s->retrain_peer_gap_seen)
+        {
+            if (s->signal_present)
+            {
+                s->retrain_peer_gap_bits = 0;
+            }
+            else if (++s->retrain_peer_gap_bits >= 24)
+            {
+                s->retrain_peer_gap_seen = true;
+                s->persistence2 = 0;
+            }
+            /*endif*/
+        }
+        /*endif*/
         if (!s->signal_present  &&  s->tone_b_present)
         {
             /* Tone B has stopped.  11.2.1.1.3 has the call modem transmit
@@ -5901,7 +5921,9 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                    otherwise enough to declare a tone that is not there. */
                 if (s->signal_present  &&  tone_a_carrier_present(s)
                     &&
-                    !s->tone_b_present)
+                    !s->tone_b_present
+                    &&
+                    (!s->retrain_wait_peer_gap  ||  s->retrain_peer_gap_seen))
                 {
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Tone B detected (power=%d ref=%d)\n",
@@ -5921,7 +5943,11 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /*endif*/
         /* We have a reversal, but we should only recognise it if it has been
            a little while since the last one */
-        if (s->persistence2 > 20)
+        /* 11.5.1.2: nor is a phase step in the caller's data a reversal
+           of a Tone B that has not started yet. */
+        if (s->persistence2 > 20
+            &&
+            (!s->retrain_wait_peer_gap  ||  s->retrain_peer_gap_seen))
         {
             switch (s->received_event)
             {

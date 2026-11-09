@@ -9924,7 +9924,20 @@ static void cleanup_v34_v90_training_locked(void)
  * V.34 counterpart, and like it, §11.5 says only "turn OFF circuit 106,
  * clamp circuit 104 to binary one" -- the error-control link above the
  * physical layer survives a retrain, so the data stack is not touched. */
+static bool restart_v34_phase2_ex_locked(const char *reason, bool responding);
+
 static bool restart_v34_phase2_locked(const char *reason)
+{
+    return restart_v34_phase2_ex_locked(reason, false);
+}
+
+/* 11.5.1.2/11.5.2.2: the peer started this retrain; we are answering it. */
+static bool respond_v34_retrain_locked(const char *reason)
+{
+    return restart_v34_phase2_ex_locked(reason, true);
+}
+
+static bool restart_v34_phase2_ex_locked(const char *reason, bool responding)
 {
     int baud;
     int bps;
@@ -9963,6 +9976,8 @@ static bool restart_v34_phase2_locked(const char *reason)
        g_retrain_from_data.  In either case sending INFO0 here leaves the peer
        waiting for the tone required by §11.5.1.2/§11.5.2.2. */
     v34_start_retrain(g_v34);
+    if (!responding)
+        v34_retrain_initiated(g_v34);
     if (g_state == ME_TRAINING  &&  !g_retrain_from_data)
         g_v34_startup_restarts++;
     ME_LOG("[ME] V.34: %s; restarting Phase 2 (%d baud / %d bps)\n",
@@ -17832,7 +17847,7 @@ skip_8k_codewords:
                                    "peer holds Tone A: answering its retrain "
                                    "(11.2.2.1.6, 11.5.1.2)\n", 1800);
                             v34_clear_peer_retrain_event(g_v34);
-                            (void) restart_v34_phase2_locked(
+                            (void) respond_v34_retrain_locked(
                                 "Tone A after INFO1c: peer retrain (11.5.1.2)");
                             pthread_mutex_unlock(&g_state_mtx);
                             return;
@@ -17914,7 +17929,7 @@ skip_8k_codewords:
                          * with 11.8.1"). */
                         v34_clear_peer_retrain_event(g_v34);
                         v34_reneg_clear_locked();
-                        (void) restart_v34_phase2_locked(
+                        (void) respond_v34_retrain_locked(
                             "peer retrain tone detected; responding per 11.5");
                     } else if (rx_event == V34_EVENT_PEER_RENEG_S) {
                         /* §11.6.1.2: the peer has opened a rate
