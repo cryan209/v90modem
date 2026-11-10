@@ -219,6 +219,17 @@ static void report_rx_status_change(v42_state_t *s, int status)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Report a LINK_DISCONNECTED with the reason, so a live call says which peer
+   frame ended the link (2026-11-11: three Eicon calls ended exactly 60 s after
+   LAPM connected, with no N400 or T401 line to say who did it).  The caller
+   has already reset the LAPM state, so the state is not printed here. */
+static void report_link_disconnected(v42_state_t *ss, const char *why)
+{
+    fprintf(stderr, "[V42] link disconnected: %s\n", why);
+    report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
+}
+/*- End of function --------------------------------------------------------*/
+
 static inline uint32_t pack_value(const uint8_t *buf, int len)
 {
     uint32_t val;
@@ -1338,7 +1349,7 @@ static int rx_unnumbered_cmd_frame(v42_state_t *ss, const uint8_t *frame, int le
             tx_unnumbered_frame(s, s->rsp_addr, LAPM_U_UA | (frame[1] & 0x10), NULL, 0);
             t401_stop(ss);
             /* TODO: notify CF */
-            report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
+            report_link_disconnected(ss, "peer sent DISC (8.5.4)");
         }
         break;
     case LAPM_U_XID:
@@ -1383,7 +1394,7 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
                 reset_lapm(ss);
                 t401_stop(ss);
                 /* TODO: notify CF */
-                report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
+                report_link_disconnected(ss, "peer DM answering our SABME/DISC");
             }
             break;
         case LAPM_DATA:
@@ -1392,7 +1403,9 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
                 s->state = LAPM_IDLE;
                 reset_lapm(ss);
                 /* TODO: notify CF */
-                report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
+                report_link_disconnected(ss, (frame[1] & 0x10)
+                                         ? "peer DM with F=1 in data mode (retry outstanding)"
+                                         : "peer DM with F=0 (unsolicited) in data mode");
             }
             break;
         default:
