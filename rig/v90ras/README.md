@@ -762,3 +762,26 @@ kept as `/opt/v90ras/sip_v90_modem.e5fd69be`. Only `v90ras` was restarted.
 slmodemd (CT 100, 6003) dialled 2950, LAPM connected, then `+++`/`ATH` from the
 rig: the server hung up 1.4 s after the silence began (08:46:19). Before this
 change the same test retrained for 3 min (see b2e98bfc).
+
+## Deployed 4fa4d4c9 (2026-11-11 09:10)
+
+Fixes a crash, not a tuning change: since 956b5b69 every **plain V.34** data
+call died on x86 on its first data frame with K > 0 (V.34 9.3.2). The cause was
+an integer divide by zero in the shell-index report in
+`v34_rx_pack_output_bitstream`; dmesg showed `trap divide error`. The MultiTech
+ISI on 7900 reported `CONNECT 31200 NoEC` because our process had already gone.
+Before the fix it failed identically on 49a33091. arm64 returns 0 for an integer
+divide by zero, so the Mac suites never saw it. V.90 calls were unaffected.
+The fix was applied as a patch to `/root/v90ras` (its own uncommitted v34rx.c
+work left in place). The previous binary is `/opt/v90ras/sip_v90_modem.e5fd69be-prefpe`;
+the new one is kept as `/opt/v90ras/sip_v90_modem.4fa4d4c9`. Only `v90ras` was
+restarted. `v90isdn` still runs the old binary, but it only matters if it
+carries plain V.34.
+
+After the fix, `tools/eicon_ppp_direct.py --law alaw --ext 7900`:
+- `--mode v34`: 31200, V.42 LAPM + V.42bis, PAP up, 10% ping loss.
+- `--mode v90`: the same, V.34 31200, 15% ping loss.
+
+Asterisk has 2910 registered. `29107910` (the Diva gateway, called number 7910)
+now reaches the MultiTech BRI and answers, but V.8 decodes a JM with no
+modulations (offered V.34 or K56). Direct `7910` trains and gets LAPM.
