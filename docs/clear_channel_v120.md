@@ -226,8 +226,31 @@ arrive byte-exact.
 | V120 56k | 4/4 | ~50 kbit/s |
 | CLEAR 64k + `ME_DATA_FRAMING=lapm` | 3/3 | 145-150 kbit/s of text (V.42bis) |
 
-Nothing here has met a real ISDN terminal adaptor or a CLEARMODE gateway.
-V.110 has no live measurement at all yet; the rows above predate it.
+The rows above are loopback only. Live results against the Eicon rig
+(Asterisk CLEARMODE → TopRouter → Diva BRI) are in
+`eicon_isdn_20261008.md` and `eicon_mlppp_20261107.md`.
+
+### Live status, 2026-11-11
+
+From CT 117 with `tools/eicon_ppp_direct.py --law alaw --sip-user 2906` and
+`ME_CLEARMODE=1 ME_JB_MS=40`, against the Diva `AT&F14` PPP answerer on
+17920:
+
+| Mode | Result |
+|---|---|
+| `AT+MS=CLEAR,0`, `ME_DATA_FRAMING=ppp` | CONNECT 64000, PAP, IPCP, 10/10 pings |
+| `AT+MS=V120,0`, `ME_V120_ACK=1` | CONNECT 64000, PAP, IPCP, 10/10 pings |
+| `AT+MS=V110,0,0,9600` and `38400` | no CONNECT: T1 (7.1.2.4) expires with rx 0 V.110 frames |
+
+V.110 fails at the answerer, not in our rate adaption. The Diva sent
+continuous HDLC flags from the moment it answered: 79840 of 80160 received
+octets were 0x7E, the rest 0xFF. The Cisco places a CLEARMODE call as BC
+`88 90` (unrestricted digital, no layer-1 rate adaption), so profile 14
+settles on HDLC and never looks for V.110 frames. The 2026-10-08 V.110
+passes (10/10 exact echo lines at 9600) used a temporary answerer fixed to
+the V.110 profile (`AT&F3`, `+iB5`). The MultiTech on 7910 does not answer a
+CLEARMODE call at all (no answer in 30 s, as on 2026-11-04). So the rig has
+no permanent V.110 answerer.
 
 ## Not done
 
