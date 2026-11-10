@@ -749,3 +749,16 @@ was restarted, with no call up. slmodemd (CT 100, 6003) dialled 2950: V.90
 31200 up / 53333 down, LAPM up at 08:29:22, still up 91 s later. A
 slmodemd `+++`/`ATH` ended the rig side, but the call went to a V.90 9.6
 retrain (no DISC was sent), so the DISC line did not fire on this test.
+
+## Deployed e5fd69be (2026-11-11 08:44)
+
+On top of b2e98bfc: a call in data mode that hears digital silence for S10
+(1.4 s) hangs up (`[ME] V.34/V.90: no line signal for N ms after data mode`),
+instead of retraining into nothing. Only a silence that began in data counts.
+Applied as this commit's `modem_engine.c` hunk to `/root/v90ras` (its other
+uncommitted files untouched). The previous binary is
+`/opt/v90ras/sip_v90_modem.b2e98bfc-s10` (the b2e98bfc build); the new one is
+kept as `/opt/v90ras/sip_v90_modem.e5fd69be`. Only `v90ras` was restarted.
+slmodemd (CT 100, 6003) dialled 2950, LAPM connected, then `+++`/`ATH` from the
+rig: the server hung up 1.4 s after the silence began (08:46:19). Before this
+change the same test retrained for 3 min (see b2e98bfc).
