@@ -283,8 +283,10 @@ Supporting changes, each with a `.before-ta-20261111` backup:
 Through the service, V.120 and CLEAR sync PPP each gave 64000, PAP, IPCP,
 10/10 pings. A voice call to 7910 still lands on ttyM4 (V.34 31200, 10/10).
 A second digital call made during the first rings **ttyM1**
-(`CONNECT 64000/V.120`), while the first ran 70/70 pings. ttyM1 has no
-answerer yet, so a second simultaneous digital call is not answered.
+(`CONNECT 64000/V.120`), while the first ran 70/70 pings. `multitech-7910-ta-b.service` now answers it: the peer is `multitech-7910-ta-b`
+on ttyM1, 10.254.122.1:10.254.122.2, `ifname e79p12`, with pap-secrets
+widened to 10.254.122.0/24. Two overlapping V.120 calls: the first on ttyM0
+ran 60/60 pings and the second on ttyM1 20/20, both at 64000 and 0% loss.
 
 ## Not done
 
