@@ -1,0 +1,94 @@
+--- a/diva_sip_gateway.py
++++ b/diva_sip_gateway.py
+@@ -62,6 +62,12 @@
+ 
+ BIT_REVERSE = bytes(int(f'{value:08b}'[::-1], 2) for value in range(256))
+ ALAW_SILENCE = 0xD5
++# The line law (--law). Diva controller 3 is forced to u-law for its Cisco BRI
++# (divas_cfg.rc CCardLAW[3]="2", 2026-10-24) while this gateway labelled every
++# octet PCMA: the far end heard A-law as u-law and never decoded a modem's V.8
++# CM (2026-11-11). The RTP payload type follows the line, so octets still pass
++# unchanged. Set from main().
++LINE_PT, LINE_CODEC, LINE_SILENCE = 8, 'PCMA', ALAW_SILENCE
+ 
+ 
+ def cstruct(data: bytes = b'') -> bytes:
+@@ -315,8 +321,8 @@
+ 
+ def build_sdp(address: str, port: int, session: int) -> bytes:
+     return (f'v=0\r\no=diva {session} {session} IN IP4 {address}\r\ns=diva\r\n'
+-            f'c=IN IP4 {address}\r\nt=0 0\r\nm=audio {port} RTP/AVP 8\r\n'
+-            'a=rtpmap:8 PCMA/8000\r\na=ptime:20\r\na=sendrecv\r\n').encode()
++            f'c=IN IP4 {address}\r\nt=0 0\r\nm=audio {port} RTP/AVP {LINE_PT}\r\n'
++            f'a=rtpmap:{LINE_PT} {LINE_CODEC}/8000\r\na=ptime:20\r\na=sendrecv\r\n').encode()
+ 
+ 
+ def isdn_reason_to_sip(reason: int) -> int:
+@@ -346,8 +352,9 @@
+ class JitterBuffer:
+     """Byte FIFO between RTP arrival and the line's clock."""
+ 
+-    def __init__(self, prefill: int = 320, limit: int = 1600, silence: int = ALAW_SILENCE):
+-        self.prefill, self.limit, self.silence = prefill, limit, silence
++    def __init__(self, prefill: int = 320, limit: int = 1600, silence: int | None = None):
++        self.prefill, self.limit = prefill, limit
++        self.silence = LINE_SILENCE if silence is None else silence
+         self.data = bytearray()
+         self.playing = False
+         self.underruns = self.overflows = 0
+@@ -643,7 +650,7 @@
+     def on_invite(self, invite: SipMessage, source) -> None:
+         call_id = invite.get('call-id') or ''
+         sdp = parse_sdp(invite.body)
+-        if sdp is None or 8 not in sdp[2]:
++        if sdp is None or LINE_PT not in sdp[2]:
+             self.respond(invite, source, 488, 'Not Acceptable Here', to_tag=self.tag())
+             return
+         if sum(c.state != 'gone' for c in self.calls.values()) >= self.args.max_calls:
+@@ -826,11 +833,11 @@
+             self.bye(call)
+             return
+         sdp = parse_sdp(message.body)
+-        if sdp is None or 8 not in sdp[2]:
+-            LOG.warning('answer without PCMA: %r', message.body[:200])
++        if sdp is None or LINE_PT not in sdp[2]:
++            LOG.warning('answer without %s: %r', LINE_CODEC, message.body[:200])
+             self.bye(call)
+             self.reject_isdn(call, REJECT_NORMAL)
+-            self.finish(call, 'no PCMA in answer')
++            self.finish(call, f'no {LINE_CODEC} in answer')
+             return
+         call.remote_rtp = (sdp[0], sdp[1])
+         self.capi.send(CONNECT, RESP, connect_resp(call.plci, 0), call.connect_ind_number)
+@@ -1027,7 +1034,7 @@
+         while len(call.to_rtp) >= RTP_BLOCK and call.remote_rtp:
+             chunk = bytes(call.to_rtp[:RTP_BLOCK])
+             del call.to_rtp[:RTP_BLOCK]
+-            header = struct.pack('!BBHII', 0x80, (0x80 if call.marker else 0) | 8,
++            header = struct.pack('!BBHII', 0x80, (0x80 if call.marker else 0) | LINE_PT,
+                                  call.seq, call.timestamp, call.ssrc)
+             call.marker = False
+             call.seq = (call.seq + 1) & 0xFFFF
+@@ -1062,7 +1069,7 @@
+         except (BlockingIOError, OSError):
+             return
+         parsed = rtp_payload(packet)
+-        if parsed is None or parsed[0] != 8:
++        if parsed is None or parsed[0] != LINE_PT:
+             return
+         call.jitter.put(parsed[1])
+ 
+@@ -1123,8 +1130,13 @@
+     # arrived garbled) and RTP left in 13-packet bursts. 160 = one RTP packet.
+     ap.add_argument('--b3-block', type=int, default=160,
+                     help='CAPI B3 data block length in octets (default 160 = 20 ms)')
++    ap.add_argument('--law', choices=('alaw', 'ulaw'), default='alaw',
++                    help='companding law the CAPI controller runs (default alaw)')
+     ap.add_argument('-v', '--verbose', action='store_true')
+     args = ap.parse_args(argv)
++    global LINE_PT, LINE_CODEC, LINE_SILENCE
++    if args.law == 'ulaw':
++        LINE_PT, LINE_CODEC, LINE_SILENCE = 0, 'PCMU', 0xFF
+     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                         format='%(asctime)s %(levelname)s %(message)s')
+     with open(args.password_file) as handle:

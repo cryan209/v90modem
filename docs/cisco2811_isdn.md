@@ -191,3 +191,34 @@ the PBX before that fallback runs. No media processing was changed.
 
 `write memory` completed; `show startup-config` verified all four rules,
 profiles, and incoming voice-port attachments persisted.
+
+## Diva SIP gateway (2910) faults, 2026-11-11
+
+`29107910` (Asterisk `_2910X.` → `PJSIP/7910@2910`) never completed V.8: the
+MultiTech answered and sent ANSam for the full ~5.3 s, then dropped to Bell
+2225 Hz. A loop call to `29102950` (gateway → controller 3 → Cisco → Asterisk
+→ v90ras) showed that v90ras received **RX RMS 0.0**: none of the SIP-side
+audio ever reached the B channel. There were three faults in
+`/usr/local/sbin/diva_sip_gateway.py`:
+
+1. **Applied:** `CAPI_REGISTER` used `datablklen=2048`. The card indicated
+   256 ms blocks, and the 1600-octet jitter buffer overflowed on almost every
+   block. Patch: `tools/eicon/diva_sip_gateway-b3-block.patch`
+   (`--b3-block`, default 160). After it: blocks `{160: N}`, 0 overflows.
+2. **Applied:** controller 3 is forced to µ-law (`CCardLAW[3]="2"`, Cisco
+   BRI0/0/1), but the gateway labelled its octets PCMA. The received ANSam
+   decodes cleanly only as µ-law (20-22 dB fit SNR, against 7-11 dB as
+   A-law, which also reads 14 dB hot). Patch:
+   `tools/eicon/diva_sip_gateway-law.patch` (`--law`; the drop-in passes
+   `--law ulaw`). Asterisk endpoint 2910 moved from `endpoint-modem-alaw`
+   to `endpoint-modem` (clearmode|ulaw). Backup:
+   `/etc/asterisk/pjsip.conf.before-2910-ulaw-20261111`.
+3. **Pending approval:** every `DATA_B3_REQ` write failed with EIO
+   (389/389 on one call, seen with `-v`). The CAPI header length counted
+   the appended data (182 instead of 22), so divacapi's
+   `DataLength > length - clength` check refused it as too small
+   (`capifunc.c`, `_DATA_B3_R`). Patch:
+   `tools/eicon/diva_sip_gateway-data-b3-length.patch`.
+
+Backups on eicon420: `/usr/local/sbin/diva_sip_gateway.py.before-b3block-20261111`
+and `.before-law-20261111`, and `/root/local-answerer.conf.before-law-20261111`.

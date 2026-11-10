@@ -1,0 +1,25 @@
+--- a/diva_sip_gateway.py	2026-11-11 10:17:10
++++ b/diva_sip_gateway.py	2026-11-11 10:17:20
+@@ -1116,6 +1116,13 @@
+     ap.add_argument('--no-bit-reverse', dest='bit_reverse', action='store_false',
+                     help='pass B-channel octets without reversing their bit order')
+     ap.add_argument('--capi', default='/dev/capi20')
++    # CAPI 2.0 CAPI_REGISTER maxBDataLen. The Diva fills a transparent B3
++    # block to this length before indicating it: at 2048 it handed over 256 ms
++    # at a time, the 1600-octet jitter buffer overflowed on almost every block
++    # (~160 ms of the SIP side's audio dropped per 256 ms, so a modem's V.8 CM
++    # arrived garbled) and RTP left in 13-packet bursts. 160 = one RTP packet.
++    ap.add_argument('--b3-block', type=int, default=160,
++                    help='CAPI B3 data block length in octets (default 160 = 20 ms)')
+     ap.add_argument('-v', '--verbose', action='store_true')
+     args = ap.parse_args(argv)
+     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+@@ -1128,7 +1135,7 @@
+     sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+     sip.bind((args.bind, args.sip_port))
+     sip.setblocking(False)
+-    capi = Capi(args.capi)
++    capi = Capi(args.capi, datablklen=args.b3_block)
+     LOG.info('gateway %s on controller %d, SIP %s:%d -> %s:%d', args.username,
+              args.controller, advertise, args.sip_port, *registrar)
+     Gateway(args, capi, sip, registrar=registrar, advertise=advertise).run()

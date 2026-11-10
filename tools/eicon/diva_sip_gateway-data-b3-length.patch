@@ -1,0 +1,38 @@
+--- a/diva_sip_gateway.py
++++ b/diva_sip_gateway.py
+@@ -103,7 +103,11 @@
+ 
+ 
+ def data_b3_req(ncci: int, data: bytes, handle: int) -> bytes:
+-    return struct.pack('<IIHHH', ncci, 0, len(data), handle, 0) + data
++    """DATA_B3_REQ parameters only: the data follows the message, outside its
++    length (CAPI 2.0 Part I 5.20; divacapi checks Data_Length against what was
++    written beyond the header length). Counting the data in the length made
++    every write fail with EIO, so no SIP audio ever reached the B channel."""
++    return struct.pack('<IIHHH', ncci, 0, len(data), handle, 0)
+ 
+ 
+ class Reader:
+@@ -175,10 +179,11 @@
+     def fileno(self) -> int:
+         return self.fd
+ 
+-    def send(self, command: int, sub: int, body: bytes, number: int | None = None) -> int:
++    def send(self, command: int, sub: int, body: bytes, number: int | None = None,
++             data: bytes = b'') -> int:
+         if number is None:
+             number = next(self.numbers) & 0x7FFF
+-        os.write(self.fd, capi_message(self.appl, command, sub, number, body))
++        os.write(self.fd, capi_message(self.appl, command, sub, number, body) + data)
+         return number
+ 
+     def receive(self) -> CapiMessage | None:
+@@ -1054,7 +1059,7 @@
+             line = audio.translate(BIT_REVERSE) if self.args.bit_reverse else audio
+             call.handle = (call.handle + 1) & 0xFFFF
+             try:
+-                self.capi.send(DATA_B3, REQ, data_b3_req(call.ncci, line, call.handle))
++                self.capi.send(DATA_B3, REQ, data_b3_req(call.ncci, line, call.handle), data=line)
+             except OSError as error:
+                 LOG.debug('DATA_B3_REQ: %s', error)
+                 return
