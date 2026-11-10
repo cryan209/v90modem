@@ -64,8 +64,62 @@ renegotiation.
 
 So for this peer the cap is the difference between V.90 and no V.90, not a
 rate step: the CPt it sends is the same size either way, and it gives up in
-Phase 4. The other peers in the table still want the same A/B (they reached
-V.90 under the cap, so for them the question is the rate).
+Phase 4.
+
+**MT9234ZBA-USB (Agere) dialling v90ras, same evening, same method, 30 s
+hold, plus one check call on the default.** No difference between the arms:
+
+| Arm | Calls | Modem's receive rate (ATI11) | Lost after data entry |
+|---|---|---|---|
+| one cycle (`=1`) | 4 | 46666, 48000, 48000, 46666 | 1 (V.34 4800) |
+| repeat until S (default) | 5, one of which never reached DIL | 46666, 48000, 48000, 48000 | 2 (V.34 4800) |
+
+CPt is drn 9 and CP drn 15-16 in both arms. DIL ran 3.72 s under the cap and
+4.02 s to the modem's S. The three losses are one failure, and it is not
+Phase 3: every call in both arms places upstream B1 blind ("B1 acquisition
+failed", then "B1 acquired ... fit=0.0%"), the upstream reads white while the
+symbol-offset search runs, and on the lost calls "upstream abrupt
+discontinuity" asks for a 9.6 resync about 10 s into data, which the modem
+answers with a retrain. Three of nine is too few to say the arm matters, and
+the modem dropped off USB before more calls could be made.
+
+**slmodemd (Proxmox rig, CT 100 dialling CT 117, port 5074), 19 calls,
+`ME_V90_DIL_AUTOTERMINATE_CYCLES` the only variable, order reversed for the
+second ten.** Counting calls that reached DIL:
+
+| slmodemd's bulk delay | Arm | Calls | V.90 data | Peer CONNECT |
+|---|---|---|---|---|
+| 3016 samples | one cycle | 8 | 8 | 54667 x6, 50667, 52000 |
+| 3016 | repeat until S | 5 | 5 | 54667 x5 |
+| 3208 | one cycle | 0 | - | - |
+| 3208 | repeat until S | 3 | 0 | none |
+
+Two more calls (one per arm) were lost before DIL: slmodemd retrained in Jd
+at +15.35 s and the call finished as V.34 21600. One repeat-arm call failed
+earlier still.
+
+So on the normal path the two arms are the same for slmodemd (the rate is
+its own choice either way), and the repeat arm's three failures are all the
+calls where slmodemd measured a round trip 20 ms longer (192 of its 9600 Hz
+samples; our INFO1a arrives 100 ms later on those calls, 20 ms more per
+Phase 2 exchange). None of those fell in the one-cycle arm, so this batch
+cannot separate the two. What says it is the delay and not DIL:
+
+- On those calls slmodemd's "Error Energy" steps from 18 to 116-193 at the
+  moment it enters `V90RCV_P3_THIRD_S` and starts transmitting, 0.5 s into
+  our **first** DIL cycle, and sits at 82-99 until its study ends. On every
+  other call it reads 9-14 there. Both arms transmit the same thing at that
+  point.
+- Our transmit tap on a failing call is codeword-identical to a passing
+  call's from Sd to the end of DIL, apart from two more Jd repetitions, and
+  the RTP in both directions has no gap, sequence or timestamp anomaly.
+- In the stored slmodemd logs, all recorded under the one-cycle cap, the
+  3208 class reached a Phase 4 constellation update on 1 call of 6. The
+  common classes do so on 192 of 194 (2632) and 43 of 45 (2680).
+
+That is a separate defect, and where the extra frame of delay comes from
+(our jitter buffer, d-modem, or Asterisk) is not yet known. The CX93001 and
+RasFinder still want the A/B.
 
 The line watch: on the five CX93001 taps the S is on the line every time
 (0.98 of a 20 ms window's energy on 229/1829/3429 Hz for 11-12 consecutive
