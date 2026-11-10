@@ -725,3 +725,14 @@ Live the same evening, Diva V90A on controller 8: 6/6 calls on this binary
 reached V.90 at 40000/31200 (one held 300 s, 292/293 pings), and 0/4 with
 `ME_V90_DIL_AUTOTERMINATE_CYCLES=1` set through a runtime drop-in, arms
 alternated (docs/v90_phase3_4_spec_audit.md, row 4). The drop-in is removed.
+
+## Deployed 49a33091 (2026-11-11 01:49)
+
+On top of 809636b2: Sd is held until two round trips after Ja began (V.90
+9.3.1.3, `ME_V90_SD_RTD_HOLD`; docs/v90_phase3_4_spec_audit.md row 12). With
+this server's 40 ms jitter buffer the hold is usually nothing. Three Diva
+V90A calls on controller 8 straight after: 3/3 V.90 at 40000/31200 with PPP
+up for the 40 s hold; one of them held Sd 35 ms (RTDEd 166 ms, Ja 357 ms old
+at the parse), the other two not at all. The sources in `/root/v90ras` match
+the commit. The previous binary is `/opt/v90ras/sip_v90_modem.809636b2`.
+Only `v90ras` was restarted, with no call up.

@@ -156,7 +156,8 @@ Where it applies: only on long paths. The MT5634 recording behind the
 AudioCodes (RTDEd 243 ms, Ja 353 ms old at the parse) gets 193 ms; v90ras
 with its 40 ms buffer (RTDEd about 150 ms) gets none unless the descriptor
 parses within 360 ms of Ja starting. **Not yet run against the AudioCodes
-path or any modem other than slmodemd.**
+path.** On v90ras the Diva (RTDEd 166 ms) connected 3/3 at 40000/31200
+with it; one call held Sd 35 ms, two not at all.
 
 The line watch: on the five CX93001 taps the S is on the line every time
 (0.98 of a 20 ms window's energy on 229/1829/3429 Hz for 11-12 consecutive
