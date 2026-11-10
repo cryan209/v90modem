@@ -248,10 +248,28 @@ octets were 0x7E, the rest 0xFF. The Cisco places a CLEARMODE call as BC
 `88 90` (unrestricted digital, no layer-1 rate adaption), so profile 14
 settles on HDLC and never looks for V.110 frames. The 2026-10-08 V.110
 passes (10/10 exact echo lines at 9600) used a temporary answerer fixed to
-the V.110 profile (`AT&F3`, `+iB5`). The MultiTech on 7910 does not answer a
-CLEARMODE call at all, V.110 or V.120 (Asterisk CDR `NO ANSWER` after 30 s,
-as on 2026-11-04). So the rig has
-no permanent V.110 answerer.
+the V.110 profile (`AT&F3`, `+iB5`). So the rig has no permanent V.110 answerer.
+
+**MultiTech 7910: digital calls ring a different tty.** The isicom card on
+eicon420 exposes two sets of ports. ttyM4–M7 are the modem ttys (`multitech-ppp`,
+`multitech-ppp-b` on 7910, `multitech-7900-b` on 7900). ttyM0–M3 report
+`ATI9` "MultiTech BRI Server" and `ATI2` `ISIHP-TA`: the ISDN terminal
+adapter, `S0=0`, with nothing listening on them. A CLEARMODE call to 7910
+(BC `88 90`) rings **ttyM0** (`RING`, `FM:2906 TO:7910`), so the earlier
+"no answer in 30 s" (here and 2026-11-04) was only an unattended tty. With
+a one-off pppd answering ttyM0 (`ATA`, no stored settings changed):
+
+| Mode | TA reported | Result |
+|---|---|---|
+| `AT+MS=V120,0`, `ME_V120_ACK=1` | `CONNECT 64000/V.120` | PAP, IPCP, 10/10 pings, 0% loss |
+| `AT+MS=CLEAR,0`, `ME_DATA_FRAMING=ppp` | CONNECT | PAP, IPCP, 10/10 pings, 0% loss |
+| `AT+MS=V110,0,0,38400` | no CONNECT in 10 s | TA sent only HDLC flags (0x7E, 99.5%); our T1 (10 s) ended it |
+
+Whether the TA would settle on V.110 given longer than our fixed T1
+(`V110_T1_OCTETS`) or needs a protocol setting is untested. Making 7910
+answer digital calls permanently needs a pppd answerer on ttyM0 (and
+probably ttyM1 for the second B channel; not yet checked which TA tty the
+second call rings).
 
 ## Not done
 
