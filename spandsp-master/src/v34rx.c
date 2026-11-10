@@ -4092,7 +4092,8 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
            to the content, so it separates "the peer is sending nothing we
            recognise" from "we are grouping its symbols wrongly".  A correctly
            grouped stream reads 0%. */
-        if (!s->v90_mode  &&  (s->v90_t3_shell_frames % 512) == 0)
+        if (!s->v90_mode  &&  s->v90_t3_shell_frames > 0
+            &&  (s->v90_t3_shell_frames % 512) == 0)
         {
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - DATA: shell index over k=%d bits in %d of %d frames (%d%%)\n",
@@ -20230,6 +20231,16 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.v90_cp_stream = 0;
     s->rx.v90_t3_prepared = false;
     s->rx.v90_t3_active = false;
+    /* No erasure seen.  Only v90_t3_start() set this, so a plain V.34 receiver
+       kept since_erased at 0 for good: the shell-index statistic gated on it
+       (v34_rx_pack_output_bitstream) never counted, and the periodic report
+       then divided by that zero count -- SIGFPE on x86 on the first data frame
+       with K > 0 (MultiTech ISI on 7900, 2026-11-11 08:48-09:03; arm64 returns
+       0 for an integer divide by zero, so the Mac tests never saw it). */
+    s->rx.v90_t3_erase_from = 0;
+    s->rx.v90_t3_erase_to = -1;
+    s->rx.v90_t3_sym_erased = false;
+    s->rx.v90_t3_since_erased = 1000000;
     /* Phase 3/4 peer-retrain detectors: a restart returns to Phase 2, where
        primary_channel_rx() -- and therefore these detectors' out-of-stage
        reset branches -- never runs, so one-shot flags latched during the
