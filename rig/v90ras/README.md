@@ -736,3 +736,16 @@ up for the 40 s hold; one of them held Sd 35 ms (RTDEd 166 ms, Ja 357 ms old
 at the parse), the other two not at all. The sources in `/root/v90ras` match
 the commit. The previous binary is `/opt/v90ras/sip_v90_modem.809636b2`.
 Only `v90ras` was restarted, with no call up.
+
+## Deployed b2e98bfc (2026-11-11 08:27)
+
+On top of 49a33091: `[V42] link disconnected: <reason>` is logged for each
+LINK_DISCONNECTED (peer DISC 8.5.4, peer DM with F=0 or F=1 in data mode).
+Built in `/root/v90ras` with the 12 uncommitted files that worktree already
+carried (not reset, not committed); only `spandsp-master/src/v42.c` was
+replaced. The previous binary is `/opt/v90ras/sip_v90_modem.49a33091`; the
+new one is also kept as `/opt/v90ras/sip_v90_modem.b2e98bfc`. Only `v90ras`
+was restarted, with no call up. slmodemd (CT 100, 6003) dialled 2950: V.90
+31200 up / 53333 down, LAPM up at 08:29:22, still up 91 s later. A
+slmodemd `+++`/`ATH` ended the rig side, but the call went to a V.90 9.6
+retrain (no DISC was sent), so the DISC line did not fire on this test.
