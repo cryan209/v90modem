@@ -466,6 +466,7 @@ SPAN_DECLARE(int) v34_get_tx_high_carrier(v34_state_t *s);
     \param s The modem context.
     \return The estimate in 8000 Hz sample times, or 0 if unavailable. */
 SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s);
+SPAN_DECLARE(int) v34_get_v90_rtded_samples(v34_state_t *s);
 
 /*! Get the effective U_INFO selected for a locally transmitted V.90 INFO1a.
     This can be lower than the configured preference when INFO0d's maximum

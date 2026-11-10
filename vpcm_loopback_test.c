@@ -862,6 +862,38 @@ scenario_done:
     return true;
 }
 
+/* V.90 §9.3.1.3: the wait before Sd that keeps it out of the analogue
+ * modem's echo-canceller training.  Figures from the slmodemd rig. */
+static bool test_v90_sd_round_trip_hold(void)
+{
+    static const struct { int age, rtd, margin, want; } c[] = {
+        {635, 339, 60, 103},    /* the failing class: Sd was 31 ms early */
+        {635, 319, 60,  63},    /* the usual class on that rig */
+        {635, 150, 60,   0},    /* short path: already past two round trips */
+        {353, 243, 60, 193},    /* MT5634 behind the AudioCodes */
+        {100, 400, 60, 500},    /* §9.3.1.3's 500 ms */
+        {600, 450, 60, 302},    /* §9.3.2.4: 1500 - 100 - 48 - 450 - 600 */
+        {900, 400, 60,   0},    /* two round trips already gone */
+        {1300, 400, 60,  0},    /* no room left: send at once */
+        {635,   0, 60,   0},    /* no round trip measured */
+        { -1, 339, 60,   0},    /* Ja's start unknown */
+    };
+
+    vpcm_log("Test: V.90 9.3.1.3 round-trip hold before Sd");
+    for (size_t i = 0; i < sizeof(c)/sizeof(c[0]); i++) {
+        int got = v90_sd_round_trip_hold_ms(c[i].age, c[i].rtd, c[i].margin);
+
+        if (got != c[i].want) {
+            fprintf(stderr, "Sd hold: Ja age %d ms, round trip %d ms gave "
+                    "%d ms, wanted %d\n", c[i].age, c[i].rtd, got, c[i].want);
+            return false;
+        }
+    }
+    vpcm_log("PASS: V.90 Sd leaves two round trips after Ja, within 9.3.1.3 "
+             "and 9.3.2.4");
+    return true;
+}
+
 /*
  * Compare two DIL descriptors by their §8.4.1 expansion (waveform
  * equivalence), which is the fidelity contract of v90_dil_rx.
@@ -11389,6 +11421,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
         && test_v90_dil_termination(V91_LAW_ULAW)
         && test_v90_dil_termination(V91_LAW_ALAW)
+        && test_v90_sd_round_trip_hold()
         && test_v90_smartlink_dil_profile()
         && test_v90_dil_rx_roundtrip(V91_LAW_ULAW)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)

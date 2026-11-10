@@ -10474,6 +10474,8 @@ static bool v90_dil_capture_has_preamble(int start)
 }
 
 static void v90_note_ja_confirmed_by_descriptor(void);
+/* Bits since the parsed Ja frame began; see v90_hold_sd_for_round_trip_locked(). */
+static int g_v90_ja_frame_age_bits = -1;
 
 static bool v90_dil_capture_try_parse_at(int start)
 {
@@ -10545,6 +10547,37 @@ static bool v90_dil_capture_try_parse_at(int start)
         ME_LOG("\n");
     }
     g_v90_dil_parse_logged = true;
+    /* The capture ends at the newest bit, so the frame that parsed began
+     * this many bits ago; the scan takes the earliest frame in the capture,
+     * which is the first of Ja when the capture reaches back that far. */
+    g_v90_ja_frame_age_bits = shifted_bits;
+    /* ...and when it does not, the frame that parsed is not the first: live
+     * against slmodemd the first repetition, which starts on the TRN-to-Ja
+     * seam, never parsed, so this read 377 ms where Ja was 635 ms old and the
+     * hold came out one descriptor (258 ms) too long.  Step back over earlier
+     * repetitions while the capture holds bits that agree with the parsed
+     * frame (§8.3.1: Ja is repetitions of one descriptor). */
+    {
+        uint8_t ref[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
+        int period = 0;
+
+        if (v90_build_dil_descriptor_bits(ref, (int) sizeof(ref), &period, &desc)
+            && period >= 206) {
+            int first = start;
+
+            while (first - period >= 0) {
+                int same = 0;
+
+                for (int i = 0; i < period; i++)
+                    same += v90_dil_capture_get_bit(first - period + i)
+                            == v90_dil_capture_get_bit(start + i);
+                if (same * 100 < period * 85)
+                    break;
+                first -= period;
+            }
+            g_v90_ja_frame_age_bits = g_v90_dil_capture_bits - first;
+        }
+    }
     v90_note_ja_confirmed_by_descriptor();
     return true;
 }
@@ -10684,6 +10717,72 @@ static bool v90_ja_heuristic_allowed(const char *source)
  * look-ahead configured for 3000 bits did not actually trigger until bit
  * 22484). Waiting for them after we already know the answer is what makes the
  * whole of Phase 3 run late and on timers rather than in step with the peer. */
+/* V.90 9.3.1.3: "After receiving Ja, the digital modem may wait for up to
+ * 500 ms and shall then transmit signal Sd".  How much of that to use.
+ *
+ * The analogue modem trains its echo cancellers on its own S, PP and TRN
+ * while we are silent (9.3.1.1), and it has to stop adapting before our Sd
+ * arrives or it adapts on Sd.  slmodemd stops three of its bulk delays after
+ * it starts Ja (1.000 s at 3208 samples of 9600 Hz, 0.981 at 3140, 0.940 at
+ * 3016), and we answer a CRC-valid descriptor at once, 635 ms after Ja starts
+ * here.  With the round trip this rig has (our 200 ms jitter buffer; RTDEd
+ * 339 ms) Sd reached it 31 ms BEFORE that instant on the calls with one more
+ * frame of delay in the path and 9 ms after it on the others.  Live,
+ * 2026-11-10, 19 calls: its near canceller's frozen taps read 4.1 rms on the
+ * 14 calls that reached V.90 data and 16.8 or 62.9 on the five that did not;
+ * on those its receive error steps from 18 to 116-193 as soon as it
+ * transmits again, 0.5 s into DIL, and it retrains in Phase 4.
+ *
+ * So do not let Sd leave before two round trips (plus a margin) after the
+ * start of Ja as we received it, which puts its arrival three round trips
+ * after Ja left the analogue modem.  On a short path that is already past
+ * when the descriptor parses and nothing changes (v90ras with a 40 ms
+ * buffer: RTDEd about 150 ms).  The wait is bounded by the clause's 500 ms
+ * and by 9.3.2.4, which retrains the analogue modem if the Sd-to-S-bar-d
+ * transition has not arrived 1500 ms after it started Ja.
+ *
+ * Live on that rig, 2026-11-11, hold on against off: 16/16 calls reach V.90
+ * data with it (51 ms held at the usual round trip and 54667 as before;
+ * 131 ms and 53333 with the jitter buffer at 240 ms), where without it the
+ * long-round-trip calls are 0/7 across the two evenings and the usual ones
+ * 22/25 (two of those three lost had the same corrupt taps, 62.9 rms).
+ *
+ * ME_V90_SD_RTD_HOLD=0 disables it; ME_V90_SD_RTD_MARGIN_MS is the margin
+ * (default 60).  ME_V90_SD_DELAY_MS and the retrain probe in
+ * prepare_v90_phase3_locked() still apply; this only ever lengthens them. */
+static void v90_hold_sd_for_round_trip_locked(void)
+{
+    int age_bits = g_v90_ja_frame_age_bits;
+    int rtd;
+    int baud;
+    int age_ms;
+    int rtd_ms;
+    int want_ms;
+
+    g_v90_ja_frame_age_bits = -1;
+    if (!g_v90 || !g_v34 || g_v92_active || age_bits < 0
+        || parse_env_int("ME_V90_SD_RTD_HOLD", 1) == 0)
+        return;
+    rtd = v34_get_v90_rtded_samples(g_v34);
+    if (rtd <= 0)
+        rtd = v34_get_round_trip_delay_samples(g_v34);
+    if (rtd <= 0)
+        return;
+    baud = v90_selected_upstream_baud_locked() == 3 ? 3000 : 3200;
+    age_ms = (int) ((int64_t) age_bits * 1000 / (2 * baud));   /* J: 2 bits a symbol */
+    rtd_ms = rtd / 8;
+    want_ms = v90_sd_round_trip_hold_ms(
+        age_ms, rtd_ms, parse_env_int("ME_V90_SD_RTD_MARGIN_MS", 60));
+    if (want_ms <= 0)
+        return;
+    v90_raise_sd_delay_ms(g_v90, want_ms);
+    ME_LOG("[ME] V.90 9.3.1.3: holding Sd %d ms: Ja began %d ms ago and the "
+           "round trip is %d ms, so Sd leaves two round trips after Ja "
+           "arrived\n", want_ms, age_ms, rtd_ms);
+    trace_phase("V90 Sd held %d ms for the round trip (%d ms, Ja age %d ms)",
+                want_ms, rtd_ms, age_ms);
+}
+
 static void v90_note_ja_confirmed_by_descriptor(void)
 {
     /* Restart the deadline clock: it measures Phase 3 time WITHOUT a
@@ -10698,6 +10797,7 @@ static void v90_note_ja_confirmed_by_descriptor(void)
         return;
     if (v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA)
         return;
+    v90_hold_sd_for_round_trip_locked();
     accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
     ME_LOG("[ME] V.90: Ja confirmed by CRC-valid DIL descriptor; starting Phase 3 "
            "without waiting for the energy gap or look-ahead (accepted=%d)\n",

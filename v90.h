@@ -396,6 +396,8 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp);
  * arming, and an early Sd leaves its equalizer training unanchored.
  */
 void v90_set_sd_delay_ms(v90_state_t *s, int ms);
+void v90_raise_sd_delay_ms(v90_state_t *s, int ms);
+int v90_sd_round_trip_hold_ms(int ja_age_ms, int rtd_ms, int margin_ms);
 
 /* Copy the currently prepared Type-0 MP/MP' bitstream for diagnostics/tests.
  * Returns its bit length, or 0 if the V.90 Phase 4 mapper is not configured. */

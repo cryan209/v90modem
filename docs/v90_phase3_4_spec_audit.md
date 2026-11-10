@@ -117,9 +117,46 @@ cannot separate the two. What says it is the delay and not DIL:
   3208 class reached a Phase 4 constellation update on 1 call of 6. The
   common classes do so on 192 of 194 (2632) and 43 of 45 (2680).
 
-That is a separate defect, and where the extra frame of delay comes from
-(our jitter buffer, d-modem, or Asterisk) is not yet known. The CX93001 and
-RasFinder still want the A/B.
+That is a separate defect: row 12 below. The CX93001 and RasFinder still
+want the DIL A/B.
+
+### Row 12: 9.3.1.3, Sd sent the instant Ja parsed (2026-11-11)
+
+| Clause | What the peer does | What we assumed | Status |
+|---|---|---|---|
+| 9.3.1.3 / 9.3.1.1 | The analogue modem trains its echo cancellers on its own S, PP and TRN while the digital modem is silent, and has to stop adapting before Sd arrives. slmodemd stops **three bulk delays after it starts Ja** (1.000 s at a bulk delay of 3208 of its 9600 Hz samples, 0.981 at 3140, 0.940 at 3016) | "After receiving Ja, the digital modem may wait for up to 500 ms": we waited 0, and sent Sd as soon as a CRC-valid descriptor parsed, 635 ms after Ja started | Fixed 2026-11-11: Sd leaves no earlier than two round trips (RTDEd, 9.2.1.1.4) plus 60 ms after the start of Ja as received, capped by the clause's 500 ms and by 9.3.2.4's 1500 ms. `ME_V90_SD_RTD_HOLD=0` disables it. |
+
+On the Proxmox rig the round trip is long (our 200 ms jitter buffer; RTDEd
+317-339 ms), so Sd reached slmodemd 9 ms after its freeze on most calls and
+31 ms **before** it on the calls with one more 20 ms frame in the path. Its
+near canceller then adapts on Sd. Frozen tap RMS over the 19 calls of the DIL
+A/B: 4.1 (2.0 once) on the 14 that reached V.90 data, 16.8 on the three
+3208-class calls and 62.9 on two more that retrained in Jd, one in each DIL
+arm. From then on its receive error steps up whenever it transmits. Which
+side adds the extra frame was not found and no longer matters.
+
+Controlled, the same evening (slmodemd dialling, DIL repeating):
+
+| Our jitter buffer | Pre-Sd wait | slmodemd bulk delay | Tap RMS | V.90 data |
+|---|---|---|---|---|
+| 240 ms | none | 3400, 3400, 3592 | 32.3, 32.3, 36.8 | 0/3 |
+| 240 ms | 150 ms fixed | 3400 x3 | 6.4 | 3/3, 53333 |
+| 200 ms | none (hold off) | 3016 x9, 3208 x1 | 4.1; 16.8 | 9/9; 0/1 |
+| 200 ms | hold: 51 ms | 3016 x4 | 4.1 | 4/4, 54667 |
+| 240 ms | hold: 131 ms | 3400 x3 | 6.4 | 3/3, 53333 |
+
+A first version timed Ja from the frame that parsed, which is the second
+repetition (the first sits on the TRN-to-Ja seam and never parses), so it
+read 377 ms for a Ja 635 ms old and held 317 ms. That also worked, 9/9
+including one 3208-class and three 3400/3592 calls, but slmodemd chose 53333
+instead of 54667 on every call. The capture is now walked back over earlier
+repetitions that agree with the parsed frame (643 ms measured).
+
+Where it applies: only on long paths. The MT5634 recording behind the
+AudioCodes (RTDEd 243 ms, Ja 353 ms old at the parse) gets 193 ms; v90ras
+with its 40 ms buffer (RTDEd about 150 ms) gets none unless the descriptor
+parses within 360 ms of Ja starting. **Not yet run against the AudioCodes
+path or any modem other than slmodemd.**
 
 The line watch: on the five CX93001 taps the S is on the line every time
 (0.98 of a 20 ms window's energy on 229/1829/3429 Hz for 11-12 consecutive

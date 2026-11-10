@@ -824,6 +824,40 @@ void v90_set_sd_delay_ms(v90_state_t *s, int ms)
     s->sd_delay_override_samples = ms * 8;
 }
 
+/* §9.3.1.3's wait before Sd, from the round trip: Sd leaves no earlier than
+ * two round trips plus `margin_ms` after the start of Ja as received
+ * (`ja_age_ms` ago), so that it arrives three round trips after Ja left the
+ * analogue modem; never more than the clause's 500 ms, and never so late
+ * that the Sd-to-S-bar-d transition (48 ms of Sd, one more one-way trip)
+ * misses §9.3.2.4's 1500 ms from the start of Ja, with 100 ms in hand.
+ * Why: v90_hold_sd_for_round_trip_locked() in modem_engine.c. */
+int v90_sd_round_trip_hold_ms(int ja_age_ms, int rtd_ms, int margin_ms)
+{
+    int want;
+    int latest;
+
+    if (ja_age_ms < 0 || rtd_ms <= 0)
+        return 0;
+    want = 2 * rtd_ms + margin_ms - ja_age_ms;
+    latest = 1500 - 100 - 48 - rtd_ms - ja_age_ms;
+    if (want > latest)
+        want = latest;
+    if (want > 500)
+        want = 500;
+    return want > 0 ? want : 0;
+}
+
+/* Make the pre-Sd wait at least `ms`, keeping a longer one already set. */
+void v90_raise_sd_delay_ms(v90_state_t *s, int ms)
+{
+    if (!s || ms <= 0)
+        return;
+    if (ms > 500)
+        ms = 500;       /* §9.3.1.3 */
+    if (s->sd_delay_override_samples < ms * 8)
+        s->sd_delay_override_samples = ms * 8;
+}
+
 static void v90_reset_data_pump_state(v90_state_t *s)
 {
     if (!s)

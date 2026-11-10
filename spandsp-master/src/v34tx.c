@@ -11389,6 +11389,14 @@ SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 9.2.1.1.4: RTDEd, the digital modem's own round-trip estimate from the
+   full Phase 2, in 8 kHz samples; 0 when it was not measured. */
+SPAN_DECLARE(int) v34_get_v90_rtded_samples(v34_state_t *s)
+{
+    return (s  &&  s->tx.v90_rtded > 0)  ?  s->tx.v90_rtded  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(bool) v34_v92_pcm_upstream_selected(v34_state_t *s)
 {
     return s && s->tx.v90_mode && s->tx.calling_party
