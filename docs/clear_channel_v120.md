@@ -266,10 +266,25 @@ a one-off pppd answering ttyM0 (`ATA`, no stored settings changed):
 | `AT+MS=V110,0,0,38400` | no CONNECT in 10 s | TA sent only HDLC flags (0x7E, 99.5%); our T1 (10 s) ended it |
 
 Whether the TA would settle on V.110 given longer than our fixed T1
-(`V110_T1_OCTETS`) or needs a protocol setting is untested. Making 7910
-answer digital calls permanently needs a pppd answerer on ttyM0 (and
-probably ttyM1 for the second B channel; not yet checked which TA tty the
-second call rings).
+(`V110_T1_OCTETS`) or needs a protocol setting is untested.
+
+**Permanent answerer (2026-11-11 12:45):** `multitech-7910-ta.service` on
+eicon420 runs `pppd call multitech-7910-ta`. The peer file is a copy of
+`multitech-7910` on `/dev/ttyM0` with its own address pair
+10.254.121.1:10.254.121.2, `ifname e79p11` and `linkname multitech-7910-ta`.
+The chat script is `/etc/chatscripts/multitech-ta-answer` (`ATE0V1S0=1`).
+Supporting changes, each with a `.before-ta-20261111` backup:
+- `modem-connect` accepts ttyM0/ttyM1;
+- `collect-members.py` maps the peer to ttyM0/7910;
+- `pap-secrets` allows 10.254.121.0/24 on the four `multitech-7910` lines.
+  Without that, IPCP closed with "Unauthorized remote IP address" after PAP
+  had succeeded.
+
+Through the service, V.120 and CLEAR sync PPP each gave 64000, PAP, IPCP,
+10/10 pings. A voice call to 7910 still lands on ttyM4 (V.34 31200, 10/10).
+A second digital call made during the first rings **ttyM1**
+(`CONNECT 64000/V.120`), while the first ran 70/70 pings. ttyM1 has no
+answerer yet, so a second simultaneous digital call is not answered.
 
 ## Not done
 
