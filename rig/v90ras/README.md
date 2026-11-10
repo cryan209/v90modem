@@ -697,3 +697,11 @@ On top of 89575b3e: each frame is sent at the start of the next media tick
 line is logged when a tick starts late plus its bridge pass exceeds 25 ms.
 `sip.env` again carries `ME_V90_MAX_TX_DBM0_CODE=23` and
 `ME_V90_TRN2D_SYMBOLS=6000` (the 9 October Eicon recipe, all callers).
+
+## Deployed upstream frame-phase fix (2026-11-10 13:21)
+
+The V.90 upstream lock is released only on 240 accumulated shell frames at
+>= 4% bad (or one window at >= 20%), and HDLC flags count as lock evidence.
+The previous binary is `/opt/v90ras/sip_v90_modem.0dfb67f6`. Test the Diva
+on controller 7 or 8: the NT ports of card 1331 (controllers 3 and 4) slip
+about 34 ppm against the Cisco clock (docs/eicon_v90a_20261009.md).

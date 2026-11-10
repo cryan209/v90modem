@@ -172,6 +172,29 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     correct-phase windows read 0% in 194 of 202 and never above 3%, while
     wrong-phase windows read 3% or more in 92 of every 100. */
 #define V34_V90_T3_SHELL_BAD_PCT            3
+/*! A STANDING lock is judged on accumulated frames, not one window.  A noisy
+    upstream overflows the occasional index at the correct phase too: the
+    Diva 4BRI's 31200 upstream (decision error 0.15, SNR 36.6 dB, LAPM up)
+    read 0,0,0,0,1,1,2 bad over ~61-frame windows (4 of ~430, 0.9%), and the
+    2-of-61 window hit 3% and released a lock that was carrying LAPM.  Every
+    one of three 2026-11-10 calls died that way: release, a sweep that could
+    not tell phases apart on flags, a "discontinuity", then a 9.6 resync the
+    peer answered by retraining to V.34.  Over 240 frames a wrong phase
+    (4-13% per frame, above) reads >= 4% with probability 0.5-1, and a 0.9%
+    correct phase reads >= 4% (10 bad, mean 2.2) with probability ~4e-4. */
+#define V34_V90_T3_LOCK_MIN_FRAMES          240
+#define V34_V90_T3_LOCK_BAD_PCT             4
+/*! One window this bad is a wrong phase whatever the noise: with ~61
+    frames it is 12 or more bad. */
+#define V34_V90_T3_LOCK_FAST_BAD_PCT        20
+/*! HDLC flags (01111110, V.42 8.1.1 / ISO 3309) per thousand descrambled
+    bits at or above which the frame phase counts as right.  An idle LAPM
+    link sends back-to-back flags: 125 per mille at the right grouping.  The
+    ones fraction cannot see grouping (a wrong one permutes bits within a
+    frame, 71-75% ones at every offset of the 2026-11-10 sweep), but it does
+    break the flag pattern: a random stream at 75% ones matches it ~11 times
+    per thousand. */
+#define V34_V90_T3_FLAG_LOCK_PERMIL         60
 /* Distance from the constellation below which the equalizer is considered
    demonstrably good and worth snapshotting, and the number of consecutive
    symbols above the tracking threshold before the snapshot is restored --
@@ -1565,6 +1588,12 @@ typedef struct
     int v90_t3_ones;
     int v90_t3_alt_ones;
     int v90_t3_bit_count;
+    /*! \brief HDLC flags seen in this window (V34_V90_T3_FLAG_LOCK_PERMIL). */
+    int v90_t3_flags;
+    /*! \brief Shell evidence accumulated while locked
+        (V34_V90_T3_LOCK_MIN_FRAMES). */
+    int v90_t3_lock_bad;
+    int v90_t3_lock_frames;
     /*! \brief Running decision-error statistics for the V.90 upstream. */
     /*! \brief Fast distance-to-lattice estimate, gating the adaptive
         elements; v90_t3_sym_err_ema is the slow one the rest reads. */

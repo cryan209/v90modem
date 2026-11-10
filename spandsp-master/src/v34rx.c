@@ -961,6 +961,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             /*endif*/
             s->v90_t3_v14_hist = ((s->v90_t3_v14_hist << 1) | out_bit) & 0x3FF;
             s->v90_t3_v14_bits++;
+            if (s->v90_t3_v14_bits >= 8  &&  (s->v90_t3_v14_hist & 0xFF) == 0x7E)
+                s->v90_t3_flags++;
+            /*endif*/
         }
         /* While searching, judge on a short window so the whole phase space
            fits inside the peer's idle period; once locked, report on a long
@@ -982,6 +985,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             int shell_pct = s->v90_t3_shell_frames
                           ? 100*s->v90_t3_shell_bad/s->v90_t3_shell_frames
                           : -1;
+            int flag_permil = 1000*s->v90_t3_flags/s->v90_t3_bit_count;
+            bool shell_release = false;
             int v14_pct = 0;
             int v14_ratio = 0;
             int sweep_score = 0;
@@ -1169,23 +1174,52 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 /*endif*/
             }
             /*endif*/
+            /* Judge a standing lock on accumulated shell frames
+               (V34_V90_T3_LOCK_MIN_FRAMES): a single window cannot tell a
+               noisy correct phase from a wrong one. */
+            if (s->v90_t3_sf_locked  &&  shell_pct >= 0)
+            {
+                s->v90_t3_lock_bad += s->v90_t3_shell_bad;
+                s->v90_t3_lock_frames += s->v90_t3_shell_frames;
+                if (shell_pct >= V34_V90_T3_LOCK_FAST_BAD_PCT)
+                {
+                    shell_release = true;
+                }
+                else if (s->v90_t3_lock_frames >= V34_V90_T3_LOCK_MIN_FRAMES)
+                {
+                    shell_release = (100*s->v90_t3_lock_bad
+                                     >= V34_V90_T3_LOCK_BAD_PCT*s->v90_t3_lock_frames);
+                    if (!shell_release)
+                    {
+                        s->v90_t3_lock_bad = 0;
+                        s->v90_t3_lock_frames = 0;
+                    }
+                    /*endif*/
+                }
+                /*endif*/
+            }
+            /*endif*/
             if (s->v90_t3_sf_locked
                 &&
                 v90_t3_phase_evidence_ok(s)
                 &&
                 ((shell_pct >= 0)
-                     ? (shell_pct >= V34_V90_T3_SHELL_BAD_PCT)
+                     ? shell_release
                      : (ones_pct < 70  &&  v14_ratio < 25))
                 &&
                 s->v90_t3_relocks < 200)
             {
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream lost frame phase (%d%% ones, "
+                         "%d bad of %d frames since the last verdict); "
+                         "sweeping again (release %d)\n",
+                         ones_pct, s->v90_t3_lock_bad, s->v90_t3_lock_frames,
+                         s->v90_t3_relocks + 1);
                 s->v90_t3_sf_locked = false;
                 s->v90_t3_sf_tries = 0;
                 s->v90_t3_relocks++;
-                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
-                         "Rx - V.90 upstream lost frame phase (%d%% ones); "
-                         "sweeping again (release %d)\n",
-                         ones_pct, s->v90_t3_relocks);
+                s->v90_t3_lock_bad = 0;
+                s->v90_t3_lock_frames = 0;
             }
             /*endif*/
             /* Only sweep where the metric can tell one phase from another.
@@ -1222,18 +1256,22 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                    wrong before releasing.  Measured on round1: 35 locks, most
                    of them in the 75-87% band, and the sweep restarting after
                    each. */
-                if (!v90_t3_phase_no_marks()
-                    &&
-                    (ones_pct >= 90
-                     ||
-                     (v14_pct >= 5  &&  v14_ratio >= 30)))
+                if ((!v90_t3_phase_no_marks()
+                     &&
+                     (ones_pct >= 90
+                      ||
+                      (v14_pct >= 5  &&  v14_ratio >= 30)))
+                    ||
+                    flag_permil >= V34_V90_T3_FLAG_LOCK_PERMIL)
                 {
                     s->v90_t3_sf_locked = true;
+                    s->v90_t3_lock_bad = 0;
+                    s->v90_t3_lock_frames = 0;
                     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase locked "
                              "(%d%% ones, V.14 %d%% at %dx the other phases, "
-                             "after %d steps)\n",
-                             ones_pct, v14_pct, v14_ratio/10,
+                             "HDLC flags %d per mille, after %d steps)\n",
+                             ones_pct, v14_pct, v14_ratio/10, flag_permil,
                              s->v90_t3_sf_tries);
                 }
                 else if (s->v90_t3_confirming
@@ -1271,6 +1309,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     {
                         s->v90_t3_sf_locked = true;
                         s->v90_t3_confirming = false;
+                        s->v90_t3_lock_bad = 0;
+                        s->v90_t3_lock_frames = 0;
                         V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream frame phase locked on "
                                  "shell evidence (offset %d, 0 bad of %d "
@@ -1609,6 +1649,7 @@ v90_t3_window_done:
             s->v90_t3_ones = 0;
             s->v90_t3_alt_ones = 0;
             s->v90_t3_bit_count = 0;
+            s->v90_t3_flags = 0;
             s->v90_t3_shell_frames = 0;
             s->v90_t3_shell_bad = 0;
         }
@@ -15442,6 +15483,9 @@ commit:
     s->v90_t3_sf_locked = false;
     s->v90_t3_idle_seen = false;
     s->v90_t3_relocks = 0;
+    s->v90_t3_flags = 0;
+    s->v90_t3_lock_bad = 0;
+    s->v90_t3_lock_frames = 0;
     s->v90_t3_sym_err_ema = 0.0f;
     s->v90_t3_err_base = 0.0f;
     s->v90_t3_err_base_n = 0;
@@ -17911,6 +17955,7 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                             s->v90_t3_ones = 0;
                             s->v90_t3_alt_ones = 0;
                             s->v90_t3_bit_count = 0;
+                            s->v90_t3_flags = 0;
                             for (int ph = 0;  ph < 10;  ph++)
                             {
                                 s->v90_t3_v14_ok[ph] = 0;
