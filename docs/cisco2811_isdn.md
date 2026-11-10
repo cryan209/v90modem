@@ -270,6 +270,7 @@ A µ-law caller works too (2900, `--law ulaw`, V.34): 31200, LAPM, PAP, 20/20
 pings, 0% loss. Asterisk converts µ-law to A-law on the 2910 leg; the sniff
 showed PT 8 both ways. The idle octet the B channel delivers is 0xD5 (A-law
 silence), which confirms controller 8 is A-law on the wire. Transparent B1
-data is not converted by the card, so `CCardLAW` only labels the octets. The
+data should pass the card unconverted (not separately verified), so
+`CCardLAW` would only label the octets. The
 conversion costs V.34 nothing visible. It would break a V.90 downstream, but
 the MultiTech never offers V.90 to us on this route or on direct 7910.
