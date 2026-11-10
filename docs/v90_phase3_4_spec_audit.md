@@ -46,11 +46,26 @@ The peer's window is its own: it does not move with our cycle length (Diva:
 modems averaged Ri, a constant U_INFO with a +++--- sign pattern, into the
 levels of the first segments of the descriptor. The worst case on record is
 the Win95 modem whose CPt had an empty constellation (rig/v90ras/README.md).
-What this did to the rates the others chose is not measured: a replay cannot
-show it, because the recorded peer has already built its CPt from what the
-live call sent. It needs a live A/B (`ME_V90_DIL_AUTOTERMINATE_CYCLES=1`
-against the default, arms alternated, downstream rate and CPt constellation
-sizes compared).
+A replay cannot show what this did to a call, because the recorded peer has
+already built its CPt from what the live call sent.
+
+**Live A/B, 2026-11-10 evening, Eicon Diva V90A on controller 8 dialling
+v90ras (809636b2), `ME_V90_DIL_AUTOTERMINATE_CYCLES` the only variable, arms
+alternated, one call per arm per pair, 45 s hold:**
+
+| Arm | V.90 data | Result on each of the 4 calls |
+|---|---|---|
+| one cycle (`=1`) | **0/4** | CPt accepted (drn 17, the same as the other arm), TRN2d sent, the Diva sends Tone A 7.9-8.0 s after its CPt and declines V.90 in the next INFO1a; V.34 at 28800 (CONNECT 28800, 31200, 31200, 28800), one call retraining again to 26400 |
+| repeat until S (default) | **4/4** | S found on the line in the second cycle (DIL ends at segment 191-193 of 197), CPt drn 17, CP drn 10, DATA 40000 down / 31200 up 11.3-11.4 s after INFO1a, no retrain |
+
+A 300 s call on the same binary and controller then held V.90 at 40000/31200
+with PPP up throughout: 292 of 293 pings intact, none corrupt, no retrain or
+renegotiation.
+
+So for this peer the cap is the difference between V.90 and no V.90, not a
+rate step: the CPt it sends is the same size either way, and it gives up in
+Phase 4. The other peers in the table still want the same A/B (they reached
+V.90 under the cap, so for them the question is the rate).
 
 The line watch: on the five CX93001 taps the S is on the line every time
 (0.98 of a 20 ms window's energy on 229/1829/3429 Hz for 11-12 consecutive

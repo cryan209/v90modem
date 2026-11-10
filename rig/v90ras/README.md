@@ -719,4 +719,9 @@ in `v90ras.service` is redundant but harmless. What changes here: DIL has a
 `v90.c`, `v34rx.c` and `private/v34.h`; the CX93001 DIL fixture gives the same
 result there as on the Mac. The previous binary is
 `/opt/v90ras/sip_v90_modem.956b5b69`. Only `v90ras` was restarted, with no
-call up; no live call has been made on it yet.
+call up.
+
+Live the same evening, Diva V90A on controller 8: 6/6 calls on this binary
+reached V.90 at 40000/31200 (one held 300 s, 292/293 pings), and 0/4 with
+`ME_V90_DIL_AUTOTERMINATE_CYCLES=1` set through a runtime drop-in, arms
+alternated (docs/v90_phase3_4_spec_audit.md, row 4). The drop-in is removed.
