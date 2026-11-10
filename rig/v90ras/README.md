@@ -805,3 +805,21 @@ Still open: our receiver mis-frames after an 11.6 B1 that is not in
 `v34rx_data.c`: it keeps the good B1's offset and conjugation, but takes the
 SWP phase and trellis state from the failed search. A peer-initiated 11.6 on
 7910 at about 54 s showed the same thing.
+
+## Deployed 8b698c2a (2026-11-11 10:00)
+
+This fixes the open item above. After an 11.6 whose B1 matches no template,
+the receiver now keeps the good B1's 8.2 switching-pattern phase (the MultiTech
+ISI runs it one mapping frame ahead), opens the Viterbi across every state,
+and runs V0 acquisition. Measured with a forced 11.6 at 12 s
+(`ME_V34_RENEG_AFTER_MS=12000`):
+- **Before:** about 1 new frame in 10 failed the shell-index check, and PPP
+  lost 80% of its pings.
+- **After:** 7910 2/2 and 7900 1/1, with two fallback B1s per call, the shell
+  check at 12 or fewer bad frames in 18944, and 0% ping loss.
+
+The verification build carried a diagnostic patch
+(`/root/eicon-tests/diag.patch`, reverted before this build). The previous
+binary is `/opt/v90ras/sip_v90_modem.3a3609be`; the new one is
+`/opt/v90ras/sip_v90_modem.8b698c2a`. Only `v90ras` was restarted, with no call
+up.
