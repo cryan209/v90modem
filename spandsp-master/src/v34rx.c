@@ -4079,9 +4079,13 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
            eight 2D symbols that belong together, and the transmitter's own
            construction bounds it.  bitstream_put() truncates silently, so
            without this the evidence is thrown away. */
-        s->v90_t3_shell_frames++;
-        if (kk < 32  &&  s->r0 >= (int32_t) (1u << kk))
-            s->v90_t3_shell_bad++;
+        if (s->v90_t3_since_erased >= V34_V90_T3_ERASE_SHELL_HOLD)
+        {
+            s->v90_t3_shell_frames++;
+            if (kk < 32  &&  s->r0 >= (int32_t) (1u << kk))
+                s->v90_t3_shell_bad++;
+            /*endif*/
+        }
         /*endif*/
         /* The same check is the only honest read on a plain V.34 data mode,
            where none of the V.90 upstream lock machinery runs: it owes nothing
@@ -13399,6 +13403,23 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            symbols are on the constellation, fourth-power while they are not,
            because the decisions a decision-directed loop needs are exactly
            what a spinning constellation does not give. */
+        {
+            int64_t w0 = s->v90_t3_next_symbol - pre - 2;
+            int64_t w1 = s->v90_t3_next_symbol - pre + V34_V90_T3_FSE_TAPS + 1;
+
+            s->v90_t3_sym_erased = (w1 >= s->v90_t3_erase_from
+                                    &&  w0 <= s->v90_t3_erase_to);
+            if (s->v90_t3_sym_erased)
+            {
+                s->v90_t3_since_erased = 0;
+                s->v90_t3_erased_symbols++;
+            }
+            else if (s->v90_t3_since_erased < 1000000)
+            {
+                s->v90_t3_since_erased++;
+            }
+            /*endif*/
+        }
         if (s->v90_t3_carrier_enabled)
         {
             float dr;
@@ -13406,9 +13427,14 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
             s->v90_t3_dump_phase = s->v90_t3_carrier.phase;
             v34_carrier_derotate(&s->v90_t3_carrier, y.re, y.im, &dr, &di);
-            v34_carrier_update(&s->v90_t3_carrier, dr, di,
-                               (s->v90_t3_sym_err_fast
-                                    < V34_V90_T3_TIMING_TRACK_ERR) ? 1 : 0);
+            if (s->v90_t3_sym_erased)
+                s->v90_t3_carrier.phase = v34_carrier_wrap(s->v90_t3_carrier.phase
+                                                           + s->v90_t3_carrier.freq);
+            else
+                v34_carrier_update(&s->v90_t3_carrier, dr, di,
+                                   (s->v90_t3_sym_err_fast
+                                        < V34_V90_T3_TIMING_TRACK_ERR) ? 1 : 0);
+            /*endif*/
             y.re = dr;
             y.im = di;
         }
@@ -13577,7 +13603,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                2^24 and reads hundreds of dB (docs/v90_upstream_rate_matrix:
                1.5e20 symbol power read "222.9 dB").  No V.34 point is
                anywhere near 128 from the origin. */
-            if (fabsf(y.re) < 128.0f  &&  fabsf(y.im) < 128.0f)
+            if (!s->v90_t3_sym_erased
+                &&
+                fabsf(y.re) < 128.0f  &&  fabsf(y.im) < 128.0f)
             {
                 float d = e_re*e_re + e_im*e_im;
                 float p = t_re*t_re + t_im*t_im;
@@ -13630,7 +13658,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                the other end (docs/v34_data_mode_rates.md: a smaller step is
                the wrong lever; adapt only while the error stays near the
                baseline that settled just after B1). */
-            if (e_re*e_re + e_im*e_im < 8.0f
+            if (!s->v90_t3_sym_erased
+                &&
+                e_re*e_re + e_im*e_im < 8.0f
                 &&
                 v90_t3_dd_gate_ok(s)
                 &&
@@ -13700,8 +13730,15 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 #endif
             }
             /*endif*/
-            v90_t3_blind_recover(s, &y, pre, frac, energy);
+            if (!s->v90_t3_sym_erased)
+                v90_t3_blind_recover(s, &y, pre, frac, energy);
+            /*endif*/
         }
+        /* An erased symbol (V34_V90_T3_ERASE_MIN_RUN) says nothing about the
+           line: no slip search, no loss, no baseline, no restore. */
+        if (s->v90_t3_sym_erased)
+            goto v90_t3_timing;
+        /*endif*/
         /* Keep a copy of the filter from when it was demonstrably working,
            and put it back if the symbols collapse.  The supervised fit onto
            B1 happens once; after that only decision-directed adaptation
@@ -13936,6 +13973,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            interpolates by -- see v34_gardner.h for why the fraction matters
            and v34_gardner_test for the S-curve, acquisition, tracking and
            quiescence it is held to. */
+v90_t3_timing:
         if (s->v90_t3_timing_enabled)
         {
             /* Gardner wants the symbol instant and the point halfway back to
@@ -14006,8 +14044,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                                    2.0f*floorf(y.re/2.0f) + 1.0f,
                                    2.0f*floorf(y.im/2.0f) + 1.0f,
                                    s->v90_t3_sym_err_fast,
-                                   (s->v90_t3_sym_err_fast
-                                        < V34_V90_T3_TIMING_TRACK_ERR)
+                                   (!s->v90_t3_sym_erased
+                                    &&  s->v90_t3_sym_err_fast
+                                            < V34_V90_T3_TIMING_TRACK_ERR)
                                        ? 1 : 0);
             if (V34_DIAG_GETENV("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
@@ -15835,6 +15874,52 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         s->v90_t3_hilbert[s->v90_t3_hilbert_pos] = amp[i];
         if (++s->v90_t3_hilbert_pos >= V34_V90_T3_HILBERT_TAPS)
             s->v90_t3_hilbert_pos = 0;
+        /* Lost-packet erasures (V34_V90_T3_ERASE_MIN_RUN).  This sample
+           enters the analytic stream at index input_count and touches it up
+           to HILBERT_TAPS later; the interpolator spreads it half a window
+           either side. */
+        if (amp[i] == s->v90_t3_run_val  &&  s->v90_t3_run_len > 0)
+        {
+            s->v90_t3_run_len++;
+        }
+        else
+        {
+            if (s->v90_t3_run_len >= V34_V90_T3_ERASE_MIN_RUN
+                &&
+                s->v90_t3_acquired)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream erasure: %d samples of fill "
+                         "(%.1f ms), %d symbols held\n",
+                         s->v90_t3_run_len, s->v90_t3_run_len/8.0f,
+                         s->v90_t3_erased_symbols);
+            }
+            /*endif*/
+            s->v90_t3_run_val = amp[i];
+            s->v90_t3_run_len = 1;
+            s->v90_t3_run_start = s->v90_t3_input_count;
+            s->v90_t3_erased_symbols = 0;
+        }
+        /*endif*/
+        if (s->v90_t3_run_len >= V34_V90_T3_ERASE_MIN_RUN
+            &&
+            s->v90_t3_run_len <= V34_V90_T3_ERASE_MAX_RUN)
+        {
+            int64_t a0 = s->v90_t3_run_start - half;
+            int64_t a1 = s->v90_t3_input_count + V34_V90_T3_HILBERT_TAPS + half;
+            int64_t from = a0*(int64_t) s->v90_t3_internal_rate/8000;
+            int64_t to = a1*(int64_t) s->v90_t3_internal_rate/8000 + 1;
+
+            if (s->v90_t3_run_len == V34_V90_T3_ERASE_MIN_RUN
+                ||
+                from > s->v90_t3_erase_to)
+            {
+                s->v90_t3_erase_from = from;
+            }
+            /*endif*/
+            s->v90_t3_erase_to = to;
+        }
+        /*endif*/
         /* Streaming analytic signal.  Form it before resampling, matching the
            proven reference receiver and preventing the negative-frequency
            image from sitting only 256 Hz beyond the RRC transition band. */
@@ -19746,6 +19831,13 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_hilbert_pos = 0;
     rx->v90_t3_rrc_pos = 0;
     rx->v90_t3_raw_count = 0;
+    rx->v90_t3_run_len = 0;
+    rx->v90_t3_run_start = 0;
+    rx->v90_t3_erase_from = 0;
+    rx->v90_t3_erase_to = -1;
+    rx->v90_t3_sym_erased = false;
+    rx->v90_t3_since_erased = 1000000;
+    rx->v90_t3_erased_symbols = 0;
     rx->v90_t3_next_symbol = 0;
     rx->v90_t3_publish_symbol = 0;
     rx->v90_t3_suppress_output = true;

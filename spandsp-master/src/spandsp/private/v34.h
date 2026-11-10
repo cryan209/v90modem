@@ -195,6 +195,22 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     break the flag pattern: a random stream at 75% ones matches it ~11 times
     per thousand. */
 #define V34_V90_T3_FLAG_LOCK_PERMIL         60
+/*! A lost RTP packet reaches the receiver as a frame of one repeated fill
+    octet (sip_modem.c keeps the sample count), and a live upstream at rms
+    ~1800 never repeats one value this many times.  Symbols whose equalizer
+    window touches such a run are still decoded -- the frame count must
+    advance -- but nothing adapts on them and nothing counts them towards a
+    slip, a loss or a frame-phase verdict.  Measured live 2026-11-10: a 30 s
+    burst of 26 lost packets (20-40 ms holes) walked the equalizer to 0.22,
+    the holes then read as a discontinuity, and the 9.6 that followed never
+    reacquired B1 while packets kept dropping; LAPM gave up (N400). */
+#define V34_V90_T3_ERASE_MIN_RUN            16
+/*! Longer than this is not packet loss (a peer's retrain silence reads the
+    same): stop treating it as an erasure and let the loss logic see it. */
+#define V34_V90_T3_ERASE_MAX_RUN            960
+/*! Symbols after an erasure during which shell frames are not counted: the
+    Viterbi traceback (15 4D pairs) plus two mapping frames. */
+#define V34_V90_T3_ERASE_SHELL_HOLD         64
 /* Distance from the constellation below which the equalizer is considered
    demonstrably good and worth snapshotting, and the number of consecutive
    symbols above the tracking threshold before the snapshot is restored --
@@ -1588,6 +1604,17 @@ typedef struct
     int v90_t3_ones;
     int v90_t3_alt_ones;
     int v90_t3_bit_count;
+    /*! \brief Lost-packet erasures (V34_V90_T3_ERASE_*): the run of identical
+        bearer samples being measured, in analytic-sample units, and the T/3
+        sample range it makes untrustworthy. */
+    int16_t v90_t3_run_val;
+    int v90_t3_run_len;
+    int64_t v90_t3_run_start;
+    int64_t v90_t3_erase_from;
+    int64_t v90_t3_erase_to;
+    bool v90_t3_sym_erased;
+    int v90_t3_since_erased;
+    int v90_t3_erased_symbols;
     /*! \brief HDLC flags seen in this window (V34_V90_T3_FLAG_LOCK_PERMIL). */
     int v90_t3_flags;
     /*! \brief Shell evidence accumulated while locked

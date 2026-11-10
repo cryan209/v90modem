@@ -1088,3 +1088,7 @@ sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/multitech-7801-i
 # V.90 9.6: an upstream below 14400 (no measured data-mode SNR threshold)
 # does not fall back; it used to walk a clean 12000 down to 4800.
 ./engine_pair_test --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env VPCM_ME_VERBOSE=1 --answer-env ME_V90_UPSTREAM_MAX_BPS=12000 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "enter DATA after B1: upstream=12000" --answer-nolog "upstream fall-back"
+# Lost RTP packets reach the V.90 upstream as fill frames; the T/3 receiver
+# must hold through them (erasures), not adapt on them. Before: decision
+# error 0.22, "abrupt discontinuity", a 9.6 that never reacquired.
+sh -c 'ME_V90_MAX_TX_DBM0_CODE=23 ME_V90_TRN2D_SYMBOLS=6000 ME_MODE=v90 ./v90_engine_replay reference-data/diva-v90-rtp-loss/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/erase.log" 2>&1; grep -q "upstream erasure: 320 samples of fill" "$TMPDIR/erase.log" && ! grep -q "abrupt discontinuity" "$TMPDIR/erase.log"'

@@ -1243,7 +1243,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 /*endif*/
             }
             /*endif*/
-            if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output)
+            if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output
+                &&  !s->v90_t3_sym_erased)
             {
                 float g_re = transformed_re*s->data_symbol_scale;
                 float g_im = transformed_im*s->data_symbol_scale;
