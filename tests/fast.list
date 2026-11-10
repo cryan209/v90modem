@@ -1020,7 +1020,9 @@ sh -c 'F=reference-data/artifacts/cx93001-ja-crc-fails-20261023/live-rx.g711; ME
 ./engine_pair_test --seconds 90 --hold-seconds 30 --expect V90 --both-env ME_MODE=v90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env ME_V90_RETRAIN_AFTER_MS=2000 --payload-printable "RR" --payload-reps 400 --call-log "retrain complete; resuming the existing data link" --answer-log "resuming the existing data link"
 
 # V.90 9.4.1.4/.6: a batch CP must not qualify E on an unvalidated live tap.
-sh -c 'ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 ./v90_engine_replay reference-data/artifacts/cx93001-unqualified-e-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/cxe.log" 2>&1 && grep -q "CP_VALID source=batch kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && grep -q "CP_VALID source=spandsp kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && ! grep -q "upstream E detected\|V90 enter DATA" "$TMPDIR/cxe.log"'
+# The call was recorded when DIL stopped after one cycle, and everything this
+# checks comes after that: replay it on the same DIL timing.
+sh -c 'ME_V90_DIL_AUTOTERMINATE_CYCLES=1 ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 ./v90_engine_replay reference-data/artifacts/cx93001-unqualified-e-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/cxe.log" 2>&1 && grep -q "CP_VALID source=batch kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && grep -q "CP_VALID source=spandsp kind=CP bits=428.*accepted=1" "$TMPDIR/cxe.log" && ! grep -q "upstream E detected\|V90 enter DATA" "$TMPDIR/cxe.log"'
 
 # Byte-exact relay and RTCP diagnostic negative controls.
 python3 tools/test_rtp_path_check.py
@@ -1092,3 +1094,8 @@ sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/multitech-7801-i
 # must hold through them (erasures), not adapt on them. Before: decision
 # error 0.22, "abrupt discontinuity", a 9.6 that never reacquired.
 sh -c 'ME_V90_MAX_TX_DBM0_CODE=23 ME_V90_TRN2D_SYMBOLS=6000 ME_MODE=v90 ./v90_engine_replay reference-data/diva-v90-rtp-loss/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer > "$TMPDIR/erase.log" 2>&1; grep -q "upstream erasure: 320 samples of fill" "$TMPDIR/erase.log" && ! grep -q "abrupt discontinuity" "$TMPDIR/erase.log"'
+
+# V.90 9.3.1.6: DIL repeats until the analogue modem's 9.3.2.10 S.  A
+# CX93001's S, 40 ms about 2.2 s into DIL and after our first cycle (1.88 s):
+# the block-aligned line watch missed this one, the sliding one finds it.
+sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/cx93001-dil-s/live-rx.g711 ulaw --fast --sync --sip-answer > "$TMPDIR/dils.log" 2>&1; grep -q "DIL termination requested, completed segment 23/119" "$TMPDIR/dils.log" && grep -q "kind=CPt bits=292.*accepted=1" "$TMPDIR/dils.log" && ! grep -q "no S-to-S-bar\|interop fallback entering Phase 4" "$TMPDIR/dils.log"'

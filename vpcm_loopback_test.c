@@ -710,6 +710,158 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
     return true;
 }
 
+/* True when a DIL of `sent` symbols ends on a DIL-segment boundary (§8.4.1). */
+static bool vpcm_test_dil_on_segment_boundary(const v90_dil_desc_t *desc,
+                                              int cycle_len, int sent)
+{
+    int pos = sent % cycle_len;
+    int edge = 0;
+
+    if (pos == 0)
+        return true;
+    for (int seg = 0; seg < desc->n; seg++) {
+        int uchord_idx = vpcm_test_dil_uchord_index(desc->train_u[seg] & 0x7F);
+
+        edge += ((int) (desc->h[uchord_idx] & 0x7F) + 1) * 6;
+        if (edge == pos)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * V.90 §8.4.1 / §9.3.1.6: "The entire sequence ... is repeated until either
+ * the analogue modem causes it to be terminated or a timeout occurs.  The
+ * sequence shall be terminated on a DIL-segment boundary."
+ *
+ * Three endings: the S of §9.3.2.10 after the first cycle (the current
+ * segment is completed), no S at all (5000 ms from §9.3.2.10 plus the
+ * allowance in v90_dil_timeout_symbols()), and an S candidate inside the
+ * first cycle (not trusted to cut the cycle short, so the cycle boundary).
+ * Until 2026-11-10 the transmitter stopped after one cycle whatever arrived.
+ */
+static bool test_v90_dil_termination(v91_law_t law)
+{
+    enum { TIMEOUT_SYMBOLS = 5500 * 8, EARLY_HOLDOFF = 4000, MAX_SEG = 128 * 6 };
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_dil_desc_t profile;
+    int cycle_len;
+
+    vpcm_log("Test: V.90 DIL termination, 8.4.1/9.3.1.6 (%s)", law_name);
+    unsetenv("ME_V90_DIL_AUTOTERMINATE_CYCLES");
+    unsetenv("ME_V90_DIL_PROFILE");
+    unsetenv("ME_V90_DIL_TIMEOUT_MS");
+    /* A real descriptor: the test one's cycle (1500 symbols) is shorter than
+     * the holdoff.  This is SmartLink's, 144 segments and 16140 symbols. */
+    memset(&profile, 0, sizeof(profile));
+    if (!v90_dil_load_smartlink_adi(&profile))
+        return false;
+    cycle_len = vpcm_test_dil_cycle_len(&profile);
+    if (cycle_len <= EARLY_HOLDOFF + 12 || cycle_len >= TIMEOUT_SYMBOLS) {
+        fprintf(stderr, "DIL termination test: cycle of %d symbols does not "
+                "separate the three cases\n", cycle_len);
+        return false;
+    }
+
+    for (int scenario = 0; scenario < 3; scenario++) {
+        v90_state_t *tx = v90_init_data_pump(v90_law);
+        uint8_t codeword;
+        int spin = 0;
+        int sent = 0;
+        int want_min;
+        int want_max;
+        bool ok = false;
+
+        if (!tx)
+            return false;
+        v90_start_phase3(tx, 66);
+        v90_set_dil_descriptor(tx, &profile);
+        if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
+            goto scenario_done;
+        while (v90_get_tx_phase(tx) != V90_TX_JD && spin++ < 40000)
+            v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (v90_get_tx_phase(tx) != V90_TX_JD
+            || !v90_handle_rx_event(tx, V90_RX_EVENT_S))
+            goto scenario_done;
+        spin = 0;
+        while (v90_get_tx_phase(tx) != V90_TX_DIL && spin++ < 2048)
+            v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (v90_get_tx_phase(tx) != V90_TX_DIL)
+            goto scenario_done;
+
+        switch (scenario) {
+        case 0:
+            /* Into the second cycle with nothing received: still DIL. */
+            for (; sent < cycle_len + 100; sent++)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            if (v90_get_tx_phase(tx) != V90_TX_DIL) {
+                fprintf(stderr, "DIL stopped after one cycle with no S\n");
+                goto scenario_done;
+            }
+            if (!v90_dil_s_can_terminate(tx)
+                || !v90_handle_rx_event(tx, V90_RX_EVENT_S)) {
+                fprintf(stderr, "DIL refused S in its second cycle\n");
+                goto scenario_done;
+            }
+            want_min = cycle_len + 100;
+            want_max = cycle_len + 100 + MAX_SEG;
+            break;
+        case 1:
+            want_min = TIMEOUT_SYMBOLS;
+            want_max = TIMEOUT_SYMBOLS + MAX_SEG;
+            break;
+        default:
+            /* Before the holdoff the S that was held through Jd is still
+             * arriving; it must neither end DIL nor be remembered. */
+            for (; sent < EARLY_HOLDOFF - 6; sent++)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            if (v90_handle_rx_event(tx, V90_RX_EVENT_S)) {
+                fprintf(stderr, "DIL accepted S before its holdoff\n");
+                goto scenario_done;
+            }
+            for (; sent < EARLY_HOLDOFF + 6; sent++)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            if (v90_handle_rx_event(tx, V90_RX_EVENT_S)) {
+                fprintf(stderr, "DIL let a first-cycle S end it at once\n");
+                goto scenario_done;
+            }
+            want_min = cycle_len;
+            want_max = cycle_len;
+            break;
+        }
+        while (v90_get_tx_phase(tx) == V90_TX_DIL
+               && sent < TIMEOUT_SYMBOLS + 2 * MAX_SEG) {
+            v90_phase3_tx_codewords(tx, &codeword, 1);
+            sent++;
+        }
+        if (v90_get_tx_phase(tx) != V90_TX_RI) {
+            fprintf(stderr, "DIL case %d: phase %d after %d symbols, wanted Ri\n",
+                    scenario, (int) v90_get_tx_phase(tx), sent);
+            goto scenario_done;
+        }
+        if (sent < want_min || sent > want_max
+            || !vpcm_test_dil_on_segment_boundary(&profile, cycle_len, sent)) {
+            fprintf(stderr, "DIL case %d ended after %d symbols (wanted "
+                    "%d..%d, on a segment boundary; cycle %d)\n",
+                    scenario, sent, want_min, want_max, cycle_len);
+            goto scenario_done;
+        }
+        ok = true;
+scenario_done:
+        v90_free(tx);
+        if (!ok) {
+            fprintf(stderr, "V.90 DIL termination case %d failed (%s)\n",
+                    scenario, law_name);
+            return false;
+        }
+    }
+    vpcm_log("PASS: V.90 DIL ends on S, on the 9.3.2.10 timeout and on a "
+             "first-cycle S, each at a segment boundary (%s, cycle=%d)",
+             law_name, cycle_len);
+    return true;
+}
+
 /*
  * Compare two DIL descriptors by their §8.4.1 expansion (waveform
  * equivalence), which is the fidelity contract of v90_dil_rx.
@@ -11235,6 +11387,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
+        && test_v90_dil_termination(V91_LAW_ULAW)
+        && test_v90_dil_termination(V91_LAW_ALAW)
         && test_v90_smartlink_dil_profile()
         && test_v90_dil_rx_roundtrip(V91_LAW_ULAW)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)

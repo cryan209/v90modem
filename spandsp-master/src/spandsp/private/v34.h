@@ -72,6 +72,8 @@
    Rebuild ALL SpanDSP and repository objects after changing this geometry:
    a partial rebuild uses stale private-structure offsets. */
 #define V34_V90_T3_RAW_SIZE                 131072
+/*! Samples in the window the DIL-mode S watch slides (20 ms). */
+#define V34_V90_DIL_S_WINDOW                160
 
 /* Ja capture geometry.  A RING of V34_JA_CAPTURE_BITS bits, packed 8 to a
    byte.  The *_len counters keep counting TOTAL bits appended -- they are not
@@ -1531,6 +1533,11 @@ typedef struct
     float v90jd_energy;
     int v90jd_samples;
     int v90jd_blocks;
+    /* DIL mode slides its 20 ms window over the last samples instead
+       (v34_rx_watch_v90_dil_s()). */
+    int16_t v90jd_ring[V34_V90_DIL_S_WINDOW];
+    int v90jd_ring_pos;
+    int v90jd_ring_fill;
 
     float reneg_s_g1[3];
     float reneg_s_g2[3];

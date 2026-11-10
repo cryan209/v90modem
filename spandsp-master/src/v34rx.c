@@ -16645,6 +16645,132 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
    Ja is over (it ends on our Sd->S-bar-d, 9.3.2.4) and 9.3.2.7 allows nothing
    but silence or S -- so Ja, whose J pattern also puts energy on these
    lines, cannot be mistaken for it. */
+/* The DIL mode of the watch below: 9.3.2.10's S, which is what ends DIL
+   (9.3.1.6), and unlike the S during Jd it is not held -- it is 128T, 37 ms
+   at 3429 baud and 40 ms at 3200, once.
+
+   The Jd watch needs two consecutive 20 ms blocks on a fixed grid, each with
+   0.6 of its energy on the lines.  A 40 ms burst fills two blocks only when
+   it starts within 8 ms after a block edge: a block that is 12 ms S after
+   silence reads 0.6, and the block that holds the end of S also holds S-bar
+   (which cancels as much S as it lasts) and the start of CPt.  That is 40% of
+   block phases, and it is what the stored CX93001 calls show: the S is on the
+   tap every time, 0.98 of the energy on 229/1829/3429 Hz for 40-45 ms about
+   2.2 s into DIL, and the watch reported it on 3 replays of 5
+   (reference-data/artifacts/cx-ja-cost-20261023/A2 and
+   cx-work-20261023/candidate1 are the two it missed).
+
+   So slide the same 20 ms window in 2.5 ms steps and ask for 8 consecutive
+   positions, which no block phase can miss: 128T of S at 3429 baud gives 11
+   after silence and 9 after SCR (9.3.2.9 allows either), and 8 positions need
+   33 ms of coherent S, more than the 24 ms that could satisfy two blocks. */
+static void v34_rx_watch_v90_dil_s(v34_rx_state_t *s,
+                                   const int16_t amp[],
+                                   int len)
+{
+    enum { WIN = V34_V90_DIL_S_WINDOW, HOP = 20, RUN = 8, HOLDOFF = 80 };
+    float fc[2];
+    float half;
+    float coeff[6];
+    int i;
+    int k;
+    int n;
+
+    half = 0.5f*baud_rate_parameters[s->baud_rate].baud_rate;
+    fc[0] = carrier_frequency(s->baud_rate, 0);
+    fc[1] = carrier_frequency(s->baud_rate, 1);
+    for (k = 0;  k < 6;  k++)
+        coeff[k] = 2.0f*cosf(2.0f*3.14159265f*(fc[k/3] + (float) (k%3 - 1)*half)/SAMPLE_RATE);
+    /*endfor*/
+    for (i = 0;  i < len;  i++)
+    {
+        float g1[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float g2[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float line[2] = {0.0f, 0.0f};
+        float energy = 0.0f;
+        float denom;
+        int on = -1;
+
+        s->v90jd_ring[s->v90jd_ring_pos] = amp[i];
+        if (++s->v90jd_ring_pos >= WIN)
+            s->v90jd_ring_pos = 0;
+        /*endif*/
+        if (s->v90jd_ring_fill < WIN)
+            s->v90jd_ring_fill++;
+        /*endif*/
+        if (++s->v90jd_samples < HOP)
+            continue;
+        /*endif*/
+        s->v90jd_samples = 0;
+        if (s->v90jd_ring_fill < WIN)
+            continue;
+        /*endif*/
+        for (n = 0;  n < WIN;  n++)
+        {
+            float x = (float) s->v90jd_ring[(s->v90jd_ring_pos + n)%WIN];
+
+            for (k = 0;  k < 6;  k++)
+            {
+                float g0 = x + coeff[k]*g1[k] - g2[k];
+
+                g2[k] = g1[k];
+                g1[k] = g0;
+            }
+            /*endfor*/
+            energy += x*x;
+        }
+        /*endfor*/
+        denom = energy*(float) WIN*0.5f;
+        if (energy > 10000.0f*(float) WIN)
+        {
+            for (k = 0;  k < 6;  k++)
+                line[k/3] += g1[k]*g1[k] + g2[k]*g2[k] - coeff[k]*g1[k]*g2[k];
+            /*endfor*/
+            if (fabsf(fc[0] - fc[1]) < 1.0f)
+            {
+                /* 3429 baud: one carrier, see the Jd watch. */
+                if (line[0] > 0.45f*denom)
+                    on = 0;
+                /*endif*/
+            }
+            else if (line[0] > 0.6f*denom  &&  line[1] < 0.2f*denom)
+                on = 0;
+            else if (line[1] > 0.6f*denom  &&  line[0] < 0.2f*denom)
+                on = 1;
+            /*endif*/
+        }
+        /*endif*/
+        if (s->v90jd_holdoff > 0)
+        {
+            s->v90jd_holdoff--;
+            on = -1;
+        }
+        /*endif*/
+        s->v90jd_blocks = (on >= 0)  ?  s->v90jd_blocks + 1  :  0;
+        if (s->v90jd_blocks >= RUN)
+        {
+            s->v90jd_blocks = 0;
+            s->v90jd_holdoff = HOLDOFF;         /* 200 ms between events */
+            s->phase3_s_present = true;
+            s->phase3_s_event_count++;
+            s->phase3_s_fired_symbol = -1;
+            s->received_event = V34_EVENT_S;
+            s->v90jd_line_event = true;
+            span_log(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 Phase 3: analogue S during DIL found on the line, %s carrier "
+                     "(%.0f Hz; lines %.2f/%.2f; receiver on %s)\n",
+                     on ? "high" : "low",
+                     (double) fc[on],
+                     (double) (line[0]/denom),
+                     (double) (line[1]/denom),
+                     s->high_carrier ? "high" : "low");
+        }
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
                                   const int16_t amp[],
                                   int len)
@@ -16666,6 +16792,13 @@ static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
         s->v90jd_energy = 0.0f;
         s->v90jd_samples = 0;
         s->v90jd_blocks = 0;
+        s->v90jd_ring_fill = 0;
+        return;
+    }
+    /*endif*/
+    if (s->v90jd_dil_mode)
+    {
+        v34_rx_watch_v90_dil_s(s, amp, len);
         return;
     }
     /*endif*/
@@ -18647,6 +18780,15 @@ SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on)
         s->rx.v90jd_energy = 0.0f;
         s->rx.v90jd_samples = 0;
         s->rx.v90jd_blocks = 0;
+    }
+    /*endif*/
+    if ((on == 2) != s->rx.v90jd_dil_mode)
+    {
+        /* The two modes count different things in the same fields. */
+        s->rx.v90jd_samples = 0;
+        s->rx.v90jd_blocks = 0;
+        s->rx.v90jd_ring_fill = 0;
+        s->rx.v90jd_ring_pos = 0;
     }
     /*endif*/
     s->rx.v90jd_s_armed = (on != 0);

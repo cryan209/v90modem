@@ -301,22 +301,26 @@ static int v90_jd_s_wait_symbols(void)
  * and real modems can need more than one descriptor cycle to converge their
  * impairment/constellation design.
  *
- * Spec-correct behaviour is thus value 0 = repeat-until-S.  That is NOT yet the
- * default because two live findings (2026-07-24, USR Courier) must be resolved
- * first:
- *   1. The upstream S/S-bar detector false-fires on the analogue modem's silent
- *      DIL turnaround (a carrier-offset rotation of near-silent noise reads as a
- *      sustained S; the AGC normalises equalizer magnitude, so only *raw* input
- *      power discriminates -- now logged next to each far-end-S detection so the
- *      floor can be calibrated).  Repeat-until-S without that gate just accepts
- *      the first false S past the minimum and still ends at ~1 cycle; a naive
- *      power gate instead suppressed the *real* pre-DIL S and stalled Phase 3.
- *   2. The analogue modem retrains ~15 s + round-trip after INFO1a (§9.4.2), so
- *      the whole DIL/Ri/CPt/TRN2d/MP/B1 sequence shares one deadline -- extra
- *      DIL cycles trade against that budget and can themselves trip the timeout.
- * Until (1) is calibrated, default to the one-cycle interop cap.  Non-zero N
- * auto-terminates after N complete cycles; SmartLink ADI/ADI-QC want exactly 1.
- * The minimum-cycle floor for *accepting* an S is separate (v90_handle_rx_event). */
+ * So the default is 0 = repeat until S (§8.4.1, §9.3.1.6), bounded by
+ * v90_dil_timeout_symbols().  It was a one-cycle cap until 2026-11-10, kept
+ * because in July the S detector false-fired on the analogue modem's silent
+ * DIL turnaround.  The gates added since (silence, dead line, own echo, the
+ * DIL-mode line watch, Tone A) removed that, and the cap was then found to be
+ * the defect three separate times, each patched with the environment knob
+ * for one peer: the Intel V92 modem (2026-10-06), the Eicon Diva (2026-10-09)
+ * and the Win95 modems (2026-11-08, whose CPt was built from our Ri and had an
+ * empty constellation).  It is every peer.  Replaying 88 stored live taps with
+ * DIL repeating, the analogue modem's §9.3.2.10 S comes after our first cycle
+ * has ended on every call that has one (80; the peer retrained in six and
+ * held its Jd S through all of DIL in two): CX93001 2.18-2.30 s into DIL against a 1.88 s
+ * cycle, Diva 3.34-3.36 against 1.62, MT5634/MT9234 4.16-4.30 and RasFinder
+ * 4.16-4.44 against 3.72, slmodemd 4.34-4.44 against 4.04.  For those 0.3 to
+ * 1.7 s each of them was studying Ri (U_INFO, +++---) as if it were the
+ * training points it had asked for.  docs/v90_phase3_4_spec_audit.md row 4.
+ *
+ * Non-zero N auto-terminates after N complete cycles (ME_V90_DIL_PROFILE's
+ * SmartLink ADI names keep 1).  The minimum-cycle floor for *accepting* an S
+ * is separate (v90_handle_rx_event). */
 static int v90_dil_autoterminate_cycles(void)
 {
     const char *value;
@@ -333,7 +337,45 @@ static int v90_dil_autoterminate_cycles(void)
     if (value && (strcmp(value, "smartlink-adi-qc") == 0
                   || strcmp(value, "smartlink-adi") == 0))
         return 1;
-    return 1;
+    return 0;
+}
+
+/* §8.4.1 repeats DIL "until either the analogue modem causes it to be
+ * terminated or a timeout occurs", and §9.3.2.10 is what bounds the analogue
+ * modem: its S starts within 5000 ms of the S-bar of §9.3.2.8, which it sends
+ * on detecting J'd.  So measured from our first DIL symbol the S-to-S-bar
+ * transition is over by 5000 ms plus the S itself (128T, 53 ms at 2400 baud)
+ * plus a round trip.  Past that we missed it (the NOTE under §9.3.1.6 expects
+ * that to happen) and the analogue modem is already sending CPt and waiting
+ * for Ri, with its own §9.4.2 deadline running, so go to Phase 4 at the next
+ * segment boundary.  The round trip is not measured on every Phase 2 path;
+ * 450 ms covers the longest seen here (148 ms over ISDN and SIP) three times
+ * over.  ME_V90_DIL_TIMEOUT_MS replaces the whole 5500 ms; 0 disables it. */
+/* An S candidate in the first DIL cycle counts (v90_handle_rx_event()) only
+ * after this many symbols, 500 ms.  The S the analogue modem held through Jd
+ * and its 16T S-bar (§9.3.2.8) are still arriving when DIL starts, and the
+ * detectors report them up to 260 ms in (20 and 240-260 ms on the MT5634 and
+ * MT9234 taps, 20 ms on the CX93001's). */
+#define V90_DIL_EARLY_S_HOLDOFF 4000
+
+static int v90_dil_timeout_symbols(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_DIL_TIMEOUT_MS");
+        long ms = 5500;
+
+        if (value && *value) {
+            char *end;
+            long parsed = strtol(value, &end, 10);
+
+            if (end != value && *end == '\0' && parsed >= 0 && parsed <= 60000)
+                ms = parsed;
+        }
+        cached = (int) (ms * 8);
+    }
+    return cached;
 }
 
 /* Interop-only per-DS0-phase amplitude shaping for TRN1d.
@@ -575,6 +617,7 @@ struct v90_state_s {
      * fits inside the peer's WaitForSd patience. */
     bool             jd_resync_wait;
     bool             dil_terminate_requested;
+    bool             dil_early_s;   /* an S candidate came in the first cycle */
     bool             v92_ri_on_frame;           /* CPt seen: Ri at next frame */
     bool             v92_phase3;
     bool             v92_trn1u_trained;
@@ -857,8 +900,12 @@ static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
    transition (9.4.2.1, 9.4.2.2), so a longer Ri costs only time.  At the
    192T floor the transition came ~160 ms into Ri, on the first CPt, and an
    Eicon Diva V90A caller never saw it: it repeated CPt through our TRN2d and
-   MP and retrained (2026-11-10).  1600T (500 ms) gives its receiver time to
-   settle on Ri first.  V90_RI_MIN_SYMBOLS overrides it (192 = the floor). */
+   MP and retrained (2026-11-10).  1600T gives its receiver time to settle on
+   Ri first: T is the downstream symbol here (5.2, 8000 a second), so that is
+   200 ms, not the 500 ms this comment and e350541e's message claimed (they
+   counted at the upstream's 3200 baud).  200 ms is the value that was run
+   live -- 3/3 five-minute V.90 calls from the Diva on 8d5f540c -- so it stays.
+   V90_RI_MIN_SYMBOLS overrides it (192 = the floor). */
 static int v90_ri_startup_symbols(void)
 {
     static int symbols = -1;
@@ -3417,6 +3464,7 @@ static void v90_dil_reset_tx(v90_state_t *s)
     s->dil_segment_index = 0;
     s->dil_pos_in_segment = 0;
     s->dil_terminate_requested = false;
+    s->dil_early_s = false;
     s->v92_ri_on_frame = false;
 }
 
@@ -3569,14 +3617,30 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
             s->tx_phase = V90_TX_RI;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
+        } else if (!s->v92_phase3 && v90_dil_cycle_cap(s) == 0
+                   && v90_dil_timeout_symbols() > 0
+                   && s->sample_count >= v90_dil_timeout_symbols()) {
+            /* §8.4.1 "or a timeout occurs": see v90_dil_timeout_symbols(). */
+            fprintf(stderr,
+                    "[V90] Phase 3: no S-to-S-bar %d ms into DIL (§9.3.2.10 "
+                    "gives the analogue modem 5000 ms); ending at segment "
+                    "%d/%d of cycle %d and entering Phase 4\n",
+                    s->sample_count / 8, seg_idx + 1, n,
+                    s->dil_segment_index / n + 1);
+            s->tx_phase = V90_TX_RI;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
         } else if ((s->dil_segment_index % n) == 0) {
             int cycles = s->dil_segment_index / n;
             int cycle_limit = v90_dil_cycle_cap(s);
 
-            if (cycle_limit > 0 && cycles >= cycle_limit) {
+            if ((cycle_limit > 0 && cycles >= cycle_limit)
+                || (!s->v92_phase3 && s->dil_early_s)) {
                 fprintf(stderr,
-                        "[V90] Phase 3: completed %d full DIL cycle%s; interop fallback entering Phase 4\n",
-                        cycles, cycles == 1 ? "" : "s");
+                        "[V90] Phase 3: completed %d full DIL cycle%s; %s entering Phase 4\n",
+                        cycles, cycles == 1 ? "" : "s",
+                        s->dil_early_s ? "S/S-bar was seen during it,"
+                                       : "interop fallback");
                 s->tx_phase = V90_TX_RI;
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
@@ -4793,6 +4857,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->dil_early_s = false;
     s->v92_ri_on_frame = false;
     memset(&s->dil, 0, sizeof(s->dil));
     v90_dil_reset_tx(s);
@@ -4829,6 +4894,7 @@ v90_state_t *v90_init(int baud_rate,
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->dil_early_s = false;
     s->v92_ri_on_frame = false;
     memset(&s->dil, 0, sizeof(s->dil));
     v90_dil_reset_tx(s);
@@ -4937,6 +5003,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_su_bar_seen = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
+    s->dil_early_s = false;
     s->v92_ri_on_frame = false;
     s->cp_ready = false;
     s->cp_ack_received = false;
@@ -4994,6 +5061,7 @@ void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
     memset(&s->dil, 0, sizeof(s->dil));
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->dil_early_s = false;
     s->v92_ri_on_frame = false;
     v90_dil_reset_tx(s);
 
@@ -5099,6 +5167,24 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
              * resemble a sustained S rotation.  Hold DIL for at least one
              * complete descriptor cycle before allowing that ambiguous event
              * to end it. */
+            if (s->dil_segment_index < minimum_segments
+                && !s->dil_early_s
+                && s->sample_count >= V90_DIL_EARLY_S_HOLDOFF) {
+                /* §9.3.2.10 lets the analogue modem stop as soon as it has
+                 * enough, which can be inside the first cycle (our own
+                 * analogue role stops at half of one).  An S this early is
+                 * still not trusted to cut a cycle short, but it must not be
+                 * lost either: with nothing to follow it, DIL would run to
+                 * its timeout.  End at the cycle boundary, as before. */
+                s->dil_early_s = true;
+                fprintf(stderr,
+                        "[V90] Phase 3: S/S-bar candidate %d ms into the first "
+                        "DIL cycle (segment %d/%d); DIL ends at the cycle "
+                        "boundary\n",
+                        s->sample_count / 8, s->dil_segment_index + 1,
+                        s->dil.n);
+                return false;
+            }
             if (s->dil_segment_index < minimum_segments) {
                 fprintf(stderr,
                         "[V90] Phase 3: ignored early S/S-bar candidate "
@@ -5287,6 +5373,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->v92_su_seen = false;
             s->v92_su_bar_seen = false;
             s->dil_terminate_requested = false;
+            s->dil_early_s = false;
             s->v92_ri_on_frame = false;
             s->dil_requested = false;
             s->dil_segment_index = 0;

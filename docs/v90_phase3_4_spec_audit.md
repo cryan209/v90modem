@@ -15,7 +15,7 @@ never a reading of our own logs (see the trap in row 3).
 | 1 | 9.3.2.7 / 9.3.1.5 | After Jd the analogue modem sends **S, held until it detects J'd** (the first one is ~0.3 s long against a 128T = 37 ms nominal S), then 9.3.2.8's S-bar for 16T | The S watch (`v34_rx_watch_v90_jd_s`) assumed a low/high carrier pair at 3000/3200 and required "this set high, the other low". **3429 baud has ONE carrier**, so the test was unsatisfiable. | Fixed 281d7910. Evidence: `serial-flex-a2` rx tap, lines 245/1959/3674 Hz at 0.72-0.81 |
 | 2 | 9.3.1.6 / 9.3.2.10 | During DIL the analogue modem sends **S for 128T then S-bar for 16T** ("S-to-S-bar transition") to say it has enough; NOTE: the digital modem can miss it | The same watch was armed **only while Jd was on air**, and its `phase3_s_present` gate stayed true after Jd's S, so nothing listened for the second S at all. | Fixed dcdaa967 (DIL mode: stays armed, 200 ms holdoff) |
 | 3 | 9.3.2.10 | The S above is the only thing that ends DIL | After the S was found, our own `p3_demod` structural check (`rejected_p3_structural`) rejected it, and the modem's **retrain Tone A (a constant dibit, which that check passes)** was accepted as the S/S-bar, so we sent Ri into a modem that had already retrained. Every log line said "S/S-bar received ... entering Phase 4". | Fixed dcdaa967: events the line watch found skip the structural check. **Trap: read what the accepted event IS on the rx tap before believing a stage log.** |
-| 4 | 9.3.1.6 | "After receiving a *subsequent* S-to-S-bar transition" -- i.e. the 9.3.2.8 S-bar that follows J'd is NOT the terminator; the next one is | We approximate "subsequent" with "at least one full DIL cycle has been sent" and act on an S alone, not on the S-to-S-bar transition. A descriptor whose cycle is longer than the modem's 5000 ms window would have the real S land mid-cycle and be ignored. | Open. Replace the cycle count with a count of S-bar transitions (ignore exactly the first), and look for the transition, not the S. |
+| 4 | 9.3.1.6 / 8.4.1 | DIL is "repeated until either the analogue modem causes it to be terminated or a timeout occurs"; the terminator is the *subsequent* S-to-S-bar transition (the 9.3.2.10 S, within 5000 ms of the 9.3.2.8 S-bar), and DIL ends on a segment boundary | We sent **one cycle** and then Ri, whatever arrived (`ME_V90_DIL_AUTOTERMINATE_CYCLES` defaulted to 1; `=0` was set per peer after the Intel V92, Diva and Win95 findings). Every peer's S comes later than that: see the table below. With `=0` there was no timeout at all, and the DIL-mode line watch needed two 20 ms blocks on a fixed grid, which a 40 ms S fills at 40% of block phases. | Fixed 2026-11-10: repeat until S is the default; 5500 ms timeout (`ME_V90_DIL_TIMEOUT_MS`); the watch slides its window in 2.5 ms steps; an S candidate in the first cycle (after 500 ms) ends DIL at the cycle boundary, as before. Still open: an S in the first cycle does not end DIL at the *segment* boundary, and the first transition is skipped by time, not counted. |
 | 5 | Table 10 bits 34:36 | Upstream symbol rate 3000/3200/3429, and it "**shall be consistent with INFO1d**"; INFO0d bit 40 says whether the digital modem can run V.90 at 3429 | We advertise bit 40 = 0 and every INFO1d row for 3429 at zero -- and the modem picked 3429 anyway (INFO1a code 5) on 1 attempt in 3. `v90_selected_upstream_baud_locked()` quietly mapped 5 to 3200, so the SpanDSP receiver ran at 3429 for Phase 3 and our Phase 4 and data receivers at 3200. Measured: the modem's Phase 4 is repeated 1244-bit CPt at 3429 (white at 3200 and 3000), which no receiver of ours decodes. | Candidate fix written, **not committed, not yet tested live** (the serial adapter dropped off the Mac): treat INFO1a code 5 as invalid when we have not enabled 3429. Patch kept in the session scratchpad. |
 | 6 | 9.3.1.3 | Sd may start up to 500 ms after Ja is *received* | Waited for a CRC-valid descriptor with no bound | Fixed earlier (`ME_V90_JA_HEURISTIC_FALLBACK_MS`), see CLAUDE.md |
 | 7 | 9.4.1.1 / 9.4.2.1 | Digital modem sends Ri for >= 192T **and keeps sending it until CPt arrives**; the analogue modem sends CPt repeatedly and waits for Ri-to-Ri-bar | "Phase 4: Ri (192 symbols)" is only the minimum; the stage correctly holds Ri, but nothing times out on *why* no CPt arrived. A modem that sends CPt in a form we cannot decode (row 5) looks identical to one that sent nothing. | Open: log what the rx tap holds (baud/carrier hypothesis, GPA ones fraction **with the dibit histogram**) when Ri has run > 1 s with no CPt. |
@@ -23,6 +23,64 @@ never a reading of our own logs (see the trap in row 3).
 | 9 | 9.4.1 | Nothing: the clause is the digital modem's own deadline, "retrain ... if it does not receive B1 within 15 s plus 5 round-trip delays after receiving INFO1a" | No deadline existed. A stalled Phase 4 waited for the 60 s training timeout, then fell back to V.22bis, which a V.90 analogue modem in Phase 4 cannot follow (the Win95 modems give up at about 55 s anyway) | Fixed 2026-11-09: retrain per 9.5.1.1 at 15 s + 5 round trips (`ME_V90_B1_DEADLINE_MS`). Phase 2 measures no round trip on V.90, so 1000 ms each is assumed (20 s total): the MT5634 fixture's B1 comes 16.5-17.0 s after INFO1a and at 200 ms per round trip it was retrained. Win95 modems: 11.1-11.3 s. |
 | 10 | 9.6.1.2.1-.2 | S for 128T, S-bar for 16T, then SCR/CP | Rd went out on S alone; answering also armed 9.6.1.1.1's S wait, which survived the following retrain and fired on Phase 3's S | Fixed 1ed19a26. Circuit 104 is still not clamped between S and Rd (20-80 ms of S reaches V.42; LAPM's FCS rejects it). |
 | 11 | 9.7 | -- | As the digital modem we drop the SIP leg on hang-up instead of sending MP with drn=0 through a 9.6 renegotiation (the analogue role and V.92 9.11 do send it) | Open, cosmetic: the peer reports NO CARRIER instead of a cleardown. |
+
+### Row 4: when each peer's 9.3.2.10 S arrives (2026-11-10)
+
+`v90_engine_replay --sync` over 109 stored live taps of calls we answered or
+dialled as the digital modem, DIL repeating. 88 reach DIL. In 80 the analogue
+modem's S is found after the first cycle and CPt is accepted 220-600 ms later
+(220 ms is our own Ri minimum plus one frame). In six the peer retrained
+during DIL (Tone A; the live calls failed there too) and in two it held its
+Jd S through all of DIL.
+
+| Peer | Our DIL cycle | S after DIL start | Ri it studied as DIL under the one-cycle cap |
+|---|---|---|---|
+| CX93001 (N=119) | 1.88 s | 2.18-2.30 s (5 calls) | 0.3-0.4 s |
+| Eicon Diva V90A (N=197) | 1.62 s | 3.34-3.36 s (3) | 1.7 s |
+| MT5634 / MT9234 (N=192) | 3.72 s | 4.16-4.30 s (5) | 0.4-0.6 s |
+| RasFinder (N=192) | 3.72 s | 4.16-4.44 s (22) | 0.4-0.7 s |
+| slmodemd / d-modem (N=144) | 4.04 s | 4.34-4.44 s (45) | 0.3-0.4 s |
+
+The peer's window is its own: it does not move with our cycle length (Diva:
+3.34 s whether we sent one cycle or two). So under the cap each of these
+modems averaged Ri, a constant U_INFO with a +++--- sign pattern, into the
+levels of the first segments of the descriptor. The worst case on record is
+the Win95 modem whose CPt had an empty constellation (rig/v90ras/README.md).
+What this did to the rates the others chose is not measured: a replay cannot
+show it, because the recorded peer has already built its CPt from what the
+live call sent. It needs a live A/B (`ME_V90_DIL_AUTOTERMINATE_CYCLES=1`
+against the default, arms alternated, downstream rate and CPt constellation
+sizes compared).
+
+The line watch: on the five CX93001 taps the S is on the line every time
+(0.98 of a 20 ms window's energy on 229/1829/3429 Hz for 11-12 consecutive
+2.5 ms steps), and the block-aligned watch reported 3 of 5. The sliding watch
+reports 5 of 5, and across the 86 replays where the peer is not holding S
+reports none between the end of the first cycle and the real one.
+
+Replays of taps recorded under the one-cycle cap diverge from the recording
+where DIL would have ended, so nothing after that point can be judged in them
+(the pre-MP upstream measurement lands on a later part of the recorded
+signal, for one). `tests/fast.list` pins the one test that checks Phase 4 on
+such a tap to `ME_V90_DIL_AUTOTERMINATE_CYCLES=1`.
+
+### Other findings of the 2026-11-10 pass
+
+* 9.4.1.1 Ri: `v90_ri_startup_symbols()` is 1600T, and T downstream is 1/8000 s
+  (5.2), so that is **200 ms**. The comment, e350541e's message and the rig
+  notes all called it 500 ms (counted at the upstream's 3200 baud). The value
+  is unchanged, since 200 ms is what the 3/3 Diva calls on 8d5f540c ran with.
+* 9.3.1.5 and 9.4.1 name a round-trip delay. RTDEd is measured since fcdb8284
+  (9.2.1.1.4) but deliberately not fed to either deadline: both run on fixed
+  allowances (1500 ms and 5 x 1000 ms) that were set from peers which use more
+  than the clause gives them (CX93001's S, the MT5634's B1 at 16.5-17.0 s).
+* The analogue role (`v90_analogue_tx.c`, `v90_analogue_phase3.c`) was read
+  against 9.3.2 and 9.4.2 clause by clause: 70 ms silence, S 128T / S-bar 16T,
+  the 1500 ms and 4500 ms deadlines of 9.3.2.4 and 9.3.2.7, S held until J'd,
+  the 5000 ms of 9.3.2.10, "complete the current sequence" in 9.4.2.2-.4 and
+  the 15 s + 5 RTD of 9.4.2 are all there. No change. It stops DIL at half a
+  cycle (`DIL_DEFAULT_COVERAGE`), which the digital side above now turns into
+  Ri at the cycle boundary rather than at its timeout.
 
 ## What has NOT been audited
 

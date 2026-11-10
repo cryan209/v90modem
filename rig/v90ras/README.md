@@ -677,7 +677,8 @@ previous binary is `/opt/v90ras/sip_v90_modem.fcdb8284`.
 
 ## Deployed e350541e (2026-11-10 08:50)
 
-On top of 63a0c4d8: startup Ri runs 1600T (500 ms) before R-bar-i
+On top of 63a0c4d8: startup Ri runs 1600T (200 ms: T downstream is 1/8000 s;
+this note first said 500 ms) before R-bar-i
 acknowledges CPt (`V90_RI_MIN_SYMBOLS`, floor 192). At 192T the Diva kept
 repeating CPt through our TRN2d and MP and retrained. The previous binary is
 `/opt/v90ras/sip_v90_modem.63a0c4d8`.
@@ -705,3 +706,12 @@ The V.90 upstream lock is released only on 240 accumulated shell frames at
 The previous binary is `/opt/v90ras/sip_v90_modem.0dfb67f6`. Test the Diva
 on controller 7 or 8: the NT ports of card 1331 (controllers 3 and 4) slip
 about 34 ppm against the Cisco clock (docs/eicon_v90a_20261009.md).
+
+## Not yet deployed: DIL repeat-until-S as the default (2026-11-10)
+
+`ME_V90_DIL_AUTOTERMINATE_CYCLES=0` in `v90ras.service` is now the built-in
+default, so the line is redundant but harmless. Two things do change here on
+the next deploy: DIL has a 5500 ms timeout (9.3.2.10; before, a missed S left
+DIL running until the 9.4.1 B1 deadline), and the S watch during DIL slides
+its window, so a 37-40 ms S is no longer missed on block alignment
+(docs/v90_phase3_4_spec_audit.md, row 4).
