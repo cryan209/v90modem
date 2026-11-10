@@ -595,6 +595,20 @@ defects, each behind the last:
   divergent transmission, which here is our MP'; its first offline run read
   "white" because the recorded peer, never having heard our MP', was still
   sending MP.
+  The fallback must also keep the good B1's **8.2 switching-pattern phase**,
+  and must not trust the failed search's trellis state (2026-11-11). The
+  MultiTech ISI (7910/7900) runs its switching pattern one mapping frame ahead
+  at startup (`swp_frames=1`, 3429/31200: r=12, p=15) and keeps doing so after
+  an 11.6. The fallback took the failed search's phase 0. The eye stayed clean
+  (distance to grid 0.08-0.10), but about 1 new frame in 10 failed the shell
+  check (shell index over k bits, 0% before the renegotiation), XID went
+  unanswered and PPP lost 80% of its pings. Now the fallback restores
+  `b1_good_swp_frames`, opens the Viterbi across every state and starts V0
+  acquisition (9.6.3). With a forced 11.6 (`ME_V34_RENEG_AFTER_MS=12000`) the
+  shell check read 12 bad frames out of 18944 through two fallback B1s, and
+  PPP passed 40/40 pings. The tool for spotting it is the
+  shell-index report: it owes nothing to content and reads 0% when frames are
+  grouped correctly.
 
 **Live (tower, ext 3999, 300 s session cap):** `rf-bbs-6` (responder and
 fallback by switch) and `rf-bbs-7` (defaults, no switches) both **held the

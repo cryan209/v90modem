@@ -2719,6 +2719,9 @@ typedef struct
         MT5634SMI).  Set by v34_rx_b1_search(), per call. */
     int b1_swp_frames;
     bool b1_good_conjugate;
+    /*! The good B1's b1_swp_frames, which a B1 that matches no template
+        keeps along with its offset and conjugation. */
+    int b1_good_swp_frames;
     int data_decision_count;
     int last_logged_mp_diag_state;
 

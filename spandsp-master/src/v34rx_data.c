@@ -431,16 +431,42 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        below. */
                     if (best < v34_rx_b1_fallback_threshold()  &&  s->b1_good_valid)
                     {
+                        int prior = (s->viterbi.ptr - 1) & 0xF;
+
                         b1_fallback = true;
                         b1_offset = s->b1_good_offset;
                         if (b1_offset > search)
                             b1_offset = search;
+                        /*endif*/
+                        /* The failed search also left its own guesses at the
+                           8.2 switching-pattern phase and the trellis state.
+                           Neither is evidence.  The MultiTech ISI (7910) runs
+                           its pattern one mapping frame ahead at startup
+                           (3429/31200: r=12, p=15) and keeps doing so after
+                           an 11.6; deframing its data at the search's phase 0
+                           mis-grouped about 1 frame in 10 (shell index over
+                           k bits, 0% before the renegotiation) and PPP lost
+                           80% of its pings.  Keep the good B1's phase, and let
+                           the Viterbi start from every state: 10.1.3.1's reset
+                           state is exactly what this peer did not send. */
+                        s->b1_swp_frames = s->b1_good_swp_frames;
+                        for (int st = 0;  st < s->viterbi.state_count;  st++)
+                            s->viterbi.vit[prior].cumulative_path_metric[st] = 0U;
+                        /*endfor*/
+                        if (s->viterbi.zero_precoder)
+                        {
+                            s->viterbi.zero_precoder = false;
+                            s->v0_acquiring = s->viterbi.state_count == 16 && !s->v90_mode;
+                            s->v0_pairs = 0;
+                            memset(s->v0_score, 0, sizeof(s->v0_score));
+                        }
                         /*endif*/
                     }
                     else if (best >= 0.9f)
                     {
                         s->b1_good_valid = true;
                         s->b1_good_offset = b1_offset;
+                        s->b1_good_swp_frames = s->b1_swp_frames;
                     }
                     /*endif*/
                     if (b1_offset > 0)
