@@ -11498,6 +11498,27 @@ SPAN_DECLARE(int) v34_get_negotiated_mp_rates(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_peer_mp_ceiling(v34_state_t *s,
+                                          int *bit_rate_a_to_c,
+                                          int *bit_rate_c_to_a)
+{
+    v34_mp_rate_offer_t unbounded;
+
+    if (!s  ||  !s->tx.peer_mp_valid)
+        return -1;
+    /*endif*/
+    /* What 11.4.1.1.4/.2.4 would select against the peer's last MP if this
+       modem offered everything: the most any renegotiation can reach while
+       the peer keeps that MP. */
+    unbounded.max_rate_a_to_c = 14;
+    unbounded.max_rate_c_to_a = 14;
+    unbounded.signalling_rate_mask = 0x3FFF;
+    unbounded.asymmetric_rates_allowed = true;
+    return v34_negotiate_mp_rates(&unbounded, &s->tx.peer_mp,
+                                  bit_rate_a_to_c, bit_rate_c_to_a);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s)
 {
     if (!s)

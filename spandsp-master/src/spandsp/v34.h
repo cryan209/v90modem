@@ -734,6 +734,13 @@ SPAN_DECLARE(int) v34_get_negotiated_mp_rates(v34_state_t *s,
                                               int *bit_rate_a_to_c,
                                               int *bit_rate_c_to_a);
 
+/*! The highest rates the peer's last MP permits (V.34 11.4.1.1.4/.2.4), as
+    the MP N coding: what a renegotiation could reach if this modem offered
+    everything.  \return 0 if an MP has been received, -1 otherwise. */
+SPAN_DECLARE(int) v34_get_peer_mp_ceiling(v34_state_t *s,
+                                          int *bit_rate_a_to_c,
+                                          int *bit_rate_c_to_a);
+
 /*! Bound the data signalling rates this modem's MP offers, as V.250 6.4.1's
     +MS asks: per direction (this modem's transmit and receive), in bit/s,
     0 meaning no bound.  The maxima cap the MP rate fields; the minima clear

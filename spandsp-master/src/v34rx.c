@@ -3794,6 +3794,8 @@ static bool mp_negotiate_rates(v34_state_t *s, const mp_t *remote)
     remote_offer.max_rate_c_to_a = remote->bit_rate_c_to_a;
     remote_offer.signalling_rate_mask = remote->signalling_rate_mask;
     remote_offer.asymmetric_rates_allowed = remote->asymmetric_rates_allowed;
+    s->tx.peer_mp = remote_offer;
+    s->tx.peer_mp_valid = true;
     if (v34_negotiate_mp_rates(&local_offer, &remote_offer,
                                &s->tx.negotiated_rate_a_to_c,
                                &s->tx.negotiated_rate_c_to_a))

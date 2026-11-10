@@ -7761,6 +7761,29 @@ static bool v34_fall_forward_check_locked(void)
     cur = *ours;
     margin = me_v34_ff_margin_db();
     now = trace_now_ms();
+    {
+        /* 11.4.1.1.4/.2.4: no renegotiation selects above the peer's MP
+           maximum, so an ask above it can only come back at the current
+           rate -- and costs a B1.  The MultiTech ISI (7910, 2026-11-11) caps
+           its transmit at 31200 in every MP; asking 33600 0.9 s into data
+           settled at 31200 and left our receiver mis-framed after the
+           renegotiation's B1, which matched no template (0.064): 0/2 calls
+           clean against 2/2 with the ask suppressed (0% ping loss). */
+        int peer_a_to_c;
+        int peer_c_to_a;
+
+        if (v34_get_peer_mp_ceiling(g_v34, &peer_a_to_c, &peer_c_to_a) == 0) {
+            int peer_cap = (ours == &a_to_c) ? peer_a_to_c : peer_c_to_a;
+
+            if (peer_cap > 0
+                && (g_v34_ff_ceiling_n == 0 || peer_cap < g_v34_ff_ceiling_n)) {
+                g_v34_ff_ceiling_n = peer_cap;
+                if (peer_cap <= cur)
+                    ME_LOG("[ME] V.34 fall-forward: the peer's MP allows at most "
+                           "%d bps this way; no asks above it\n", peer_cap*2400);
+            }
+        }
+    }
 
     if (g_v34_fb_to_n) {
         ME_LOG("[ME] V.34 fall-back to %d bps settled at %d bps\n",
@@ -11671,10 +11694,14 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     {
                         int a2c = 0, c2a = 0;
-                        if (v34_get_negotiated_mp_rates(g_v34, &a2c, &c2a) == 0)
-                            trace_phase("V34 enter DATA: rate=%d (MP a2c=%d c2a=%d)",
-                                        rate, a2c*2400, c2a*2400);
-                        else
+                        int pa2c = 0, pc2a = 0;
+                        if (v34_get_negotiated_mp_rates(g_v34, &a2c, &c2a) == 0) {
+                            if (v34_get_peer_mp_ceiling(g_v34, &pa2c, &pc2a) != 0)
+                                pa2c = pc2a = 0;
+                            trace_phase("V34 enter DATA: rate=%d (MP a2c=%d c2a=%d; "
+                                        "peer MP allows a2c=%d c2a=%d)",
+                                        rate, a2c*2400, c2a*2400, pa2c*2400, pc2a*2400);
+                        } else
                             trace_phase("V34 enter DATA: rate=%d", rate);
                     }
                     /* §11.5 never takes CONNECT back; a retrain only clamps

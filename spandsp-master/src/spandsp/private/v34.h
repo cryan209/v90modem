@@ -1245,6 +1245,11 @@ typedef struct
     bool negotiated_rates_valid;
     int negotiated_rate_a_to_c;
     int negotiated_rate_c_to_a;
+    /*! \brief The rate fields of the last MP received (V.34 10.1.3.9/Table 20),
+        kept so a rate controller can tell what the peer allows before it
+        asks: 11.4.1.1.4/.2.4 never select above either MP's maximum. */
+    bool peer_mp_valid;
+    v34_mp_rate_offer_t peer_mp;
     /*! \brief V.34 12.4.1.3/12.4.2.4: the half-duplex primary channel data
         signalling rate settled by the MPh exchange, as Table 16's N, so the
         rate is N*2400 bit/s.  Zero until an MPh has been received.  Kept
