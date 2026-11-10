@@ -213,7 +213,7 @@ audio ever reached the B channel. There were three faults in
    `--law ulaw`). Asterisk endpoint 2910 moved from `endpoint-modem-alaw`
    to `endpoint-modem` (clearmode|ulaw). Backup:
    `/etc/asterisk/pjsip.conf.before-2910-ulaw-20261111`.
-3. **Pending approval:** every `DATA_B3_REQ` write failed with EIO
+3. **Applied:** every `DATA_B3_REQ` write failed with EIO
    (389/389 on one call, seen with `-v`). The CAPI header length counted
    the appended data (182 instead of 22), so divacapi's
    `DataLength > length - clength` check refused it as too small
@@ -222,3 +222,19 @@ audio ever reached the B channel. There were three faults in
 
 Backups on eicon420: `/usr/local/sbin/diva_sip_gateway.py.before-b3block-20261111`
 and `.before-law-20261111`, and `/root/local-answerer.conf.before-law-20261111`.
+
+After all three (the gateway restarted at 10:37), V.8 completes on every route:
+- **Loop `29102950`** (to v90ras): V.34 31200, then a retrain to 21600, LAPM
+  up and LCP seen, but PAP never succeeded.
+- **`29107910`, V.34:** trained 28800/19200, but V.42 detection found no LAPM
+  peer, and the call fell into 11.6/11.5 retrains until the ISDN side cleared
+  (0x3490).
+- **`29107910`, V.90:** reached V.34 31200, then the same retrains (7200 at
+  the end).
+
+The data mode reached but nothing decoded, which is the pattern of the
+documented controller 3/4 clocking limit: these controllers are NT, and their
+BRI clock slips about 34 ppm against the Cisco. On that path the gateway now
+carries modem audio intact apart from the clock. Clean data needs a TE
+controller locked to the Cisco (7/8), which would be a rig choice, not a
+gateway fix.
