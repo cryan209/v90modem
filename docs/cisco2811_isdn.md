@@ -238,3 +238,30 @@ BRI clock slips about 34 ppm against the Cisco. On that path the gateway now
 carries modem audio intact apart from the clock. Clean data needs a TE
 controller locked to the Cisco (7/8), which would be a rig choice, not a
 gateway fix.
+
+### Outgoing calls moved to controller 8 (2026-11-11 11:05)
+
+The gateway now dials ISDN on **controller 8** (TE, A-law, locked to the
+Cisco). It still listens on controller 3 (µ-law). Patch:
+`tools/eicon/diva_sip_gateway-dial-controller.patch`, which adds
+`--dial-controller` and `--dial-law`. The payload type, codec, silence octet
+and SDP now follow each call's controller; a call's direction picks its law.
+The drop-in adds `--dial-controller 8 --dial-law alaw` (backup
+`/root/local-answerer.conf.before-dialctl-20261111`; previous script
+`/usr/local/sbin/diva_sip_gateway.py.before-dialctl-20261111`). Asterisk
+endpoint `[2910]` allows `clearmode,alaw,ulaw` (backup
+`pjsip.conf.before-2910-dialctl-20261111`). Only an A-law caller (2905,
+`--law alaw`) reaches 2910 byte-exact; Asterisk transcodes a µ-law caller.
+
+The first deployment answered calls to ISDN with the listen law (PCMU) in the
+200 OK SDP. Asterisk then sent PT 0, the gateway dropped it as the wrong
+payload type, and both ends heard A-law silence (RX RMS 8.0). An RTP sniff on
+eicon420 showed this: in PT 0, out PT 8. With the 200 OK fixed, all from
+CT 117 with `tools/eicon_ppp_direct.py --law alaw`:
+- **Loop `29102950`, V.34:** 31200/28800, LAPM, PPP, 10/10 pings.
+- **`29107910`, V.34:** 31200, LAPM, PAP, 30/30 pings, 0% loss.
+- **`29107910`, V.90:** 31200 (V.34; the MultiTech is a digital ISDN modem),
+  LAPM, PAP, 30/30 pings, 0% loss.
+
+This confirms that the earlier controller 3 failures were the clock slip
+alone.

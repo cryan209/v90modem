@@ -1,0 +1,164 @@
+--- d/diva_sip_gateway.py	2026-11-11 10:32:59
++++ e/diva_sip_gateway.py	2026-11-11 11:05:09
+@@ -68,6 +68,7 @@
+ # CM (2026-11-11). The RTP payload type follows the line, so octets still pass
+ # unchanged. Set from main().
+ LINE_PT, LINE_CODEC, LINE_SILENCE = 8, 'PCMA', ALAW_SILENCE
++LAWS = {'alaw': (8, 'PCMA', ALAW_SILENCE), 'ulaw': (0, 'PCMU', 0xFF)}
+ 
+ 
+ def cstruct(data: bytes = b'') -> bytes:
+@@ -324,10 +325,13 @@
+     return address, port, formats
+ 
+ 
+-def build_sdp(address: str, port: int, session: int) -> bytes:
++def build_sdp(address: str, port: int, session: int,
++              pt: int | None = None, codec: str | None = None) -> bytes:
++    pt = LINE_PT if pt is None else pt
++    codec = LINE_CODEC if codec is None else codec
+     return (f'v=0\r\no=diva {session} {session} IN IP4 {address}\r\ns=diva\r\n'
+-            f'c=IN IP4 {address}\r\nt=0 0\r\nm=audio {port} RTP/AVP {LINE_PT}\r\n'
+-            f'a=rtpmap:{LINE_PT} {LINE_CODEC}/8000\r\na=ptime:20\r\na=sendrecv\r\n').encode()
++            f'c=IN IP4 {address}\r\nt=0 0\r\nm=audio {port} RTP/AVP {pt}\r\n'
++            f'a=rtpmap:{pt} {codec}/8000\r\na=ptime:20\r\na=sendrecv\r\n').encode()
+ 
+ 
+ def isdn_reason_to_sip(reason: int) -> int:
+@@ -438,6 +442,8 @@
+     outstanding: int = 0
+     handle: int = 0
+     seq: int = field(default_factory=lambda: random.getrandbits(16))
++    # (payload type, codec, silence octet) of the controller this call is on.
++    law: tuple = field(default_factory=lambda: (LINE_PT, LINE_CODEC, LINE_SILENCE))
+     timestamp: int = field(default_factory=lambda: random.getrandbits(32))
+     ssrc: int = field(default_factory=lambda: random.getrandbits(32))
+     marker: bool = True
+@@ -453,6 +459,7 @@
+         self.args, self.capi, self.sip = args, capi, sip
+         self.registrar = registrar
+         self.advertise = advertise
++        self.dial_law = LAWS[args.dial_law]
+         self.sip_port = sip.getsockname()[1]
+         self.selector = selectors.DefaultSelector()
+         self.selector.register(capi, selectors.EVENT_READ, self.on_capi)
+@@ -522,6 +529,9 @@
+     def new_call(self, call_id: str, direction: str) -> Call:
+         sock, port = self.open_rtp()
+         call = Call(call_id, direction, self.tag(), sock, port)
++        if direction == 'to-isdn':
++            call.law = self.dial_law
++            call.jitter = JitterBuffer(silence=call.law[2])
+         self.selector.register(sock, selectors.EVENT_READ, lambda c=call: self.on_rtp(c))
+         self.calls[call_id] = call
+         return call
+@@ -655,7 +665,7 @@
+     def on_invite(self, invite: SipMessage, source) -> None:
+         call_id = invite.get('call-id') or ''
+         sdp = parse_sdp(invite.body)
+-        if sdp is None or LINE_PT not in sdp[2]:
++        if sdp is None or self.dial_law[0] not in sdp[2]:
+             self.respond(invite, source, 488, 'Not Acceptable Here', to_tag=self.tag())
+             return
+         if sum(c.state != 'gone' for c in self.calls.values()) >= self.args.max_calls:
+@@ -678,10 +688,10 @@
+         called = self.args.isdn_number if user in ('', self.args.username) else user
+         calling = digits(uri_user(uri_of(call.remote_hdr)))
+         number = self.capi.send(CONNECT, REQ, connect_req(
+-            self.args.controller, self.args.cip, called, calling))
++            self.args.dial_controller, self.args.cip, called, calling))
+         self.pending_connect[number] = call
+         LOG.info('SIP %s -> ISDN %s on controller %d (CIP %d)', calling or '?',
+-                 called or '(no number)', self.args.controller, self.args.cip)
++                 called or '(no number)', self.args.dial_controller, self.args.cip)
+ 
+     def final(self, call: Call, code: int, reason: str, body: bytes = b'') -> None:
+         call.final_response = self.respond(call.invite, call.invite_source, code, reason,
+@@ -750,7 +760,7 @@
+ 
+     def send_invite(self, call: Call, challenge: SipMessage | None = None) -> None:
+         call.invite_branch = self.branch()
+-        sdp = build_sdp(self.advertise, call.rtp_port, random.getrandbits(31))
++        sdp = build_sdp(self.advertise, call.rtp_port, random.getrandbits(31), *call.law[:2])
+         headers = [f'Via: {self.via(call.invite_branch)}', 'Max-Forwards: 70',
+                    f'From: {call.local_hdr}', f'To: {call.remote_hdr}',
+                    f'Call-ID: {call.call_id}', f'CSeq: {call.invite_cseq} INVITE',
+@@ -838,11 +848,11 @@
+             self.bye(call)
+             return
+         sdp = parse_sdp(message.body)
+-        if sdp is None or LINE_PT not in sdp[2]:
+-            LOG.warning('answer without %s: %r', LINE_CODEC, message.body[:200])
++        if sdp is None or call.law[0] not in sdp[2]:
++            LOG.warning('answer without %s: %r', call.law[1], message.body[:200])
+             self.bye(call)
+             self.reject_isdn(call, REJECT_NORMAL)
+-            self.finish(call, f'no {LINE_CODEC} in answer')
++            self.finish(call, f'no {call.law[1]} in answer')
+             return
+         call.remote_rtp = (sdp[0], sdp[1])
+         self.capi.send(CONNECT, RESP, connect_resp(call.plci, 0), call.connect_ind_number)
+@@ -1029,7 +1039,7 @@
+         if call.direction == 'to-isdn' and not call.answered:
+             call.answered = True
+             self.final(call, 200, 'OK', build_sdp(self.advertise, call.rtp_port,
+-                                                  random.getrandbits(31)))
++                                                  random.getrandbits(31), *call.law[:2]))
+         self.pump(call)
+ 
+     def line_to_rtp(self, call: Call, payload: bytes) -> None:
+@@ -1039,7 +1049,7 @@
+         while len(call.to_rtp) >= RTP_BLOCK and call.remote_rtp:
+             chunk = bytes(call.to_rtp[:RTP_BLOCK])
+             del call.to_rtp[:RTP_BLOCK]
+-            header = struct.pack('!BBHII', 0x80, (0x80 if call.marker else 0) | LINE_PT,
++            header = struct.pack('!BBHII', 0x80, (0x80 if call.marker else 0) | call.law[0],
+                                  call.seq, call.timestamp, call.ssrc)
+             call.marker = False
+             call.seq = (call.seq + 1) & 0xFFFF
+@@ -1074,7 +1084,7 @@
+         except (BlockingIOError, OSError):
+             return
+         parsed = rtp_payload(packet)
+-        if parsed is None or parsed[0] != LINE_PT:
++        if parsed is None or parsed[0] != call.law[0]:
+             return
+         call.jitter.put(parsed[1])
+ 
+@@ -1137,11 +1147,24 @@
+                     help='CAPI B3 data block length in octets (default 160 = 20 ms)')
+     ap.add_argument('--law', choices=('alaw', 'ulaw'), default='alaw',
+                     help='companding law the CAPI controller runs (default alaw)')
++    # Outgoing (SIP -> ISDN) calls may use another controller than the one
++    # listened on. Controller 3 is NT and free-runs 34 ppm off the Cisco's TDM
++    # clock: a call through it slips one sample per 3.7 s (byte-exact path
++    # otherwise, 2026-11-11), which no V.34 data mode survives. Controllers 7/8
++    # are TE, locked to the Cisco, A-law.
++    ap.add_argument('--dial-controller', type=int, default=None,
++                    help='CAPI controller for calls to ISDN (default: --controller)')
++    ap.add_argument('--dial-law', choices=('alaw', 'ulaw'), default=None,
++                    help='law of --dial-controller (default: --law)')
+     ap.add_argument('-v', '--verbose', action='store_true')
+     args = ap.parse_args(argv)
+     global LINE_PT, LINE_CODEC, LINE_SILENCE
+     if args.law == 'ulaw':
+         LINE_PT, LINE_CODEC, LINE_SILENCE = 0, 'PCMU', 0xFF
++    if args.dial_controller is None:
++        args.dial_controller = args.controller
++    if args.dial_law is None:
++        args.dial_law = args.law
+     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                         format='%(asctime)s %(levelname)s %(message)s')
+     with open(args.password_file) as handle:
+@@ -1153,8 +1176,9 @@
+     sip.bind((args.bind, args.sip_port))
+     sip.setblocking(False)
+     capi = Capi(args.capi, datablklen=args.b3_block)
+-    LOG.info('gateway %s on controller %d, SIP %s:%d -> %s:%d', args.username,
+-             args.controller, advertise, args.sip_port, *registrar)
++    LOG.info('gateway %s on controller %d (%s), dialling on controller %d (%s), SIP %s:%d -> %s:%d',
++             args.username, args.controller, args.law, args.dial_controller, args.dial_law,
++             advertise, args.sip_port, *registrar)
+     Gateway(args, capi, sip, registrar=registrar, advertise=advertise).run()
+ 
+ 
