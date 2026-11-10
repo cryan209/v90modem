@@ -785,3 +785,23 @@ After the fix, `tools/eicon_ppp_direct.py --law alaw --ext 7900`:
 Asterisk has 2910 registered. `29107910` (the Diva gateway, called number 7910)
 now reaches the MultiTech BRI and answers, but V.8 decodes a JM with no
 modulations (offered V.34 or K56). Direct `7910` trains and gets LAPM.
+
+## Deployed 3a3609be (2026-11-11 09:45)
+
+The V.34 fall-forward no longer asks above the peer's MP maximum (V.34
+11.4.1.1.4/.2.4). The data-entry trace now shows `peer MP allows a2c=… c2a=…`.
+On the MultiTech ISI (7900 and 7910) the peer's MP caps both directions at
+31200, but the B1 fall-forward used to ask 33600 0.9 s into data. That ask
+always settled at 31200. The renegotiation's B1 matched no template (0.064),
+and the receiver came out mis-framed under a clean eye. Before the change, a
+fall-forward A/B on 7910 gave 2/2 clean calls with the ask off (0% ping loss)
+and 0/2 with it on (15% loss; PPP never up). After the change: 7910 2/2, 7900
+1/1, all PPP up with 0% loss, and no ask was made. The previous binary is
+`/opt/v90ras/sip_v90_modem.4fa4d4c9`; the new one is
+`/opt/v90ras/sip_v90_modem.3a3609be`.
+
+Still open: our receiver mis-frames after an 11.6 B1 that is not in
+10.1.3.1's reset state. That is the RasFinder fallback path in
+`v34rx_data.c`: it keeps the good B1's offset and conjugation, but takes the
+SWP phase and trellis state from the failed search. A peer-initiated 11.6 on
+7910 at about 54 s showed the same thing.
