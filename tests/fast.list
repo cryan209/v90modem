@@ -1057,6 +1057,9 @@ sh -c 'V90_REPLAY_QUIET=1 ./v90_upstream_replay reference-data/artifacts/cx93001
 # V.34 fall-forward seeded from B1: a first MP of 14400 on a 31200 line asks
 # 31200 by 11.6 as soon as V.42 detection is over, not 11 s in.
 ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --hold-seconds 20 --seconds 90 --call-log "B1 supports 31200 bps" --call-log "fall-forward to 31200 bps confirmed" --both-nolog "bps failed ("
+# A fall-forward that settles lower took the peer's MP ceiling (11.4.2.1.1):
+# stop there. The Diva 4BRI dropped the third repeat ask and retrained.
+./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --call-env ME_V34_TEST_FIRST_MP_BPS=14400 --answer-at "AT+MS=V34,0,0,26400" --both-env ME_V34_FALL_FORWARD_AFTER_MS=3000 --both-env ME_V34_FALL_FORWARD_HOLD_MS=1000 --both-env ME_V34_FALL_FORWARD_DWELL_MS=3000 --both-env VPCM_ME_VERBOSE=1 --hold-seconds 40 --seconds 120 --call-log "caps this call at 26400 bps" --call-nolog "(2 of 3)" --both-nolog "falling back to a §11.5"
 # A bundle member (another line busy, ME_V34_LOSS_HANGUP_AFTER_MS) that stops
 # decoding gets one 11.6 before it is hung up, and here keeps the call.
 sh -c 'mkdir -p "$TMPDIR/busy"; sleep 300 & echo $! > "$TMPDIR/busy/line9"; ./engine_pair_test --expect V34 --both-env ME_MODE=v34 --both-env ME_V34_BAUD=3200 --both-env ME_LINE_BUSY_DIR="$TMPDIR/busy" --both-env ME_V34_LOSS_HANGUP_AFTER_MS=3000 --answer-env ME_TX_NOISE_AFTER_MS=8000 --answer-env ME_TX_NOISE_RMS=150 --hold-seconds 30 --seconds 100 --call-log "one §11.6 before hanging up" --both-nolog "hanging up instead of retraining"; rc=$?; kill $(cat "$TMPDIR/busy/line9"); exit $rc'

@@ -7780,10 +7780,21 @@ static bool v34_fall_forward_check_locked(void)
             return false;
         }
         if (cur != g_v34_ff_probe_n) {
-            /* The renegotiation ended at a different rate (the peer's MP is
-               the minimum, 11.4.2.1.1); nothing was proved either way. */
+            /* The renegotiation ended at a different rate: the data
+               signalling rate is the lower of the two MPs' (11.4.2.1.1), so
+               a lower one is the peer's own ceiling.  Asking again only
+               repeats the answer, and each ask is an 11.6 the peer may
+               drop: the Diva 4BRI settled two asks at 26400 and let the
+               third time out, and the retrain that followed cost 10-30 s
+               of data (2026-11-10).  Stop asking above it this call. */
             ME_LOG("[ME] V.34 fall-forward: renegotiation settled at %d bps, "
                    "not %d bps\n", cur*2400, g_v34_ff_probe_n*2400);
+            if (cur < g_v34_ff_probe_n
+                && (g_v34_ff_ceiling_n == 0 || cur < g_v34_ff_ceiling_n)) {
+                g_v34_ff_ceiling_n = cur;
+                ME_LOG("[ME] V.34 fall-forward: the peer's MP caps this call "
+                       "at %d bps; no more asks above it\n", cur*2400);
+            }
             g_v34_ff_probe_n = 0;
             v34_set_mp_rx_data_rate(g_v34, 0);
             g_v34_ff_last_ms = now;
