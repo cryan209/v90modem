@@ -707,11 +707,16 @@ The previous binary is `/opt/v90ras/sip_v90_modem.0dfb67f6`. Test the Diva
 on controller 7 or 8: the NT ports of card 1331 (controllers 3 and 4) slip
 about 34 ppm against the Cisco clock (docs/eicon_v90a_20261009.md).
 
-## Not yet deployed: DIL repeat-until-S as the default (2026-11-10)
+## Deployed 809636b2 (2026-11-10 15:28)
 
-`ME_V90_DIL_AUTOTERMINATE_CYCLES=0` in `v90ras.service` is now the built-in
-default, so the line is redundant but harmless. Two things do change here on
-the next deploy: DIL has a 5500 ms timeout (9.3.2.10; before, a missed S left
-DIL running until the 9.4.1 B1 deadline), and the S watch during DIL slides
-its window, so a 37-40 ms S is no longer missed on block alignment
-(docs/v90_phase3_4_spec_audit.md, row 4).
+On top of 956b5b69 (the CT sources matched that commit file for file): DIL
+repeat-until-S is the built-in default, so `ME_V90_DIL_AUTOTERMINATE_CYCLES=0`
+in `v90ras.service` is redundant but harmless. What changes here: DIL has a
+5500 ms timeout (9.3.2.10; before, a missed S left DIL running until the
+9.4.1 B1 deadline), and the S watch during DIL slides its window, so a
+37-40 ms S is no longer missed on block alignment
+(docs/v90_phase3_4_spec_audit.md, row 4). Built on the CT from the committed
+`v90.c`, `v34rx.c` and `private/v34.h`; the CX93001 DIL fixture gives the same
+result there as on the Mac. The previous binary is
+`/opt/v90ras/sip_v90_modem.956b5b69`. Only `v90ras` was restarted, with no
+call up; no live call has been made on it yet.
