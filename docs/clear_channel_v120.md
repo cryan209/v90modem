@@ -249,7 +249,8 @@ octets were 0x7E, the rest 0xFF. The Cisco places a CLEARMODE call as BC
 settles on HDLC and never looks for V.110 frames. The 2026-10-08 V.110
 passes (10/10 exact echo lines at 9600) used a temporary answerer fixed to
 the V.110 profile (`AT&F3`, `+iB5`). The MultiTech on 7910 does not answer a
-CLEARMODE call at all (no answer in 30 s, as on 2026-11-04). So the rig has
+CLEARMODE call at all, V.110 or V.120 (Asterisk CDR `NO ANSWER` after 30 s,
+as on 2026-11-04). So the rig has
 no permanent V.110 answerer.
 
 ## Not done
