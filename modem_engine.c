@@ -16856,6 +16856,54 @@ static bool me_fax_tx_g711(uint8_t *codewords, int count)
     return true;
 }
 
+/* V.250 6.3.12 (S10) on the V.34 and V.90 data path.  The V.22bis path hangs
+ * up after S10 of absent line signal; here a call that has reached data and
+ * then receives digital silence for S10 (1.4 s by default) lost its far end:
+ * the peer hung up or its carrier left.  2026-11-11: slmodemd sent ATH, no
+ * DISC, and our receive RMS was 0.0 from then on, yet the call retrained for
+ * three minutes (V.90 9.6 timeout, V.90 training timeout, V.22bis fallback)
+ * before the timeouts ended it.  Only exact zero counts, and only a silence
+ * that began in ME_DATA: a peer's retrain has silent intervals of its own
+ * (V.90 retrain silence, V.34 11.5), which a retrain-time silence would trip
+ * (engine-pair row 1066, ME_TX_NOISE_AFTER_MS, 2026-11-11).  Holds and calls
+ * that never reached data are left alone.  S10 = 0 or 255 disables it. */
+static int64_t g_line_absent_samples = 0;
+static bool    g_line_absent_from_data = false;
+static bool me_data_hold_locked(void);
+
+static void line_signal_absent_check(const int16_t *amp, int len)
+{
+    int s10 = di_carrier_loss_delay();
+    int64_t run;
+
+    pthread_mutex_lock(&g_state_mtx);
+    for (int i = 0; i < len; i++) {
+        if (amp[i] != 0) {
+            g_line_absent_samples = 0;
+        } else {
+            /* The silence counts only if it began in ME_DATA: a peer's
+               retrain has silent intervals of its own (see above). */
+            if (g_line_absent_samples == 0)
+                g_line_absent_from_data = (g_state == ME_DATA);
+            g_line_absent_samples++;
+        }
+    }
+    run = g_line_absent_samples;
+    if (s10 >= 1 && s10 <= 254 && run >= (int64_t) s10 * 800
+        && g_line_absent_from_data && g_v34_data_entry_ms != 0
+        && (g_state == ME_TRAINING || g_state == ME_DATA)
+        && !me_data_hold_locked()) {
+        ME_LOG("[ME] V.34/V.90: no line signal for %lld ms after data mode "
+               "(S10=%d), hanging up\n", (long long) (run / 8), s10);
+        trace_phase("V34/V90 line signal absent for S10 -> hangup");
+        g_hangup_cause = "Carrier lost (S10)";
+        v34_reneg_clear_locked();
+        g_state = ME_HANGUP;
+        g_line_absent_samples = 0;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
 void me_rx_audio(const int16_t *amp, int len)
 {
     g_rx_audio_samples += (uint64_t)len;
@@ -17255,6 +17303,8 @@ skip_8k_codewords:
                 g_training_rx_count  = 0;
             }
         }
+        if (mod == ME_MOD_V34 || mod == ME_MOD_V90)
+            line_signal_absent_check(amp, len);
         /* Feed audio to the appropriate modem receiver.
            Apply notch filter to remove our TX carrier echo from FXS hybrid. */
         if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
