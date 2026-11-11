@@ -627,13 +627,26 @@ With the link criterion: **5 of 5** `CONNECT 54666` (peer 54667), 68150-68650
 lines up and 68450-68900 down in 240 s, no gaps. That is V.92 Phase 2 with a
 V.90-form data mode, not PCM upstream.
 
-Why PCM upstream does not come up at all on these calls is open. A binary
-built on 5 November from f8d32c64 connects at 53333/36000 on the same rig
-(49350/49600 lines) and a fresh build of the same commit does not; the two
-differ by exactly one RTP frame in short Phase 1 ("7640 symbols" against
-"7800"), which moves Jd from 4536 to 4752 symbols and the scrambler state our
-Jp starts from (35fa72 against 4da0f8) -- the state slmodemd's first-attempt
-retrain is already known to depend on. The old tree's pjproject predates
-c7c67863 (jbuf); that is the only library difference found, not yet tested
-as the cause. A 192T Ri (`V90_RI_MIN_SYMBOLS=192`) and
-`ME_V90_SD_RTD_HOLD=0` each left the marker at 4752.
+Why PCM upstream does not come up on these calls: it is the Jd state again,
+moved by our transmit scheduling, not by the V.92 code. f8d32c64 (5 November)
+connects at 53333/36000 on the same rig (49350/49600 lines). The two builds
+differ by whole RTP frames in short Phase 1 -- "7640 symbols" at f8d32c64,
+1cb06bc6 and 63a0c4d8; 7960 at 809636b2; 7800 at 6d377c76 -- and the step
+falls between 63a0c4d8 and 809636b2, where the only media-path changes are
+89575b3e (transmit clock seeded from the caller's last call) and 0dfb67f6
+(each frame sent at the next tick's start). A frame more or less of Phase 1
+moves Jd from 4536 to 4752 symbols and the scrambler state Jp starts from
+(35fa72 against 4da0f8), the state slmodemd's first-attempt retrain is
+already known to depend on; at 4da0f8 the second attempt designs 34666 on a
+TRN2u sigma of 37.8 instead of 36000 on 24.6, and slmodemd retrains it.
+Ruled out as the cause: the vendored pjproject (current sources against the
+5 November pjproject libraries still read 7800), a 192T Ri
+(`V90_RI_MIN_SYMBOLS=192`) and `ME_V90_SD_RTD_HOLD=0` (both left Jd at 4752).
+Open: making the Jp start state independent of how many Jd repetitions
+happened to be sent, or finding what in that state slmodemd's equaliser
+objects to.
+
+Bisecting on CT 117: extract only `*.c`, `*.h` and `makefile` from the
+archive with `tar -x -m` (touching `Makefile.am` sends spandsp to automake,
+which the container does not have, and the old binary is silently kept), and
+check that the link succeeded before making the call.
