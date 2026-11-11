@@ -15712,12 +15712,13 @@ void me_on_sip_disconnected_status(int sip_status)
     ds_release(&g_data_stack);
     if (g_cc_active) {
         ME_LOG("[ME] %s: tx %llu frames/%llu bytes, rx %llu frames/%llu bytes, "
-               "%llu bad, %llu unsupported\n",
+               "%llu bad, %llu unsupported, %llu aborts\n",
                g_cc.mode == CC_V110 ? "V.110" : g_cc.mode == CC_V120 ? "V.120" : "clear channel",
                (unsigned long long) g_cc.tx_frames, (unsigned long long) g_cc.tx_data_bytes,
                (unsigned long long) g_cc.rx_frames, (unsigned long long) g_cc.rx_data_bytes,
                (unsigned long long) g_cc.rx_bad_frames,
-               (unsigned long long) g_cc.rx_unsupported);
+               (unsigned long long) g_cc.rx_unsupported,
+               (unsigned long long) g_cc.rx_aborts);
         if (g_cc.mode == CC_V120 && g_cc.v120_ack)
             ME_LOG("[ME] V.120 acknowledged mode: link %s, %llu UI fallbacks, "
                    "%llu resets, %llu go-back-N rewinds\n",
@@ -22664,10 +22665,11 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             if (n != last && (n & (n - 1)) == 0) {
                 last = n;
                 ME_LOG("[ME] PPP: %llu frame(s) to the DTE, %llu to the line, "
-                       "%llu bad off the line, %llu bad FCS from the DTE\n",
+                       "%llu bad off the line, %llu aborts, %llu bad FCS from the DTE\n",
                        (unsigned long long) g_cc.ppp_rx_frames,
                        (unsigned long long) g_cc.ppp_tx_frames,
                        (unsigned long long) g_cc.rx_bad_frames,
+                       (unsigned long long) g_cc.rx_aborts,
                        (unsigned long long) g_cc.ppp_tx_bad_fcs);
             }
         }

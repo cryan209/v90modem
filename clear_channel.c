@@ -45,6 +45,20 @@ static void took_bit(clear_channel_t *cc, int bit)
 /* CC_PPP: synchronous HDLC on the line, RFC 1662 async to the DTE    */
 /* ---------------------------------------------------------------- */
 
+/* SpanDSP reports an HDLC abort (seven or more 1s, ISO/IEC 13239 4.4.2) as a
+ * status, not as a bad frame, so a frame cut short by one isn't in
+ * rx_bad_frames.  On a CLEARMODE bearer the usual cause is a lost RTP
+ * packet: the jitter buffer fills its 160 octets with 0xFF, and the frame
+ * spanning the hole vanishes.  Count each run once; it also counts an idle
+ * all-1s line before the far end starts flagging. */
+static void cc_note_abort(clear_channel_t *cc, int status)
+{
+    if (status == SIG_STATUS_ABORT && !cc->rx_abort_open) {
+        cc->rx_aborts++;
+        cc->rx_abort_open = true;
+    }
+}
+
 /* A frame off the line.  SpanDSP has already checked and removed the FCS, so
  * RFC 1662 4.1's FCS has to be put back for the DTE's own check, and the
  * result octet-stuffed between flags (4.2). */
@@ -53,8 +67,11 @@ static void ppp_frame(void *user_data, const uint8_t *pkt, int len, int ok)
     clear_channel_t *cc = (clear_channel_t *) user_data;
     uint8_t frame[CC_PPP_MAX_FRAME + 2];
 
-    if (len < 0)
-        return;                        /* a status report, not a frame */
+    if (len < 0) {
+        cc_note_abort(cc, len);        /* a status report, not a frame */
+        return;
+    }
+    cc->rx_abort_open = false;
     if (!ok || len < 2 || len > CC_PPP_MAX_FRAME) {
         cc->rx_bad_frames++;
         return;
@@ -834,8 +851,11 @@ static void v120_frame(void *user_data, const uint8_t *pkt, int len, int ok)
     clear_channel_t *cc = (clear_channel_t *) user_data;
     int lli;
 
-    if (len < 0)
-        return;            /* a status report, not a frame */
+    if (len < 0) {
+        cc_note_abort(cc, len);    /* a status report, not a frame */
+        return;
+    }
+    cc->rx_abort_open = false;
     if (!ok || len < 3) {
         cc->rx_bad_frames++;
         return;

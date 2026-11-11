@@ -856,6 +856,63 @@ static void test_ppp_pair(bool r56)
     free(ea); free(eb);
 }
 
+/* A lost RTP packet on a CLEARMODE bearer reaches us as 160 octets of 0xFF
+ * (the jitter buffer's fill).  Inside a frame that is an HDLC abort, which
+ * SpanDSP reports as a status rather than a bad frame: live MLPPP to the
+ * MultiTech TA lost ~40 frames that way while "0 bad off the line" was
+ * logged.  The abort must be counted, once per run, and not as an FCS error. */
+static void test_ppp_abort_count(void)
+{
+    enum { BODY = 4 + 600 };                    /* ff 03 00 21 + a 600-octet IP packet */
+
+    for (int cut = 0; cut < 2; cut++) {
+        uint8_t body[BODY + 2], async[2 * (BODY + 2) + 2], line[16000];
+        int blen, alen = 0;
+        uint32_t x = 0x2468ace0;
+        end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+        clear_channel_t a, b;
+
+        body[0] = 0xff; body[1] = 0x03; body[2] = 0x00; body[3] = 0x21;
+        for (int i = 4; i < BODY; i++) {
+            x = x * 1103515245u + 12345u;
+            body[i] = (uint8_t) (x >> 23);
+        }
+        blen = crc_itu16_append(body, BODY);
+        async[alen++] = CC_PPP_FLAG;
+        for (int i = 0; i < blen; i++) {
+            if (body[i] == CC_PPP_FLAG || body[i] == CC_PPP_ESC || body[i] < 0x20) {
+                async[alen++] = CC_PPP_ESC;
+                async[alen++] = (uint8_t) (body[i] ^ CC_PPP_XOR);
+            } else {
+                async[alen++] = body[i];
+            }
+        }
+        async[alen++] = CC_PPP_FLAG;
+        ea->src = async; ea->src_len = (size_t) alen;
+        check(cc_init_ppp(&a, false, end_pull, end_push, ea) == 0
+              && cc_init_ppp(&b, false, end_pull, end_push, eb) == 0, "PPP abort init");
+        cc_tx(&a, line, (int) sizeof(line));
+        if (cut) {
+            size_t first = 0;
+
+            while (first < sizeof(line) && line[first] == CC_PPP_FLAG)
+                first++;                               /* the frame's first octet */
+            memset(line + first + 100, 0xff, 160);     /* one lost 20 ms packet */
+        }
+        cc_rx(&b, line, (int) sizeof(line));
+        if (cut)
+            check(b.rx_aborts == 1 && b.rx_bad_frames == 0 && b.ppp_rx_frames == 0,
+                  "PPP: a frame cut by a lost packet's 0xFF fill counts one abort, not a bad FCS");
+        else
+            check(b.rx_aborts == 0 && b.rx_bad_frames == 0 && b.ppp_rx_frames == 1,
+                  "PPP: the same stream intact arrives whole with no abort");
+        cc_release(&a);
+        cc_release(&b);
+        free(ea);
+        free(eb);
+    }
+}
+
 /* CC_PPP must carry a full-size frame: RFC 1661's default MRU is 1500, and
  * RFC 1990 multilink fragments of a 1500-octet MRRU are as large.  SpanDSP's
  * HDLC used to cap every frame at 400 octets and clamp the larger limit
@@ -2070,6 +2127,7 @@ int main(void)
     test_ppp_pair(false);
     test_ppp_pair(true);
     test_ppp_full_size();
+    test_ppp_abort_count();
     test_v120_pair(false);
     test_v120_pair(true);
     test_v120_rx_variants();

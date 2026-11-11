@@ -258,7 +258,10 @@ typedef struct {
     uint64_t tx_octets, rx_octets;
     uint64_t tx_frames, rx_frames;
     uint64_t tx_data_bytes, rx_data_bytes;
-    uint64_t rx_bad_frames;      /* FCS errors, aborts, runts, bad headers */
+    uint64_t rx_bad_frames;      /* FCS errors, runts, bad headers */
+    uint64_t rx_aborts;          /* HDLC aborts (7+ ones), once per run: a frame
+                                    cut by a lost packet's 0xFF fill, or idle 1s */
+    bool rx_abort_open;          /* in an abort run, no frame since */
     uint64_t rx_unsupported;     /* I-frames and other non-UI frames */
     uint64_t rx_other_lli;       /* V.120 frames for a link we do not serve */
     uint64_t rx_breaks;

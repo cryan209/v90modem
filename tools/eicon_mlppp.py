@@ -254,6 +254,10 @@ class Link:
         cc = re.findall(r'clear channel: tx (\d+) frames.*?rx (\d+) frames.*?(\d+) bad', text)
         if cc:
             self.result['hdlc_tx_frames'], self.result['hdlc_rx_frames'], self.result['hdlc_bad'] = map(int, cc[-1])
+        # Frames cut by an HDLC abort (a lost packet's 0xFF fill) are not "bad".
+        ab = re.findall(r'clear channel: .*?, (\d+) aborts', text)
+        if ab:
+            self.result['hdlc_aborts'] = int(ab[-1])
         self.result['bytes_from_modem'] = self.bytes_from_modem
         self.result['bytes_to_modem'] = self.bytes_to_modem
         self.result['modem_exit'] = self.proc.poll() if self.proc else None
