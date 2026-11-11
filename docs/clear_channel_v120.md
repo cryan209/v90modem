@@ -405,8 +405,38 @@ The split is even across both card types: 2.02–2.15 MB per link down,
 echo failures. The upload scales with links (238 → 457 kbit/s), so mixing
 the two cards in one bundle works. The download does not (234 → 282): every
 link ran at the same ~45 kbit/s, so a bundle-wide limit, not one slow member,
-is pacing eicon420's MP sender (TCP window or eicon420's transmit side; not
-yet measured).
+is pacing eicon420's MP sender.
+
+**Why the 8-link download stalls: the isicom transmit queue.** A 6 MiB rerun
+gave 276.5 kbit/s. Our side of the line was clean: 0 RTP loss, 0 bad frames.
+TCP on eicon420 was loss-limited, not window-limited: cwnd 16–23, ssthresh
+11–14, 149 KB retransmitted (2.3%), and rwnd-limited only 0.1% of the time.
+eicon420's fq_codel dropped nothing. CT 117's bundle counted 34–81 receive
+drops, which is where Linux counts MP fragments it gives up on.
+`eicon_mlppp.py --mp-trace` logs each fragment's RFC 1990 sequence number
+and arrival time per link; `tools/mp_skew.py` joins the links:
+
+| Links | Lateness vs neighbouring seqs, median / p95 |
+|---|---|
+| MultiTech TA (7910 ×2, 17900 ×2) | +306…+384 / +674…+719 ms |
+| Diva (17920 ×2, 17930 ×2) | −237…−245 / −31…−38 ms |
+
+The MultiTech fragments arrive ~580 ms behind the Diva ones. Replaying the
+arrivals, the receive reassembly queue sits at ppp_generic.c's
+PPP_MP_MAX_QLEN (128 fragments) on 1,345 arrivals. At that point the kernel
+stops waiting for the gap and drops the packets in it, and TCP backs off.
+With 8 links a 1500-octet packet becomes 8 fragments, so 128 fragments is
+only ~24 KB, ~0.37 s of bundle data. A 4-link bundle has 4× the slack, and
+there all members are MultiTech, so their delays match anyway.
+
+The 580 ms is the isicom driver's per-port host queue: `isicom_write_room`
+offers ISICOM_XMIT_SIZE (PAGE_SIZE, 4096 octets) to ppp_async, which is
+0.51 s at 64 kbit/s. `tools/eicon/isicom-tx-queue.patch` (on top of the
+throttle-lock patch) caps it with a runtime-writable module parameter,
+`tx_queue`, default 512 octets (~64 ms). The 10 ms tx timer drains up to
+TX_SIZE (254) per tick, and the tty layer refills at WAKEUP_CHARS (256).
+Built, not yet loaded. 103 of 34,022 sequence numbers never reached CT 117
+on any link, a separate 0.3% loss still to place.
 
 ## Not done
 

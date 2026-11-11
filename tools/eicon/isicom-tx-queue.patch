@@ -1,0 +1,50 @@
+--- a/isicom.c
++++ b/isicom.c
+@@ -975,6 +975,27 @@
+ 	tty_port_close(port, tty, filp);
+ }
+ 
++/*
++ * Host-side transmit queue per port, in bytes.  The driver used to accept a
++ * whole page (ISICOM_XMIT_SIZE, 4096): 0.51 s at a B channel's 64 kbit/s,
++ * so ppp_async kept every TA port half a second behind the line.  In a
++ * Linux MLPPP bundle that mixes these ports with links that queue little
++ * (Diva ttyds), the skew holds more fragments than the receiver's
++ * reassembly queue (PPP_MP_MAX_QLEN, 128) and it drops packets.  The timer
++ * drains up to TX_SIZE every 10 ms and the tty layer refills at
++ * WAKEUP_CHARS (256), so 512 keeps the port busy with ~64 ms queued.
++ */
++static unsigned int tx_queue = 512;
++module_param(tx_queue, uint, 0644);
++MODULE_PARM_DESC(tx_queue, "Max bytes queued per port on the host (default 512, max 4095; old driver 4095)");
++
++static int isicom_tx_limit(void)
++{
++	unsigned int q = READ_ONCE(tx_queue);
++
++	return q == 0 || q > ISICOM_XMIT_SIZE - 1 ? ISICOM_XMIT_SIZE - 1 : q;
++}
++
+ /* write et all */
+ static ssize_t isicom_write(struct tty_struct *tty, const u8 *buf,
+ 	size_t count)
+@@ -990,8 +1011,8 @@
+ 	spin_lock_irqsave(&card->card_lock, flags);
+ 
+ 	while (1) {
+-		cnt = min_t(int, count, min(ISICOM_XMIT_SIZE - port->xmit_cnt
+-				- 1, ISICOM_XMIT_SIZE - port->xmit_head));
++		cnt = min_t(int, count, min_t(int, isicom_tx_limit() - port->xmit_cnt,
++				ISICOM_XMIT_SIZE - port->xmit_head));
+ 		if (cnt <= 0)
+ 			break;
+ 
+@@ -1058,7 +1079,7 @@
+ 	if (isicom_paranoia_check(port, tty->name, "isicom_write_room"))
+ 		return 0;
+ 
+-	free = ISICOM_XMIT_SIZE - port->xmit_cnt - 1;
++	free = isicom_tx_limit() - port->xmit_cnt;
+ 	if (free < 0)
+ 		free = 0;
+ 	return free;

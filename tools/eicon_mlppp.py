@@ -66,6 +66,8 @@ def parse_link(spec, index):
 
 
 class Link:
+    mp_trace = False
+
     def __init__(self, index, cfg, outdir, binary, common_env, weight=True):
         self.weight = weight
         self.i, self.cfg = index, cfg
@@ -168,6 +170,7 @@ class Link:
         os.set_blocking(master, False)
         to_modem, to_pppd = bytearray(), bytearray()
         LIMIT = 4096
+        mp_trace = MpTrace(self.d / 'mp-rx.tsv') if self.mp_trace else None
 
         def relay():
             while not self.stop.is_set():
@@ -193,6 +196,8 @@ class Link:
                         if data:
                             setattr(self, attr, getattr(self, attr) + len(data))
                             buf.extend(data)
+                            if mp_trace and src == self.fd:
+                                mp_trace.feed(data)
                 for dst, buf in ((self.fd, to_modem), (master, to_pppd)):
                     if dst in w and buf:
                         try:
@@ -263,6 +268,51 @@ class Link:
         self.result['modem_exit'] = self.proc.poll() if self.proc else None
 
 
+class MpTrace:
+    """Log the arrival time of every RFC 1990 fragment off the line.
+
+    Parses the async-HDLC stream the modem hands pppd (RFC 1662 section 4:
+    0x7e flags, 0x7d escapes) and writes `monotonic_s seq B E` for each
+    protocol-0x003d frame, long (24-bit) or short (12-bit) sequence
+    numbers (RFC 1990 section 3).  Joining the files of all links on seq
+    gives each link's delay relative to the bundle.
+    """
+
+    def __init__(self, path):
+        self.f = path.open('w', buffering=1)
+        self.frame, self.esc = bytearray(), False
+
+    def feed(self, data):
+        now = time.monotonic()
+        for b in data:
+            if b == 0x7e:
+                if len(self.frame) > 8:
+                    self.frame_done(now, bytes(self.frame))
+                self.frame.clear()
+                self.esc = False
+            elif b == 0x7d:
+                self.esc = True
+            else:
+                self.frame.append(b ^ 0x20 if self.esc else b)
+                self.esc = False
+
+    def frame_done(self, now, f):
+        if f[:2] == b'\xff\x03':
+            f = f[2:]
+        if f[:2] == b'\x00\x3d':
+            f = f[2:]
+        elif f[:1] == b'\x3d':
+            f = f[1:]
+        else:
+            return
+        flags = f[0]
+        if flags & 0x3f == 0 and len(f) > 4:        # long: B E 0 0 0 0 0 0, then 24 bits
+            seq = int.from_bytes(f[1:4], 'big')
+        else:                                    # short: B E 0 0 + 12 bits
+            seq = ((flags & 0x0f) << 8) | f[1]
+        self.f.write('%.4f %d %d %d\n' % (now, seq, flags >> 7 & 1, flags >> 6 & 1))
+
+
 def payload(size, seed=PAYLOAD_SEED):
     return hashlib.shake_256(seed).digest(size)
 
@@ -280,11 +330,14 @@ def main():
     ap.add_argument('--weight', choices=('on', 'off'), default='on',
                     help='on: pppd on the relay pty at a baud rate proportional to the line rate, '
                          'so the kernel weights the MP split; off: notty (every link 38400, even split)')
+    ap.add_argument('--mp-trace', action='store_true',
+                    help='log every received MP fragment (time, seq) per link to link-*/mp-rx.tsv')
     ap.add_argument('--hold', type=float, default=0, help='extra seconds to keep the bundle up after the tests')
     args = ap.parse_args()
     out = args.output
     out.mkdir(parents=True, exist_ok=False)
     common_env = {'ME_JB_MS': args.jb_ms} if args.jb_ms else {}
+    Link.mp_trace = args.mp_trace
     links = [Link(i, parse_link(s, i), out, args.binary.resolve(), common_env, args.weight == 'on')
              for i, s in enumerate(args.link)]
     summary = dict(links=[], tests={}, ok=False, bytes=args.bytes)
