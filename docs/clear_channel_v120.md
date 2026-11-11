@@ -367,9 +367,28 @@ code. The PPP async line discipline unthrottles from its receive path, so
 four ports receiving at line rate can race on different CPUs and lose one
 port's bit. That port then stays throttled at the card until it is
 reopened, which is also why ttyM1 worked again after its pppd restarted.
-Fix drafted, not loaded: `tools/eicon/isicom-port-throttle-lock.patch`
-(compiles cleanly against `~/isicom-port`). Loading it means reloading the
-module, which drops every MultiTech port (voice and TA).
+Fix: `tools/eicon/isicom-port-throttle-lock.patch`. A second unpatched run
+lost a *different* port (ttyM3, 17900's second B channel) and froze the
+upload again, with our side clean: 0 bad FCS or overlong frames from the
+DTE, 0 RTP loss, 1 startup abort per link.
+
+**Loaded 2026-11-11 14:24.** The installed module was backed up as
+`isicom.ko.before-throttle-lock-20261111`, and `~/isicom-port` was patched
+(old files `.pre-throttle-lock`); srcversion A9A2B2F8… is now D2FC2057….
+After the reload, voice to 7910 and 7900 ran 31200 and V.120 to 7910 and
+17900 ran 64000, all at 0% loss.
+
+**Four B channels on the patched driver:**
+
+| Direction (6 MiB) | Result | Rate | Line use |
+|---|---|---|---|
+| Download | SHA-256 exact | 233.7 kbit/s | 91% of 256 kbit/s |
+| Upload | SHA-256 exact | 237.9 kbit/s | 93% of 256 kbit/s |
+
+Each link carried ~1.9 MB per direction. No echo failures on any server
+pppd, 0 RTP loss, 0 bad frames, 1 startup abort per link. The upload freeze
+went with the deaf port: it was a consequence of the dead member, not a
+separate fault.
 
 ## Not done
 
