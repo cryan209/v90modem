@@ -11,7 +11,8 @@ line) and reports:
     fragments that have arrived but wait behind a gap in the sequence space.
     ppp_generic.c caps that queue at PPP_MP_MAX_QLEN (128) and, once it is
     that long, gives up on the gap and drops the packets it covered;
-  * sequence numbers that never arrived on any link.
+  * sequence numbers that never arrived on any link, and which link each
+    was sent on (from the MP round-robin order).
 
 Usage: tools/mp_skew.py RUN_DIR [--window 16]
 """
@@ -74,6 +75,26 @@ def main():
             nxt = min(have)           # the kernel gives up on the gap
     print('seq %d..%d, %d never arrived; reassembly queue max %d fragments, '
           'at or over %d on %d arrivals' % (lo, hi, missing, qmax, args.qlen, over))
+
+    # Which link lost each missing seq.  ppp_generic.c ppp_mp_explode gives a
+    # packet's fragments to consecutive free channels in list order from
+    # nxchan, wrapping, so the lost fragment's channel lies cyclically strictly
+    # between the channels of seq-1 and seq+1 (assumes our link order is the
+    # sender's channel order, i.e. the order the links joined).
+    n, lost, amb = len(names), {}, 0
+    for s in range(lo, hi + 1):
+        if s in arrivals:
+            continue
+        if s - 1 in arrivals and s + 1 in arrivals:
+            a, b = arrivals[s - 1][1], arrivals[s + 1][1]
+            between = [(a + k) % n for k in range(1, (b - a) % n)]
+            if len(between) == 1:
+                lost[names[between[0]]] = lost.get(names[between[0]], 0) + 1
+                continue
+        amb += 1
+    if missing:
+        print('missing seqs by link (round-robin order): %s; %d ambiguous'
+              % (', '.join('%s %d' % kv for kv in sorted(lost.items())) or 'none', amb))
 
 
 if __name__ == '__main__':

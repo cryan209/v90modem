@@ -503,6 +503,44 @@ Across the 12 eight-link runs on the 512-octet queue, the clean ones ran
 312.7–353.7 kbit/s. The skew to the Diva links still keeps the reassembly
 queue at 128, and 50–140 sequence numbers per run never arrive.
 
+**The missing sequence numbers are lost inside the MultiTech card's TA**
+(2026-11-12). ttyM0–M3 are not an external TA on a serial cable but the ISI
+card's own BRI firmware (`ATI9` "MultiTech BRI Server", `ATI2` `ISIHP-TA`), so
+the "115200 crtscts" async link and the RFC 1662 async-to-sync conversion
+are both on the card. The fragments are lost there, and only there:
+
+- *Which link.* ppp_generic.c `ppp_mp_explode` gives a packet's fragments
+  to consecutive free channels in list order, wrapping, so a lost
+  fragment's link lies strictly between the links of seq−1 and seq+1
+  (`tools/mp_skew.py` now prints this). In hup-2 and hup-3 the
+  unambiguous losses were 45/46 and 57/58 on the TA links. On the
+  Diva/Cisco links they were 1 in each (hup-1: 31 of 95, cause not traced).
+- *Not on the B channel.* Our clear-channel receiver reports bad-FCS
+  frames (`hdlc_rx_init(..., report_bad_frames = true, ...)`) and counted 0,
+  with no aborts after the start of the call. So no lost fragment reached
+  the line even as a damaged frame. (`hdlc_rx_frames` in summary.json reads 0
+  in PPP mode; the line count is the `PPP totals` "frames to the DTE".)
+- *Not in eicon420's kernel.* tracefs fprobes on `ppp_async_send` (reading the
+  MP sequence number from `skb->data`) and `isicom_write` during an 8-link
+  download (trc-1): all 36 missing sequence numbers were accepted by
+  ppp_async (ret 1) on ttyM0–M3 (14/6/13/3), and no `isicom_write` returned
+  an error. ppp_async only discards an accepted frame on a negative tty
+  write. isicom's transmit path (`isicom_tx`, including the odd-octet and
+  ring-wrap handling) copies everything it takes to the card.
+- *Not flow-control overflow.* 69.4% of lost fragments had a short
+  `isicom_write` on their tty within 50 ms, against 69.3% of all TA
+  fragments (200 ms: 94.4% vs 90.4%). Back-pressure from the TA does not
+  predict a loss.
+
+The rate is per frame: 0.36–0.41% of TA fragments in the 8-link bundle
+(~190 octets, ~24/s/port), 0.05% in the 4-link MultiTech-only bundle (~375
+octets, ~13/s/port). The CTS wedge has the same profile, so both look like
+the card firmware running short of per-frame resources. Each loss costs MP a
+whole packet and TCP a retransmit. Nothing on the host can recover it. The
+only levers are fewer, larger frames on the TA ports, or keeping them out of
+wide bundles. `tools/eicon/mp_async_trace.py` documents the probes (nothing
+installed, removed after the run) and does the join.
+
 ## Not done
 
 - **SDP**: `ME_CLEARMODE=1` offers RFC 4040 `CLEARMODE/8000` ahead of PCMU/PCMA
