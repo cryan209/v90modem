@@ -823,3 +823,12 @@ The verification build carried a diagnostic patch
 binary is `/opt/v90ras/sip_v90_modem.3a3609be`; the new one is
 `/opt/v90ras/sip_v90_modem.8b698c2a`. Only `v90ras` was restarted, with no call
 up.
+
+## Deployed 2af4189f (2026-11-11 13:12)
+
+Diagnostics only: clear-channel calls now count HDLC aborts (`..., N aborts`
+in the end-of-call line). A lost RTP packet's 0xFF fill aborts the frame it
+lands in, which was counted nowhere before. No call path changed. Applied as
+a patch to `/root/v90ras`; the previous binary is
+`/opt/v90ras/sip_v90_modem.pre-2af4189f`, and the new one is kept as
+`sip_v90_modem.2af4189f`. Restarted with no PPP call up.

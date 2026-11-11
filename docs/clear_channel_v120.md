@@ -299,7 +299,50 @@ the ttyM1 link attached (20.4 s). Both 3 MiB transfers were SHA-256 exact:
 
 That is 79% and 76% of 128 kbit/s, against 93% for the Diva pair (run 11
 in `eicon_mlppp_20261107.md`, 12 MiB). The shorter transfer and one 44-packet
-RTP loss report on link 0 are both candidates; neither is isolated.
+RTP loss report on link 0 are both candidates.
+
+**The losses were hidden frame errors.** Link 0's 44 lost packets (40 events,
+144–182 s) appear in its RX tap as 36 runs of exactly 160 × 0xFF, the
+jitter buffer's fill, at the same times; link 1 has none. Inside a frame,
+0xFF is an HDLC abort, which SpanDSP reports as a status and our receivers
+ignored, so "0 bad off the line" hid about 40 dropped frames that TCP
+resent. Since 2af4189f, `rx_aborts` counts each abort run once and appears in
+the end-of-call line (`..., N aborts`) and as `hdlc_aborts` in
+`eicon_mlppp.py`. A clean call shows 1: the idle all-1s line before the far
+end starts flagging.
+
+**7900 (second span): TA ttys ttyM2/ttyM3.** Asterisk's `7900` goes
+through `toprouter-bri` (A-law only), so `17900` was added, a clearmode
+route via endpoint 6501 like `17920`–`17950` (backup
+`extensions.conf.before-17900-20261111`). A digital call to 17900 rings
+**ttyM2** (`CONNECT 64000/V.120`). The answerers are:
+
+| Service | Peer | tty | Addresses | ifname |
+|---|---|---|---|---|
+| `multitech-7900-ta` | `multitech-7900-ta` | ttyM2 | 10.254.123.1:.2 | `e79p13` |
+| `multitech-7900-ta-b` | `multitech-7900-ta-b` | ttyM3 | 10.254.124.1:.2 | `e79p14` |
+
+Both peers use PAP name `multitech-7900-ta` and the `multitech-7910-ta`
+options (multilink, nopersist). `pap-secrets` has four new
+`multitech-7900-ta` lines that copy the `multitech-7900` clients. The TA
+answer chat script and `modem-connect` cover ttyM2/M3. Backups end
+`.before-ta79-20261111`.
+
+**ttyM2 is shared with the 7900 routing init.** Before each start,
+`multitech-7900-b` runs `multitech-7900-route.py`, which opens ttyM2 and
+sends `AT*!DN1`, `AT*!EN2`, `AT*!N2=7900`. To keep those commands out of a
+live call:
+- the script now exits early while `/run/lock/LCK..ttyM2` exists;
+- `multitech-7900-ta` starts `After=multitech-7900-b.service`, so the routing
+  is still set at boot.
+
+Results:
+- **17900 single calls (ttyM2):** V.120 and CLEAR sync PPP each 64000, PAP,
+  IPCP, 10/10 pings. Voice 7900 still lands on ttyM7 (V.34 31200, 10/10).
+- **2-link MLPPP to 17900:** ttyM2 created the bundle and ttyM3 attached.
+  Both 3 MiB transfers were SHA-256 exact: 104.5 kbit/s down, 104.4 up
+  (82%). RTP loss was 0, with 0 bad frames and 1 abort per link (startup),
+  and no retrains.
 
 ## Not done
 
