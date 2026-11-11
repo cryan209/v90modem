@@ -839,3 +839,21 @@ Diagnostics only: clear-channel PPP calls end with a `PPP totals:` line
 (frames each way, bad FCS and overlong frames from the DTE). Built in
 `/root/v90ras` on top of 2af4189f and kept as
 `/opt/v90ras/sip_v90_modem.ppp-totals`. Restarted with no PPP call up.
+
+## Deployed bf4a3fbb (2026-11-12 10:45)
+
+V.90 upstream from analogue modems on their own clock (MT9234ZBA +105 ppm,
+CX93001 -44 ppm): the pre-MP measurement, the 4-point B1 handoff, the
+symbol-offset search and the 9.6 re-acquisition, as in
+`docs/v90_hardware_interop.md` ("Analogue modems on their own clock"); and
+V.92's PCM-upstream offer is withdrawn when a retrained attempt proves
+nothing (`docs/v92_full_startup.md`). Built in `/root/vpcm-fix6` (6d377c76
+plus the commit's four source files, checked byte for byte against
+bf4a3fbb), kept as `/opt/v90ras/sip_v90_modem.bf4a3fbb`; the previous binary
+is `sip_v90_modem.pre-bf4a3fbb`. Only `v90ras` was restarted, with no call
+up; v90isdn takes the binary at its next restart.
+
+The same night `tools/soak/qc_slm_pve.sh` restarted `v90ras` and `v90isdn`
+nine times between 23:52 and 00:07 (its `pkill -x sip_v90_modem`, fixed in
+bf4a3fbb). The journal shows no call connected on either service in the 12 h
+before, so nothing was lost.
