@@ -288,6 +288,19 @@ on ttyM1, 10.254.122.1:10.254.122.2, `ifname e79p12`, with pap-secrets
 widened to 10.254.122.0/24. Two overlapping V.120 calls: the first on ttyM0
 ran 60/60 pings and the second on ttyM1 20/20, both at 64000 and 0% loss.
 
+**Multilink over both B channels (RFC 1990):** `tools/eicon_mlppp.py` from
+CT 117, two links `ext=7910 ms=AT+MS=CLEAR,0 framing=ppp clearmode=1`
+(users 2906, 2907), with `tools/eicon/http_test_server.py` bound to
+10.254.121.1 on eicon420. The ttyM0 link created the bundle (10.2 s) and
+the ttyM1 link attached (20.4 s). Both 3 MiB transfers were SHA-256 exact:
+- download: 100.7 kbit/s;
+- upload: 97.6 kbit/s;
+- split about 50/50 per link, no retrains.
+
+That is 79% and 76% of 128 kbit/s, against 93% for the Diva pair (run 11
+in `eicon_mlppp_20261107.md`, 12 MiB). The shorter transfer and one 44-packet
+RTP loss report on link 0 are both candidates; neither is isolated.
+
 ## Not done
 
 - **SDP**: `ME_CLEARMODE=1` offers RFC 4040 `CLEARMODE/8000` ahead of PCMU/PCMA
