@@ -606,3 +606,34 @@ PCM attempt -> V.92 54667/31200, LAPM retained, payload gapless.
 
 Open: why slmodemd's retrained V.92 Phase 3/4 fails where its startup one
 succeeds on the same signals.
+
+### 2026-11-12: a retrained PCM-upstream attempt has to prove itself
+
+On the Proxmox rig at 6d377c76, slmodemd V.92 (`+PQC=0`, `+MS=92,0,300,56000`,
+PCM upstream offered) failed **7 calls of 7** with no `CONNECT` at either
+DTE. Same pattern every time: Tone A retrain 2.5 s into our first TRN2d (the
+known one), second attempt into PCM-upstream data at 34666 (TRN2u sigma 37.8,
+B1u locked), a second Tone A retrain 2.5-11 s later with no error-control
+link ever up, third attempt offered PCM upstream again because the second had
+"reached data" (sigma 79, B1u never locks), hang-up at 70 s.
+
+The offer is now withdrawn (INFO1d bit 70) when a retrained attempt's data
+mode is retrained again before its error-control link came up
+(`g_v92_data_since_ms`); the third attempt is then V.92 Phase 2 with a V.34
+upstream. Live, the first version of the rule (10 s of data): 2 of 3 calls
+`CONNECT 54666`, 68250-68350 lines up and 68550-68750 down in 240 s; the
+third had 11 s of dead "data" and is what moved the criterion to the link.
+With the link criterion: **5 of 5** `CONNECT 54666` (peer 54667), 68150-68650
+lines up and 68450-68900 down in 240 s, no gaps. That is V.92 Phase 2 with a
+V.90-form data mode, not PCM upstream.
+
+Why PCM upstream does not come up at all on these calls is open. A binary
+built on 5 November from f8d32c64 connects at 53333/36000 on the same rig
+(49350/49600 lines) and a fresh build of the same commit does not; the two
+differ by exactly one RTP frame in short Phase 1 ("7640 symbols" against
+"7800"), which moves Jd from 4536 to 4752 symbols and the scrambler state our
+Jp starts from (35fa72 against 4da0f8) -- the state slmodemd's first-attempt
+retrain is already known to depend on. The old tree's pjproject predates
+c7c67863 (jbuf); that is the only library difference found, not yet tested
+as the cause. A 192T Ri (`V90_RI_MIN_SYMBOLS=192`) and
+`ME_V90_SD_RTD_HOLD=0` each left the marker at 4752.

@@ -938,6 +938,7 @@ SPAN_DECLARE(float) v34_v90_upstream_rx_error(v34_state_t *s, float *settled);
     \param s The V.34 context.
     \return non-zero if the upstream has lost carrier. */
 SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s);
+SPAN_DECLARE(int) v34_v90_upstream_acq_abandoned(v34_state_t *s);
 
 /*! Note that recovery has been started for the current loss, so it is not
     started twice.

@@ -37,7 +37,12 @@ DIR=/root/qc/$NAME
 ox() { pct exec $CT_OURS -- bash -c "$1"; }
 sx() { pct exec $CT_SLM -- bash -c "$1"; }
 
-ox "pkill -x sip_v90_modem; sleep 1; mkdir -p $DIR; rm -f /tmp/v90slm; pkill -f '[c]at /tmp/v90slm'; true"
+# Stop OUR server only, by its SIP port: CT_OURS also runs the live v90ras and
+# v90isdn services, and `pkill -x sip_v90_modem` took all of them down at every
+# call boundary (2026-11-11; systemd restarted them, their calls were lost).
+KILL_OURS='for p in $(ps -eo pid=,args= | awk "/[s]ip_v90_modem .*--local-port 5074 /{print \$1}"); do kill $p; done'
+
+ox "$KILL_OURS; sleep 1; mkdir -p $DIR; rm -f /tmp/v90slm; pkill -f '[c]at /tmp/v90slm'; true"
 ox "cd ${SRV_DIR:-/root/v90modem} && ( env SIP_FORCE_PCMU=1 ME_MODE=v92 ME_LAPM_XID_OPTION_OCTETS=auto VPCM_G711_TAP_DIR=$DIR $OURS_ENV \
     nohup timeout $((HOLD + 90)) ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username $OUR_ACCT --password $OUR_ACCT \
     --local-port 5074 --rtp-port 14100 --pty-link /tmp/v90slm --verbose > $DIR/server.log 2>&1 & ); sleep 5"
@@ -64,7 +69,9 @@ else
 fi
 
 if [ "$ORIG" = slm ]; then DIALCMD="ATD$OUR_ACCT"; else DIALCMD=ATA; fi
-PAY_DELAY=${PAY_DELAY:-45}
+# 45 s put the first payload line inside training on calls answered late; a
+# character from the DTE during training aborts the call (V.250 6.3.5).
+PAY_DELAY=${PAY_DELAY:-60}
 if [ -n "$PAYLOAD" ]; then
     ox "( sleep $PAY_DELAY; i=0; end=\$(( \$(date +%s) + $HOLD - $PAY_DELAY - 10 )); \
         while [ \$(date +%s) -lt \$end ]; do j=0; while [ \$j -lt 50 ]; do printf 'U%07d\r\n' \$i > /tmp/v90slm; i=\$((i+1)); j=\$((j+1)); done; sleep 0.1; done ) > /dev/null 2>&1 &"
@@ -99,7 +106,7 @@ fi
 wait $peer
 sx "cat /tmp/slm.log" > /tmp/qc-$NAME.slm.log 2>/dev/null
 sleep 2
-ox "pkill -x sip_v90_modem; pkill -f '[c]at /tmp/v90slm'; true"
+ox "$KILL_OURS; pkill -f '[c]at /tmp/v90slm'; true"
 sx "pkill '[s]lmodemd'; true"
 echo "== $NAME (ORIG=$ORIG PQC=$PQC MS=$MS ${OURS_ENV})"
 echo "ours : $(ox "grep -ao 'CONNECT[^\r]*' $DIR/pty-rx.bin | head -1")"

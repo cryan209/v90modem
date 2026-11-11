@@ -1450,3 +1450,112 @@ no measured threshold (below 14400 `v34_rx_data_snr_threshold_db()` returns
 
 After the white upstream these modems fall back to `CONNECT 4800 NoEC`, which
 corrupted every PPP frame (bad FCS) in the MT9234 soak -- a separate defect.
+
+## Analogue modems on their own clock: MT9234ZBA and CX93001 (2026-11-12)
+
+Dial-in to the V.90 digital server on CT 117 from this Mac's two USB modems,
+150-180 s holds with a numbered line a second each way, server and modem
+logs both kept. The MultiTech MT9234ZBA-USB (Agere, via a Cisco FXS, RTP
++61 ppm) transmits its V.34 upstream at **+103 to +107 ppm** against the
+gateway clock; the Conexant CX93001 at **-44 ppm**. slmodemd and the
+RasFinder are loop-timed (0 ppm). Everything below is that clock, met in five
+places, all ours.
+
+Baseline at 6d377c76: MT9234 **0 of 6** calls held V.90 for 60 s (3 of 6 gave
+`CONNECT` at all); CX93001 1 of 4 held; slmodemd V.90 4 of 4 (54666/31200,
+59100-60450 lines each way in 180 s).
+
+**1. The symbol-offset search stepped past the right offset and then locked on
+it.** (`v34rx.c`, `v90_t3_sym_search`.) A B1 placed from the end of the
+4-point signal is searched over eight symbol offsets. An offset is kept at
+once only at 70% ones; the MT9234's right offset (+5) read 63% and 68% on the
+two calls whose window caught XID frames between the flags, so the search
+moved on to +6 -- and the frame-phase lock, further down the same window,
+fired on that window's HDLC flags (90 and 97 per mille) and ended the search
+one symbol out. Eye 0.009 from the grid, bits white (395 flags in 74196
+bits), our LAPM never saw the modem's XID, and the modem retrained 10.5 s
+into data (Tone A, then L1/L2) and declined V.90 on the way back (INFO1a in
+the V.34 layout). A window that shows the flags now keeps its offset, and no
+lock is taken on a window whose offset has just moved: 8344 flags on the same
+recording. Regression: second case of `tools/v90_b1_offset_test.py`
+(`reference-data/artifacts/mt9234-v90-offset-lock-20261112`).
+
+**2. The pre-MP "4-point SNR" measured the clock, not the line.**
+(`v34_v90_upstream_4point_snr()`.) It fits one filter to 600 symbols. Over
+600 symbols at 3200 baud and 1829 Hz, +105 ppm slides the sampling instant
+0.063 T (-29.6 dB) and turns the carrier +/-0.114 rad (-23.6 dB): -22.6 dB
+together, and the MT9234 read **22.7-22.9 dB** on every call while its data
+mode ran at 33-34 dB. At -44 ppm the same sum is -30 dB against the CX's
+28.3-28.9. So MP offered 14400 and 21600 to lines that carry 26400, and every
+call then depended on a 9.6 step-up 12 s into data. The measurement now also
+fits the taps as `w0 + t*w1` (first order in both the sliding instant and the
+turning carrier) and corrects the residual for the extra unknowns: MT9234
+**36.0**, CX93001 **33.7**, slmodemd 38.1 (unchanged from 38.1). One rate
+step (2 dB) is held back when the two fits differ by more than 3 dB, which
+puts both modems at 26400. `ME_V90_4POINT_FIXED_FIT=1` restores the old
+measurement.
+
+**3. A B1 placed from the 4-point signal got a filter half a window stale.**
+(`v90_t3_blind_acquire()`.) The same fixed fit is right for the middle of its
+600 symbols; by B1 the signal is 0.033 T later, 0.117 rad round and turning
+0.00038 rad a symbol. That is 0.8 of a grid unit at the edge of the 14400
+constellation, which the loops pull in, and 2.6 at the edge of 26400's: the
+first call offered 26400 from MP read 0.73 from the grid from its first
+window and decoded nothing. Where tracking explains the stretch better by
+3 dB, B1 now gets the tracked filter evaluated at its own first symbol, and
+the carrier loop starts at the rate measured across the stretch's two halves
+(-0.00038 rad/symbol on the MT9234, where the loop settles). The same
+recording then decodes at 35.8-36.0 dB, flags at 125 per mille, XID
+negotiated.
+
+**4. A 9.6 renegotiation restarted the timing loop at 0 ppm.** The pre-B1
+clock estimate needs 0.7 s of signal; a renegotiation has 0.45 s, so the
+estimate was "none" and every slip recovery put the loop back to zero. At
+26400 the eye (0.045 through B1) was white 0.2 s later. The call's last
+measured offset is kept (`v90_t3_freq_call`).
+
+**5. A renegotiation's upstream was never acquired when the batch CP decoder
+caught CP'.** Three parts. The CP'-started B1 search
+(`v34_v90_begin_b1_search()`) forbade the 4-point fallback, the only way a B1
+with an unreset scrambler is acquired: it now runs a second, E-style pass from
+the CP' anchor when no template fits, looking for the 4-point signal's end in
+everything received. The T/3 capture started only when the first CRC-valid CP
+had been decoded, by which time CP'/E could be gone: it now starts when the
+peer's S answer is seen. And 9.6.1's E timer was never discharged on this
+path: an acquired B1 implies its E (9.4.2.5). After a step-up the peer
+settles below, that rate is the call's ceiling (the MT9234 enables 26400 and
+was asked for 28800 every 23 s).
+
+| Build | MT9234ZBA | CX93001 |
+|---|---|---|
+| 6d377c76 | 0/6 held V.90 60 s | 1/4 held |
+| + 1 and 4 | 5/5 `CONNECT` 46666-48000 in 28 s; 0/5 survive the step-up at 12 s | -- |
+| + 2, 3 and 5 (CP' fallback) | 3/3 held 180 s, 26400 up from MP, lines 177/177, 176/177, 146/177 | 5/5 held 180 s at 50666/26400, three with no retrain or renegotiation |
+| + 5 complete (early capture, ceiling) | 6/6 `CONNECT` 46666-48000 in 27.7-28.3 s; 5/6 held 180 s, 176-177 of 177 lines, one renegotiation each (the 28800 the modem does not enable) | 6/6 `CONNECT` in 25.3-26.3 s; 3/6 held 180 s (175-177 of 177 lines) |
+
+(Two further MT9234 attempts in the third batch got BUSY from the PBX after
+the previous call's leg had not cleared: not counted. The MT9234 call lost in
+the last batch was the rig's: a 424 ms stall of our media thread, 6.8 s into
+data, while a build was running in the same 4-core container -- "upstream
+discontinuity", an Rd the modem never answered, its retrain 6.6 s later. Do
+not build on CT 117 during a live batch.)
+
+**6. A B1 search that gives up now retrains (9.5.1.1).** The three CX93001
+calls lost in the last batch all followed a renegotiation or resync after
+which our upstream was not re-acquired. On one the modem lowered its
+downstream by 9.6 at 106 s (50666 -> 49333); the downstream came back, the
+B1 template fitted 55% (99.9% at start-up of the same call), the search
+logged "only a retrain can give it one" after 7 windows -- and nothing acted
+on it, because loss recovery is off by default (`ME_V90_RENEG`,
+`ME_V90_RETRAIN_ON_LOSS`). V.42's T401 ran out 25 s later (N400 20,
+`vs=84 va=81`) and took the call; the modem reports LINK DISCONNECT. An
+abandoned acquisition is not a drifting receiver: there is no upstream to
+protect, so it now starts a retrain, twice a call at most
+(`v34_v90_upstream_acq_abandoned()`). Retrains to this modem return to V.90
+in 15 s. **Not verified live**: both USB modems left the Mac's USB bus before
+the batch that would have tested it.
+
+Still open on the CX93001: why its B1 after a renegotiation fits 55% where
+the start-up B1 fits 99.9%, and the out-of-sample check that follows B1 with
+a fixed filter (0.418 from the grid at start-up, 0.628 after the
+renegotiation; a -44 ppm carrier turns 0.06 rad across its 256 symbols).

@@ -986,6 +986,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                           ? 100*s->v90_t3_shell_bad/s->v90_t3_shell_frames
                           : -1;
             int flag_permil = 1000*s->v90_t3_flags/s->v90_t3_bit_count;
+            bool sym_moved = false;
             bool shell_release = false;
             int v14_pct = 0;
             int v14_ratio = 0;
@@ -1117,6 +1118,21 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 if (v14_ratio >= 20  &&  dev < 20)
                     dev = 20;
                 /*endif*/
+                /* HDLC flags are the evidence the frame-phase lock below
+                   accepts on its own, and they only exist at the right
+                   offset (4 per mille by chance, 90-105 on a LAPM line).
+                   Without this the same window could step the offset on and
+                   then lock the frame phase on the reading it had just left
+                   behind: MT9234, 2026-11-11, +5 read 63% and 68% ones with
+                   flags at 90 and 97 per mille (the two calls of five whose
+                   mix of XID and flags fell short of 70%), the search moved
+                   to +6, the lock fired on the +5 flags and ended the search
+                   for good.  The eye stayed at 0.009 and the bits white, our
+                   LAPM never saw the peer's XID, and the peer retrained 10.5
+                   s into data and declined V.90 on the way back. */
+                if (flag_permil >= V34_V90_T3_FLAG_LOCK_PERMIL  &&  dev < 20)
+                    dev = 20;
+                /*endif*/
                 /* One window per offset.  A strong reading is kept at once;
                    otherwise the best of the eight wins, and only a clear
                    one: a timing slip inside a window costs even the right
@@ -1144,6 +1160,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     s->v90_t3_sym_steps = 0;
                     s->v90_t3_sym_best = 0;
                     s->v90_t3_sym_best_dev = 0;
+                    sym_moved = (step != 0);
                     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream symbol offset: no clear "
                              "winner, pass %d\n", s->v90_t3_sym_pass + 1);
@@ -1156,6 +1173,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     s->v90_t3_sym_search = false;
                     s->v90_t3_next_symbol += 3*(target - step);
                     s->v90_t3_sym_steps = target;
+                    sym_moved = (target != step);
                     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream symbol offset +%d chosen "
                              "(%d%% from white; +%d read %d%%/%d%% ones)\n",
@@ -1166,6 +1184,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 {
                     s->v90_t3_next_symbol += 3;
                     s->v90_t3_sym_steps++;
+                    sym_moved = true;
                     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream symbol offset +%d reads "
                              "%d%%/%d%% ones; trying +%d\n",
@@ -1247,7 +1266,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             sweep_score = ones_pct
                         + ((v14_pct >= 5) ? v14_ratio/10 : 0)
                         - ((shell_pct > 0) ? 4*shell_pct : 0);
-            if (!s->v90_t3_sf_locked)
+            /* A window whose symbol offset has just been moved says nothing
+               about the stream from here on: no lock on it. */
+            if (!s->v90_t3_sf_locked  &&  !sym_moved)
             {
                 /* Lock on marks only when they are really marks.  A correct
                    phase on an idle line reads 99-100%; 75-87% is a phase that
@@ -14535,6 +14556,30 @@ enum { V90_T3_BLIND_TRAIN = 600, V90_T3_BLIND_LOOKAHEAD = 96 };
 /* How far before E the 4-point signal may end: 1 s at 3200 baud. */
 enum { V90_T3_BLIND_BACK = 3200 };
 
+static bool v90_t3_4point_fixed_fit_only(void);
+static float v90_t3_4point_err_tracked(v34_rx_state_t *s,
+                                       const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                       int64_t base,
+                                       int64_t end,
+                                       int phase,
+                                       int64_t at,
+                                       complexf_t w_at[V34_V90_T3_FSE_TAPS]);
+
+/* How far forward the end of the 4-point signal is looked for.  After an E
+   the anchor IS (about) that end, so a little way past it.  A search
+   anchored on a CRC-valid CP' instead (v90_t3_cpprime_second_pass()) knows
+   only that CP' was running there: the peer repeats it until our MP' reaches
+   it and only then sends E, so the end can be anywhere in what has arrived
+   since. */
+static int64_t v90_t3_blind_limit(const v34_rx_state_t *s, int lookahead)
+{
+    if (s->v90_t3_blind_wide)
+        return s->v90_t3_raw_count - V34_V90_T3_FSE_TAPS;
+    /*endif*/
+    return s->v90_t3_e_anchor + lookahead;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* First half of v90_t3_blind_acquire(), in packets of its own: train well
    clear of E and find roughly where the 4-point signal ends.  Returns that
    raw index, -1 if there is none, or -2 to be called again next packet. */
@@ -14543,7 +14588,7 @@ static int64_t v90_t3_blind_locate(v34_rx_state_t *s)
     enum { TRAIN = V90_T3_BLIND_TRAIN, LOOKAHEAD = V90_T3_BLIND_LOOKAHEAD };
     int pre = V34_V90_T3_FSE_TAPS/2;
     int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
-    int64_t limit = s->v90_t3_e_anchor + 3*LOOKAHEAD;
+    int64_t limit = v90_t3_blind_limit(s, 3*LOOKAHEAD);
     int64_t base;
     int64_t end;
     complexf_t w[V34_V90_T3_FSE_TAPS];
@@ -14594,7 +14639,7 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
     enum { TRAIN = V90_T3_BLIND_TRAIN, LOOKAHEAD = V90_T3_BLIND_LOOKAHEAD };
     int pre = V34_V90_T3_FSE_TAPS/2;
     int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
-    int64_t limit = s->v90_t3_e_anchor + 3*LOOKAHEAD;
+    int64_t limit = v90_t3_blind_limit(s, 3*LOOKAHEAD);
     int64_t base;
     int64_t end;
     int64_t first = -1;
@@ -14661,6 +14706,63 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
              (int) ((end - base)/3), err, -10.0*log10(err + 1e-12),
              (long long) qend, (long long) first,
              (long long) (first - s->v90_t3_e_anchor));
+    /* A peer on its own clock has moved by the time B1 starts.  The one
+       filter above is right for the MIDDLE of its 600 symbols; at +103 ppm
+       (MT9234ZBA) the signal is 0.033 T later and 0.117 rad round by B1, and
+       turning 0.00038 rad every symbol after it.  That is 0.8 of a grid
+       unit at the edge of the 14400 constellation, which the loops pull in,
+       and 2.6 at the edge of 26400's (d_min 2): the first live call offered
+       26400 from MP (2026-11-12) read 0.73 from the grid from its first
+       window and never decoded a bit.  So where tracking the clock explains
+       the stretch clearly better, hand over the tracked filter evaluated AT
+       B1's first symbol, and start the carrier loop at the rate the same
+       stretch turned at (the two halves' mean angle, as the B1 template
+       path does with B1 itself). */
+    s->v90_t3_blind_dphi = 0.0f;
+    if (!v90_t3_4point_fixed_fit_only())
+    {
+        complexf_t w_b1[V34_V90_T3_FSE_TAPS];
+        float tracked = v90_t3_4point_err_tracked(s, w, base, end, phase,
+                                                  first, w_b1);
+
+        if (tracked > 0.0f  &&  tracked < 0.5f*err)
+        {
+            complexf_t c0 = {0.0f, 0.0f};
+            complexf_t c1 = {0.0f, 0.0f};
+            int total = (int) ((end - 3 - (base + phase) + 2)/3);
+            int k = 0;
+
+            for (int64_t c = base + phase;  c + 3 < end;  c += 3, k++)
+            {
+                complexf_t y = v90_t3_fse_at(s, w, c);
+                float dr = (y.re >= 0.0f)  ?  0.70710678f  :  -0.70710678f;
+                float di = (y.im >= 0.0f)  ?  0.70710678f  :  -0.70710678f;
+                complexf_t *acc = (k < total/2)  ?  &c0  :  &c1;
+
+                acc->re += y.re*dr + y.im*di;
+                acc->im += y.im*dr - y.re*di;
+            }
+            /*endfor*/
+            if (total >= 4  &&  (c0.re != 0.0f  ||  c0.im != 0.0f))
+            {
+                float dphi = atan2f(c1.im*c0.re - c1.re*c0.im,
+                                    c1.re*c0.re + c1.im*c0.im)/(float) (total/2);
+
+                if (fabsf(dphi) < V34_CARRIER_FREQ_LIMIT)
+                    s->v90_t3_blind_dphi = dphi;
+                /*endif*/
+            }
+            /*endif*/
+            memcpy(w, w_b1, sizeof(w_b1));
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 T/3 4-point training: %.1f dB with the peer's "
+                     "clock tracked; B1 gets the filter as at its first "
+                     "symbol and a carrier turning %+.5f rad/symbol\n",
+                     -10.0*log10(tracked + 1e-12), s->v90_t3_blind_dphi);
+        }
+        /*endif*/
+    }
+    /*endif*/
     /* The constellation's own mean power -- measured over the mapper's
        output when the template was built -- not B1's 128 symbols. */
     if (s->v90_t3_cma_n > 0  &&  s->v90_t3_cma_p2 > 0.0)
@@ -14735,7 +14837,52 @@ enum { V90_T3_SEARCH_FORWARD = 4800 };
    dphi degrees per T/3 sample is a timing drift of 3*dphi/360 samples per
    sample, i.e. -dphi/40 samples per symbol in v34_gardner terms.  Returns
    0 (no seed) without at least six 0.2 s windows. */
-static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to)
+/* The B1 search a CRC-valid CP' starts (v34_v90_begin_b1_search()) looks
+   back over the buffered signal with the B1 template alone: no E had been
+   seen, so the 4-point fallback was forbidden there.  That left every peer
+   that does not reset its scrambler for B1 -- no template fits those --
+   without an upstream whenever the batch CP decoder rather than the
+   streaming one caught CP'.  MT9234ZBA, 2026-11-11/12: a 9.6 renegotiation
+   completed downstream, B1 "acquisition failed" for 16 s (coarse 7.9%), and
+   the modem retrained and declined V.90 on the way back.
+
+   What precedes B1 is the CP'/E whose CRC the caller checked, a 4-point
+   signal on this carrier and clock (9.4.2.4-.5), exactly what the fallback
+   trains on after an E.  So when the template pass fails, run the search
+   once more the way the E path does: anchored where CP' was accepted,
+   forward window and all, 4-point training first.  By then E has passed.
+   True if the second pass was armed.  ME_V90_T3_CPPRIME_NO_BLIND=1 keeps the
+   old rule for A/Bs. */
+static bool v90_t3_cpprime_second_pass(v34_rx_state_t *s)
+{
+    if (s->v90_t3_cpprime_anchor < 0
+        ||  V34_DIAG_GETENV("ME_V90_T3_CPPRIME_NO_BLIND"))
+    {
+        s->v90_t3_cpprime_anchor = -1;
+        return false;
+    }
+    /*endif*/
+    s->v90_t3_e_anchor = s->v90_t3_cpprime_anchor;
+    s->v90_t3_cpprime_anchor = -1;
+    s->v90_t3_blind_tried = false;
+    s->v90_t3_blind_wide = true;
+    s->v90_t3_acquisition_attempted = false;
+    s->v90_t3_acq_retry_at = 0;
+    /* The classic window, as after an E: no early or fast windows (those
+       are template-only), no retry budget spent by the first pass. */
+    s->v90_t3_prelude_next = -1;
+    s->v90_t3_fast_end = -1;
+    s->v90_t3_fast_retries = 0;
+    s->v90_t3_acq_retries = 0;
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 T/3 no B1 template fits after CP'; searching again "
+             "from the CP' anchor with the 4-point training\n");
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to,
+                               bool *measured)
 {
     enum { W = 1920, STEP = 960, MAXW = 32 };
     static const float c3[3] = {1.0f, -0.5f, -0.5f};
@@ -14771,6 +14918,7 @@ static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to
         x[n] = (double) (b + W/2 - from);
         n++;
     }
+    *measured = false;
     if (n < 6)
         return 0.0f;
     for (int i = 0;  i < n;  i++)
@@ -14784,6 +14932,7 @@ static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to
     freq = (float) (-(slope*180.0/M_PI)/40.0);
     if (fabsf(freq) > 0.0015f)
         return 0.0f;
+    *measured = true;
     return freq;
 }
 /*- End of function --------------------------------------------------------*/
@@ -15233,6 +15382,9 @@ search:
            matrix calls: one "acquisition failed" and then 115 s of silence.
            It is the same situation the out-of-sample rejection below handles
            by sliding the window forward, so handle it the same way. */
+        if (v90_t3_cpprime_second_pass(s))
+            return;
+        /*endif*/
         v90_t3_acq_retry_or_abandon(s, "in-sample fit", search_start, search_end);
         return;
     }
@@ -15579,6 +15731,12 @@ commit:
                blind recovery below worth anything at all. */
             s->v90_t3_carrier.nda_freq_hold = 1;
         }
+        /* A 4-point-placed B1 has no template to measure the residual
+           carrier on; v90_t3_blind_acquire() measured it on the 4-point
+           signal instead. */
+        if (blind)
+            s->v90_t3_carrier.freq = s->v90_t3_blind_dphi;
+        /*endif*/
     }
     {
         /* Without timing recovery this receiver decodes correctly for about
@@ -15603,12 +15761,39 @@ commit:
                     from = oldest;
                 if (from < 0)
                     from = 0;
-                s->v90_t3_freq_seed = v90_t3_clock_freq(s, from, to);
+                bool measured;
+
+                s->v90_t3_freq_seed = v90_t3_clock_freq(s, from, to, &measured);
+                /* The estimate needs 0.7 s of signal before B1 (six windows).
+                   Phase 4 has it; a 9.6 rate renegotiation does not: its
+                   capture starts at Rd and B1 is 0.45 s in (4321 T/3 samples
+                   on the MT9234, 2026-11-11), so the estimate was "none" and
+                   the loop restarted at 0 ppm on a modem measured at +104 ppm
+                   in the same call.  At 14400 the loop pulls that in; at
+                   26400 the eye (0.045 from the grid through B1) was white
+                   0.2 s later, and every slip recovery put the frequency
+                   back to the same zero.  The peer's clock does not change
+                   between Phase 4 and a renegotiation of the same call, so
+                   keep the call's last measurement. */
+                if (measured)
+                {
+                    s->v90_t3_freq_call = s->v90_t3_freq_seed;
+                    s->v90_t3_freq_call_valid = true;
+                }
+                else if (s->v90_t3_freq_call_valid)
+                {
+                    s->v90_t3_freq_seed = s->v90_t3_freq_call;
+                }
+                /*endif*/
                 s->v90_t3_gardner.freq = s->v90_t3_freq_seed;
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream clock offset before B1: %+.6f "
-                         "samples/symbol (%+.0f ppm); timing loop starts there\n",
-                         s->v90_t3_freq_seed, s->v90_t3_freq_seed/3.0e-6);
+                         "samples/symbol (%+.0f ppm, %s); timing loop starts there\n",
+                         s->v90_t3_freq_seed, s->v90_t3_freq_seed/3.0e-6,
+                         measured  ?  "measured"
+                                   :  (s->v90_t3_freq_call_valid
+                                       ?  "kept from this call's last measurement"
+                                       :  "not measurable"));
             }
             /* Which timing error detector.  Non-data-aided Gardner is the
                one this loop was built on, and it is the wrong one once a
@@ -19211,6 +19396,168 @@ SPAN_DECLARE(int) v34_v90_upstream_capture_early(v34_state_t *s)
 /* SNR of the newest `symbols` symbols of the T/3 ring as a 4-point signal:
    the T/3 equalizer is trained on them and its decision error is the noise
    it leaves.  0 if the ring does not hold them. */
+/* ME_V90_4POINT_FIXED_FIT=1 keeps the pre-MP measurement on the single fixed
+   filter (the behaviour before 2026-11-12), for A/B runs. */
+static bool v90_t3_4point_fixed_fit_only(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V90_4POINT_FIXED_FIT");
+
+        cached = (e  &&  e[0] == '1')  ?  1  :  0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The decision error of the 4-point signal with the peer's clock taken out.
+
+   v90_t3_train_4point() fits ONE filter to the whole stretch.  An analogue
+   modem whose upstream is not loop-timed moves under that filter: a clock f
+   away slides the sampling instant by f x symbols, and turns the carrier by
+   2 pi fc f per second, and a fixed filter can only sit in the middle of
+   both.  Over 600 symbols at 3200 baud and a 1829 Hz carrier a +105 ppm
+   clock (Agere MT9234ZBA, measured in data mode) costs 0.063 T of timing
+   (-29.6 dB) and +/-0.114 rad of phase (-23.6 dB): -22.6 dB together, which
+   is the 22.7 dB the fixed fit read on that modem while its data mode ran at
+   33-34 dB.  At -44 ppm (Conexant CX93001) the same sum is -30 dB against
+   28.3-28.5 read and 32.6 in data.  So on any peer with its own clock the
+   fixed fit reports the clock, and MP offered 14400 and 21600 to lines that
+   carry 26400.
+
+   Fit the taps as w0 + t w1 instead, t running -1..1 over the stretch: to
+   first order that is both a sliding sampling instant and a turning carrier
+   (the second-order remainder is below -50 dB at 105 ppm).  The decisions
+   come from the fixed fit, which makes none wrong at 20 dB.  Least squares
+   on 4 x TAPS unknowns flatters its own residual by unknowns/equations; that
+   is divided back out.  Returns the error, or a large value if there is no
+   solution. */
+static float v90_t3_4point_err_tracked(v34_rx_state_t *s,
+                                       const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                       int64_t base,
+                                       int64_t end,
+                                       int phase,
+                                       int64_t at,
+                                       complexf_t w_at[V34_V90_T3_FSE_TAPS])
+{
+    enum { N1 = 2*V34_V90_T3_FSE_TAPS, N = 2*N1 };
+    double *matrix;     /* 56 kB: not for a media thread's stack */
+    double rhs[N];
+    double solution[N];
+    double trace = 0.0;
+    double err = 0.0;
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    int total = (int) ((end - 3 - (base + phase) + 2)/3);
+    int counted = 0;
+    int k;
+
+    if (total < 4*V34_V90_T3_FSE_TAPS)
+        return 1.0e9f;
+    /*endif*/
+    if ((matrix = (double *) calloc(N*N, sizeof(double))) == NULL)
+        return 1.0e9f;
+    /*endif*/
+    memset(rhs, 0, sizeof(rhs));
+    for (int pass = 0;  pass < 2;  pass++)
+    {
+        k = 0;
+        for (int64_t c = base + phase;  c + 3 < end;  c += 3, k++)
+        {
+            double fr[N];
+            double fi[N];
+            double tt = 2.0*k/(double) (total - 1) - 1.0;
+            complexf_t y = v90_t3_fse_at(s, w, c);
+            double dr = (y.re >= 0.0f)  ?  0.70710678  :  -0.70710678;
+            double di = (y.im >= 0.0f)  ?  0.70710678  :  -0.70710678;
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t x = v90_t3_raw_get(s, c - pre + tap);
+
+                fr[2*tap] = x.re;
+                fr[2*tap + 1] = -x.im;
+                fi[2*tap] = x.im;
+                fi[2*tap + 1] = x.re;
+                fr[N1 + 2*tap] = tt*x.re;
+                fr[N1 + 2*tap + 1] = -tt*x.im;
+                fi[N1 + 2*tap] = tt*x.im;
+                fi[N1 + 2*tap + 1] = tt*x.re;
+            }
+            /*endfor*/
+            if (pass == 0)
+            {
+                for (int row = 0;  row < N;  row++)
+                {
+                    rhs[row] += fr[row]*dr + fi[row]*di;
+                    for (int column = row;  column < N;  column++)
+                        matrix[row*N + column] += fr[row]*fr[column] + fi[row]*fi[column];
+                    /*endfor*/
+                }
+                /*endfor*/
+            }
+            else
+            {
+                double yr = 0.0;
+                double yi = 0.0;
+
+                for (int row = 0;  row < N;  row++)
+                {
+                    yr += fr[row]*solution[row];
+                    yi += fi[row]*solution[row];
+                }
+                /*endfor*/
+                err += (yr - dr)*(yr - dr) + (yi - di)*(yi - di);
+                counted++;
+            }
+            /*endif*/
+        }
+        /*endfor*/
+        if (pass == 0)
+        {
+            for (int row = 0;  row < N;  row++)
+            {
+                for (int column = 0;  column < row;  column++)
+                    matrix[row*N + column] = matrix[column*N + row];
+                /*endfor*/
+                trace += matrix[row*N + row];
+            }
+            /*endfor*/
+            for (int row = 0;  row < N;  row++)
+                matrix[row*N + row] += trace*1e-7;
+            /*endfor*/
+            k = v90_t3_solve(matrix, rhs, solution, N);
+            free(matrix);
+            if (!k)
+                return 1.0e9f;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    if (counted <= N)
+        return 1.0e9f;
+    /*endif*/
+    if (w_at)
+    {
+        /* The filter this fit puts at sample `at` (a symbol instant on the
+           same phase, usually just past the stretch). */
+        double tt = 2.0*(double) ((at - (base + phase))/3)/(double) (total - 1) - 1.0;
+
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            w_at[tap].re = (float) (solution[2*tap] + tt*solution[N1 + 2*tap]);
+            w_at[tap].im = (float) (solution[2*tap + 1] + tt*solution[N1 + 2*tap + 1]);
+        }
+        /*endfor*/
+    }
+    /*endif*/
+    return (float) (err/counted/(1.0 - (double) N/(2.0*counted)));
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
 {
     complexf_t w[V34_V90_T3_FSE_TAPS];
@@ -19222,6 +19569,10 @@ SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
     float err;
     float best;
     int back;
+    complexf_t best_w[V34_V90_T3_FSE_TAPS];
+    int64_t best_base = 0;
+    int64_t best_end = 0;
+    int best_phase = 0;
 
     if (!s  ||  !s->rx.v90_t3_active  ||  symbols <= 0)
         return 0.0f;
@@ -19249,10 +19600,43 @@ SPAN_DECLARE(float) v34_v90_upstream_4point_snr(v34_state_t *s, int symbols)
         phase = 0;
         err = v90_t3_train_4point(&s->rx, base, end, w, &phase);
         if (err > 0.0f  &&  -10.0f*log10f(err) > best)
+        {
             best = -10.0f*log10f(err);
+            best_base = base;
+            best_end = end;
+            best_phase = phase;
+            memcpy(best_w, w, sizeof(best_w));
+        }
         /*endif*/
     }
     /*endfor*/
+    /* The fixed fit reads the peer's clock offset as noise; measure the
+       line.  Only where the fixed fit already found the 4-point signal
+       (its decisions are the reference), and never downwards. */
+    if (best >= 15.0f  &&  !v90_t3_4point_fixed_fit_only())
+    {
+        float fixed = best;
+
+        err = v90_t3_4point_err_tracked(&s->rx, best_w, best_base, best_end,
+                                        best_phase, 0, NULL);
+        if (err > 0.0f  &&  -10.0f*log10f(err) > best)
+            best = -10.0f*log10f(err);
+        /*endif*/
+        V34_RX_LOG(s->rx.logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 4-point measurement: %.1f dB with one filter "
+                 "over %d symbols, %.1f dB with the peer's clock tracked\n",
+                 fixed, symbols, best);
+        /* A peer on its own clock is measured here with that clock removed
+           exactly; the data-mode receiver has to follow it with its loops.
+           One rate step (2 dB, me_v90_upstream_rate_for_snr()) is held back
+           for that until live calls say otherwise: it puts the MT9234 (36.0)
+           and the CX93001 (33.7) at the 26400 their data-mode readings
+           asked for by 9.6. */
+        if (best - fixed > 3.0f)
+            best -= 2.0f;
+        /*endif*/
+    }
+    /*endif*/
     return best;
 }
 /*- End of function --------------------------------------------------------*/
@@ -19305,6 +19689,14 @@ SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s)
         return 0;
     /*endif*/
     return (s->rx.v90_t3_lost_run >= V34_V90_T3_LOST_SYMBOLS) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* True when the B1 search ran out of windows: the upstream never came back
+   after this E (start-up, retrain or 9.6 renegotiation). */
+SPAN_DECLARE(int) v34_v90_upstream_acq_abandoned(v34_state_t *s)
+{
+    return (s  &&  s->rx.v90_t3_acq_abandoned)  ?  1  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -19949,6 +20341,8 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_freq_seed = 0.0f;
     rx->v90_t3_blind_tried = false;
     rx->v90_t3_4point_final = false;
+    rx->v90_t3_cpprime_anchor = -1;
+    rx->v90_t3_blind_wide = false;
     rx->v90_t3_srch_running = false;
     rx->v90_t3_acq_abandoned = false;
     rx->v90_t3_acq_best_valid = false;
@@ -20147,10 +20541,12 @@ SPAN_DECLARE(int) v34_v90_begin_b1_search(v34_state_t *s)
     int result = begin_rx_data(s, false);
     if (result == 0)
     {
-        /* No E was observed: do not use the optional 4-point/blind
-           fallback for a non-reset peer. This entry requires the actual
-           complete B1 template and its out-of-sample validation. */
+        /* No E was observed, so the first pass is the B1 template alone,
+           over what is already buffered.  If that fails, the 4-point
+           fallback gets its turn from the unshifted anchor: see
+           v90_t3_cpprime_second_pass(). */
         s->rx.v90_t3_blind_tried = true;
+        s->rx.v90_t3_cpprime_anchor = s->rx.v90_t3_e_anchor;
         /* CP' is decoded behind the physical input: B1 may already be in
            the ring (V.90 9.4.2.4-.5). Search that history before waiting
            another 500 ms for the E path's forward window. The complete B1

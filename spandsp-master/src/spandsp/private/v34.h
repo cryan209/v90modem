@@ -1608,6 +1608,19 @@ typedef struct
         before B1 (samples per symbol, as v90_t3_gardner.freq): the loop
         starts there, and returns there when a closed eye resets it. */
     float v90_t3_freq_seed;
+    /*! Where a CP'-started B1 search was anchored before it was moved back
+        over the buffered history, for its second pass; -1 when none is owed. */
+    /*! Carrier rate measured on the 4-point signal for a B1 placed from it. */
+    float v90_t3_blind_dphi;
+    int64_t v90_t3_cpprime_anchor;
+    /*! The 4-point signal's end is looked for in everything received, not
+        just past the anchor (a CP'-anchored search). */
+    bool v90_t3_blind_wide;
+    /*! The last pre-B1 clock offset actually measured on this call, for the
+        acquisitions (a 9.6 renegotiation's) that have too little signal
+        before B1 to measure one. */
+    float v90_t3_freq_call;
+    bool v90_t3_freq_call_valid;
     /*! \brief First published upstream data bits, for structure checks. */
     uint32_t v90_t3_first_word;
     int v90_t3_first_bits;

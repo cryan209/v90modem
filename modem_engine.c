@@ -817,6 +817,7 @@ static void me_drain_rx_to_dte(void)
     }
 }
 
+static int64_t g_v92_data_since_ms;     /* defined with the V.92 retrain state below */
 static void data_stack_link_event(void *user_data, ds_link_event_t event)
 {
     (void)user_data;
@@ -880,6 +881,7 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
                "buffered V.14 mode (+ES fallback)\n",
                g_ec_alt_ok ? ", then MNP" : "");
         g_data_framing = DS_FRAMING_V14;
+        g_v92_data_since_ms = 0;
         /* x2 host: CONNECT waits for DATA (accepted MP/E and upstream B1),
            which reports it now that the framing is V.14. */
         if (!g_data_connect_reported && me_connect_carrier_ready()
@@ -902,6 +904,8 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
                    st.k, st.n401, st.optimisation);
         } else
             ME_LOG("[ME] V.42 LAPM connected\n");
+            /* A retrained V.92 PCM-upstream attempt has proven itself. */
+            g_v92_data_since_ms = 0;
         if (!g_data_connect_reported && !g_data_link_failed
             && me_connect_carrier_ready()) {
             g_data_connect_reported = true;
@@ -1734,6 +1738,9 @@ static bool           g_v92_p4_refit_armed = false;
  * stays V.92 Phase 2, with a V.34 upstream the peer completes reliably. */
 static bool           g_v92_retrain_pending_data = false;
 static bool           g_v92_pcm_upstream_withdrawn = false;
+/* When a RETRAINED PCM-upstream attempt entered data mode; cleared once its
+ * error-control link is up.  Still set at the next retrain = not proven. */
+static int64_t        g_v92_data_since_ms = 0;
 static int            g_v92_p4_refits_seen = 0;
 static double         g_v92_trn2u_pow = 0.0;
 static uint64_t       g_v92_trn2u_nerr = 0;
@@ -7276,6 +7283,9 @@ static void v34_rx_rate_backoff_locked(void)
  * cap as any other. */
 static bool g_v34_b1_rate_checked = false;
 static bool retrain_on_loss_due(int cap);
+/* Retrains for a B1 search that gave up (per call). */
+#define ME_V90_MAX_ABANDON_RETRAINS 2
+static int g_v90_abandon_retrains = 0;
 static void v34_reneg_clear_locked(void);
 static bool restart_v34_phase2_locked(const char *reason);
 static bool restart_v90_phase2_locked(const char *reason);
@@ -9853,6 +9863,7 @@ static void cleanup_v34_v90_training_locked(void)
     /* Per call, not per process: this server runs many calls in one. */
     vpcm_analogue_peer_reset(&g_v90a_peer);
     g_loss_retrains = 0;
+    g_v90_abandon_retrains = 0;
     g_v34_call_baud_cap = 0;
     g_v34_rx_rate_backoff_n = 0;
     g_data_link_redetect = false;
@@ -10111,6 +10122,18 @@ static bool v90_upstream_adapt_locked(void)
         if (cur != g_v90_ua_pending_bps)
             ME_LOG("[ME] V.90 upstream renegotiation settled at %d bps, not %d\n",
                    cur, g_v90_ua_pending_bps);
+        /* §9.4.2.4: the analogue modem transmits at the highest rate BOTH
+         * modems enable.  Asked for more than it settled at, it has shown
+         * its own maximum, and asking again only costs another 3 s of
+         * upstream: the MT9234 (26400 enabled) was asked for 28800 at 36,
+         * 59 and 82 s of one call (2026-11-12) and answered 26400 each
+         * time.  That rate is this call's ceiling. */
+        if (cur < g_v90_ua_pending_bps
+            && (g_v90_ua_ceiling_bps == 0 || cur < g_v90_ua_ceiling_bps)) {
+            g_v90_ua_ceiling_bps = cur;
+            ME_LOG("[ME] V.90 upstream: %d bps is the most the peer enables; "
+                   "no step-up above it this call\n", cur);
+        }
         g_v90_ua_pending_bps = 0;
         if (g_v90_ua_probe_bps && cur != g_v90_ua_probe_bps)
             g_v90_ua_probe_bps = 0;
@@ -10216,6 +10239,25 @@ static bool v90_upstream_adapt_locked(void)
         g_v90_ua_prev_bps = cur;
         return true;
     }
+}
+
+/* §9.6: start the T/3 capture as soon as the upstream leaves DATA for the
+ * renegotiation's CP exchange, as Phase 4 does from CPt
+ * (v90_upstream_measure_locked()).  It used to start only when the first
+ * CRC-valid CP had been decoded and the new rate prepared -- and the batch CP
+ * decoder runs behind the wire, so on the MT9234 (2026-11-12, 26400 -> 28800)
+ * the first frame it delivered was already CP', the capture began at that
+ * instant, and the CP'/E the 4-point training needs, with E and the start of
+ * B1, had gone by uncaptured: "no B1 template fits", nothing to train on,
+ * retrain 7 s later.  Preparing the rate keeps a ring that is already
+ * running (v34_v90_prepare_upstream_data()). */
+static void v90_reneg_capture_upstream_locked(void)
+{
+    if (!g_v34 || g_v92_active)
+        return;
+    v34_v90_upstream_rearm(g_v34);
+    if (v34_v90_upstream_capture_early(g_v34) != 0)
+        ME_LOG("[ME] V.90 §9.6: early upstream capture unavailable\n");
 }
 
 static bool restart_v90_phase2_locked(const char *reason)
@@ -10326,6 +10368,18 @@ static bool restart_v90_phase2_locked(const char *reason)
     v34_set_v92_info0_capabilities(g_v34,
                                     g_v92_info0_local_advertised ? 1 : 0,
                                     0);
+    /* "Reached data" has to mean data that lasted.  slmodemd on the Proxmox
+     * rig (2026-11-12, 7 calls of 7 at one Jd alignment) retrained its first
+     * attempt, let the second into PCM-upstream data at 34666, retrained
+     * 2.5 s later, and the third attempt -- offered PCM upstream again
+     * because the second had "reached data" -- never locked B1u (sigma 79)
+     * and the call was hung up at 70 s with no CONNECT at either DTE.  A
+     * retrained attempt whose data mode is retrained again before its
+     * error-control link came up has not proven anything (11 s of such
+     * "data" on the next call, still no CONNECT). */
+    if (g_v92_data_since_ms)
+        g_v92_retrain_pending_data = true;
+    g_v92_data_since_ms = 0;
     if (g_v92_retrain_pending_data && !g_v92_pcm_upstream_withdrawn
         && g_v92_info0_mutual && v92_pcm_upstream_advertised()) {
         g_v92_pcm_upstream_withdrawn = true;
@@ -15185,6 +15239,7 @@ static void v92_call_state_reset_locked(void)
 {
     g_v92_retrain_pending_data = false;
     g_v92_pcm_upstream_withdrawn = false;
+    g_v92_data_since_ms = 0;
     g_v92_active = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
@@ -19879,6 +19934,9 @@ static void enter_v90_data_locked(void)
            g_v92_active ? "V.92" : "V.90",
            g_v92_active ? "PCM" : "V.34",
            upstream_rate, downstream_rate);
+    /* Only a RETRAINED attempt's data mode is on probation. */
+    g_v92_data_since_ms = (g_v92_active && g_v92_retrain_pending_data)
+                              ? trace_now_ms() : 0;
     g_v92_retrain_pending_data = false;
     trace_phase("%s enter DATA after B1: upstream=%d downstream=%d",
                 g_v92_active ? "V92" : "V90",
@@ -20090,6 +20148,23 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             return false;
         }
 
+        /* §9.4.2.5: B1 follows E, so an upstream receiver that has acquired
+         * B1 has had its E, whichever detector did or did not report one.
+         * The CP'-started B1 search (v34_v90_begin_b1_search()) reports no E
+         * event by design; when the batch CP decoder had not seen E either,
+         * a §9.6 renegotiation whose upstream was decoding again -- flags at
+         * 115 per mille, 34-35 dB at 26400 on the MT9234 replay of
+         * 2026-11-11 -- still ran §9.6.1's E timer out and was torn down for
+         * a retrain 4 s later. */
+        if (!g_v92_active && g_v34 && g_v34_upstream_data_started
+            && v90_rate_renegotiation_waiting_for_e(g_v90)
+            && v34_v90_upstream_rx_acquired(g_v34)
+            && v90_handle_rx_event(g_v90, V90_RX_EVENT_E)) {
+            ME_LOG("[ME] V.90 §9.6: upstream B1 acquired; E taken as received "
+                   "(§9.4.2.5)\n");
+            trace_phase("V90 reneg E implied by B1");
+        }
+
         /* §9.6.1: a rate renegotiation that does not produce an E is
          * abandoned for a full retrain.  The engine owns the retrain, so it
          * is the engine that acts on the flag. */
@@ -20187,6 +20262,29 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (g_v34 && v34_v90_upstream_carrier_lost(g_v34)
             && !v90_rate_renegotiation_active(g_v90)
             && !v90_rate_renegotiation_pending(g_v90)) {
+            if (v34_v90_upstream_acq_abandoned(g_v34)
+                && g_v90_abandon_retrains < ME_V90_MAX_ABANDON_RETRAINS) {
+                /* §9.5.1.1.  The B1 search ran out of windows: this E was
+                 * never followed by an upstream, so the error-control link
+                 * above has had no peer since.  Unlike a receiver that has
+                 * drifted off a signal it was decoding (the case
+                 * ME_V90_RETRAIN_ON_LOSS leaves alone by default), there is
+                 * nothing to keep: a CX93001 that renegotiated its downstream
+                 * at 106 s (2026-11-12) got a working downstream back and a
+                 * B1 we could not place, we logged "only a retrain can give
+                 * it one" and did nothing, and V.42's T401 ran out 25 s
+                 * later (N400 20) and took the call.  Retrains to this modem
+                 * come back in V.90 (15 s). */
+                v34_v90_upstream_clear_carrier_lost(g_v34);
+                g_v90_abandon_retrains++;
+                ME_LOG("[ME] V.90 upstream never acquired after E; initiating "
+                       "a §9.5.1.1 retrain (%d of %d)\n",
+                       g_v90_abandon_retrains, ME_V90_MAX_ABANDON_RETRAINS);
+                trace_phase("V90 upstream B1 abandoned -> retrain");
+                (void) restart_v90_phase2_locked(
+                    "no upstream B1 after E; retraining per 9.5.1.1");
+                return false;
+            }
             if (me_v90_reneg_enabled()
                 && v90_rate_renegotiation_count(g_v90) < ME_V90_MAX_RENEGOTIATIONS) {
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
@@ -20288,6 +20386,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                     g_v90_reneg_responding = false;
                     ME_LOG("[ME] V.90 §9.6.1.2.2: responding; receiver "
                            "conditioned for CP\n");
+                    v90_reneg_capture_upstream_locked();
                 } else if (!g_v92_active) {
                     /* Leave the receiver in DATA and watch for S spectrally.
                      * The constellation detector in V34_RX_STAGE_PHASE4_S
@@ -20332,6 +20431,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             trace_phase("V90 reneg S answer seen, CP search");
             v34_v90_force_reneg_cp_rx(g_v34);
             v90_reneg_cp_mark_locked();
+            v90_reneg_capture_upstream_locked();
             /* The peer is answering, so this attempt gets §9.6.1's full E
              * window rather than the unanswered-attempt bound. */
             v90_rate_renegotiation_note_answer(g_v90);
