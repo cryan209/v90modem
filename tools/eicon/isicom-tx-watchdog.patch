@@ -1,0 +1,163 @@
+--- a/isicom.c
++++ b/isicom.c
+@@ -209,6 +209,12 @@
+ 	int			xmit_head;
+ 	int			xmit_tail;
+ 	int			xmit_cnt;
++	unsigned long		tx_last;	/* jiffies of last tx progress */
++	unsigned long		rx_last;	/* jiffies of last rx data */
++	unsigned long		tx_bytes;
++	bool			tx_stalled;	/* watchdog has reported a stall */
++	unsigned int		kicks;		/* signal-mask resends this stall */
++	unsigned long		kick_last;
+ };
+ 
+ static struct isi_board isi_card[BOARD_COUNT];
+@@ -438,6 +444,105 @@
+  *	will do the rest of the work for us.
+  */
+ 
++/*
++ * The TA behind a port sometimes drops CTS under load and never raises it
++ * again for the rest of the call (2026-11-11: 9 of 9 such stalls lasted
++ * until hangup; re-reporting the EIA lines, KILLTX and an RTS toggle never
++ * brought CTS back).  A member link wedged that way stalls a whole MLPPP
++ * bundle until pppd's echo timeout.  Hang the port up instead, so pppd
++ * drops it and the bundle carries on without it.  0 disables.
++ */
++static unsigned int stall_hangup_ms = 10000;
++module_param(stall_hangup_ms, uint, 0644);
++MODULE_PARM_DESC(stall_hangup_ms, "Hang up a port whose TA has held CTS low with data queued this long (ms, default 10000, 0 = never; a modem retrain can hold CTS for seconds)");
++
++/*
++ * Report a port that holds transmit data but has sent nothing for 2 s, with
++ * every condition isicom_tx() gates on, so a wedged port names its cause.
++ * Called from the tx timer with card_lock held.
++ */
++static void isicom_tx_watchdog(struct isi_board *card)
++{
++	unsigned short ready = inw(card->base + 0x02);
++	struct isi_port *port = card->ports;
++	int i;
++
++	for (i = 0; i < card->port_count; i++, port++) {
++		struct tty_struct *tty;
++
++		if (!tty_port_initialized(&port->port) || port->xmit_cnt <= 0 ||
++		    !time_after(jiffies, port->tx_last + 2 * HZ))
++			continue;
++		tty = tty_port_tty_get(&port->port);
++		if (port->tx_stalled && tty && tty->hw_stopped &&
++		    READ_ONCE(stall_hangup_ms) &&
++		    time_after(jiffies, port->tx_last +
++			       msecs_to_jiffies(READ_ONCE(stall_hangup_ms)))) {
++			pr_warn("isicom: ttyM%d TA has held CTS low for %u ms with %d queued: hanging up\n",
++				card->index * 16 + port->channel,
++				jiffies_to_msecs(jiffies - port->tx_last), port->xmit_cnt);
++			port->tx_last = jiffies;	/* once per stall window */
++			tty_hangup(tty);
++			tty_kref_put(tty);
++			continue;
++		}
++		if (port->tx_stalled) {
++			/*
++			 * Stopped on CTS: ask the card to report the EIA lines
++			 * again (vendor command 0x07), alternately re-arming
++			 * the mask from 0, so a lost CTS-up report shows as an
++			 * immediate resume.
++			 */
++			if (tty && tty->hw_stopped &&
++			    time_after(jiffies, port->kick_last + 2 * HZ)) {
++				const char *what;
++
++				port->kicks++;
++				port->kick_last = jiffies;
++				switch (port->kicks % 3) {
++				case 1:		/* re-report the EIA lines */
++					set_signal_mask(port, 0xff);
++					what = "signal mask";
++					break;
++				case 2:		/* flush the card's tx buffer */
++					if (!WaitTillCardIsFree(card->base)) {
++						outw(0x8000 | (port->channel << card->shift_count) | 0x02,
++						     card->base);
++						outw((ISICOM_KILLTX << 8) | 0x06, card->base);
++						InterruptTheCard(card->base);
++					}
++					what = "KILLTX";
++					break;
++				default:	/* toggle RTS */
++					drop_rts(port);
++					udelay(500);
++					raise_rts(port);
++					what = "RTS toggle";
++					break;
++				}
++				if (port->kicks <= 9)
++					pr_warn("isicom: ttyM%d kick %u (%s), CTS %d\n",
++						card->index * 16 + port->channel,
++						port->kicks, what, !!(port->status & ISI_CTS));
++			}
++			tty_kref_put(tty);
++			continue;
++		}
++		port->tx_stalled = true;
++		pr_warn("isicom: ttyM%d tx stalled %u ms: %d queued, TXOK %d CTS %d DCD %d hw_stopped %d flow.stopped %d card-ready %d rx-enable %d throttled %d, rx %u ms ago\n",
++			card->index * 16 + port->channel,
++			jiffies_to_msecs(jiffies - port->tx_last), port->xmit_cnt,
++			!!(port->status & ISI_TXOK), !!(port->status & ISI_CTS),
++			!!(port->status & ISI_DCD),
++			tty ? tty->hw_stopped : -1, tty ? tty->flow.stopped : -1,
++			!!(ready & (1 << port->channel)),
++			!!(card->port_status & (1 << port->channel)),
++			tty ? !!tty_throttled(tty) : -1,
++			jiffies_to_msecs(jiffies - port->rx_last));
++		tty_kref_put(tty);
++	}
++}
++
+ static void isicom_tx(struct timer_list *unused)
+ {
+ 	unsigned long flags, base;
+@@ -534,6 +639,16 @@
+ 		}
+ 
+ 		InterruptTheCard(base);
++		port->tx_last = jiffies;
++		if (port->tx_stalled) {
++			port->tx_stalled = false;
++			pr_warn("isicom: ttyM%d tx resumed after %u kick(s) (last %s), %u ms after it, %d queued\n",
++				port->card->index * 16 + port->channel, port->kicks,
++				port->kicks % 3 == 1 ? "signal mask" : port->kicks % 3 == 2 ? "KILLTX" : "RTS toggle",
++				port->kicks ? jiffies_to_msecs(jiffies - port->kick_last) : 0,
++				port->xmit_cnt);
++			port->kicks = 0;
++		}
+ 		/*
+ 		 * The card is busy for 20-40 us while it takes the packet. A
+ 		 * packet for the next port written in that time is lost, so
+@@ -553,6 +668,7 @@
+ 		if (retries >= 250)
+ 			break;
+ 	}
++	isicom_tx_watchdog(&isi_card[card]);
+ unlock:
+ 	spin_unlock_irqrestore(&isi_card[card].card_lock, flags);
+ 	/*	schedule another tx for hopefully in about 10ms	*/
+@@ -704,6 +820,7 @@
+ 		/* Drain the complete packet, including an odd trailing byte.
+ 		 * The old path reserved only the even prefix and dropped that byte.
+ 		 */
++		port->rx_last = jiffies;
+ 		insw(base, rxbuf, DIV_ROUND_UP(byte_count, 2));
+ 		tty_insert_flip_string(&port->port, rxbuf, byte_count);
+ 		tty_flip_buffer_push(&port->port);
+@@ -1010,6 +1127,8 @@
+ 
+ 	spin_lock_irqsave(&card->card_lock, flags);
+ 
++	if (port->xmit_cnt <= 0)
++		port->tx_last = jiffies;
+ 	while (1) {
+ 		cnt = min_t(int, count, min_t(int, isicom_tx_limit() - port->xmit_cnt,
+ 				ISICOM_XMIT_SIZE - port->xmit_head));

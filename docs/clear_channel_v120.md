@@ -461,8 +461,47 @@ either way, until both pppds gave up on echoes (eicon420 logged "No response
 to 6 echo-requests" too). After that, the TermReq/TermAck exchange did pass,
 so the port stalls rather than dies. ttyM3 went the same way later. The
 earlier ml8e failure on ttyM2, which I put down to a TIOCOUTQ probe holding
-the tty open, is probably this fault too. Still to place: which flow state
-sticks (ISI_TXOK, hw_stopped/CTS, or the card's port_status bit).
+the tty open, is probably this fault too.
+
+**The stall is the TA holding CTS low.** `tools/eicon/isicom-tx-watchdog.patch`
+logs a port that has had transmit data queued but sent nothing for 2 s,
+along with every condition `isicom_tx` gates on. All 9 stalls caught over
+9 eight-link runs read the same:
+
+```
+ttyM3 tx stalled 2004 ms: 512 queued, TXOK 0 CTS 0 DCD 1 hw_stopped 1
+  flow.stopped 0 card-ready 1 rx-enable 1 throttled 0, rx 1576 ms ago
+```
+
+The card was ready, receive was enabled and live, and nothing was
+throttled. The port is stopped on CTS, and CTS never comes back for the rest
+of the call: every stall lasted until hangup (75–840 s), and one port
+resumed by itself after 152 s. The TA is really holding CTS low; this is not
+a lost CTS-up report. Asking the card to re-report the EIA lines (vendor
+command 0x07, 35–76 times per stall), a card transmit flush (0x06 KILLTX)
+and an RTS toggle never raised it (75–385 tries per stall). 6 of the 9 stalls were on ttyM1/ttyM3,
+the second B channel of each BRI.
+
+What triggers it: neither a single TA link flooded with 150-octet pings
+(~26 frames/s, about the fragment rate each MultiTech link carries in the
+8-link bundle) nor 1400-octet pings, 2 × 150 s each, stalled. Neither did
+two 4-link MultiTech-only bundle downloads (224.8 and 226.0 kbit/s). It
+takes the 8-link mix: four busy TA ports carrying ~190-octet fragments.
+
+The patch also adds `stall_hangup_ms` (module parameter, 0644, default
+10000; 0 turns it off). A port whose TA has held CTS low with data queued for
+that long is hung up (`tty_hangup`), so pppd drops the member and the bundle
+carries on. The default is 10 s because a modem retrain on ttyM4–M7 can
+legitimately hold CTS for seconds. Before this change, a wedged member
+stalled MP reassembly for every link until pppd's 60 s echo timeout, and TCP
+backed off until the download died (2 of 3 runs). Loaded 2026-11-11
+(srcversion DD46EE21…, sha256 9f5b55cd…). Three 8-link 6 MiB downloads all
+finished exact: 288.7, 225.3 and 305.6 kbit/s. In the second, ttyM3 wedged
+and was hung up after 10 s, and the download finished on 7 links.
+
+Across the 12 eight-link runs on the 512-octet queue, the clean ones ran
+312.7–353.7 kbit/s. The skew to the Diva links still keeps the reassembly
+queue at 128, and 50–140 sequence numbers per run never arrive.
 
 ## Not done
 
