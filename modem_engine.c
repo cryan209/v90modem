@@ -15719,6 +15719,13 @@ void me_on_sip_disconnected_status(int sip_status)
                (unsigned long long) g_cc.rx_bad_frames,
                (unsigned long long) g_cc.rx_unsupported,
                (unsigned long long) g_cc.rx_aborts);
+        if (g_clear_ppp)
+            ME_LOG("[ME] PPP totals: %llu frame(s) to the DTE, %llu to the line, "
+                   "%llu bad FCS from the DTE, %llu overlong from the DTE\n",
+                   (unsigned long long) g_cc.ppp_rx_frames,
+                   (unsigned long long) g_cc.ppp_tx_frames,
+                   (unsigned long long) g_cc.ppp_tx_bad_fcs,
+                   (unsigned long long) g_cc.ppp_tx_overlong);
         if (g_cc.mode == CC_V120 && g_cc.v120_ack)
             ME_LOG("[ME] V.120 acknowledged mode: link %s, %llu UI fallbacks, "
                    "%llu resets, %llu go-back-N rewinds\n",
