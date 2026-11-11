@@ -344,6 +344,33 @@ Results:
   (82%). RTP loss was 0, with 0 bad frames and 1 abort per link (startup),
   and no retrains.
 
+**Four B channels (7910 x2 + 17900 x2), first attempt (2026-11-11 13:33):**
+all four links joined the bundle. Download: 6 MiB SHA-256 exact at
+133.4 kbit/s. Upload: froze. **ttyM1 (7910's second TA port) went deaf at
+the start of the download.** From ~35 s both directions carried only idle
+flags. The server's LCP echo requests never reached the line, and ours
+never reached its pppd; both ends dropped the link after six echoes (60 s).
+The three remaining links pushed 228 kbit/s into the bundle for 45 s, then
+the bundle stopped both ways. Only keepalives and a TCP retransmit every
+~60 s passed, with no ACK, until the 940 s timeout. Our side shows 0 RTP
+transmit gaps over 35 ms, and 0 aborts and 0 bad frames on the working
+links. Linux multilink reassembly wedging on a lost fragment would explain
+the stall, but the first loss is not located.
+
+**Suspected cause of the deaf port: the isicom driver.** The out-of-tree
+`~/isicom-port` module (`isicom.ko`, the loaded one) keeps one
+`card->port_status` mask for every port. `isicom_throttle()` and
+`isicom_unthrottle()` read-modify-write it and `outw()` it to the card
+**without `card_lock`**. Every other writer (open, both termios paths,
+shutdown) holds the lock, and upstream `isicom.c` has the same unlocked
+code. The PPP async line discipline unthrottles from its receive path, so
+four ports receiving at line rate can race on different CPUs and lose one
+port's bit. That port then stays throttled at the card until it is
+reopened, which is also why ttyM1 worked again after its pppd restarted.
+Fix drafted, not loaded: `tools/eicon/isicom-port-throttle-lock.patch`
+(compiles cleanly against `~/isicom-port`). Loading it means reloading the
+module, which drops every MultiTech port (voice and TA).
+
 ## Not done
 
 - **SDP**: `ME_CLEARMODE=1` offers RFC 4040 `CLEARMODE/8000` ahead of PCMU/PCMA

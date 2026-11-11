@@ -1,0 +1,43 @@
+--- a/isicom.c
++++ b/isicom.c
+@@ -1226,13 +1226,22 @@
+ {
+ 	struct isi_port *port = tty->driver_data;
+ 	struct isi_board *card = port->card;
++	unsigned long flags;
+ 
+ 	if (isicom_paranoia_check(port, tty->name, "isicom_throttle"))
+ 		return;
+ 
+-	/* tell the card that this port cannot handle any more data for now */
++	/*
++	 * tell the card that this port cannot handle any more data for now.
++	 * port_status is one mask for every port on the card: an unlocked
++	 * read-modify-write races another port's (un)throttle on another CPU
++	 * and can lose that port's bit, leaving it throttled at the card for
++	 * good (four PPP links at line rate wedged one TA port, 2026-11-11).
++	 */
++	spin_lock_irqsave(&card->card_lock, flags);
+ 	card->port_status &= ~(1 << port->channel);
+ 	outw(card->port_status, card->base + 0x02);
++	spin_unlock_irqrestore(&card->card_lock, flags);
+ }
+ 
+ /* unthrottle et all */
+@@ -1240,13 +1249,16 @@
+ {
+ 	struct isi_port *port = tty->driver_data;
+ 	struct isi_board *card = port->card;
++	unsigned long flags;
+ 
+ 	if (isicom_paranoia_check(port, tty->name, "isicom_unthrottle"))
+ 		return;
+ 
+ 	/* tell the card that this port is ready to accept more data */
++	spin_lock_irqsave(&card->card_lock, flags);
+ 	card->port_status |= (1 << port->channel);
+ 	outw(card->port_status, card->base + 0x02);
++	spin_unlock_irqrestore(&card->card_lock, flags);
+ }
+ 
+ /* stop et all */
