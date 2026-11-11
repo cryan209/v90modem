@@ -435,8 +435,34 @@ offers ISICOM_XMIT_SIZE (PAGE_SIZE, 4096 octets) to ppp_async, which is
 throttle-lock patch) caps it with a runtime-writable module parameter,
 `tx_queue`, default 512 octets (~64 ms). The 10 ms tx timer drains up to
 TX_SIZE (254) per tick, and the tty layer refills at WAKEUP_CHARS (256).
-Built, not yet loaded. 103 of 34,022 sequence numbers never reached CT 117
-on any link, a separate 0.3% loss still to place.
+103 of 34,022 sequence numbers never reached CT 117 on any link, a
+separate 0.3% loss still to place.
+
+**Loaded 2026-11-11** (srcversion 65470DC2…, module backup
+`isicom.ko.before-tx-queue-20261111`). Voice to 7910 and 7900 ran 31200,
+V.120 to 7910 and 17900 ran 64000, all at 0% loss. Alternated 8-link
+6 MiB downloads, with `tx_queue` set through
+`/sys/module/isicom/parameters/tx_queue` between runs:
+
+| Arm | tx_queue | Download | MultiTech lateness, median | Queue at 128 | Bundle rx drops |
+|---|---|---|---|---|---|
+| 1 | 512 | 330.6 kbit/s, exact | +55…+187 ms | 5,242 arrivals | 72 |
+| 2 | 4095 | 283.9 kbit/s, exact | +312…+417 ms | 1,158 arrivals | 92 |
+| 3 | 512 | failed at 1.57 MB | — | — | 6 |
+
+The cap reduces the skew (+16% in the one good pair), but not to zero, and
+the queue still reaches 128. With 512, the MultiTech links also took fewer
+fragments (~3,500 against ~4,400), because the sender skips a link whose
+queue is full.
+
+Arm 3 lost the bundle to the earlier fault, which the throttle-lock patch
+did not cure. ttyM1 carried 168 fragments in its first 11 s and then nothing
+either way, until both pppds gave up on echoes (eicon420 logged "No response
+to 6 echo-requests" too). After that, the TermReq/TermAck exchange did pass,
+so the port stalls rather than dies. ttyM3 went the same way later. The
+earlier ml8e failure on ttyM2, which I put down to a TIOCOUTQ probe holding
+the tty open, is probably this fault too. Still to place: which flow state
+sticks (ISI_TXOK, hw_stopped/CTS, or the card's port_status bit).
 
 ## Not done
 
