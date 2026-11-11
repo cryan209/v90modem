@@ -832,3 +832,10 @@ lands in, which was counted nowhere before. No call path changed. Applied as
 a patch to `/root/v90ras`; the previous binary is
 `/opt/v90ras/sip_v90_modem.pre-2af4189f`, and the new one is kept as
 `sip_v90_modem.2af4189f`. Restarted with no PPP call up.
+
+## Deployed 55283044 (2026-11-11 14:50)
+
+Diagnostics only: clear-channel PPP calls end with a `PPP totals:` line
+(frames each way, bad FCS and overlong frames from the DTE). Built in
+`/root/v90ras` on top of 2af4189f and kept as
+`/opt/v90ras/sip_v90_modem.ppp-totals`. Restarted with no PPP call up.
