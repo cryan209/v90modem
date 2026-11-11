@@ -390,6 +390,24 @@ pppd, 0 RTP loss, 0 bad frames, 1 startup abort per link. The upload freeze
 went with the deaf port: it was a consequence of the dead member, not a
 separate fault.
 
+**Eight B channels, MultiTech and Diva in one bundle (2026-11-11).** Links
+7910 ×2, 17900 ×2 (the MultiTech TA ttys) and 17920 ×2, 17930 ×2 (the Diva
+answerers) all joined one MP bundle on eicon420; every link CONNECT 64000 in
+0.1 s. 12 MiB each way:
+
+| Direction (12 MiB) | Result | Rate | Line use |
+|---|---|---|---|
+| Download | SHA-256 exact | 281.7 kbit/s | 55% of 512 kbit/s |
+| Upload | SHA-256 exact | 456.5 kbit/s | 89% of 512 kbit/s |
+
+The split is even across both card types: 2.02–2.15 MB per link down,
+1.97–2.09 MB up. 0 RTP loss, 0 bad frames, 1 startup abort per link, no
+echo failures. The upload scales with links (238 → 457 kbit/s), so mixing
+the two cards in one bundle works. The download does not (234 → 282): every
+link ran at the same ~45 kbit/s, so a bundle-wide limit, not one slow member,
+is pacing eicon420's MP sender (TCP window or eicon420's transmit side; not
+yet measured).
+
 ## Not done
 
 - **SDP**: `ME_CLEARMODE=1` offers RFC 4040 `CLEARMODE/8000` ahead of PCMU/PCMA
