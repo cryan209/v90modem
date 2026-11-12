@@ -873,6 +873,7 @@ int v34_rx_descramble(v34_rx_state_t *s, int in_bit)
 
 static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame);
 static void v34_rx_arm_v0_acquisition(v34_rx_state_t *s);
+static bool v34_rx_v90_v0_seed_enabled(void);
 static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s);
 static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
                                       int64_t index,
@@ -13532,6 +13533,67 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                        as a 78-bit burst, and one inside a V.14 run of
                        back-to-back characters misframed the rest of it. */
                     v34_rx_arm_v0_acquisition(s);
+                    /* ...but the epoch at this instant is not unknown, only
+                       mislabelled.  The frame just measured is the first DATA
+                       frame, so superframe frame 0 (9.4.2.5/V.90 starts a new
+                       superframe after B1) began b1_symbols ago.  It was
+                       decoded under the j-1 parking above, which fires a
+                       mapping frame early: this symbol and the `pending`
+                       buffered before it have not reached the
+                       decoder yet, so the next 4D pair it takes is
+                       (b1_symbols - 1 - pending)/2 of frame 0,
+                       wherever the counter now says.  Measured: the counter
+                       read 0 and Figure 10's parity moved it to 60 =
+                       (128 - 1 - 7)/2 on every call, about 280 ms (one
+                       superframe of evidence) into DATA.  Data in that window
+                       was decoded with no U0 constraint, so a single symbol
+                       error became a burst at the DTE -- four junk
+                       characters before every multi-line payload once the
+                       round trip exceeded the bare pair's.  Seed that epoch
+                       (the U0 constraint follows at the next data frame,
+                       below); the tracker keeps checking it and drops or
+                       moves it on parity as before.  ME_V90_V0_SEED=0
+                       restores acquisition from scratch.
+
+                       Only when a B1 frame matched the template first
+                       (idx >= 2 frames): that proves the placement and is
+                       what ran the re-parking this corrects.  A B1 that
+                       never matched (MT5634 at 9600, fit 0%, the 4-point
+                       placement: "ended after 1 data frames", frame error
+                       13.2) was placed a mapping frame late, and parity put
+                       its epoch 4 pairs on, not 60 -- nothing here knows
+                       that, so it stays with the tracker. */
+                    if (s->v0_tracking  &&  v34_rx_v90_v0_seed_enabled()
+                        &&  idx + 1 >= 2*(int64_t) s->v90_t3_b1_symbols)
+                    {
+                        int span = 4*s->parms.p*s->parms.j;
+                        /* mapping_frame_buf holds re,im halves */
+                        int pending = s->mapping_frame_count/2;
+                        int ahead = s->v90_t3_b1_symbols - 1 - pending;
+
+                        if (span > 0  &&  ahead >= 0  &&  (ahead & 1) == 0
+                            &&  s->v90_t3_b1_symbols == 8*s->parms.p)
+                        {
+                            s->input_4d = (ahead/2) % span;
+                            /* The constraint itself starts with data frame
+                               1.  Switched on for frame 0's last mapping
+                               frame (the one still buffered), it put a
+                               40-bit burst into the Diva's idle marks
+                               (reference-data/diva-v90-rtp-loss); from the
+                               next frame boundary -- or 16 or 32 pairs
+                               later -- the stream is identical and clean. */
+                            /* Counted down before each pair's metric
+                               update, so +1 lands it on the boundary pair. */
+                            s->v0_seed_delay = 4*s->parms.p - s->input_4d % (4*s->parms.p) + 1;
+                            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                                       "Rx - V0 epoch seeded at 4D pair %d of frame 0 "
+                                       "(B1 end, %d symbols not yet decoded); "
+                                       "U0 constraint from frame 1 (9.6.3.2)\n",
+                                       s->input_4d, pending + 1);
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                     /* ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n
                        data frames from the phase B1 pins.  It has to happen
                        HERE and not at acquisition: applied while B1 is still
@@ -18177,6 +18239,24 @@ static int v34_v0_at(const v34_rx_state_t *s, int pair)
 #define V34_V0_EPOCH_MARGIN         8
 #define V34_V0_EPOCH_MAX_MISSES     22
 
+/* ME_V90_V0_SEED=0: start V.90 upstream DATA with the V0 epoch unknown and
+   the U0 constraint off, as before 2026-11-12, instead of seeding it at
+   B1's end (see the B1-end handler). */
+static bool v34_rx_v90_v0_seed_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *v = getenv("ME_V90_V0_SEED");
+
+        enabled = (v == NULL  ||  *v == '\0'  ||  atoi(v) != 0);
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* (Re)start V0 epoch acquisition, with the U0 constraint off until it
    succeeds.  Only the 16-state code with h=0 has the C0=0 parity check this
    relies on (9.6.3.2, Figure 10). */
@@ -18189,6 +18269,7 @@ static void v34_rx_arm_v0_acquisition(v34_rx_state_t *s)
             zero_h = false;
     /*endfor*/
     s->viterbi.zero_precoder = false;
+    s->v0_seed_delay = 0;
     s->v0_acquiring = false;
     s->v0_tracking = (s->viterbi.state_count == 16  &&  zero_h);
     s->v0_pairs = 0;
@@ -18296,6 +18377,9 @@ static void v34_rx_acquire_v0(v34_rx_state_t *s)
     }
     s->v0_u[n%5] = (label[1] - label[0]) & 1;
     s->v0_input[n%5] = conv_encode_input[label[0]][label[1]];
+    if (s->v0_seed_delay > 0  &&  --s->v0_seed_delay == 0  &&  s->v0_tracking)
+        s->viterbi.zero_precoder = true;
+    /*endif*/
     if (s->v0_tracking)
     {
         /* Keep the five-deep history indexed consistently while the pair

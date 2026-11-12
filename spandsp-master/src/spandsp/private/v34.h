@@ -1995,6 +1995,9 @@ typedef struct
     bool v0_tracking;
     int v0_window_pairs;
     int v0_track_pairs;
+    /* 4D pairs until a V0 epoch seeded at V.90 B1's end turns the U0
+       constraint on: it starts at the next data-frame boundary. */
+    int v0_seed_delay;
     uint16_t v0_half[512];
 
     /*! \brief Buffer to accumulate 8 equalized 2D symbols (as Q9.7 re,im pairs)

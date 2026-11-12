@@ -18,7 +18,8 @@
  *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
  *                    [--expect-hangup] [--expect-no-connect] [--payload-lines N]
  *                    [--payload-printable PREFIX] [--payload-reps N]
- *                    [--payload-random-bytes N]
+ *                    [--payload-random-bytes N] [--payload-first]
+ *                    [--delay-frames N] [--delay-to-call N] [--delay-to-answer N]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
  * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
@@ -59,6 +60,15 @@
  * --payload-on-connect starts each DTE's payload on its own CONNECT, as a
  * real terminal does, not half a second after both ends report one: data
  * the far end is not yet taking is then lost (on V.14) or retransmitted.
+ *
+ * --payload-first requires each side's payload to be the first thing its
+ * peer's DTE receives after the CONNECT line: the default only finds it
+ * somewhere in the stream, which passes a V.14 call that delivers junk
+ * characters ahead of it (multi_line_test, 2026-11-12).
+ *
+ * --delay-frames N makes each direction of the line N whole 20 ms frames
+ * longer (--delay-to-call / --delay-to-answer set one direction), as a SIP
+ * path's packetisation and playout do; the bare pair has almost none.
  *
  * --hold-seconds N keeps the call in data mode N seconds longer after the
  * payload, before any --X-after command.
@@ -302,13 +312,48 @@ static int write_full(int fd, const void *buf, size_t len)
     return 0;
 }
 
+/* --delay-frames N: each direction of the line is N whole frames (20 ms
+   each) long, as a SIP path's playout and packetisation make it.  The pair
+   is otherwise sample-synchronous with no delay at all, which hid a V.90
+   startup fault that only a round trip of 40 ms more shows (multi_line_test,
+   2026-11-12).  --delay-to-call / --delay-to-answer set one direction. */
+#define MAX_DELAY_FRAMES 50
+static int g_delay_frames[2];   /* [k]: frames of delay into side k */
+static uint8_t g_delay_ring[2][MAX_DELAY_FRAMES][2*FRAME];
+static int g_delay_pos[2];
+
+static void delay_init(int alaw)
+{
+    for (int k = 0; k < 2; k++)
+        for (int f = 0; f < MAX_DELAY_FRAMES; f++)
+            memset(g_delay_ring[k][f], alaw ? 0xD5 : 0xFF, 2*FRAME);
+}
+
+/* The frame side k hears now: what the other side sent g_delay_frames ago. */
+static const uint8_t *delay_line(int k, const uint8_t *from)
+{
+    uint8_t *slot;
+
+    if (g_delay_frames[k] <= 0)
+        return from;
+    slot = g_delay_ring[k][g_delay_pos[k]];
+    {
+        static uint8_t out[2][2*FRAME];
+
+        memcpy(out[k], slot, 2*FRAME);
+        memcpy(slot, from, 2*FRAME);
+        g_delay_pos[k] = (g_delay_pos[k] + 1) % g_delay_frames[k];
+        return out[k];
+    }
+}
+
 /* One frame of the line for side k: send it what the other side transmitted,
    read back what it transmits next. */
 static int exchange(side_t *side, int k, const uint8_t *from, uint8_t *next)
 {
     uint8_t header[2] = { FRAME & 0xFF, FRAME >> 8 };
     uint8_t rx[3*FRAME*sizeof(int16_t)];
-    size_t len = bearer(k, from, rx);
+    size_t len = bearer(k, delay_line(k, from), rx);
     size_t back = side[k].linear ? FRAME*sizeof(int16_t) : FRAME;
 
     return write_full(side[k].to_fd, header, 2) || write_full(side[k].to_fd, rx, len)
@@ -447,6 +492,7 @@ int main(int argc, char **argv)
     int payload_lines = 12;
     const char *payload_printable = NULL;
     int payload_reps = 4;
+    int payload_first = 0;
     int payload_random_bytes = 0;
     int payload_start_frame = -1;
     int fax_hdlc = 0;
@@ -512,6 +558,22 @@ int main(int argc, char **argv)
             fdm_call_linear = 1;
         } else if (!strcmp(argv[i], "--dte-stall-seconds") && i + 1 < argc) {
             dte_stall_seconds = atof(argv[++i]);
+        } else if ((!strcmp(argv[i], "--delay-frames")
+                    || !strcmp(argv[i], "--delay-to-call")
+                    || !strcmp(argv[i], "--delay-to-answer")) && i + 1 < argc) {
+            int n = atoi(argv[i + 1]);
+
+            if (n < 0 || n > MAX_DELAY_FRAMES) {
+                fprintf(stderr, "%s must be 0..%d\n", argv[i], MAX_DELAY_FRAMES);
+                return 2;
+            }
+            if (strcmp(argv[i], "--delay-to-answer"))
+                g_delay_frames[0] = n;
+            if (strcmp(argv[i], "--delay-to-call"))
+                g_delay_frames[1] = n;
+            i++;
+        } else if (!strcmp(argv[i], "--payload-first")) {
+            payload_first = 1;
         } else if (!strcmp(argv[i], "--gap-ms") && i + 1 < argc) {
             gap_ms = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--gap-after-ms") && i + 1 < argc) {
@@ -606,6 +668,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "--gap-ms needs a byte-exact bearer, not --fdm-slot\n");
         return 2;
     }
+    if ((g_delay_frames[0] || g_delay_frames[1]) && fdm_slot >= 0) {
+        /* the delay line idles with G.711 silence, not linear samples */
+        fprintf(stderr, "--delay-frames needs a byte-exact bearer, not --fdm-slot\n");
+        return 2;
+    }
     if (fdm_call_linear && fdm_slot < 0) {
         fprintf(stderr, "--fdm-call-linear needs --fdm-slot\n");
         return 2;
@@ -690,6 +757,7 @@ int main(int argc, char **argv)
 
     for (int k = 0; k < 2; k++)
         memset(tx[k], side[k].linear ? 0 : alaw ? 0xD5 : 0xFF, sizeof(tx[k]));
+    delay_init(alaw);
     frames = (int) (seconds * 8000.0 / FRAME);
     for (int f = 0; f < frames; f++) {
         uint8_t next[2][2*FRAME];
@@ -962,6 +1030,21 @@ int main(int argc, char **argv)
             printf("  %-6s FAIL: its DTE text did not arrive intact at the %s side\n",
                    s->name, side[1 - k].name);
             failed = 1;
+        } else if (payload_first && !expect_hangup && !no_connect) {
+            /* The far DTE's stream: its CONNECT line, then this payload. */
+            const side_t *f = &side[1 - k];
+            const char *c = memmem(f->dte, f->dte_len, "CONNECT", 7);
+            const char *eol = c ? memmem(c, f->dte_len - (size_t)(c - f->dte), "\r\n", 2) : NULL;
+            size_t at = eol ? (size_t)(eol + 2 - f->dte) : f->dte_len;
+
+            if (at + s->payload_len > f->dte_len
+                || memcmp(f->dte + at, s->payload, s->payload_len)) {
+                const char *hit = memmem(f->dte, f->dte_len, s->payload, s->payload_len);
+
+                printf("  %-6s FAIL: %zd octets reached the %s DTE between CONNECT and its text\n",
+                       s->name, hit ? (ssize_t)(hit - (f->dte + at)) : -1, f->name);
+                failed = 1;
+            }
         }
     }
     /* ENGINE_PAIR_DTE_DUMP=PREFIX writes each side's whole DTE stream to

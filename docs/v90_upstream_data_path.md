@@ -3368,3 +3368,80 @@ before MP, and only lowered after the receiver had lost the constellation.
   against a 35.9 dB need, still 0.9 dB above the 34.9 dB fall-back trigger,
   so it neither falls back nor probes up. While the carrier is lost the
   controller does nothing; the discontinuity path owns that case.
+
+## The V0 epoch is known at B1's end, so DATA starts with the trellis on (2026-11-12)
+
+Symptom: every `multi_line_test --mode v90` line's DTE got four junk
+characters (`09 bd d9 ff`) ahead of its V.14 payload. The fault was bisected
+to 0dfb67f6 (TX frames sent at the next tick's start), and `ME_TX_DEFER=0`
+cleared it. That commit is not the fault: it only adds 20 ms each way.
+`engine_pair_test --delay-frames N` reproduces it with no SIP at all. Delay 0
+is clean; 1, 2 or 4 extra frames, in either direction, give the same junk.
+
+Where it came from: the caller's V.34 TX bit stream (`V34_PRIMARY_TX_BIT_DUMP`)
+and the answerer's data-stack RX stream (`DS_RX_BIT_DUMP`) align at offset 0.
+They differ in only 15 bits, all inside a 37-bit window at data bit 6449, about
+207 ms into DATA. That is one or two hard symbol errors, followed by the
+descrambler's 18/23-tap echoes. The channel is a byte-exact FIFO, so this was
+µ-law quantisation noise at 37 dB. The 16-state code would have corrected it,
+but it was not yet constrained.
+
+The V0 epoch tracker (Figure 10 parity, V.34 9.6.3.2) is armed at B1's end
+with the U0 constraint off. On every call it found the epoch 60 4D pairs from
+where the counter stood, after one superframe of evidence (448 pairs, about
+280 ms). Until then the Viterbi decoder was a hard slicer. Whether a noise
+error fell into that window depended on how the equalizer had trained, and a
+longer round trip changes that.
+
+The 60 is not something that has to be measured:
+
+- While B1 runs, the receiver re-parks at superframe frame j−1 at the end of
+  every B1-matching frame (V.34 10.1.3.1: B1 carries the final frame's
+  inversions).
+- B1's end is only seen at the end of the first DATA frame, which V.90 9.4.2.5
+  makes frame 0 of a new superframe. That frame was decoded as j−1 and the
+  counter wrapped to 0.
+- The check fires before its own symbol is decoded, with the rest of the
+  mapping frame still buffered (`mapping_frame_count`/2 = 7 symbols).
+
+So the next 4D pair the decoder takes is pair (b1_symbols − 1 − pending)/2 =
+(128 − 1 − 7)/2 = 60 of frame 0, however many B1 frames the peer sent.
+
+The receiver now seeds `input_4d` there at B1's end; the log line is
+"V0 epoch seeded at 4D pair 60". The U0 constraint follows at the next
+data-frame boundary (pair 64). The tracker still runs, and moves or drops the
+epoch on parity exactly as before. `ME_V90_V0_SEED=0` restores acquisition
+from scratch.
+
+Two conditions came from real-peer replays:
+
+- **The constraint starts at frame 1, not at the seed.** On the Diva capture
+  (`reference-data/diva-v90-rtp-loss`), switching it on for frame 0's last,
+  still-buffered mapping frame put a 40-bit burst into the idle marks. From
+  the frame boundary, or 16 or 32 pairs later, the stream is identical and
+  clean.
+- **The seed is applied only if a B1 frame matched the template first.** That
+  match proves the placement, and it is what ran the re-parking this
+  corrects. On the MT5634 at 9600 (`rf-mt5634-v90-b1`), B1 never matched (fit
+  0%, 4-point placement, "ended after 1 data frames", frame error 13.2). That
+  placement was a mapping frame late, and parity put the epoch 4 pairs on,
+  not 60. Seeding 60 there cost the first 1200 bits (91% ones), so that case
+  stays with the tracker.
+
+Results:
+
+- **Our analogue caller:** the tracker never moves the seeded epoch, and
+  payloads are byte-exact in both directions at delays 0, 1, 2 and 4.
+- **Multi-line:** both V.90 slow rows pass.
+- **The Diva (a real peer), graded against the ODP it sends:**
+  - With the seed off, its parity acquisition lands on "advance 60",
+    confirming the seed on foreign hardware.
+  - With the seed on, the stream decodes cleanly in all five regions where
+    the seed-off run has errors: two bursts in the idle marks (72 and 9
+    zeros) and three garbled stretches of ODP.
+- **The new fast row** (`--delay-frames 2 --payload-first`) fails with the
+  seed off: "4 octets reached the answer DTE between CONNECT and its text".
+
+`engine_pair_test` used to grade only that the payload appeared somewhere in
+the stream, which is why junk ahead of it went unnoticed. Use
+`--payload-first` for any V.14 row.
