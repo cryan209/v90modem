@@ -915,4 +915,7 @@ Built in `/root/vpcm-fix6` (ae59c34a plus the commit's `modem_engine.c`,
 `v90.c`, `v90.h`, checked byte for byte), md5 ae2f2026…, kept as
 `/opt/v90ras/sip_v90_modem.121c6c53`; the previous binary is
 `sip_v90_modem.pre-121c6c53`. Only `v90ras` was restarted, with no call up.
-Not yet verified live.
+Live, MT9234 3 of 3 pass (46666-48000/26400, 175/175, 175/175, 174/174
+pings): each logs "the peer's CP enables at most 26400 bps", with no
+renegotiation or retrain in 180 s (2 of 3 passed before, the third lost
+after the 28800 ask).

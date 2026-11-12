@@ -1676,6 +1676,8 @@ The ask is now bounded by the latest CP's mask (`v90_peer_upstream_max_bps()`),
 the V.90 counterpart of the V.34 MP guard. The fast-tier row (an analogue
 caller at `AT+MS=V90,0,0,24000`) asks 24000 once. On the old code it asks
 31200 and settles at 24000.
+Live on 121c6c53, the MT9234 is 3 of 3: 175/175, 175/175 and 174/174 pings,
+no renegotiation or retrain in 180 s.
 
 **Open: the CX offers only 9600 upstream to v90ras.** On the test answerer
 (2026-11-12, `/root/vg/f4cx-*`), the same modem on the same route sent a
