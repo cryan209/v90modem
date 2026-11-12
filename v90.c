@@ -480,6 +480,52 @@ static int v92_jd_extra_reps(void)
     return (value && *value) ? atoi(value) : 0;
 }
 
+/* V.92 9.5.1.1.8: after Su-bar the digital modem completes "the current Jd
+ * sequence" once it "has determined the proper phase adjustment", so how
+ * many whole Jd repetitions go out is ours to choose.  It decides the
+ * scrambler state Jp starts from: TRN1d starts the GPC scrambler from zero
+ * (8.4/V.90) and Jd continues it, so after a fixed TRN1d the state is a
+ * function of the repetition count alone (Proxmox rig 2026-11-12: 4368bf
+ * both at 66+7 skipped and at 68+5 sent repetitions).  And slmodemd's Phase
+ * 4 verdict is a function of that state alone: its equaliser, seeded by Jp,
+ * drifts through the DIL it requested by an amount Jp's content sets
+ * (docs/v92_quick_connect.md, "It is Jp's content").  One call per state,
+ * ratio against its 1.5 retrain limit: 4da0f8 2.39, 79fcae 2.46, 382005
+ * 1.98, 0caa85 2.43, 4368bf 2.65/3.05; 547923 1.354 and 38969c 1.398
+ * trained.  Left to Su-bar detection, the count followed RTP frame timing
+ * in short Phase 1 (63 repetitions before 89575b3e/0dfb67f6, 66 after),
+ * and PCM upstream came and went with it.
+ *
+ * So Jd is held, whole repetitions at a time, until the state is one of
+ * these, for at most V92_JD_HOLD_MAX_REPS (9 ms each).  The scrambler is
+ * never stepped: a jump at Jp would be compliant in principle (the
+ * descrambler self-synchronises) but costs the analogue modem Jp's framing
+ * for 23 bits, and our own analogue receiver, which frames Jp once, then
+ * never decodes it.  ME_V92_JP_STATES=<hex,...> replaces the list, =none
+ * turns the hold off. */
+#define V92_JD_HOLD_MAX_REPS 8
+static int v92_jp_states(uint32_t *states, int max)
+{
+    const char *value = getenv("ME_V92_JP_STATES");
+    const char *p;
+    int n = 0;
+
+    if (!value || !*value)
+        value = "547923,38969c";
+    if (strcmp(value, "none") == 0)
+        return 0;
+    for (p = value; *p && n < max; ) {
+        char *end;
+        unsigned long v = strtoul(p, &end, 16);
+
+        if (end == p)
+            break;
+        states[n++] = (uint32_t)(v & 0x7FFFFF);
+        p = (*end == ',') ? end + 1 : end;
+    }
+    return n;
+}
+
 static int v90_jd_resync_symbols(void)
 {
     const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
@@ -612,6 +658,7 @@ struct v90_state_s {
     bool             jd_terminated_by_s;
     bool             jd_terminated_by_su;
     int              jd_extra_reps_left; /* ME_V92_JD_EXTRA_REPS diagnostic */
+    int              jd_hold_reps;       /* V.92 Jd held for Jp's state (v92_jp_states) */
     /* Set when WAIT_JA was entered from the Jd no-S resync rather than at the
      * start of Phase 3, so the fallback back to Sd can use a deadline that
      * fits inside the peer's WaitForSd patience. */
@@ -4077,6 +4124,29 @@ static void v90_reneg_clock_advance(v90_state_t *s, int symbols)
     }
 }
 
+/* Another whole Jd repetition before Jp (v92_jp_states())?  Called at a Jd
+ * repetition boundary after Su-bar, with the scrambler where Jp would start.
+ * Holds only if a listed state is reached within V92_JD_HOLD_MAX_REPS
+ * repetitions in all; otherwise Jp starts now, as it always did. */
+static bool v92_jd_hold_for_jp(v90_state_t *s)
+{
+    uint32_t states[8];
+    int n = v92_jp_states(states, 8);
+    v90_scrambler_t ahead = s->scrambler;
+
+    for (int k = s->jd_hold_reps; k <= V92_JD_HOLD_MAX_REPS && n > 0; k++) {
+        uint32_t at = ahead.sr & 0x7FFFFF;
+
+        for (int i = 0; i < n; i++) {
+            if (states[i] == at)
+                return k > s->jd_hold_reps;
+        }
+        for (int b = 0; b < V90_JD_BITS; b++)
+            (void)v90_scramble_bit(&ahead, (s->jd_bits[b / 8] >> (b % 8)) & 1);
+    }
+    return false;
+}
+
 static uint8_t v90_phase3_codeword(v90_state_t *s)
 {
     int sign;
@@ -4259,6 +4329,9 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             if (s->jd_terminate_requested && s->jd_bit_pos == 0
                 && s->jd_extra_reps_left > 0)
                 s->jd_extra_reps_left--;
+            else if (s->jd_terminate_requested && s->jd_bit_pos == 0
+                     && s->v92_phase3 && v92_jd_hold_for_jp(s))
+                s->jd_hold_reps++;
             else if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
                 /* Say which one actually terminated Jd.  This used to print
                  * "S detected" unconditionally, including when the interop
@@ -4277,8 +4350,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     for (int i = 0; i < skip * V90_JD_BITS; i++)
                         s->diff_enc ^= v90_scramble_bit(&s->scrambler, v90_get_jd_bit(s));
                     fprintf(stderr,
-                            "[V92] Phase 3: Su sequence complete, finished Jd after %d symbols; starting Jp (scrambler %06x, sign %d)\n",
-                            s->sample_count, s->scrambler.sr & 0x7fffff, s->diff_enc);
+                            "[V92] Phase 3: Su sequence complete, finished Jd after %d symbols (%d held for Jp's state); starting Jp (scrambler %06x, sign %d)\n",
+                            s->sample_count, s->jd_hold_reps, s->scrambler.sr & 0x7fffff, s->diff_enc);
                     s->tx_phase = V90_TX_JP;
                     s->jp_bit_pos = 0;
                 } else {
@@ -5259,6 +5332,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->jd_terminate_requested = true;
             s->jd_terminated_by_su = true;
             s->jd_extra_reps_left = v92_jd_extra_reps();
+            s->jd_hold_reps = 0;
             fprintf(stderr,
                     "[V92] Phase 3: Su-to-S-bar-u detected; completing current Jd\n");
             return true;

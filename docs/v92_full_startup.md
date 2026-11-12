@@ -642,9 +642,56 @@ TRN2u sigma of 37.8 instead of 36000 on 24.6, and slmodemd retrains it.
 Ruled out as the cause: the vendored pjproject (current sources against the
 5 November pjproject libraries still read 7800), a 192T Ri
 (`V90_RI_MIN_SYMBOLS=192`) and `ME_V90_SD_RTD_HOLD=0` (both left Jd at 4752).
-Open: making the Jp start state independent of how many Jd repetitions
-happened to be sent, or finding what in that state slmodemd's equaliser
-objects to.
+### Jd held for Jp's scrambler state (2026-11-12)
+
+The Jp start state is a function of the Jd repetition count alone. TRN1d
+starts the GPC scrambler from zero (8.4/V.90) and Jd continues it. 4368bf
+came up both at 66 sent + 7 skipped repetitions and at 68 sent + 5
+skipped.
+
+slmodemd's verdict is a function of that state alone. One call per state
+(`ME_V92_JD_SKIP_REPS`, Jd 4752 symbols), Phase 4 ratio against its 1.5
+limit:
+
+| Jp start state | ratio | result |
+|---|---|---|
+| 4da0f8 (66 reps, the default) | 2.39 | retrain, PCM offer withdrawn |
+| 79fcae | 2.46 | retrain |
+| **547923** (68 reps) | **1.354** | trained |
+| **38969c** (69 reps) | **1.398** | trained |
+| 382005 | 1.98 | retrain |
+| 4368bf | 2.65 / 3.05 | retrain |
+| 0caa85 | 2.43 | retrain |
+
+V.92 9.5.1.1.8 leaves it to the digital modem when it "has determined the
+proper phase adjustment" and completes Jd, so the repetition count is
+ours. After Su-bar, Jd is now held one whole repetition (9 ms) at a time
+until the scrambler reaches a listed state (547923, 38969c), and only when
+one is within 8 repetitions; otherwise Jp starts as before
+(`v92_jd_hold_for_jp()`, `ME_V92_JP_STATES=none` turns it off).
+
+The obvious alternative was to load a fixed state into the scrambler at
+Jp. 8.6.3 constrains only the differential encoder, and the analogue
+modem's descrambler self-synchronises, so it is compliant on paper. But
+the jump garbles Jp's first 23 descrambled bits. Our own V.92 analogue
+receiver frames Jp once and never re-hunts, so it then never decodes Jp:
+five `+PQC` engine-pair rows failed (B1d timeout). Holding Jd keeps the
+scrambler continuous.
+
+Live on the Proxmox rig (60ecf54c plus the hold, `+PQC=0`,
+`+MS=92,0,300,56000`): **5 of 5** calls held 2 repetitions (Jd 4752 ->
+4896), started Jp at 547923, read slmodemd's ratio at 1.317 every time,
+and came up first attempt with **PCM upstream 36000 / downstream 54666**,
+LAPM connected. The 6d377c76 baseline was 7 of 7 retrains into a withdrawn
+offer. Two 240 s calls with numbered lines both ways were gapless: 87450
+and 87550 lines up, 87950 and 87850 down (`qc_slm_pve.sh`, `PAY_DELAY=45`).
+f8d32c64, on 5 November, carried 49350 / 49600 at 53333/36000.
+
+The listed states are slmodemd's preference. Any state is equally valid to
+a compliant analogue modem, and the hold only moves Jp by whole
+repetitions. Another peer may prefer other states; this has been measured
+against slmodemd only. The state also moves with TRN1d's length
+(`ME_V90_TRN1D_SYMBOLS`), and when none is reachable the hold does nothing.
 
 Bisecting on CT 117: extract only `*.c`, `*.h` and `makefile` from the
 archive with `tar -x -m` (touching `Makefile.am` sends spandsp to automake,
