@@ -1726,6 +1726,14 @@ So:
   0x0004. The last calls with mask 0x1FFF were `/root/vg/f4cx-6` (2026-11-12
   06:12). The first with 0x0004 was v90ras at 00:01 on 2026-11-13. The cause
   lies in the CX or its line (AudioCodes 6314) in that window.
+- **The MT9234 against the same Eicon answerer (7930, `AT+MS=V90`, two
+  120 s holds) does not get V.90 at all.** Its `ATI11` reports V.34 both
+  times: 26400 TX / 31200 RX with one local retrain, then 24000 / 31200.
+  Both had LAPM/V.42bis and a 177 ms round trip. Against our server it runs
+  V.90 46666-48000 / 26400 (3 of 3 since 121c6c53), so its upstream is
+  about the same either way. The CX, by contrast, gets V.90 from 7930. The
+  two modems reach 7930 by different paths (Cisco FXS 7803 and AudioCodes
+  6314), so this does not compare the digital modems on one line.
 - **TRN2d 6000 does nothing measurable on this modem.**
 - **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
