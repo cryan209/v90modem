@@ -904,3 +904,15 @@ B1"). Built in `/root/vpcm-fix6` (4f489d6a plus the commit's `v34rx.c` and
 `/opt/v90ras/sip_v90_modem.ae59c34a`; the previous binary is
 `sip_v90_modem.pre-ae59c34a`. Only `v90ras` was restarted, with no call up.
 Not yet verified live.
+
+## Deployed 121c6c53 (2026-11-13 00:26)
+
+V.90 upstream fall-forward never asks above the peer's CP upstream mask
+(§9.4.2.4). Live, before this, the MT9234 was asked 28800 against its 26400
+and the CX93001 26400 against its 9600, on every call
+(`docs/v90_hardware_interop.md`, "USB modems into v90ras after ae59c34a").
+Built in `/root/vpcm-fix6` (ae59c34a plus the commit's `modem_engine.c`,
+`v90.c`, `v90.h`, checked byte for byte), md5 ae2f2026…, kept as
+`/opt/v90ras/sip_v90_modem.121c6c53`; the previous binary is
+`sip_v90_modem.pre-121c6c53`. Only `v90ras` was restarted, with no call up.
+Not yet verified live.
