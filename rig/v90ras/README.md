@@ -857,3 +857,16 @@ The same night `tools/soak/qc_slm_pve.sh` restarted `v90ras` and `v90isdn`
 nine times between 23:52 and 00:07 (its `pkill -x sip_v90_modem`, fixed in
 bf4a3fbb). The journal shows no call connected on either service in the 12 h
 before, so nothing was lost.
+
+## Deployed 60ecf54c (2026-11-12 19:32)
+
+V.90 upstream B1 re-acquisition after a retrain or renegotiation: the
+out-of-sample check takes out the peer's carrier drift, the 4-point placement
+is tried when a template is refused out of sample, a 4-point placement is
+never committed white, an acquisition needs to be within 0.30 of the grid,
+and V.90 search steps are three packets apart
+(`docs/v90_hardware_interop.md`, item 7). Built in `/root/vpcm-fix6`
+(bf4a3fbb plus the commit's `v34rx.c` and `private/v34.h`, checked byte for
+byte), kept as `/opt/v90ras/sip_v90_modem.60ecf54c`; the previous binary is
+`sip_v90_modem.pre-60ecf54c`. Only `v90ras` was restarted, with no call up;
+v90isdn takes the binary at its next restart. Not yet verified live.
