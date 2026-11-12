@@ -1559,3 +1559,29 @@ Still open on the CX93001: why its B1 after a renegotiation fits 55% where
 the start-up B1 fits 99.9%, and the out-of-sample check that follows B1 with
 a fixed filter (0.418 from the grid at start-up, 0.628 after the
 renegotiation; a -44 ppm carrier turns 0.06 rad across its 256 symbols).
+
+### Regression check on the Diva 4BRI cards (2026-11-12, bf4a3fbb on v90ras)
+
+Diva V90A caller on eicon420 (`/dev/ttyds6`, `CTRL=7` and `CTRL=8`, the
+controllers clocked to the Cisco), dialling 2950, 180 s holds with a PPP ping
+a second graded byte for byte (`/tmp/diva_batch.sh`, `ppp_ping_soak.py`).
+The Diva is loop-timed (+2 ppm measured), so none of the own-clock fixes
+should act on it, and the pre-MP measurement reads the same either way (37.0
+dB by one filter, 37.0 tracked).
+
+**10 of 10** calls `CONNECT 40000` (27-31 s) and kept PPP up for 180 s; 8 of
+10 pass the 95% ping criterion (174-176 of 174-177 intact). Seven ran
+40000/31200 for the whole call with no event, upstream 36.4-36.8 dB. Three
+had retrains, all opened by the Diva ("Supervisor retrain start 20 0" in its
+mlog, 17-25 s or 82 s into data, RTP clean both ways at our end):
+
+- vg8-2: retrained to V.90 38666/28800, where our upstream re-acquired on a
+  poor B1 (fit 98.7%, 0.495 from the grid out of sample, 28-29 dB against
+  36.7 at start-up) and stayed white; second Diva retrain 16 s later, V.34
+  14400 for the rest. 118 of 174 pings.
+- vg7-4: the retrain came back as V.34 28800. 120 of 177 pings.
+- vg7-5: recovered to V.90 31200 (0.097 and 0.164 out of sample); 174 of 176.
+
+The poor post-retrain acquisition of vg8-2 is the open one: an accepted B1
+at 0.4-0.65 from the grid after a retrain or renegotiation on these cards.
+Why the Diva retrains in the first place is not visible from our side.
