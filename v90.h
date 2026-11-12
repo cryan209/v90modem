@@ -429,6 +429,7 @@ void v90_set_upstream_rate_limit(v90_state_t *s, int bps);
  * §10.4.2.4): both modems use the highest rate enabled in both MP and CP, so
  * this, not the rate V.34 trained at, is what the peer transmits. */
 int v90_mp_upstream_max_bps(const v90_state_t *s);
+int v90_peer_upstream_max_bps(const v90_state_t *s);
 /* V.250 6.4.1 +MS receive minimum: MP's upstream mask then leaves out the
  * rates below it.  0 clears it. */
 void v90_set_upstream_rate_floor(v90_state_t *s, int bps);

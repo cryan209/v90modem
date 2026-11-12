@@ -1700,6 +1700,15 @@ int v90_mp_upstream_max_bps(const v90_state_t *s)
     return v90_upstream_mask_max_drn(v90_capped_upstream_mask(s))*2400;
 }
 
+/* §9.4.2.4: the highest upstream rate the analogue modem's own latest CP
+ * enables, before any limit of ours.  0 when no CP has been received. */
+int v90_peer_upstream_max_bps(const v90_state_t *s)
+{
+    if (!s)
+        return 0;
+    return v90_upstream_mask_max_drn(s->cp_frame.upstream_rate_mask)*2400;
+}
+
 void v90_set_upstream_rate_floor(v90_state_t *s, int bps)
 {
     if (!s || bps < 0)

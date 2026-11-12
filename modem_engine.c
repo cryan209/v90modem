@@ -10057,6 +10057,7 @@ static int64_t g_v90_ua_good_since_ms = 0;
 static int64_t g_v90_ua_last_ms = 0;
 static int64_t g_v90_ua_data_since_ms = 0;
 static int64_t g_v90_ua_log_ms = 0;
+static bool g_v90_ua_peer_cap_logged = false;
 
 static void v90_upstream_adapt_reset_locked(void)
 {
@@ -10070,6 +10071,7 @@ static void v90_upstream_adapt_reset_locked(void)
     g_v90_ua_last_ms = 0;
     g_v90_ua_data_since_ms = 0;
     g_v90_ua_log_ms = 0;
+    g_v90_ua_peer_cap_logged = false;
     g_v90_ua_test_first_used = false;
     g_v90_ua_peer_ignores_rd = false;
 }
@@ -10215,6 +10217,26 @@ static bool v90_upstream_adapt_locked(void)
         top = g_lim[LIM_MAX_RX];
     if (g_v90_ua_ceiling_bps > 0 && top > g_v90_ua_ceiling_bps)
         top = g_v90_ua_ceiling_bps;
+    /* §9.4.2.4: the analogue modem transmits at the highest rate BOTH
+     * modems enable, and its CP has already said which it enables.  Asking
+     * above that only costs a renegotiation that settles where it was:
+     * live 2026-11-13 the MT9234 (CP mask 0x03FF, 26400) was asked for
+     * 28800 and the CX93001 (mask 0x0004, 9600) for 26400 on every call;
+     * the MT9234's upstream was not re-acquired after one such round and
+     * the call retrained, and each CX ask began a run of renegotiations
+     * that ended in a retrain. */
+    {
+        int peer_max = v90_peer_upstream_max_bps(g_v90);
+
+        if (peer_max > 0 && top > peer_max) {
+            if (!g_v90_ua_peer_cap_logged) {
+                ME_LOG("[ME] V.90 upstream: the peer's CP enables at most %d "
+                       "bps; no step-up above it (§9.4.2.4)\n", peer_max);
+                g_v90_ua_peer_cap_logged = true;
+            }
+            top = peer_max;
+        }
+    }
     {
         int target = v34_rx_data_snr_rate(g_v34, snr - up_margin);
 

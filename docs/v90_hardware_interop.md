@@ -1636,3 +1636,58 @@ mlog, 17-25 s or 82 s into data, RTP clean both ways at our end):
 The poor post-retrain acquisition of vg8-2 is the open one: an accepted B1
 at 0.4-0.65 from the grid after a retrain or renegotiation on these cards.
 Why the Diva retrains in the first place is not visible from our side.
+
+## USB modems into v90ras after ae59c34a (2026-11-13)
+
+This Mac's two USB modems dialling the v90ras pilot 2950, 180 s holds with a
+PPP ping a second graded byte for byte (`tools/soak/ppp_ping_soak.py`,
+`AT+MS=V90`, `ATM0`). The MT9234ZBA arrives on Cisco FXS 7803; the CX93001
+arrives on AudioCodes 6314.
+
+| Modem | Calls | Result |
+|---|---|---|
+| MT9234ZBA | 3 | 2 pass (46666/26400 `CONNECT 46666 V42bis`, 175/175 and 174/175 pings); 1 lost after our fall-forward (below) |
+| CX93001 | 6 | 0 pass: `CONNECT 9600` or none; data dies in renegotiations and retrains, then falls back to V.34 |
+
+The trellis-from-B1 change (ae59c34a) is not implicated. Every start-up B1
+was template-fitted at 99.9% with "V0 epoch kept from B1", and the CX's
+9600 upstream decoded at 32.4-32.7 dB with flags and XID.
+
+**Our fall-forward asked above the peer's own CP (fixed).** On every call
+the V.90 upstream fall-forward asked for a rate the analogue modem's CP did
+not enable:
+
+- The MT9234 (CP upstream mask 0x03FF, 26400) was asked for 28800.
+- The CX93001 (mask 0x0004, 9600 only) was asked for 26400.
+
+§9.4.2.4 has the analogue modem transmit the highest rate both modems
+enable, so each renegotiation settled where it started ("settled at 26400
+bps, not 28800"). The ceiling was learned only afterwards. The ask was not
+free:
+
+- On mt-3 the post-renegotiation B1 never fitted (18-24%, out-of-sample
+  0.488 from the grid). The pings stopped 4 s later and the modem retrained
+  13 s after that. Its USB then dropped mid-retrain: the TUSB3410
+  re-enumerated without firmware, and the bridge had to be restarted.
+- On the CX, each ask began a run of renegotiations ending in "no answer
+  within 32000 symbols" and a retrain.
+
+The ask is now bounded by the latest CP's mask (`v90_peer_upstream_max_bps()`),
+the V.90 counterpart of the V.34 MP guard. The fast-tier row (an analogue
+caller at `AT+MS=V90,0,0,24000`) asks 24000 once. On the old code it asks
+31200 and settles at 24000.
+
+**Open: the CX offers only 9600 upstream to v90ras.** On the test answerer
+(2026-11-12, `/root/vg/f4cx-*`), the same modem on the same route sent a
+292-bit CPt with mask 0x1FFF and ran 50666/26400 on 6 of 6 calls. Against
+v90ras it sends a 428-bit CPt with mask 0x0004 and drn 9 on every call,
+whatever its `+MS`. The modem had been left at
+`+MS: V90,1,9600,33600,9600,56000`; `AT+MS=V90,1,300,33600,300,56000` changed
+nothing.
+
+The candidate difference is v90ras's `sip.env`:
+`ME_V90_MAX_TX_DBM0_CODE=23` (INFO0d declares -13 dBm0, which the CX honours:
+U_INFO 95 -> 79) and `ME_V90_TRN2D_SYMBOLS=6000`, both from the Eicon recipe
+of 9 October. The CX also opens §9.6 renegotiations of its own a few seconds
+into data, and after one of them our upstream did not re-acquire (fit 21%).
+Not yet A/B'd one variable at a time.
