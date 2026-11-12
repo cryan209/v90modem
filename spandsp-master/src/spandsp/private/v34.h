@@ -285,6 +285,21 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     the RasFinder's AudioCodes a 107 ms one moved its playout -- and so our
     echo -- 80 ms later, mid-call (docs/v90_rasfinder_phase4.md, 2026-10-16). */
 #define V34_V90_T3_ACQ_STEP_GAP             192
+/*! T/3 samples between two STEPS of the B1 search (a template, a trellis
+    state, a stage of the 4-point training).  One packet apart was not far
+    enough: a step is a 28-33 ms media callback on the CT 117 host, the next
+    transmit tick starts that much less 20 ms late, and with a step in every
+    packet the lateness adds up.  CX93001 through an AudioCodes, 2026-11-12:
+    three steps in three packets, ticks 0.1, 14.0, 27.1 and 37.7 ms late, the
+    gateway moved its playout and with it our echo by +25 ms ("echo moved +200
+    samples") and the upstream read white until the canceller followed, on
+    one call for the 30 s it lasted.  Three packets apart, one step's 13 ms is
+    made up before the next.  V.90 only: K56flex and x2 keep the one-packet
+    gap (V34_V90_T3_ACQ_STEP_GAP).  The search runs 20-30 steps, so this puts
+    V.90 acquisition about 1.1 s later (MT9234 replays), and the K56flex
+    56000 +10 ppm pair, which has no live evidence for the change, loses its
+    downstream payload at the later acquisition. */
+#define V34_V90_T3_ACQ_STEP_SPACING         576
 #define V34_V90_T3_EMIT_BUDGET              1
 /*! Few, because the fallback has to be REACHABLE.  Holding out for a good
     acquisition is only safe if settling for the best one seen costs a couple
@@ -448,6 +463,17 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     eye reads 0.67/120 = 0.0056, a good one 0.00061), so it has about a
     factor of three either side at the worst rate. */
 #define V34_V90_T3_ACQ_GOOD_SNR             0.002f
+
+/*! ...and, whatever the power, no further from the lattice than this.  The
+    ratio above cannot see a white constellation at a high rate: white is
+    0.667 from the odd-integer grid at ANY power, and at 31200 the symbol
+    power is about 700, so white reads 0.00095 and passes 0.002.  Live
+    against the Diva cards (2026-11-10, ctrl 8) every re-acquisition after a
+    retrain or a 9.6 renegotiation that then lost the upstream was accepted
+    on its first window at 0.392-0.646 (call i8-2: 0.546 at power 709, "good"
+    by the ratio), while every acquisition that held read 0.036-0.176.  0.30
+    splits them with a margin either side; 21600 loopback reads 0.053-0.074. */
+#define V34_V90_T3_ACQ_GOOD_DIST            0.30f
 
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
@@ -1754,6 +1780,9 @@ typedef struct
     /* v34_begin_b1_search_after_mp_ack(): a B1 that the 4-point MP'/E
        training has placed is final; the templates are not tried. */
     bool v90_t3_4point_final;
+    /* ...and that search, K56flex's, steps once a packet
+       (V34_V90_T3_ACQ_STEP_GAP), not V.90's V34_V90_T3_ACQ_STEP_SPACING. */
+    bool v90_t3_packet_steps;
     /*! A 4-point-placed B1's symbol offset is still being searched
         (v34rx.c, the DATA window): one symbol skipped per white window. */
     bool v90_t3_sym_search;

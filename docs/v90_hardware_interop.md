@@ -1560,6 +1560,57 @@ the start-up B1 fits 99.9%, and the out-of-sample check that follows B1 with
 a fixed filter (0.418 from the grid at start-up, 0.628 after the
 renegotiation; a -44 ppm carrier turns 0.06 rad across its 256 symbols).
 
+**7. B1 re-acquisition after a renegotiation (2026-11-12, offline).** Four
+changes in `v34rx.c`'s B1 search:
+
+- **Carrier drift removed before the out-of-sample check.** The check
+  holds the B1 filter still for 256 symbols. The peer's carrier rate is
+  now measured on B1 itself (the angle between its two halves against the
+  template) and taken out first. CX93001 start-up: 0.418 -> 0.215 from the
+  grid.
+- **The 4-point placement gets a second chance.** Before, it was only
+  tried when every template failed *in* sample. After the CX's own 9.6,
+  the wrong template "state 11" fitted 97.6% in sample, was refused out of
+  sample seven times, and the upstream was abandoned. The 4-point
+  placement is now tested the same way (its own carrier rate, zero phase
+  at its first symbol), and is taken when the template is refused. On
+  f4cx-4 it reads 0.266-0.270 and the upstream comes back clean.
+- **The 4-point placement must pass out of sample before it commits.**
+  If the 256 symbols after it have not arrived, the search retries. If
+  they have arrived and are off the lattice, the refusal counts against
+  the windows like any other, instead of re-running the same placement.
+  On `cx93001-connect-without-b1-20261023` it reads 0.597, where the old
+  code handed DATA a white B1 (that route decodes zero valid frames).
+  It now retrains at 9.4.1's B1 deadline; the `fast.list` row asserts
+  that.
+- **A grid-distance limit on "good".** An acquisition also needs to be
+  at most 0.30 from the grid (`V34_V90_T3_ACQ_GOOD_DIST`). The power ratio
+  passes white at 31200. On the Diva re-acquisitions that went on to lose
+  the upstream, the distance was 0.392-0.646; on the ones that held it was
+  0.036-0.176.
+
+Search steps on V.90 are now three packets apart
+(`V34_V90_T3_ACQ_STEP_SPACING`, after one CX call where a step in every
+packet made the gateway move its playout +25 ms). K56flex and x2 keep one
+packet: at three, the K56flex 56000 +10 ppm pair lost its downstream
+payload 4 of 4 times. Cost on V.90: acquisition and LAPM come about
+1.1 s later on the MT9234 replays.
+
+Deterministic replays (`--sync --echo-ref`) of six own-clock calls,
+against bf4a3fbb:
+
+| Call | bf4a3fbb | Now |
+|---|---|---|
+| f4cx-4 | post-9.6 B1 refused 7 times, abandoned | re-acquired, 608/608 windows < 0.3 |
+| f4cx-6 | 5 acquisitions, 165/232 windows clean | 1 acquisition, 91/92 |
+| f4cx-1 | 8/81 windows clean | 46/86 |
+| f4mt-1 | 36/36 | 36/36 |
+
+f4mt-2 and f4mt-5 match until the live fall-forward. The later acquisition
+moves our fall-forward past the S the modem sent in answer to the live
+call's Rd, and the replays diverge there (not a receiver change). **Not
+verified live.**
+
 ### Regression check on the Diva 4BRI cards (2026-11-12, bf4a3fbb on v90ras)
 
 Diva V90A caller on eicon420 (`/dev/ttyds6`, `CTRL=7` and `CTRL=8`, the

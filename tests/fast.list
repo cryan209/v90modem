@@ -1037,7 +1037,9 @@ python3 tools/test_rtp_path_check.py
 ./v90_ja_match_test
 
 # V.90 9.4.1.6: optional error-control fallback cannot replace upstream B1.
-ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 python3 tools/replay_dte_check.py --expect unconnected --require-log "B1 acquired" --require-log "upstream carrier lost" --require-log "CONNECT deferred: upstream carrier lost or recovering" -- ./v90_engine_replay reference-data/artifacts/cx93001-connect-without-b1-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer
+# The 4-point placement on this capture decodes no valid frame; it is refused
+# out of sample (0.597 from the grid) and the 9.4.1 B1 deadline retrains.
+ME_MODE=v90 ME_V90_TRN2D_SYMBOLS=8000 python3 tools/replay_dte_check.py --expect unconnected --require-log "B1 placed from the 4-point signal, out of sample" --require-log "no B1 20000 ms after INFO1a" -- ./v90_engine_replay reference-data/artifacts/cx93001-connect-without-b1-20261023/live-rx.g711 ulaw --fast --sync --echo-ref --sip-answer
 ./v90_b1_state_test
 # Sustained upstream loss is actionable before baseline learning completes.
 python3 tools/test_v90_early_loss.py

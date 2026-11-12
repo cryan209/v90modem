@@ -14827,16 +14827,123 @@ static void v90_t3_cma_abandon(v34_rx_state_t *rx);
 
 enum { V90_T3_SEARCH_FORWARD = 4800 };
 
-/* The far end's symbol clock against ours, from the history before B1.
-   |x|^2 of the matched-filter output carries a line at the symbol rate,
-   fs/3 on this branch; its phase drifts at the clock offset.  On a Conexant
-   CX93001 the drift is a smooth 56 degrees a second (~48 ppm, no slips:
-   tools/measure_timing_slips.py), and a loop started at zero frequency took
-   ~2.5 s to pull in, by which time the sampling instant had fallen 1.4 T/3
-   samples behind and the 24000 upstream collapsed.  A phase that grows by
-   dphi degrees per T/3 sample is a timing drift of 3*dphi/360 samples per
-   sample, i.e. -dphi/40 samples per symbol in v34_gardner terms.  Returns
-   0 (no seed) without at least six 0.2 s windows. */
+/* T/3 samples between two steps of the B1 search (V34_V90_T3_ACQ_STEP_SPACING). */
+static int v90_t3_step_spacing(const v34_rx_state_t *s)
+{
+    return (s->x2_mode  ||  s->v90_t3_packet_steps)  ?  V34_V90_T3_ACQ_STEP_GAP  :  V34_V90_T3_ACQ_STEP_SPACING;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The out-of-sample test of the template path, for the B1 placed from the
+   4-point signal: the 256 symbols after it must sit on the lattice at about
+   the constellation's power, under its own filter, carrier rate and zero
+   phase at its first symbol.  Returns 1 when they do, 0 when they were
+   measured and do not, and -1 when they have not all arrived yet. */
+static int v90_t3_blind_validates(v34_rx_state_t *s)
+{
+    double dist = 0.0;
+    double power = 0.0;
+    double target = (s->v90_t3_cma_n > 0)  ?  s->v90_t3_cma_p2/s->v90_t3_cma_n  :  0.0;
+    int counted = 0;
+    int64_t after;
+
+    if (s->v90_t3_srch_blind_first < 0)
+        return 0;
+    /*endif*/
+    after = s->v90_t3_srch_blind_first + 3*(int64_t) s->v90_t3_b1_symbols;
+    for (int k = 0;  k < V34_V90_T3_VALIDATE_SYMBOLS;  k++)
+    {
+        int64_t at = after + 3*k;
+        complexf_t y;
+        float turn = -s->v90_t3_blind_dphi*(float) (k + s->v90_t3_b1_symbols);
+        float c = cosf(turn);
+        float sn = sinf(turn);
+        float yr;
+        float yi;
+        float tr;
+        float ti;
+
+        if (at - V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_FSE_TAPS > s->v90_t3_raw_count)
+            return -1;
+        /*endif*/
+        y = v90_t3_fse_at(s, s->v90_t3_srch_blind_coeff, at);
+        yr = y.re*c - y.im*sn;
+        yi = y.re*sn + y.im*c;
+        tr = 2.0f*floorf(yr/2.0f) + 1.0f;
+        ti = 2.0f*floorf(yi/2.0f) + 1.0f;
+        dist += (tr - yr)*(tr - yr) + (ti - yi)*(ti - yi);
+        power += yr*yr + yi*yi;
+        counted++;
+    }
+    /*endfor*/
+    dist /= counted;
+    power /= counted;
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 T/3 B1 placed from the 4-point signal, out of sample: "
+             "lattice distance %.3f, symbol power %.1f against %.1f, over %d "
+             "symbols\n",
+             dist, power, target, counted);
+    return (dist <= V34_V90_T3_VALIDATE_ERR
+            &&  (target <= 0.0  ||  power <= V34_V90_T3_VALIDATE_POWER_RATIO*target))  ?  1  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The rate, in radians a symbol, at which the signal turns under filter w
+   across the B1 at `first`: the angle between the mean y.conj(template) of
+   its two halves.  0 when it cannot be measured or looks wrapped.
+   ME_V90_B1_VALIDATE_FIXED=1 returns 0 (the validation as it was). */
+static float v90_t3_b1_carrier_rate(const v34_rx_state_t *s,
+                                    const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                    int64_t first,
+                                    bool conjugate)
+{
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    int n = s->v90_t3_b1_symbols;
+    int half = n/2;
+    complexf_t c0 = {0.0f, 0.0f};
+    complexf_t c1 = {0.0f, 0.0f};
+    float dphi;
+
+    if (half < 16  ||  V34_DIAG_GETENV("ME_V90_B1_VALIDATE_FIXED"))
+        return 0.0f;
+    /*endif*/
+    for (int m = 0;  m < 2*half;  m++)
+    {
+        int64_t at = first + 3*(int64_t) m;
+        complexf_t y = {0.0f, 0.0f};
+        complexf_t e = s->v90_t3_b1[m];
+        complexf_t *acc = (m < half)  ?  &c0  :  &c1;
+
+        if (at - pre + V34_V90_T3_FSE_TAPS > s->v90_t3_raw_count)
+            return 0.0f;
+        /*endif*/
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get(s, at - pre + tap);
+            complexf_t z;
+
+            if (conjugate)
+                x.im = -x.im;
+            /*endif*/
+            z = complex_mulf(&w[tap], &x);
+            y = complex_addf(&y, &z);
+        }
+        /*endfor*/
+        acc->re += y.re*e.re + y.im*e.im;
+        acc->im += y.im*e.re - y.re*e.im;
+    }
+    /*endfor*/
+    if ((c0.re == 0.0f  &&  c0.im == 0.0f)  ||  (c1.re == 0.0f  &&  c1.im == 0.0f))
+        return 0.0f;
+    /*endif*/
+    dphi = atan2f(c1.im*c0.re - c1.re*c0.im, c1.re*c0.re + c1.im*c0.im)/(float) half;
+    if (fabsf(dphi) >= 0.005f)
+        return 0.0f;
+    /*endif*/
+    return dphi;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* The B1 search a CRC-valid CP' starts (v34_v90_begin_b1_search()) looks
    back over the buffered signal with the B1 template alone: no E had been
    seen, so the 4-point fallback was forbidden there.  That left every peer
@@ -14881,6 +14988,16 @@ static bool v90_t3_cpprime_second_pass(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The far end's symbol clock against ours, from the history before B1.
+   |x|^2 of the matched-filter output carries a line at the symbol rate,
+   fs/3 on this branch; its phase drifts at the clock offset.  On a Conexant
+   CX93001 the drift is a smooth 56 degrees a second (~48 ppm, no slips:
+   tools/measure_timing_slips.py), and a loop started at zero frequency took
+   ~2.5 s to pull in, by which time the sampling instant had fallen 1.4 T/3
+   samples behind and the 24000 upstream collapsed.  A phase that grows by
+   dphi degrees per T/3 sample is a timing drift of 3*dphi/360 samples per
+   sample, i.e. -dphi/40 samples per symbol in v34_gardner terms.  Returns
+   0 (no seed) without at least six 0.2 s windows. */
 static float v90_t3_clock_freq(const v34_rx_state_t *s, int64_t from, int64_t to,
                                bool *measured)
 {
@@ -15096,7 +15213,7 @@ search:
         if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
             return;
         /*endif*/
-        s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+        s->v90_t3_srch_step_at = s->v90_t3_raw_count + v90_t3_step_spacing(s);
         /* The MP template's constellation power is a 32000-symbol run of
            the mapper, about 5 ms unoptimised (v34tx.c is), so it is spread
            over these three packets and finished just before
@@ -15174,7 +15291,7 @@ search:
             if (s->v90_t3_raw_count < s->v90_t3_srch_step_at)
                 return;
             /*endif*/
-            s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+            s->v90_t3_srch_step_at = s->v90_t3_raw_count + v90_t3_step_spacing(s);
             s->v90_t3_srch_step++;
             if (s->x2_mode)
                 v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
@@ -15256,7 +15373,7 @@ search:
             if (lo < search_start) lo = search_start;
             if (hi > search_end) hi = search_end;
             s->v90_t3_srch_step++;
-            s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+            s->v90_t3_srch_step_at = s->v90_t3_raw_count + v90_t3_step_spacing(s);
             b1_template_skip_cma = true;
             bool built = v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, initial);
             b1_template_skip_cma = false;
@@ -15330,7 +15447,7 @@ search:
         }
         /*endif*/
         s->v90_t3_srch_built = true;
-        s->v90_t3_srch_step_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_STEP_GAP;
+        s->v90_t3_srch_step_at = s->v90_t3_raw_count + v90_t3_step_spacing(s);
         return;
     }
     /*endif*/
@@ -15359,6 +15476,34 @@ search:
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
                  100.0f*best_match, best_tap, best_trellis);
+        if (want_blind  &&  s->v90_t3_blind_wide)
+        {
+            int verdict = v90_t3_blind_validates(s);
+
+            /* A CP'-anchored placement looks for the 4-point signal's end in
+               whatever has arrived, and E may not have: the "end" can be the
+               edge of the buffer, and the B1 a template would fit is still
+               on its way (CX93001 replay, 2026-11-12: committed 238 symbols
+               before the data it needed, white from the first window).  It
+               commits only once the symbols after it are there and on the
+               lattice.  Until they are there the forward windows carry on and
+               the 4-point training is run again with them.  Once they are
+               there and off the lattice, running it again finds the same end
+               and the same answer (cx93001-connect-without-b1: 0.597 thirteen
+               times, no retrain), so it counts against the windows like any
+               other refusal, and the search gives up to a retrain instead of
+               handing DATA a white B1. */
+            if (verdict < 0)
+                s->v90_t3_blind_tried = false;
+            /*endif*/
+            if (verdict <= 0)
+            {
+                v90_t3_acq_retry_or_abandon(s, "4-point placement not confirmed", search_start, search_end);
+                return;
+            }
+            /*endif*/
+        }
+        /*endif*/
         if (want_blind)
         {
             /* Trained before the templates, and the MP template reloaded a
@@ -15407,10 +15552,25 @@ search:
         double power = 0.0;
         int counted = 0;
 
+        /* The filter under test was solved on B1's 128 symbols and is then
+           held still for 256 more.  A peer on its own clock turns under it:
+           at -44 ppm (CX93001) the carrier moves 0.00016 rad a symbol, 0.05
+           rad by the end of the window, which is a grid unit at the edge of
+           the 26400 constellation.  That is what this check was reading on
+           that modem -- 0.418 from the grid at start-up, accepted with
+           nothing to spare, and 0.628 after its own 9.6 renegotiation,
+           refused seven times while its data mode ran at 32.5 dB -- so take
+           the turn out first.  The rate is measured on B1 itself against the
+           template, between its two halves, as the carrier loop's seed is
+           after the commit; the fit leaves zero phase at B1's middle. */
+        float val_dphi = v90_t3_b1_carrier_rate(s, best_coeff, best_first,
+                                                best_conjugate);
+
         for (int k = 0;  k < V34_V90_T3_VALIDATE_SYMBOLS;  k++)
         {
             int64_t at = after + 3*k;
             complexf_t y = {0.0f, 0.0f};
+            complexf_t yd;
             float t_re;
             float t_im;
 
@@ -15429,10 +15589,18 @@ search:
                 y = complex_addf(&y, &z);
             }
             /*endfor*/
-            t_re = 2.0f*floorf(y.re/2.0f) + 1.0f;
-            t_im = 2.0f*floorf(y.im/2.0f) + 1.0f;
-            dist += (t_re - y.re)*(t_re - y.re) + (t_im - y.im)*(t_im - y.im);
-            power += y.re*y.re + y.im*y.im;
+            {
+                float turn = -val_dphi*((float) k + 0.5f*(float) s->v90_t3_b1_symbols);
+                float c = cosf(turn);
+                float sn = sinf(turn);
+
+                yd.re = y.re*c - y.im*sn;
+                yd.im = y.re*sn + y.im*c;
+            }
+            t_re = 2.0f*floorf(yd.re/2.0f) + 1.0f;
+            t_im = 2.0f*floorf(yd.im/2.0f) + 1.0f;
+            dist += (t_re - yd.re)*(t_re - yd.re) + (t_im - yd.im)*(t_im - yd.im);
+            power += yd.re*yd.re + yd.im*yd.im;
             counted++;
         }
         /*endfor*/
@@ -15478,7 +15646,8 @@ search:
             bool power_ok = (mean_power
                                  <= V34_V90_T3_VALIDATE_POWER_RATIO
                                         *template_power);
-            bool good = power_ok  &&  rel <= V34_V90_T3_ACQ_GOOD_SNR;
+            bool good = power_ok  &&  rel <= V34_V90_T3_ACQ_GOOD_SNR
+                        &&  mean_dist <= V34_V90_T3_ACQ_GOOD_DIST;
             bool passable = power_ok  &&  mean_dist <= V34_V90_T3_VALIDATE_ERR;
             bool retries_left = (s->v90_t3_acq_retries
                                      < V34_V90_T3_ACQ_MAX_RETRIES);
@@ -15564,6 +15733,34 @@ search:
                          s->v90_t3_acq_best_dist, s->v90_t3_acq_best_rel,
                          100.0f*best_match);
                 good = true;
+            }
+            /*endif*/
+            if (!good  &&  s->v90_t3_srch_blind_first >= 0)
+            {
+                /* The template that fitted in sample is not B1.  The B1
+                   placed from the 4-point signal has not been looked at,
+                   because it is only the fallback for a template that FAILS
+                   in sample -- and a wrong template that fits 97% is not
+                   that.  CX93001, 2026-11-12: after its own 9.6
+                   renegotiation its B1 starts from a trellis state no reset
+                   template matches; "state 11" fitted 97.6% to data 0.5 s
+                   further on, was refused out of sample seven times, and the
+                   upstream was abandoned with the 4-point placement sitting
+                   unused.  Give that placement the same test, with its own
+                   carrier rate and zero phase at its first symbol. */
+                if (v90_t3_blind_validates(s) > 0)
+                {
+                    (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+                    memcpy(best_coeff, s->v90_t3_srch_blind_coeff, sizeof(best_coeff));
+                    best_first = s->v90_t3_srch_blind_first;
+                    best_conjugate = false;
+                    best_match = 0.0f;
+                    best_tap = mp_tap;
+                    best_trellis = mp_trellis;
+                    blind = true;
+                    goto commit;
+                }
+                /*endif*/
             }
             /*endif*/
             if (!good)
@@ -20341,6 +20538,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_freq_seed = 0.0f;
     rx->v90_t3_blind_tried = false;
     rx->v90_t3_4point_final = false;
+    rx->v90_t3_packet_steps = false;
     rx->v90_t3_cpprime_anchor = -1;
     rx->v90_t3_blind_wide = false;
     rx->v90_t3_srch_running = false;
@@ -20584,6 +20782,7 @@ SPAN_DECLARE(int) v34_begin_b1_search_after_mp_ack(v34_state_t *s)
     if (begin_rx_data(s, false))
         return -1;
     s->rx.v90_t3_4point_final = true;
+    s->rx.v90_t3_packet_steps = true;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
