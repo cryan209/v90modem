@@ -674,14 +674,16 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # 31200 upstream takes a hard symbol error every few hundred mapping frames,
 # and only the 16-state trellis's parity (V.34 9.6.3, V0 epoch tracked from
 # the code itself) keeps them off the DTE (docs/v90_upstream_data_path.md).
-./engine_pair_test --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "CONNECT deferred: upstream B1 not acquired"
-./engine_pair_test --alaw --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "CONNECT deferred: upstream B1 not acquired"
+./engine_pair_test --payload-first --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "CONNECT deferred: upstream B1 not acquired"
+./engine_pair_test --payload-first --alaw --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "CONNECT deferred: upstream B1 not acquired"
 # ...and from the FIRST data frame.  The V0 epoch used to be found by parity
 # ~280 ms into DATA, unconstrained until then; with 40 ms more round trip a
 # symbol error landed there and put four junk characters ahead of every
-# payload (multi_line_test --mode v90 after the TX defer).  Now seeded at B1's
-# end (v34rx.c, ME_V90_V0_SEED); --payload-first grades what precedes the text.
-./engine_pair_test --expect V90 --delay-frames 2 --payload-first --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 30 --answer-log "V0 epoch seeded at 4D pair 60" --answer-nolog "V0 phase moved"
+# payload (multi_line_test --mode v90 after the TX defer), and on A-law one
+# landed in data frame 0.  Now the constraint runs from B1's first pair
+# (v34rx.c, ME_V90_V0_SEED); --payload-first grades what precedes the text.
+./engine_pair_test --expect V90 --delay-frames 2 --payload-first --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 30 --answer-log "V0 epoch kept from B1: next 4D pair 60" --answer-nolog "V0 phase moved"
+./engine_pair_test --alaw --expect V90 --delay-frames 2 --payload-first --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 30 --answer-log "V0 epoch kept from B1: next 4D pair 60" --answer-nolog "V0 phase moved"
 # The same pair as V.92 with PCM upstream (+PIG=0): INFO0 bit 26/27, Table 18
 # INFO1a, V.92 Phases 3-4, both B1s, payload both ways (docs/v92_full_startup.md).
 # V.92 mode with +PIG=1 still sets the INFO0 bits and must fall back to V.90.
@@ -824,6 +826,8 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-at "AT+ES=1,0,1" --both-expect "+ER: NONE|+DR: NONE|CONNECT"
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-at "AT+ES=,,1" --both-expect "+ER: NONE|+DR: NONE|CONNECT"
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-at "AT+DS=0" --call-at "AT+DS=3,0" --both-expect "+ER: LAPM|+DR: NONE|CONNECT"
+# No --payload-first here: a V.14-only answerer's DTE rightly gets the
+# caller's V.42 ODP (DC1 11/91, V.42 7.2.1) before the text.
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-env ME_DATA_FRAMING=v14 --seconds 60 --both-expect "+ER: NONE|+DR: NONE|CONNECT"
 ./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --answer-env ME_DATA_FRAMING=v14 --call-at "AT+ES=3,2" --call-absent CONNECT --call-expect "NO CARRIER"
 ./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --answer-env ME_DATA_FRAMING=v14 --call-at "AT+ES=3,3" --call-absent CONNECT --call-expect "NO CARRIER"
@@ -899,10 +903,10 @@ python3 tools/pcm_ber_regression.py
 ./v32bis_duplex_test --eye-only
 
 # V.21 §§2–4, 7(a): complementary 300-bit/s FSK channels, async data.
-./engine_pair_test --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V21,0,300,300
+./engine_pair_test --payload-first --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V21,0,300,300
 # Bell 103: the same FSK path with 1070/1270 and 2025/2225 Hz, both laws.
-./engine_pair_test --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B103,0,300,300
-./engine_pair_test --alaw --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B103,0,300,300
+./engine_pair_test --payload-first --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B103,0,300,300
+./engine_pair_test --payload-first --alaw --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B103,0,300,300
 # V.21 §8.2.2 circuit 109: a peer in the other 300 bit/s family is energy
 # but not carrier, so neither side may CONNECT.
 ./engine_pair_test --seconds 10 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=V21,0,300,300
@@ -910,31 +914,31 @@ python3 tools/pcm_ber_regression.py
 # datapump alone (tone, handshake, delayed bearer), then two engines.
 ./bell212a_test
 ./v22bis_s1_test
-./engine_pair_test --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --both-at AT+MS=B212,0,1200,1200 --call-log "answer tone heard" --call-log "answer tone ended" --both-after ATI6 --both-expect "Modulation         B212"
-./engine_pair_test --alaw --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B212,0,1200,1200
+./engine_pair_test --payload-first --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --both-at AT+MS=B212,0,1200,1200 --call-log "answer tone heard" --call-log "answer tone ended" --both-after ATI6 --both-expect "Modulation         B212"
+./engine_pair_test --payload-first --alaw --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B212,0,1200,1200
 # A 212A caller must not train on a Bell 103 answerer's 2225 Hz mark; a 212A
 # answerer falls back to Bell 103 for a 103 caller.
 ./engine_pair_test --seconds 15 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --call-at AT+MS=B212,0,1200,1200 --answer-at AT+MS=B103,0,300,300
-./engine_pair_test --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=B212 --answer-log "falling back to Bell 103" --answer-after ATI6 --answer-expect "Modulation         B103"
+./engine_pair_test --payload-first --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=B212 --answer-log "falling back to Bell 103" --answer-after ATI6 --answer-expect "Modulation         B103"
 # V.23 mode 2 + 75 bit/s backward channel (V.250 "V23C").  Default: the
 # answerer sends 1200; +MS receive bounds reverse it.  Short payload: 75 bit/s.
-./engine_pair_test --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0 --both-after ATI6 --call-expect "Rate               TX 75  RX 1200" --answer-expect "Rate               TX 1200  RX 75"
-./engine_pair_test --alaw --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0
-./engine_pair_test --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --call-at AT+MS=V23C,0,1200,1200,75,75 --answer-at AT+MS=V23C,0,75,75,1200,1200 --call-expect "CONNECT 75" --answer-expect "CONNECT 1200"
+./engine_pair_test --payload-first --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0 --both-after ATI6 --call-expect "Rate               TX 75  RX 1200" --answer-expect "Rate               TX 1200  RX 75"
+./engine_pair_test --payload-first --alaw --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0
+./engine_pair_test --payload-first --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --call-at AT+MS=V23C,0,1200,1200,75,75 --answer-at AT+MS=V23C,0,75,75,1200,1200 --call-expect "CONNECT 75" --answer-expect "CONNECT 1200"
 ./engine_pair_test --seconds 10 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V23C,0,1200,1200,75,75
 # Legacy automode (docs/legacy_automode.md).  Answer side: our default
 # offer against V.8-less call modems.  V.21 and V.23 callers hold until the
 # answer tone ends (V.25 3.10), so they are caught in the USB1 phase.
-./engine_pair_test --seconds 40 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --call-log "answer tone ended (V.25 3.10)" --answer-log "Automode: 980 Hz"
-./engine_pair_test --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-log "Automode: 1270 Hz"
-./engine_pair_test --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --call-at AT+MS=V23C,0 --call-log "answer tone ended" --answer-log "Automode: 390 Hz" --answer-expect "CONNECT 75"
-./engine_pair_test --seconds 40 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B212,0,1200,1200 --call-log "answer tone ended"
+./engine_pair_test --payload-first --seconds 40 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --call-log "answer tone ended (V.25 3.10)" --answer-log "Automode: 980 Hz"
+./engine_pair_test --payload-first --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-log "Automode: 1270 Hz"
+./engine_pair_test --payload-first --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --call-at AT+MS=V23C,0 --call-log "answer tone ended" --answer-log "Automode: 390 Hz" --answer-expect "CONNECT 75"
+./engine_pair_test --payload-first --seconds 40 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B212,0,1200,1200 --call-log "answer tone ended"
 # Call side: our default offer against V.8-less answer modems.  A Bell 103
 # answerer never drops 2225 Hz, so 212A gives way to 103.
-./engine_pair_test --seconds 30 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=V21,0,300,300 --call-log "Automode: 1650 Hz"
-./engine_pair_test --seconds 30 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B212,0,1200,1200 --call-log "Automode: 2225 Hz"
-./engine_pair_test --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B103,0,300,300 --call-log "answering as a Bell 103 originate modem"
-./engine_pair_test --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --answer-at AT+MS=V23C,0 --call-log "Automode: 1300 Hz" --call-expect "CONNECT 1200"
+./engine_pair_test --payload-first --seconds 30 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=V21,0,300,300 --call-log "Automode: 1650 Hz"
+./engine_pair_test --payload-first --seconds 30 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B212,0,1200,1200 --call-log "Automode: 2225 Hz"
+./engine_pair_test --payload-first --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B103,0,300,300 --call-log "answering as a Bell 103 originate modem"
+./engine_pair_test --payload-first --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --answer-at AT+MS=V23C,0 --call-log "Automode: 1300 Hz" --call-expect "CONNECT 1200"
 # +MS automode 0 is the named carrier only: no fallback.
 ./engine_pair_test --seconds 20 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --answer-at AT+MS=V34,0 --answer-nolog "Automode:"
 # Multi-line server (docs/multi_line.md): one supervisor, N worker processes,
@@ -1110,7 +1114,7 @@ sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/win95-7801-info1
 sh -c 'ME_MODE=v90 ./v90_engine_replay reference-data/artifacts/multitech-7801-info1a-tone-a-false-20261109/live-rx.g711 ulaw --fast --sync --sip-answer > "$TMPDIR/i1af.log" 2>&1; grep -q "INFO1a rejected: V.34 selection with a2c baud 0, c2a baud 0, pre-emphasis 10, projected rate 0" "$TMPDIR/i1af.log" && ! grep -q "INFO1a: c2a (our TX) baud=0" "$TMPDIR/i1af.log"'
 # V.90 9.6: an upstream below 14400 (no measured data-mode SNR threshold)
 # does not fall back; it used to walk a clean 12000 down to 4800.
-./engine_pair_test --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env VPCM_ME_VERBOSE=1 --answer-env ME_V90_UPSTREAM_MAX_BPS=12000 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "enter DATA after B1: upstream=12000" --answer-nolog "upstream fall-back"
+./engine_pair_test --payload-first --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --answer-env VPCM_ME_VERBOSE=1 --answer-env ME_V90_UPSTREAM_MAX_BPS=12000 --payload-printable "line 6 " --payload-reps 100 --seconds 60 --answer-log "enter DATA after B1: upstream=12000" --answer-nolog "upstream fall-back"
 # Lost RTP packets reach the V.90 upstream as fill frames; the T/3 receiver
 # must hold through them (erasures), not adapt on them. Before: decision
 # error 0.22, "abrupt discontinuity", a 9.6 that never reacquired.

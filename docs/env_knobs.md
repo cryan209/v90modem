@@ -176,7 +176,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_UPSTREAM_MAX_BPS` | modem_engine.c |  | tsd | mask: otherwise INFO1d can advertise 31200 while MP/B1 expect 21600. |
 | `ME_V90_UPSTREAM_NO_SNR_CAP` | modem_engine.c |  | d | an empty common set must not silently preserve the initial ceiling. |
 | `ME_V90_UPSTREAM_STEP` | modem_engine.c |  | d | A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0 |
-| `ME_V90_V0_SEED` | v34rx.c |  | td | ME_V90_V0_SEED=0: start V.90 upstream DATA with the V0 epoch unknown and |
+| `ME_V90_V0_SEED` | v34rx.c |  | td | ME_V90_V0_SEED=0: decode a template-placed V.90 upstream B1 and the start |
 | `ME_V91_CONTROL_CHANNEL` | modem_engine.c |  | sd | 6.4: optional; on by default, it gives slip detection and in-band |
 | `ME_V91_SPECIFY_DIL` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
 | `ME_V91_TRANSPARENT` | modem_engine.c |  | sd | Law is carried by INFO bit 39, and CP bit 35 is reserved in V.91. |

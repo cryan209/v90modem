@@ -13505,9 +13505,26 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                        of a superframe, exactly as the reset left it. */
                     if (s->parms.j > 0)
                     {
+                        /* mapping_frame_buf holds re,im halves */
+                        int pending = s->mapping_frame_count/2;
+                        int ahead = s->v90_t3_b1_symbols - 1 - pending;
+
                         s->super_frame = s->parms.j - 1;
                         s->v0_pattern = (uint16_t)(2*(s->parms.j - 1));
                         s->input_4d = (s->parms.j - 1)*4*s->parms.p;
+                        /* This symbol ends a B1 frame, but it and the
+                           `pending` before it have not reached the decoder:
+                           the next pair it takes is pair ahead/2 of this
+                           frame, not its first.  Parking at the first put
+                           every later pair 60 out of step (128-1-7)/2 with
+                           the far end's superframe -- invisible without the
+                           U0 constraint, and the reason the V0 tracker
+                           always found the epoch "60 pairs on". */
+                        if (!s->v90_t3_sym_search  &&  v34_rx_v90_v0_seed_enabled()
+                            &&  ahead >= 0  &&  (ahead & 1) == 0
+                            &&  s->v90_t3_b1_symbols == 8*s->parms.p)
+                            s->input_4d += ahead/2;
+                        /*endif*/
                     }
                     /*endif*/
                 }
@@ -13533,65 +13550,31 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                        as a 78-bit burst, and one inside a V.14 run of
                        back-to-back characters misframed the rest of it. */
                     v34_rx_arm_v0_acquisition(s);
-                    /* ...but the epoch at this instant is not unknown, only
-                       mislabelled.  The frame just measured is the first DATA
-                       frame, so superframe frame 0 (9.4.2.5/V.90 starts a new
-                       superframe after B1) began b1_symbols ago.  It was
-                       decoded under the j-1 parking above, which fires a
-                       mapping frame early: this symbol and the `pending`
-                       buffered before it have not reached the
-                       decoder yet, so the next 4D pair it takes is
-                       (b1_symbols - 1 - pending)/2 of frame 0,
-                       wherever the counter now says.  Measured: the counter
-                       read 0 and Figure 10's parity moved it to 60 =
-                       (128 - 1 - 7)/2 on every call, about 280 ms (one
-                       superframe of evidence) into DATA.  Data in that window
-                       was decoded with no U0 constraint, so a single symbol
-                       error became a burst at the DTE -- four junk
-                       characters before every multi-line payload once the
-                       round trip exceeded the bare pair's.  Seed that epoch
-                       (the U0 constraint follows at the next data frame,
-                       below); the tracker keeps checking it and drops or
-                       moves it on parity as before.  ME_V90_V0_SEED=0
-                       restores acquisition from scratch.
-
-                       Only when a B1 frame matched the template first
-                       (idx >= 2 frames): that proves the placement and is
-                       what ran the re-parking this corrects.  A B1 that
-                       never matched (MT5634 at 9600, fit 0%, the 4-point
-                       placement: "ended after 1 data frames", frame error
-                       13.2) was placed a mapping frame late, and parity put
-                       its epoch 4 pairs on, not 60 -- nothing here knows
-                       that, so it stays with the tracker. */
-                    if (s->v0_tracking  &&  v34_rx_v90_v0_seed_enabled()
+                    /* ...but after a B1 frame matched the template (idx >=
+                       2 frames) the epoch is known: the re-park above keeps
+                       the labels exact, and the frame just measured --
+                       9.4.2.5/V.90's first DATA frame -- was decoded as
+                       frame 0 under the U0 constraint set at acquisition.
+                       Keep it; the tracker still checks it and moves or
+                       drops it on parity.  Measured before this: the
+                       tracker found the epoch 60 pairs on, ~280 ms into
+                       DATA, and a single noise symbol error in that window
+                       reached the DTE -- 4-7 junk characters before every
+                       multi-line payload once the round trip grew, and in
+                       data frame 0 itself on A-law.  A B1 that never
+                       matched (MT5634 at 9600, 4-point placement, "ended
+                       after 1 data frames") was placed a mapping frame
+                       late, parity put it 4 pairs on, and it stays with the
+                       tracker.  ME_V90_V0_SEED=0 restores the old path. */
+                    if (s->v0_tracking  &&  !s->v90_t3_sym_search
+                        &&  v34_rx_v90_v0_seed_enabled()
                         &&  idx + 1 >= 2*(int64_t) s->v90_t3_b1_symbols)
                     {
-                        int span = 4*s->parms.p*s->parms.j;
-                        /* mapping_frame_buf holds re,im halves */
-                        int pending = s->mapping_frame_count/2;
-                        int ahead = s->v90_t3_b1_symbols - 1 - pending;
-
-                        if (span > 0  &&  ahead >= 0  &&  (ahead & 1) == 0
-                            &&  s->v90_t3_b1_symbols == 8*s->parms.p)
-                        {
-                            s->input_4d = (ahead/2) % span;
-                            /* The constraint itself starts with data frame
-                               1.  Switched on for frame 0's last mapping
-                               frame (the one still buffered), it put a
-                               40-bit burst into the Diva's idle marks
-                               (reference-data/diva-v90-rtp-loss); from the
-                               next frame boundary -- or 16 or 32 pairs
-                               later -- the stream is identical and clean. */
-                            /* Counted down before each pair's metric
-                               update, so +1 lands it on the boundary pair. */
-                            s->v0_seed_delay = 4*s->parms.p - s->input_4d % (4*s->parms.p) + 1;
-                            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
-                                       "Rx - V0 epoch seeded at 4D pair %d of frame 0 "
-                                       "(B1 end, %d symbols not yet decoded); "
-                                       "U0 constraint from frame 1 (9.6.3.2)\n",
-                                       s->input_4d, pending + 1);
-                        }
-                        /*endif*/
+                        s->viterbi.zero_precoder = true;
+                        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                                   "Rx - V0 epoch kept from B1: next 4D pair %d of frame 0, "
+                                   "U0 constraint on throughout (9.6.3.2)\n",
+                                   s->input_4d);
                     }
                     /*endif*/
                     /* ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n
@@ -15875,6 +15858,22 @@ commit:
             if (s->h[i].re != 0 || s->h[i].im != 0)
                 s->viterbi.zero_precoder = false;
     }
+    if (!s->x2_mode  &&  !blind  &&  s->viterbi.state_count == 16
+        &&  v34_rx_v90_v0_seed_enabled())
+    {
+        /* V.34 9.6.3.2/Table 11, as x2 does above: a template fit places
+           B1 to the symbol and fixes the encoder's state at its start
+           (10.1.3.1, or best_initial_state), and v34_begin_rx_data() parked
+           the input epoch on frame j-1 for it.  So the U0 parity is known
+           from B1's first pair and holds through DATA -- the B1-end handler
+           keeps it.  Off, every pair until the V0 tracker proved the epoch
+           (~280 ms into DATA) was decoded as by a hard slicer. */
+        s->viterbi.zero_precoder = true;
+        for (int i = 0;  i < 3;  i++)
+            if (s->h[i].re != 0  ||  s->h[i].im != 0)
+                s->viterbi.zero_precoder = false;
+    }
+    /*endif*/
     memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
     v90_t3_fse_taps_replaced(s);
     s->v90_t3_training_match = best_match;
@@ -18239,9 +18238,9 @@ static int v34_v0_at(const v34_rx_state_t *s, int pair)
 #define V34_V0_EPOCH_MARGIN         8
 #define V34_V0_EPOCH_MAX_MISSES     22
 
-/* ME_V90_V0_SEED=0: start V.90 upstream DATA with the V0 epoch unknown and
-   the U0 constraint off, as before 2026-11-12, instead of seeding it at
-   B1's end (see the B1-end handler). */
+/* ME_V90_V0_SEED=0: decode a template-placed V.90 upstream B1 and the start
+   of DATA with the U0 constraint off and the V0 epoch unknown until the
+   tracker proves it, as before 2026-11-12 (see the B1-end handler). */
 static bool v34_rx_v90_v0_seed_enabled(void)
 {
     static int enabled = -1;
@@ -18269,7 +18268,6 @@ static void v34_rx_arm_v0_acquisition(v34_rx_state_t *s)
             zero_h = false;
     /*endfor*/
     s->viterbi.zero_precoder = false;
-    s->v0_seed_delay = 0;
     s->v0_acquiring = false;
     s->v0_tracking = (s->viterbi.state_count == 16  &&  zero_h);
     s->v0_pairs = 0;
@@ -18377,9 +18375,6 @@ static void v34_rx_acquire_v0(v34_rx_state_t *s)
     }
     s->v0_u[n%5] = (label[1] - label[0]) & 1;
     s->v0_input[n%5] = conv_encode_input[label[0]][label[1]];
-    if (s->v0_seed_delay > 0  &&  --s->v0_seed_delay == 0  &&  s->v0_tracking)
-        s->viterbi.zero_precoder = true;
-    /*endif*/
     if (s->v0_tracking)
     {
         /* Keep the five-deep history indexed consistently while the pair

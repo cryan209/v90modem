@@ -3369,7 +3369,7 @@ before MP, and only lowered after the receiver had lost the constellation.
   so it neither falls back nor probes up. While the carrier is lost the
   controller does nothing; the discontinuity path owns that case.
 
-## The V0 epoch is known at B1's end, so DATA starts with the trellis on (2026-11-12)
+## The V0 epoch is known from B1, so the trellis is on from the first data pair (2026-11-12)
 
 Symptom: every `multi_line_test --mode v90` line's DTE got four junk
 characters (`09 bd d9 ff`) ahead of its V.14 payload. The fault was bisected
@@ -3405,43 +3405,61 @@ The 60 is not something that has to be measured:
   mapping frame still buffered (`mapping_frame_count`/2 = 7 symbols).
 
 So the next 4D pair the decoder takes is pair (b1_symbols − 1 − pending)/2 =
-(128 − 1 − 7)/2 = 60 of frame 0, however many B1 frames the peer sent.
+(128 − 1 − 7)/2 = 60 of frame 0, however many B1 frames the peer sent. The
+re-park was the bug: it labelled every later pair 60 out of step with the far
+end's superframe.
 
-The receiver now seeds `input_4d` there at B1's end; the log line is
-"V0 epoch seeded at 4D pair 60". The U0 constraint follows at the next
-data-frame boundary (pair 64). The tracker still runs, and moves or drops the
-epoch on parity exactly as before. `ME_V90_V0_SEED=0` restores acquisition
-from scratch.
+### First version: a seed at B1's end (4f489d6a), and why it was not enough
 
-Two conditions came from real-peer replays:
+The first fix seeded `input_4d` at B1's end and switched the U0 constraint on
+at data frame 1. Two real-peer replays shaped it:
 
-- **The constraint starts at frame 1, not at the seed.** On the Diva capture
-  (`reference-data/diva-v90-rtp-loss`), switching it on for frame 0's last,
-  still-buffered mapping frame put a 40-bit burst into the idle marks. From
-  the frame boundary, or 16 or 32 pairs later, the stream is identical and
-  clean.
-- **The seed is applied only if a B1 frame matched the template first.** That
-  match proves the placement, and it is what ran the re-parking this
-  corrects. On the MT5634 at 9600 (`rf-mt5634-v90-b1`), B1 never matched (fit
-  0%, 4-point placement, "ended after 1 data frames", frame error 13.2). That
-  placement was a mapping frame late, and parity put the epoch 4 pairs on,
-  not 60. Seeding 60 there cost the first 1200 bits (91% ones), so that case
-  stays with the tracker.
+- On the MT5634 at 9600 (`rf-mt5634-v90-b1`), B1 never matched the template
+  (fit 0%, 4-point placement, "ended after 1 data frames"). That placement
+  was a mapping frame late and parity put the epoch 4 pairs on, not 60, so
+  that case stays with the tracker.
+- On the Diva, switching the constraint on mid-frame put a 40-bit burst into
+  its idle marks.
+
+The `--payload-first` sweep then found the A-law V.14 pair still delivering 7
+junk octets. The error was at upstream bit 780, inside data frame 0. Frame 0 is
+decoded before B1's end can even be detected, so no seed at that point can
+reach it. Moving the switch-on point anywhere left the burst where it was.
+
+### The fix: the constraint runs from B1's first pair
+
+The x2 path already kept the constraint on through its reset-state B1. V.90
+now does the same whenever a template fit placed B1, because the encoder's
+state (10.1.3.1, or `best_initial_state`) and the epoch are then both known:
+
+- At acquisition the constraint goes on (16-state, h=0).
+- The per-frame B1 re-park allows for the pending mapping frame. The next pair
+  is pair (b1_symbols - 1 - pending)/2 of frame j-1, so `input_4d` is set to
+  444, not 384.
+- At B1's end the constraint and the labels are kept. The log line is "V0
+  epoch kept from B1: next 4D pair 60".
+
+Blind (4-point) placements keep the old path: constraint off until the tracker
+proves an epoch. The tracker still runs in every case. `ME_V90_V0_SEED=0`
+restores the old path.
 
 Results:
 
-- **Our analogue caller:** the tracker never moves the seeded epoch, and
-  payloads are byte-exact in both directions at delays 0, 1, 2 and 4.
-- **Multi-line:** both V.90 slow rows pass.
-- **The Diva (a real peer), graded against the ODP it sends:**
-  - With the seed off, its parity acquisition lands on "advance 60",
-    confirming the seed on foreign hardware.
-  - With the seed on, the stream decodes cleanly in all five regions where
-    the seed-off run has errors: two bursts in the idle marks (72 and 9
+- **Our pair:** u-law and A-law are bit-exact at round-trip delays 0, 2 and 4
+  frames, and the tracker never moves the epoch.
+- **The Diva, graded against the ODP it sends:** clean throughout.
+  - The seed-off run's errors are gone: two bursts in the idle marks (72 and 9
     zeros) and three garbled stretches of ODP.
-- **The new fast row** (`--delay-frames 2 --payload-first`) fails with the
-  seed off: "4 octets reached the answer DTE between CONNECT and its text".
+  - So is a 27-bit burst at bit 312 that the frame-1 version still had.
+  - With the seed off, its parity acquisition lands on "advance 60",
+    confirming the epoch on foreign hardware.
+- **The MT5634** is unchanged.
+- **Multi-line:** both V.90 slow rows pass.
 
 `engine_pair_test` used to grade only that the payload appeared somewhere in
-the stream, which is why junk ahead of it went unnoticed. Use
-`--payload-first` for any V.14 row.
+the stream, which is why junk ahead of it went unnoticed. Every V.14 row now
+uses `--payload-first`, apart from these:
+
+- The V.14-only answerer that rightly receives the caller's V.42 ODP first.
+- Rows where the check does not apply: synchronous V.110 delivers its idle
+  `0xFF` fill as octets, and fax HDLC wraps the payload in frames.
