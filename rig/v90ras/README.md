@@ -880,3 +880,15 @@ does not act. Built in `/root/vpcm-fix6` (60ecf54c plus the commit's
 `v90.c`, checked byte for byte), kept as
 `/opt/v90ras/sip_v90_modem.9d69c8cf`; the previous binary is
 `sip_v90_modem.pre-9d69c8cf`. Only `v90ras` was restarted, with no call up.
+
+## Deployed 4f489d6a (2026-11-12 22:35)
+
+V.90 upstream: the V0 epoch is seeded at B1's end, and the U0 trellis
+constraint starts with data frame 1, not ~280 ms into DATA
+(`docs/v90_upstream_data_path.md`, "The V0 epoch is known at B1's end").
+Before this, a single upstream symbol error early in DATA reached the DTE as a
+burst. Built in `/root/vpcm-fix6` (9d69c8cf plus the commit's `v34rx.c` and
+`private/v34.h`, checked byte for byte), kept as
+`/opt/v90ras/sip_v90_modem.4f489d6a`; the previous binary is
+`sip_v90_modem.pre-4f489d6a`. Only `v90ras` was restarted, with no call up.
+Not yet verified live.
