@@ -1692,4 +1692,32 @@ The candidate difference is v90ras's `sip.env`:
 U_INFO 95 -> 79) and `ME_V90_TRN2D_SYMBOLS=6000`, both from the Eicon recipe
 of 9 October. The CX also opens §9.6 renegotiations of its own a few seconds
 into data, and after one of them our upstream did not re-acquire (fit 21%).
-Not yet A/B'd one variable at a time.
+
+**A/B on the test answerer (2903, the 121c6c53 binary, one variable per arm,
+150 s holds, 2026-11-13 08:00-08:40):**
+
+| Arm | Calls | CX CP upstream mask | U_INFO | Start-up rates | CX result |
+|---|---|---|---|---|---|
+| no knobs | 2 | 0x0004 | 95 | 50666/9600 | `CONNECT 9600`, held, 0 and 1 retrains |
+| `ME_V90_TRN2D_SYMBOLS=6000` | 2 | 0x0004 | 95 | 50666/9600 | `CONNECT 9600`, held, no retrain |
+| `ME_V90_MAX_TX_DBM0_CODE=23` | 1 | 0x0004 | 79 | 40000/9600, then 38666/9600 | 1 retrain |
+| no knobs, CX `AT&F` | 1 | 0x0004 | 95 | 50666/9600 | `CONNECT 9600`, held |
+| no knobs, 2026-11-12's test binary | 1 | 0x0004 | 95 | 50666/9600 | `CONNECT 9600`, 4 retrains, NO CARRIER |
+
+(Two more power-code calls got BUSY: the CX's AudioCodes leg had not
+cleared from the previous call. A 60 s gap before redialling avoids it.)
+
+So:
+
+- **The 9600-only upstream is the modem's.** It persists with no knobs,
+  after `AT&F`, and against the exact binary that saw mask 0x1FFF on
+  2026-11-12. The CPt frame formats are the same as then (292 and 428
+  bits); only the mask differs. Nothing we send explains it. What changed
+  in the CX between the two days is unknown. Both USB modems had left the
+  Mac's bus since then; a USB power cycle of the CX is the next thing to
+  try.
+- **TRN2d 6000 does nothing measurable on this modem.**
+- **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
+  -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
+  38666-40000. v90ras carries the code for the Eicon cards (9 October
+  recipe). It is a cost to every analogue caller that honours INFO0d.
