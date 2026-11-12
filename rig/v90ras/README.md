@@ -871,7 +871,7 @@ byte), kept as `/opt/v90ras/sip_v90_modem.60ecf54c`; the previous binary is
 `sip_v90_modem.pre-60ecf54c`. Only `v90ras` was restarted, with no call up;
 v90isdn takes the binary at its next restart. Not yet verified live.
 
-## Deployed 9d69c8cf (2026-11-12 21:00)
+## Deployed 9d69c8cf (2026-11-12 20:48)
 
 V.92: after Su-bar, Jd is held in whole repetitions until Jp's scrambler
 state is one slmodemd trains on (`docs/v92_full_startup.md`, "Jd held for
