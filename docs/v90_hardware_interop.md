@@ -1746,6 +1746,15 @@ So:
     converts on the MT's path.
   - The CX still got V.90 through its conversion, so the conversion alone
     does not explain the MT's V.34.
+  - The MT9234 previously reached V.90 on this path (reported by the user;
+    there is no record in the repository). The FXS-to-BRI hairpin had **no**
+    conversion until 2026-11-08: the FXS ports were `compand-type a-law`,
+    like the BRI ports. The 2026-11-08 modem-safe change (rig/v90ras/README.md,
+    "Cisco 2911 FXS gateway") set them to µ-law, so that v90ras's µ-law SIP
+    leg would carry no conversion. That moved the conversion onto the
+    FXS-to-BRI path. This is the leading explanation and has not been tested.
+    The test: put voice-port 0/3/3 back to A-law and redial 7930 (it needs a
+    router login).
 - **TRN2d 6000 does nothing measurable on this modem.**
 - **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
