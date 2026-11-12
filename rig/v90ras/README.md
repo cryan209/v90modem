@@ -892,3 +892,15 @@ burst. Built in `/root/vpcm-fix6` (9d69c8cf plus the commit's `v34rx.c` and
 `/opt/v90ras/sip_v90_modem.4f489d6a`; the previous binary is
 `sip_v90_modem.pre-4f489d6a`. Only `v90ras` was restarted, with no call up.
 Not yet verified live.
+
+## Deployed ae59c34a (2026-11-12 23:06)
+
+V.90 upstream: when a template fit placed B1, the U0 trellis constraint runs
+from B1's first pair, and the B1 re-park allows for the pending mapping frame.
+This supersedes 4f489d6a's seed at B1's end, which could not reach errors in
+data frame 0 (`docs/v90_upstream_data_path.md`, "The V0 epoch is known from
+B1"). Built in `/root/vpcm-fix6` (4f489d6a plus the commit's `v34rx.c` and
+`private/v34.h`, checked byte for byte), kept as
+`/opt/v90ras/sip_v90_modem.ae59c34a`; the previous binary is
+`sip_v90_modem.pre-ae59c34a`. Only `v90ras` was restarted, with no call up.
+Not yet verified live.
