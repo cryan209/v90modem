@@ -1716,6 +1716,16 @@ So:
   in the CX between the two days is unknown. Both USB modems had left the
   Mac's bus since then; a USB power cycle of the CX is the next thing to
   try.
+- **The Eicon card gets the same.** The CX dialling the Diva V.90 answerer
+  on 7930 (`AT+MS=V90,1,300,33600,300,56000`, 45 s hold) reports, in its
+  own `AT&V1`: `LAST TX rate 9600`, `HIGHEST TX rate 9600`, RX
+  49333-52000, V90, LAPM/V.42bis, one remote retrain. Its upstream ceiling
+  is the same against a digital modem that shares none of our code.
+- The CX's stored profiles match the 28 October dump except `W0` for `W2`.
+  Restoring its October `+MS=V92,1,300,48000,300,56000` still gives mask
+  0x0004. The last calls with mask 0x1FFF were `/root/vg/f4cx-6` (2026-11-12
+  06:12). The first with 0x0004 was v90ras at 00:01 on 2026-11-13. The cause
+  lies in the CX or its line (AudioCodes 6314) in that window.
 - **TRN2d 6000 does nothing measurable on this modem.**
 - **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
