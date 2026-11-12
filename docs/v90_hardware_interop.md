@@ -1734,6 +1734,18 @@ So:
   about the same either way. The CX, by contrast, gets V.90 from 7930. The
   two modems reach 7930 by different paths (Cisco FXS 7803 and AudioCodes
   6314), so this does not compare the digital modems on one line.
+- **Both paths to 7930 have one µ-law/A-law conversion, in different
+  places.**
+  - The CX's call is in Asterisk's CDR: 6314 (allows ulaw only) to
+    `toprouter-bri` (allows alaw only), transcoded by Asterisk.
+  - The MT9234's two calls have no CDR. The Cisco matched them to pots
+    dial-peer 7930 (BRI 0/1/1) and hairpinned them inside the router.
+  - The router's last saved config (2026-11-10, read in an earlier session;
+    not re-read now) has FXS 0/3/3 at the default µ-law (0 dB; EC, NLP, VAD
+    and CNG off) and BRI 0/1/1 at `compand-type a-law`. So the Cisco's DSP
+    converts on the MT's path.
+  - The CX still got V.90 through its conversion, so the conversion alone
+    does not explain the MT's V.34.
 - **TRN2d 6000 does nothing measurable on this modem.**
 - **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
