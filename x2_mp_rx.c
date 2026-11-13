@@ -30,15 +30,31 @@ void x2_mp_rx_init(x2_mp_rx_t *r,x2_mp_received_t received,void *context)
         double x=(double)i-63,fc=1700.0/8000;
         r->taps[i]=(x==0?1:sin(2*PI*fc*x)/(2*PI*fc*x))
                     *(0.54-0.46*cos(2*PI*i/126))*2*fc;
+        /* The same low-pass half a sample earlier: the 16 kHz baseband. */
+        x-=0.5;
+        r->half_taps[i]=sin(2*PI*fc*x)/(2*PI*fc*x)
+                    *(0.54-0.46*cos(2*PI*(i-0.5)/126))*2*fc;
     }
-    for(unsigned i=0;i<10;++i) {
-        r->next_symbol[i]=i*0.25;
+    r->warm_until=1000;
+    for(unsigned i=0;i<10;++i)r->next_symbol[i]=i*0.25;
+    for(unsigned i=0;i<X2_MP_RX_HYPOTHESES;++i)
+        for(unsigned j=0;j<2;++j)x2_scrambler_init(&r->hypotheses[i][j].descrambler,5,0);
+}
+void x2_mp_rx_restart(x2_mp_rx_t *r)
+{
+    if(!r)return;
+    memset(r->hypotheses,0,sizeof(r->hypotheses));
+    for(unsigned i=0;i<X2_MP_RX_HYPOTHESES;++i) {
+        r->power[i]=r->fourth_re[i]=r->fourth_im[i]=0;r->phase_valid[i]=0;
         for(unsigned j=0;j<2;++j)x2_scrambler_init(&r->hypotheses[i][j].descrambler,5,0);
     }
+    r->valid_frames=r->rejected_frames=r->eq_valid_frames=0;
+    r->e_detected=r->e_timing=r->e_phase=r->four_point=r->train_only=0;
+    r->e_sample=0;r->warm_until=r->samples+1000;
 }
 void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
 {
-    if(!r||timing>=10||phase>=2||bit>1)return;
+    if(!r||timing>=X2_MP_RX_HYPOTHESES||phase>=2||bit>1)return;
     x2_mp_rx_hypothesis_t *h=&r->hypotheses[timing][phase];
     if(!h->position) {
         if(bit) {
@@ -53,8 +69,12 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
              * early (client pair, 19 Oct). An ACKed MP is not required:
              * the captured Courier's E follows 0344, its ACK set while the
              * last frame was already on the line. */
-            unsigned best=0;
-            for(unsigned t=0;t<10;++t)for(unsigned p=0;p<2;++p)
+            /* Best among its own kind: an equalized hypothesis runs some
+             * twenty samples behind the direct ones, and on a clean bearer
+             * the direct hypothesis declares E at the sample it always has. */
+            unsigned best=0,first=timing<X2_MP_RX_EQ?0:X2_MP_RX_EQ;
+            unsigned last=timing<X2_MP_RX_EQ?X2_MP_RX_EQ:X2_MP_RX_HYPOTHESES;
+            for(unsigned t=first;t<last;++t)for(unsigned p=0;p<2;++p)
                 if(r->hypotheses[t][p].repeats>best)best=r->hypotheses[t][p].repeats;
             if(h->ones==20 && h->repeats>=2 && h->repeats>=best && !r->e_detected) {
                 r->e_detected=1;r->e_timing=timing;r->e_phase=phase;
@@ -72,6 +92,7 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
         x2_mp_t mp;h->position=0;
         if(x2_mp_decode(h->frame,&mp)) {++r->rejected_frames;h->repeats=0;return;}
         ++r->valid_frames;
+        if(timing>=X2_MP_RX_EQ)++r->eq_valid_frames;
         /* Ignore the acknowledgement bit for repeat qualification: the
          * acknowledged final frame must retain all negotiated parameters. */
         if(h->repeats && ((h->previous_mp.words[0]^mp.words[0])&0x7fff)==0
@@ -88,9 +109,10 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
     r->power[timing]+=alpha*(power-r->power[timing]);
     r->fourth_re[timing]+=alpha*(rr*rr-ii*ii-r->fourth_re[timing]);
     r->fourth_im[timing]+=alpha*(2*rr*ii-r->fourth_im[timing]);
-    if(r->samples<1000)return;
+    if(r->samples<r->warm_until||r->train_only)return;
     double reference=sqrt(r->power[timing]);
-    if(reference<100)return;
+    /* The equalizer's output is normalised and carrier-gated already. */
+    if(timing<X2_MP_RX_EQ && reference<100)return;
     /* atan2()/4 jumps by 90 degrees when the fourth-power mean crosses 180
      * degrees -- where the V.34 16-point grid's mean sits at zero carrier
      * offset -- and each jump is a differential symbol error on every
@@ -134,18 +156,90 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
             x2_descramble_bit(&h->descrambler,(nibble>>k)&1));
     }
 }
+/* One symbol from each equalizer; equalizer q strobes q 16 kHz samples
+ * after r->eq_pos. The taps are two samples (T/2.5) apart, linearly
+ * interpolated at the strobe's fraction. V.34 (10/1996) 9.1/Table 9: the
+ * 16-point TRN/MP constellation has orbits of power 0.2, 1.0 and 1.8 about
+ * a unit mean, hence the constant-modulus constant 1.32 and the three
+ * radius-directed targets. */
+static void equalized_symbol(x2_mp_rx_t *r,unsigned carrier)
+{
+    enum {L=X2_MP_RX_EQ_TAPS};
+    uint64_t base=(uint64_t)r->eq_pos;
+    double f=r->eq_pos-(double)base;
+    r->eq_pos+=5+r->eq_rate;
+    if(!r->eq_started) {
+        if(!carrier||++r->eq_burst_symbols<160)return;
+        memset(r->eq_re,0,sizeof(r->eq_re));memset(r->eq_im,0,sizeof(r->eq_im));
+        for(unsigned q=0;q<X2_MP_RX_EQS;++q)r->eq_re[q][L/2]=1/sqrt(r->eq_fast);
+        r->eq_started=1;r->eq_burst_symbols=0;
+    }
+    if(!carrier)return;
+    if(++r->eq_burst_symbols>64) {
+        /* |z|^2 = A + B cos(2 pi (t - t0)/5): the averaged line's angle is
+         * how far the strobe sits from t0. Hold it there; the rate term
+         * only moves once the phase is in, so pull-in cannot wind it up. */
+        double e=-atan2(r->line_im,r->line_re)*5/(2*PI);
+        r->eq_pos+=0.02*e;
+        if(fabs(e)<0.5)r->eq_rate+=2e-5*e;
+        if(r->eq_rate>2.5e-3)r->eq_rate=2.5e-3;
+        if(r->eq_rate<-2.5e-3)r->eq_rate=-2.5e-3;
+    }
+    for(unsigned q=0;q<X2_MP_RX_EQS;++q) {
+        double zr[L],zi[L],yr=0,yi=0,norm=1e-9,m,target,er,ei,step;
+        for(unsigned i=0;i<L;++i) {
+            unsigned k=(unsigned)(base+q-2*i)&127,k1=(k+1)&127;
+            zr[i]=r->z_re[k]*(1-f)+r->z_re[k1]*f;zi[i]=r->z_im[k]*(1-f)+r->z_im[k1]*f;
+            yr+=r->eq_re[q][i]*zr[i]-r->eq_im[q][i]*zi[i];
+            yi+=r->eq_re[q][i]*zi[i]+r->eq_im[q][i]*zr[i];
+            norm+=zr[i]*zr[i]+zi[i]*zi[i];
+        }
+        m=yr*yr+yi*yi;
+        if(r->eq_burst_symbols<800||r->four_point){target=1.32;step=0.02;}
+        else {target=m<0.6?0.2:m<1.4?1.0:1.8;step=0.01;}
+        /* w += step * y (target - |y|^2) conj(z), normalised by the input. */
+        er=step*yr*(target-m)/norm;ei=step*yi*(target-m)/norm;
+        for(unsigned i=0;i<L;++i) {
+            r->eq_re[q][i]+=er*zr[i]+ei*zi[i];
+            r->eq_im[q][i]+=ei*zr[i]-er*zi[i];
+        }
+        symbol(r,X2_MP_RX_EQ+q,yr,yi);
+    }
+}
+/* One 16 kHz baseband sample: carrier gate, the baud-rate line, and any
+ * symbol strobe whose interpolation samples are now all in the ring. */
+static void equalize(x2_mp_rx_t *r,double re,double im)
+{
+    double power=re*re+im*im;
+    r->z_re[r->z_count&127]=re;r->z_im[r->z_count&127]=im;
+    r->eq_fast+=(power-r->eq_fast)/128;
+    if(r->eq_fast>r->eq_peak)r->eq_peak=r->eq_fast;
+    else r->eq_peak-=r->eq_peak/160000;
+    unsigned carrier=r->eq_peak>100.0*100.0 && r->eq_fast>0.1*r->eq_peak;
+    if(!carrier){if(++r->eq_gap>1600)r->eq_burst_symbols=0;}
+    else {
+        double angle=2*PI*((double)r->z_count-r->eq_pos)/5;
+        r->eq_gap=0;
+        r->line_re+=(power*cos(angle)-r->line_re)/1280;
+        r->line_im+=(-power*sin(angle)-r->line_im)/1280;
+    }
+    ++r->z_count;
+    while((double)(r->z_count-1)>=floor(r->eq_pos)+X2_MP_RX_EQS)equalized_symbol(r,carrier);
+}
 void x2_mp_rx_audio(x2_mp_rx_t *r,const int16_t *samples,size_t count)
 {
     if(!r||!samples)return;
     for(size_t n=0;n<count;++n,++r->samples) {
-        double phase=2*PI*1920*(double)(r->samples%25)/8000,re=0,im=0;
+        double phase=2*PI*1920*(double)(r->samples%25)/8000,re=0,im=0,hre=0,him=0;
         r->ring_re[r->position]=samples[n]*cos(phase);
         r->ring_im[r->position]=-samples[n]*sin(phase);
         for(unsigned j=0;j<127;++j) {
             unsigned i=(r->position+127-j)%127;
             re+=r->ring_re[i]*r->taps[j];im+=r->ring_im[i]*r->taps[j];
+            hre+=r->ring_re[i]*r->half_taps[j];him+=r->ring_im[i]*r->half_taps[j];
         }
         r->position=(r->position+1)%127;
+        equalize(r,hre,him);equalize(r,re,im);
         for(unsigned h=0;h<10;++h) {
             if(r->next_symbol[h]<=(double)r->samples) {
                 double f=(double)r->samples-r->next_symbol[h];

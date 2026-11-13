@@ -8,16 +8,51 @@ typedef struct {
     unsigned ones, position, previous_rotation, repeats;
     x2_mp_t previous_mp;
 } x2_mp_rx_hypothesis_t;
+/* Timing hypotheses 0..9 sample the low-pass output directly, a quarter
+ * sample apart; X2_MP_RX_EQ onward are the equalized ones, a fifth of a
+ * symbol apart. */
+#define X2_MP_RX_EQS 5
+#define X2_MP_RX_EQ 10
+#define X2_MP_RX_HYPOTHESES (X2_MP_RX_EQ+X2_MP_RX_EQS)
+#define X2_MP_RX_EQ_TAPS 32
 typedef struct {
     double taps[127], ring_re[127], ring_im[127];
     unsigned position;
     uint64_t samples;
-    double previous_re, previous_im, power[10], fourth_re[10], fourth_im[10];
+    double previous_re, previous_im, power[X2_MP_RX_HYPOTHESES];
+    double fourth_re[X2_MP_RX_HYPOTHESES], fourth_im[X2_MP_RX_HYPOTHESES];
     double next_symbol[10];
     /* Carrier phase per timing hypothesis, unwrapped modulo 90 degrees. */
-    double phase[10];
-    unsigned phase_valid[10];
-    x2_mp_rx_hypothesis_t hypotheses[10][2];
+    double phase[X2_MP_RX_HYPOTHESES];
+    unsigned phase_valid[X2_MP_RX_HYPOTHESES];
+    x2_mp_rx_hypothesis_t hypotheses[X2_MP_RX_HYPOTHESES][2];
+    /* Blind fractionally spaced equalizers (taps one 8 kHz sample = T/2.5
+     * apart) on the 16 kHz baseband, for a real line: the hypotheses above
+     * assume a flat channel and the far end's baud clock. Constant-modulus
+     * adaptation, then radius-directed on the 16-point TRN/MP orbits, only
+     * while the upstream carrier is present. Blind adaptation from a centre
+     * spike stalls when the spike sits near an eye crossing, and where the
+     * eye opens against the baud-rate line depends on the line's band-edge
+     * delay (half a symbol from the envelope peak for the emulated Courier,
+     * a quarter on a Cisco FXS port), so five equalizers run a fifth of a
+     * symbol apart and CRC picks. */
+    double half_taps[127];
+    double eq_re[X2_MP_RX_EQS][X2_MP_RX_EQ_TAPS], eq_im[X2_MP_RX_EQS][X2_MP_RX_EQ_TAPS];
+    double z_re[128], z_im[128];
+    uint64_t z_count;
+    /* Symbol strobe on the 16 kHz baseband (in samples, fractional) and its
+     * correction to the nominal five samples a symbol: a second-order loop
+     * on the baud-rate line of |z|^2, so the peer's own clock (a Courier on
+     * a Cisco FXS port ran 80 ppm slow of the network, 14 November 2026)
+     * does not walk the eye across the equalizer. It coasts on the last
+     * rate through the silence between the Courier's two bursts. */
+    double eq_pos, eq_rate, line_re, line_im;
+    double eq_fast, eq_peak;
+    unsigned eq_started, eq_burst_symbols, eq_gap, eq_valid_frames;
+    /* Set while only the equalizer trains (before the server's TRAIN_C):
+     * no MP or E is framed from the Courier's first upstream burst. */
+    unsigned train_only;
+    uint64_t warm_until;
     x2_mp_received_t received;
     void *context;
     unsigned valid_frames, rejected_frames;
@@ -31,6 +66,9 @@ typedef struct {
 } x2_mp_rx_t;
 void x2_mp_rx_init(x2_mp_rx_t *rx, x2_mp_received_t received, void *context);
 void x2_mp_rx_audio(x2_mp_rx_t *rx, const int16_t *samples, size_t count);
+/* A fresh MP/E framer on the same line: every hypothesis, E and the
+ * 4-point mode are reset; the front end and the equalizer keep running. */
+void x2_mp_rx_restart(x2_mp_rx_t *rx);
 /* Already descrambled bits: the same strict streaming framer used by the
  * audio receiver. Notifications require repeated matching protected words. */
 void x2_mp_rx_bit(x2_mp_rx_t *rx, unsigned timing, unsigned phase, unsigned bit);

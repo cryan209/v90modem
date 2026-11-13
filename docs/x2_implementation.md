@@ -15,8 +15,9 @@ Courier 403 feedback reaches native CONNECT and upstream B1 acquisition.
 The PCM response-mask correction below establishes complete messages in both
 directions against that emulator. The engine enters DATA after accepted MP/E
 and upstream B1 acquisition. LAPM is qualified against emulated peers in
-both roles (Courier as client, Ie030002 as server); sustained hardware
-operation remains unqualified.
+both roles (Courier as client, Ie030002 as server). Against a hardware
+Courier on an analogue line the server does not connect yet: see "A hardware
+Courier on a Cisco FXS line (14 November 2026)".
 
 ## Implemented
 
@@ -1816,3 +1817,126 @@ is wrong; see the correction above.) A host for it would have to be another prod
 sharing this DSP code, or a path that static search cannot see (a tag
 loaded from a runtime structure). Running Ie030002 on an A-law NET3 profile
 with S58 = 52 sends the same command set as µ-law, with no `6b`.
+
+## A hardware Courier on a Cisco FXS line (14 November 2026)
+
+The first x2 calls from real hardware. The modem is a USRobotics Courier
+V.Everything, `ATI7`: ID_SDL v4.03d, supervisor 7.4.16, DSP 3.1.2, options
+HST/V32bis/Terbo/VFC/V34+/x2/V90. That is the firmware family the emulated
+Courier 403 runs (`--nvram-fixture idsdl403`). It is on this Mac's
+`/dev/cu.usbserial-FT4TQOFT` (115200) and its line is TopRouter FXS 0/3/0,
+caller 7800. `tools/soak/courier_serial_call.py <name>` dials our server on
+vmhost CT 117 (`/root/x2live`, account 2902, u-law, started by
+`tools/soak/courier_serial_server.sh`) and saves the Courier's `ATI6`/`ATI11`
+beside our taps.
+
+**x2 fails the same way on every call (3 of 3).** V.8 completes, Phase 2
+completes, marker `4d` is accepted, the Courier's first upstream burst runs
+2.4 s, we send ZERO/A/B, it resumes with S and S-bar (J is released), we
+send C/D/E, and RECORD_WAIT times out with `MP none`:
+
+| call | build, Courier setup | Courier upstream RMS | second burst | then |
+|---|---|---|---|---|
+| c01 | 1fdd65d4, stored profile (S39=0) | 5180 | 1.7 s | Tone A |
+| c02 | b21ee0bd, `AT&F1` | 1980 | 1.7 s | Tone A |
+| c03 | b21ee0bd, `&F1 S27=1 S54=0 S58=48 S39=8` (the emulator rig's) | 1980 | 1.7 s | Tone A |
+
+**The Courier never sends its MP; it asks for a retrain.** Its second burst
+is S, S-bar and 1.7 s of 16-point TRN, then 2400 Hz Tone A with the 1800 Hz
+guard tone until we hang up. Equalized offline (below), that burst is a
+clean V.34 16-point constellation (orbits at 0.45, 1.0 and 1.34 of the RMS,
+kurtosis 1.31-1.34) with no 17-ones MP sync in either scrambler. In a call
+that works, the emulated Courier sends about 1.6 s of the same TRN and then
+MP. So the Courier judges its own downstream training and rejects it; our
+MP receiver is not what stops the call.
+
+What the line is, measured on these calls:
+
+- **Law:** 6.1% of the received codewords lie outside the A-law image, so
+  nothing transcodes (0% would mean it did).
+- **RTP:** 0 lost and 0 late packets in 1242 each way; the Cisco's clock is
+  8000.43 Hz against the host and our loop timing follows it (8000.47).
+- **Clock:** the Courier's Tone A reads 2399.808 Hz and its guard tone
+  1799.856 Hz, both -79.9 ppm against the Cisco's sample clock.
+- **Echo:** our downstream returns at RMS 135 while we send RMS 3772
+  (-29 dB); the Courier reports near echo loss 20.6 dB.
+- **V.34 on the same line works:** a V.90-mode call fell back to V.34
+  26400, LAPM/V42bis, 40 of 40 lines exact each way, and the Courier's
+  `ATI11` read SNR 41.8 dB, receive level -14.6 dBm, round trip 303 ms.
+  (Its "Timing Offset" field read -12960 ppm and is not a clock
+  measurement.)
+- **V.90 from this Courier fails too:** Ja decoded (N=197), we sent Sd,
+  S-bar-d and TRN1d, and it retrained 480 ms after our Sd left. Not
+  followed up here.
+
+### Reproduced offline: the server only works over a sample-exact bearer
+
+`tools/probe_x2_host_courier.py` drives the emulated Courier over its
+"digital line", which hands our codewords to the Courier's codec model one
+for one. New options put a line in between: `--path-delay-ms` (a FIFO each
+way), and `--clock-ppm` with `--clock-phase`, `--codec-cutoff` and
+`--codec-highpass`, which pass both directions through a linear-domain
+band-limit and a windowed-sinc resampler and back to PCMU, so no codeword
+survives.
+
+| run | bearer | result |
+|---|---|---|
+| exact; `--clock-ppm 0` (resampler at phase 0) | codeword-exact | DATA 32000/24000, payload exact |
+| `--path-delay-ms 150` | exact, 150 ms each way | DATA |
+| `--clock-ppm 0 --clock-phase 0.5` | half a sample off, no drift | RECORD_WAIT timeout, `MP none` |
+| `--clock-ppm` 20, 40, -40, -80 | drifting | RECORD_WAIT timeout, `MP none` |
+| `--clock-ppm` 60, 80 | drifting | Tone A while we are still in J |
+| `--codec-cutoff 3900` | low-pass, 6 dB down at 3900 Hz | RECORD_WAIT timeout, `MP none` |
+| `--codec-cutoff 3700` | low-pass | RECORD_WAIT timeout, `MP none` |
+| `--codec-highpass 250` | high-pass only | RECORD_WAIT timeout, `MP none` |
+| `--codec-cutoff 3500` (with or without the high-pass) | low-pass | MARKER_WAIT timeout |
+
+In the failing runs the emulated Courier does what the hardware does: second
+burst about 1.5 s, then 2400 Hz. So the live failure is not the round trip
+(150 ms each way passes), not the Courier's S-registers (c03), and not a
+clock pull-in limit (a static half-sample offset fails as 20 ppm does). Any
+bearer that is not codeword-exact and sample-aligned fails, including one
+far milder than a real codec. Every x2 result before today came over a
+bearer of that exact kind: the emulator's digital line, or our own client
+through Asterisk.
+
+Not established: whose fault that is. A real Courier trained on real x2
+servers through real codecs, so either our downstream training differs from
+a real server's in a way only an imperfect channel shows (the doc above has
+always listed the initial training scrambler state as a hypothesis, and on
+an exact bearer a receiver needs no equalizer and no reference), or the
+emulator's Courier cannot train through any channel. The control is the
+native pair: Ie030002 as server against the same emulated Courier through
+the same impaired line. If it connects, diff its A/B/C/D/E against ours
+sample for sample under the same Courier upstream. The resampler itself
+requantises to PCMU (about 38 dB), which a real line does not.
+
+### MP receiver: equalized hypotheses
+
+The ten direct timing hypotheses in `x2_mp_rx.c` assume a flat channel, the
+peer's baud clock equal to ours and almost no carrier offset (the
+fourth-power phase tracker averages over 512 symbols). On the hardware tap
+none of them holds an eye: the best sampling phase crosses the whole symbol
+in about 1.3 s of the first burst, and they framed 0 valid MPs and 1-3
+CRC failures per call, which were noise.
+
+Hypotheses 10-14 are new: five blind fractionally spaced equalizers (32 taps
+T/2.5 apart on a 16 kHz baseband), constant-modulus and then radius-directed
+on the three 16-point orbits, strobed by a second-order loop on the
+baud-rate line of the squared envelope and gated on the upstream carrier.
+Five, a fifth of a symbol apart, because blind adaptation from a centre
+spike stalls near an eye crossing, and where the eye opens against the
+baud-rate line depends on the line's band-edge delay: half a symbol from the
+envelope peak for the emulated Courier, a quarter on the FXS line. CRC
+picks. E is still declared by the best hypothesis of its own kind, so on an
+exact bearer the direct one declares it at the sample it always has
+(`x2_session_test`'s 11434).
+
+On the hardware tap the loop reads the Courier's clock at +70 to +90 ppm
+(the tones say 80) and one equalizer converges: kurtosis 1.005 on the
+4-point first burst, radius error 0.05-0.07 on the 16-point second. That is
+how the "TRN, never MP" reading above was made. On the clean capture
+(reference-data/artifacts/x2-20261019-arq-short) three of the five decode
+every MP. **No hardware MP has been through it**, because the Courier has
+not sent one yet; the emulated Courier still reaches DATA with it in.
+

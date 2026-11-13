@@ -106,6 +106,23 @@ def main():
                         help='read-only capture of Courier PCM receive frame state')
     parser.add_argument('--capture-rate', action='store_true',
                         help='read-only capture of Courier 403 rate metric and ceilings')
+    parser.add_argument('--clock-ppm', type=float, default=None,
+                        help='resample the bearer as an analogue line does: the '
+                             'network (engine) clock runs this many ppm fast of '
+                             'the Courier (0 = resampler only; a Courier on a '
+                             'Cisco FXS port measured +80)')
+    parser.add_argument('--clock-phase', type=float, default=0.0,
+                        help='with --clock-ppm: starting sampling offset between '
+                             'the two clocks, in samples (0.5 = half a sample)')
+    parser.add_argument('--codec-cutoff', type=float, default=0.0,
+                        help='with --clock-ppm: low-pass both directions at this '
+                             'frequency first, as a G.712 codec does (3400)')
+    parser.add_argument('--codec-highpass', type=float, default=0.0,
+                        help='with --clock-ppm: also remove everything below this '
+                             'frequency (a Cisco FXS port is 12 dB down at 200 Hz)')
+    parser.add_argument('--path-delay-ms', type=int, default=0,
+                        help='one-way bearer delay added in each direction (a live '
+                             'SIP/FXS path measured about 150 ms each way)')
     args = parser.parse_args()
     if args.native_chunk_bytes < 0:
         parser.error('--native-chunk-bytes must be nonnegative')
@@ -231,6 +248,114 @@ def main():
                 return status
 
         probe.EnginePeer = PtyPeer
+
+    if args.path_delay_ms > 0:
+        delayed_peer = probe.EnginePeer
+        delay_octets = args.path_delay_ms * 8
+
+        class DelayedPeer(delayed_peer):
+            """The same call with each direction held in a FIFO of idle PCMU."""
+            def exchange(self, octets):
+                if not hasattr(self, 'to_engine'):
+                    self.to_engine = bytearray(b'\xff' * delay_octets)
+                    self.to_courier = bytearray(b'\xff' * delay_octets)
+                if not octets:
+                    return b''
+                self.to_engine.extend(octets)
+                head = bytes(self.to_engine[:len(octets)])
+                del self.to_engine[:len(octets)]
+                self.to_courier.extend(super().exchange(head))
+                tail = bytes(self.to_courier[:len(octets)])
+                del self.to_courier[:len(octets)]
+                return tail
+
+        probe.EnginePeer = DelayedPeer
+
+    if args.clock_ppm is not None:
+        import math
+        resampled_peer = probe.EnginePeer
+        ratio = 1 + args.clock_ppm * 1e-6
+        half = 16
+
+        def interpolate(history, position):
+            base = int(position)
+            total = 0.0
+            for k in range(-half + 1, half + 1):
+                x = k - (position - base)
+                weight = 1.0 if abs(x) < 1e-9 else math.sin(math.pi * x) / (math.pi * x)
+                total += history[base + k] * weight * (0.54 + 0.46 * math.cos(math.pi * x / half))
+            return total
+
+        codec = []
+        if args.codec_cutoff > 0 or args.codec_highpass > 0:
+            def low_pass(cutoff):
+                out = []
+                for k in range(-63, 64):
+                    x = 2 * cutoff / 8000 * k
+                    weight = 1.0 if k == 0 else math.sin(math.pi * x) / (math.pi * x)
+                    out.append(2 * cutoff / 8000 * weight
+                               * (0.54 + 0.46 * math.cos(math.pi * k / 63)))
+                return out
+            codec = (low_pass(args.codec_cutoff) if args.codec_cutoff > 0
+                     else [1.0 if k == 63 else 0.0 for k in range(127)])
+            if args.codec_highpass > 0:
+                codec = [a - b for a, b in zip(codec, low_pass(args.codec_highpass))]
+
+        def band_limit(state, samples):
+            if not codec:
+                return samples
+            out = []
+            for v in samples:
+                state.append(v)
+                del state[:-len(codec)]
+                out.append(sum(a * b for a, b in zip(state, codec))
+                           if len(state) == len(codec) else 0.0)
+            return out
+
+        class ResampledPeer(resampled_peer):
+            """Both directions through a windowed-sinc resampler in the linear
+            domain and back to PCMU: no codeword survives, as on a real line."""
+            def exchange(self, octets):
+                if not hasattr(self, 'courier_line'):
+                    self.courier_line = [0.0] * (2 * half)
+                    self.engine_line = [0.0] * (2 * half)
+                    self.courier_at = self.engine_at = half + args.clock_phase
+                    self.engine_due = bytearray()
+                    self.courier_codec, self.engine_codec = [], []
+                if not octets:
+                    return b''
+                self.courier_line.extend(band_limit(
+                    self.courier_codec, [probe.ulaw_to_linear(v) for v in octets]))
+                line = self.courier_line
+                while self.courier_at + half < len(line):
+                    self.engine_due.append(probe.linear_to_ulaw(
+                        max(-32768, min(32767, round(interpolate(line, self.courier_at))))))
+                    self.courier_at += 1 / ratio
+                while len(self.engine_due) >= len(octets):
+                    reply = super().exchange(bytes(self.engine_due[:len(octets)]))
+                    del self.engine_due[:len(octets)]
+                    self.engine_line.extend(band_limit(
+                        self.engine_codec, [probe.ulaw_to_linear(v) for v in reply]))
+                line = self.engine_line
+                out = bytearray()
+                while len(out) < len(octets):
+                    if self.engine_at + half < len(line):
+                        out.append(probe.linear_to_ulaw(
+                            max(-32768, min(32767, round(interpolate(line, self.engine_at))))))
+                        self.engine_at += ratio
+                    else:
+                        out.append(0xff)
+                drop = int(min(self.courier_at, len(self.courier_line))) - 4 * half
+                if drop > 4096:
+                    del self.courier_line[:drop]
+                    self.courier_at -= drop
+                drop = int(self.engine_at) - 4 * half
+                if drop > 4096:
+                    del self.engine_line[:drop]
+                    self.engine_at -= drop
+                return bytes(out)
+
+        probe.EnginePeer = ResampledPeer
 
     def native_payload(command, *a, **kw):
         if str(command[0]) == str(args.engine) and not args.pty_source:
