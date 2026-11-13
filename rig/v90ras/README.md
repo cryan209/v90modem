@@ -393,6 +393,12 @@ refuses). Set modem-safe on 2026-11-08 and saved with `write memory`:
 | 0/3/3 | EC on; VAD and CNG at their defaults | EC, NLP, VAD and comfort noise off on every FXS port | each one rewrites the samples |
 | 6501, 6502 | `dtmf-relay rtp-nte sip-info ...`, plus `dtmf-interworking` on 6502 | removed | digit detection can take modem energy for DTMF and mute the audio. CME phones now send DTMF in-band |
 
+**2026-11-13: 0/3/3 (7803, the MT9234) is temporarily `compand-type a-law`,
+not saved,** to confirm that the µ-law setting cost the MT9234 V.90 to the
+Eicon BRI lines (it did: `docs/v90_hardware_interop.md`). While it is A-law,
+7803's calls into v90ras are converted on the FXS. Revert with
+`no compand-type a-law` under `voice-port 0/3/3`.
+
 Left alone: `network-clock-select 1 BRI0/1/0` (the +62 ppm reference that
 our loop timing follows), the A-law BRI ports and the FXS impedance (default
 600r). No live modem call has been made on the new settings yet.

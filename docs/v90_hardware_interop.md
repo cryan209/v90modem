@@ -1752,9 +1752,17 @@ So:
     like the BRI ports. The 2026-11-08 modem-safe change (rig/v90ras/README.md,
     "Cisco 2911 FXS gateway") set them to µ-law, so that v90ras's µ-law SIP
     leg would carry no conversion. That moved the conversion onto the
-    FXS-to-BRI path. This is the leading explanation and has not been tested.
-    The test: put voice-port 0/3/3 back to A-law and redial 7930 (it needs a
-    router login).
+    FXS-to-BRI path.
+  - **Confirmed 2026-11-13.** We set voice-port 0/3/3 to `compand-type
+    a-law` (not saved to startup-config) and redialled 7930 twice, 70 s
+    apart. Both calls reached V.90 at 50666 down / 26400 up, LAPM/V.42bis,
+    held 120 s. The modem's `ATI11` showed no retrains, digital loss 0 dB,
+    and no robbed-bit signalling. With the port at µ-law the same calls were
+    V.34 at 24000-26400 / 31200.
+  - So the Agere modem does not get V.90 through the Cisco's µ-law/A-law
+    hairpin, even though the CX gets V.90 through Asterisk's conversion. One
+    port setting cannot serve both paths: v90ras is µ-law on SIP (A-law on
+    the FXS converts there instead), and the Eicon BRI is A-law.
 - **TRN2d 6000 does nothing measurable on this modem.**
 - **Power code 23 costs the CX about 10 kbit/s downstream.** It honours the
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
