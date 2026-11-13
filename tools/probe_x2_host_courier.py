@@ -117,6 +117,9 @@ def main():
     parser.add_argument('--codec-cutoff', type=float, default=0.0,
                         help='with --clock-ppm: low-pass both directions at this '
                              'frequency first, as a G.712 codec does (3400)')
+    parser.add_argument('--line-down-only', action='store_true',
+                        help='with --clock-ppm 0: impair only our downstream; the '
+                             "Courier's upstream reaches the engine untouched")
     parser.add_argument('--codec-highpass', type=float, default=0.0,
                         help='with --clock-ppm: also remove everything below this '
                              'frequency (a Cisco FXS port is 12 dB down at 200 Hz)')
@@ -324,8 +327,15 @@ def main():
                     self.courier_codec, self.engine_codec = [], []
                 if not octets:
                     return b''
+                if args.line_down_only:
+                    reply = super().exchange(octets)
+                    self.engine_line.extend(band_limit(
+                        self.engine_codec, [probe.ulaw_to_linear(v) for v in reply]))
+                    octets_in = b''
+                else:
+                    octets_in = octets
                 self.courier_line.extend(band_limit(
-                    self.courier_codec, [probe.ulaw_to_linear(v) for v in octets]))
+                    self.courier_codec, [probe.ulaw_to_linear(v) for v in octets_in]))
                 line = self.courier_line
                 while self.courier_at + half < len(line):
                     self.engine_due.append(probe.linear_to_ulaw(

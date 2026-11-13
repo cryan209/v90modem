@@ -1900,6 +1900,11 @@ far milder than a real codec. Every x2 result before today came over a
 bearer of that exact kind: the emulator's digital line, or our own client
 through Asterisk.
 
+Impairing only our downstream is enough (`--line-down-only`, with the
+Courier's upstream reaching the engine untouched): a half-sample offset, a
+250 Hz high-pass and a 3900 Hz low-pass each still end in RECORD_WAIT with
+`MP none`. The upstream side is not involved.
+
 Not established: whose fault that is. A real Courier trained on real x2
 servers through real codecs, so either our downstream training differs from
 a real server's in a way only an imperfect channel shows (the doc above has
