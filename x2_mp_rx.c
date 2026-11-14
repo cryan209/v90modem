@@ -1,5 +1,6 @@
 #include "x2_mp_rx.h"
 #include "x2_short_banks.h"
+#include "x2_short_banks_high.h"
 #include <math.h>
 #include <string.h>
 #define PI 3.14159265358979323846
@@ -13,7 +14,16 @@ static int positive_ulaw(unsigned code)
  */
 void x2_training_config(x2_pcm_config_t *c)
 {
-    static const uint8_t codes[] = {0xa5,0xa7,0xad,0xaf,0xb7,0xbd,0xc5,0xcf,0xe5};
+    x2_training_config_power(c,0);
+}
+/* Ie030002 D229/D238 pick the E table by ffd9 bit 2: with the -6 dBm
+ * constellation it is d241, the same nine levels one mu-law segment (6 dB)
+ * up. Native capture with a Courier INFO0 of 25ff, 15 November 2026. */
+void x2_training_config_power(x2_pcm_config_t *c,unsigned high)
+{
+    static const uint8_t low[] = {0xa5,0xa7,0xad,0xaf,0xb7,0xbd,0xc5,0xcf,0xe5};
+    static const uint8_t up[] = {0x95,0x97,0x9d,0x9f,0xa7,0xad,0xb5,0xbf,0xd5};
+    const uint8_t *codes=high?up:low;
     unsigned i,j;
     memset(c,0,sizeof(*c)); c->amplitude_bits=19; c->independent_signs=5;
     for (i=0;i<128;++i) c->levels[i]=(int16_t)(positive_ulaw(128+i)/2);
@@ -252,6 +262,11 @@ void x2_mp_rx_audio(x2_mp_rx_t *r,const int16_t *samples,size_t count)
 }
 int x2_short_record_config(const x2_mp_t *mp,unsigned local_mask,x2_pcm_config_t *config)
 {
+    return x2_short_record_config_power(mp,local_mask,0,config);
+}
+int x2_short_record_config_power(const x2_mp_t *mp,unsigned local_mask,unsigned high,
+                                 x2_pcm_config_t *config)
+{
     unsigned ceiling,eligible,index=0,md;
     if(!mp||!config||local_mask>0x7fff || (mp->words[0]&~0x83fc)
        ||mp->words[2] ||(mp->words[3]&255))return -1;
@@ -260,12 +275,17 @@ int x2_short_record_config(const x2_mp_t *mp,unsigned local_mask,x2_pcm_config_t
     eligible=local_mask&((1u<<ceiling)-1);
     while(eligible){++index;eligible>>=1;}
     if(!index)return -1;
-    return x2_short_profile(index,md,config) ? -1 : (int)index;
+    return x2_short_profile_power(index,md,high,config) ? -1 : (int)index;
 }
 int x2_short_profile(unsigned index,unsigned md,x2_pcm_config_t *config)
 {
+    return x2_short_profile_power(index,md,0,config);
+}
+int x2_short_profile_power(unsigned index,unsigned md,unsigned high,x2_pcm_config_t *config)
+{
     if(!config||!index||index>15||md>6)return -1;
-    x2_pcm_config_t c=x2_short_profiles[index-1];c.independent_signs=(uint8_t)md;
+    x2_pcm_config_t c=(high?x2_short_profiles_high:x2_short_profiles)[index-1];
+    c.independent_signs=(uint8_t)md;
     if(x2_pcm_validate(&c))return -1;
     *config=c;return 0;
 }

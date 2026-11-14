@@ -13763,7 +13763,9 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
             g_x2_receiver_started = true;
             logging_state_t *log = v34_get_logging_state(g_v34);
             if (log) span_log_set_level(log,me_span_flow_level());
-            trace_phase("X2 accepted marker=%02x: upstream 3200 high carrier",g_x2.marker);
+            trace_phase("X2 accepted marker=%02x: upstream 3200 high carrier; peer INFO0=%04x, ours %04x, %s constellation",
+                        g_x2.marker,g_x2.peer_capabilities,(unsigned)g_x2.info_body,
+                        g_x2.high_power?"-6 dBm":"low");
         }
     }
     if (g_x2_receiver_started && g_v34 && x2_session_renegotiating(&g_x2)

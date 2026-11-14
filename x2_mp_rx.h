@@ -79,6 +79,14 @@ int x2_short_record_config(const x2_mp_t *mp, unsigned local_mask,
                            x2_pcm_config_t *config);
 /* One short-record allocation (index 1..15) at a given MD (0..6). */
 int x2_short_profile(unsigned index, unsigned md, x2_pcm_config_t *config);
+/* The same three with the constellation named: high selects the -6 dBm
+ * banks (Ie030002 ffd9 bit 2), which both ends use when each INFO0 carries
+ * capability bit 10 (0400). B per index is the same, so are the rates. */
+int x2_short_profile_power(unsigned index, unsigned md, unsigned high,
+                           x2_pcm_config_t *config);
+int x2_short_record_config_power(const x2_mp_t *mp, unsigned local_mask,
+                                 unsigned high, x2_pcm_config_t *config);
+void x2_training_config_power(x2_pcm_config_t *config, unsigned high);
 /* Draft 0.33 clauses 15/16/22: a frame carries B+MD source bits per six
  * samples, so short-record index 1..15 runs at (B+MD)*8000/6 bit/s at its
  * allocation's MD (5 in every captured Courier MP): index 1 = 32000,

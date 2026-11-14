@@ -1,5 +1,6 @@
 #include "x2_session.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #define PI 3.14159265358979323846
 static uint16_t crc_step(uint16_t crc, unsigned bit)
@@ -128,7 +129,7 @@ void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
 {
     x2_pcm_config_t c;unsigned eligible,n=0;
     if(!s||!mp||s->stage<X2_TRAIN_C||s->stage>X2_RECORD_TX)return;
-    int index=x2_short_record_config(mp,s->downstream_rate_mask,&c);
+    int index=x2_short_record_config_power(mp,s->downstream_rate_mask,s->high_power,&c);
     if(index<0){s->stage=X2_FAILED;return;}
     /* W2 is the V.34 upstream capability mask, independent of PCM N1.
      * Highest allowed N no greater than N2; bit zero represents N=1. */
@@ -207,7 +208,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
     }
     if(next==X2_TRAIN_B)x2_scrambler_init(&s->training_scrambler,18,0);
     if(next==X2_TRAIN_E) {
-        x2_pcm_config_t c;x2_training_config(&c);
+        x2_pcm_config_t c;x2_training_config_power(&c,s->high_power);
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,ones,NULL))s->stage=X2_FAILED;
     }
     if(next==X2_RECORD_TX) {
@@ -224,7 +225,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * uses a linear constellation (V.34 9.7). */
         build_record(s);
         s->record_position=0;
-        x2_pcm_config_t c;x2_training_config(&c);
+        x2_pcm_config_t c;x2_training_config_power(&c,s->high_power);
         /* In data the record rides the index-1 (B=19) data allocation at
          * the current MD, not the training alphabet: the captured I-modem
          * record decodes there (pair capture, 25.2 s, from index 1), and
@@ -232,7 +233,7 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * banks nor the training banks (19 Oct). From index 1 that is also
          * the current allocation, so the observed I-modem cannot tell the
          * two apart; nothing here suggests the startup allocation instead. */
-        if(s->reneg && x2_short_profile(1,s->reneg_config.independent_signs,&c))s->stage=X2_FAILED;
+        if(s->reneg && x2_short_profile_power(1,s->reneg_config.independent_signs,s->high_power,&c))s->stage=X2_FAILED;
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
@@ -279,6 +280,16 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     } else if(body&0x1800)return;
     unsigned repeated=s->peer_info_valid && s->stage==X2_TONE_A && !s->a_reversals;
     s->peer_capabilities=(uint16_t)body;s->peer_info_valid=1;++s->accepted_frames;
+    /* Ie030002 95cb..95d4: ffd9 |= 4, the -6 dBm constellation, when both
+     * INFO0 bodies carry capability bit 10. A Courier at its defaults sends
+     * 25ff; with S58 bit 4 set it sends 21ff and both stay on the low set.
+     * Server only: the client's receiver has the low banks alone. */
+    s->high_power=!s->client && !s->symmetric && (body&0x400) && (s->info_body&0x400);
+    {   /* ME_X2_HIGH_POWER=0: a TEST of the old behaviour, the low set
+           whatever the two INFO0s say. */
+        const char *force=getenv("ME_X2_HIGH_POWER");
+        if(force && atoi(force)==0)s->high_power=0;
+    }
     /* V.34 Table 14 bit 28 and Courier 8E8B/9120/9141: during error
      * recovery the peer repeats 17-bit INFO0 with ACK, even after the
      * first INFO0 was accepted. V.34 11.2.2.2.1 also requires recovery

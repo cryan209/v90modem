@@ -37,6 +37,9 @@ typedef struct {
 typedef struct {
     x2_session_stage_t stage;
     unsigned alaw, symmetric, answering, client;
+    /* Both INFO0s carry capability bit 10: E, the record and every data
+       bank come from the -6 dBm set (x2_short_profiles_high). */
+    unsigned high_power;
     uint32_t info_body;         /* our 17-bit INFO0 body (ITU bits 12..28) */
     x2_sym_link_t sym;
     uint64_t tx_samples, rx_samples;

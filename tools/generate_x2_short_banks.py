@@ -1,8 +1,12 @@
 """Generate x2 short-record banks and frame vectors from original I-modem execution.
 Usage (with courier-emu's Python):
-  generate_x2_short_banks.py COURIER_ROOT CAPTURE_DIRECTORY OUTPUT_DIRECTORY
+  generate_x2_short_banks.py COURIER_ROOT CAPTURE_DIRECTORY OUTPUT_DIRECTORY [high]
 The capture supplies Ie030002 dsp-program.bin and dsp-data.bin. Outputs contain
 constructed configurations and results, never firmware program words.
+With "high" the bank builder runs with ffd9 bit 2 set, the -6 dBm
+constellation both ends select with INFO0 capability bit 10, and the outputs
+are x2_short_banks_high.h (x2_short_profiles_high) and
+x2_short_vectors_high.h.
 """
 from pathlib import Path
 import hashlib
@@ -14,6 +18,8 @@ import sys
 sys.path.insert(0,sys.argv[1])
 from courier_emu.dsp import NativeC5x
 capture=Path(sys.argv[2]);output=Path(sys.argv[3]);output.mkdir(parents=True,exist_ok=True)
+high=len(sys.argv)>4 and sys.argv[4]=='high'
+suffix='_high' if high else ''
 program=(capture/'dsp-program.bin').read_bytes()
 data=struct.unpack('<65536H',(capture/'dsp-data.bin').read_bytes())
 rng=random.Random(0xcff4)
@@ -29,7 +35,8 @@ with NativeC5x.from_program(0,program) as core:
         raise AssertionError(core.state())
     for index in range(1,16):
         for address,value in {0x340:(index<<2)|(13<<6),0xd9f1:0,0xd9f2:0x500,
-                              0xf6d9:0x7fff,0x39f:0x1462,0xffd9:data[0xffd9]&~4}.items():
+                              0xf6d9:0x7fff,0x39f:0x1462,
+                              0xffd9:(data[0xffd9]|4) if high else data[0xffd9]&~4}.items():
             core.set_data(address,value)
         invoke(0xcff4)
         assert core.data(0x3a2)==index-1
@@ -46,18 +53,18 @@ with NativeC5x.from_program(0,program) as core:
             vectors.append((index,md,bits,[core.data(0x4c1-i)&255 for i in range(6)]))
 def array(values):return '{'+','.join(map(str,values))+'}'
 lines=['/* Original Ie030002 CFF4/D24A/D0AF, executed with mode=0, W3=0,',
-       ' * W4=0500, mask=7FFF and the captured PCMU low-level call state.',
+       ' * W4=0500, mask=7FFF and the captured PCMU '+('-6 dBm (ffd9 bit 2)' if high else 'low-level')+' call state.',
        ' * Constructed banks only; no firmware program words. */',
-       'static const x2_pcm_config_t x2_short_profiles[15] = {']
+       'static const x2_pcm_config_t x2_short_profiles'+suffix+'[15] = {']
 for b,sizes,banks,levels in profiles:
     lines.append('{'+f'{b},5,0,'+array(sizes)+',{'+','.join(array(bank) for bank in banks)+'},'+array(levels)+'},')
-lines+=['};'];(output/'x2_short_banks.h').write_text('\n'.join(lines)+'\n')
+lines+=['};'];(output/('x2_short_banks'+suffix+'.h')).write_text('\n'.join(lines)+'\n')
 lines=['/* Original Ie030002 CC95/CE85, zero parity and monitor 0280.',
        ' * Constructed frame inputs; no firmware instructions. */',
-       'struct x2_short_vector { unsigned index,md; uint64_t bits; uint8_t octets[6]; };',
-       'static const struct x2_short_vector x2_short_vectors[] = {']
+       *([] if high else ['struct x2_short_vector { unsigned index,md; uint64_t bits; uint8_t octets[6]; };']),
+       'static const struct x2_short_vector x2_short_vectors'+suffix+'[] = {']
 for index,md,bits,octets in vectors:
     lines.append('{'+f'{index},{md},UINT64_C({bits}),'+array(octets)+'},')
-lines+=['};'];(output/'x2_short_vectors.h').write_text('\n'.join(lines)+'\n')
+lines+=['};'];(output/('x2_short_vectors'+suffix+'.h')).write_text('\n'.join(lines)+'\n')
 print(json.dumps({'profiles':len(profiles),'frames':len(vectors),'seed':hex(0xcff4),
                   'program_sha256':hashlib.sha256(program).hexdigest()}))
