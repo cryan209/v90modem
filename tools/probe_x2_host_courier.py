@@ -121,6 +121,12 @@ def main():
                         help='with --clock-ppm: filter both directions with these '
                              'taps (one per line), e.g. a response measured on a '
                              'real line, instead of --codec-cutoff/--codec-highpass')
+    parser.add_argument('--line-echo-db', type=float, default=None,
+                        help="with --line-linear: return the Courier's own transmit "
+                             'to it this many dB down, as its hybrid does')
+    parser.add_argument('--line-invert', action='store_true',
+                        help='with --clock-ppm: invert the downstream, as a reversed '
+                             'tip and ring pair does')
     parser.add_argument('--line-taps', type=int, default=16,
                         help='with --clock-ppm: half-length of the resampling '
                              'sinc (16 rolls off above about 3.6 kHz at half a sample)')
@@ -334,6 +340,12 @@ def main():
                            if len(state) == len(codec) else 0.0)
             return out
 
+        echo_gain = 0.0
+        if args.line_echo_db is not None:
+            from courier_emu import bearer_line
+            echo_gain = 10 ** ((-args.line_echo_db - bearer_line.TO_ULAW_DB
+                                - bearer_line.FROM_ULAW_DB) / 20)
+
         class ResampledPeer(resampled_peer):
             """Both directions through a windowed-sinc resampler in the linear
             domain and back to PCMU: no codeword survives, as on a real line."""
@@ -372,9 +384,18 @@ def main():
                         self.engine_codec, [probe.ulaw_to_linear(v) for v in reply]))
                 line = self.engine_line
                 out = [] if args.line_linear else bytearray()
+                # On the line the echo is the Courier's transmit times the
+                # hybrid loss; here both are in mu-law units, so undo the
+                # harness's two level conversions (TO_ULAW_DB, FROM_ULAW_DB).
+                echo = ([probe.ulaw_to_linear(v) * echo_gain for v in octets]
+                        if args.line_echo_db is not None else None)
                 while len(out) < len(octets):
                     if self.engine_at + half < len(line):
                         value = interpolate(line, self.engine_at)
+                        if args.line_invert:
+                            value = -value
+                        if echo:
+                            value += echo[len(out)]
                         if args.line_noise_db is not None:
                             self.line_power += (value * value - self.line_power) / 4000
                             value += random.gauss(0, math.sqrt(self.line_power)

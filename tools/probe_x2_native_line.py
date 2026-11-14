@@ -53,6 +53,9 @@ def main():
     ap.add_argument('--highpass', type=float, default=0.0)
     ap.add_argument('--ppm', type=float, default=0.0)
     ap.add_argument('--linear', action='store_true')
+    ap.add_argument('--echo-db', type=float, default=None,
+                    help="return the Courier's own transmit to it this many dB down, "
+                         'one line frame late (COURIER_LINE_FRAME_MS); implies --linear')
     ap.add_argument('--save-downstream', type=Path)
     ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
@@ -68,6 +71,8 @@ def main():
     impaired = a.phase or a.cutoff or a.highpass
     taps = line_filter(a.phase, a.cutoff, a.highpass) if impaired else None
     saved = a.save_downstream.open('wb') if a.save_downstream else None
+    if a.echo_db is not None:
+        a.linear = True
     ratio = 1 + a.ppm * 1e-6
     half = 96
     if a.linear:
@@ -91,6 +96,13 @@ def main():
             if not (taps or a.ppm or a.linear):
                 return super()._exchange(dsc, channel, octets)
             if not hasattr(self, 'line_state'):
+                self.heard = []
+                receive = self.line.receive_audio
+
+                def receive_and_keep():
+                    self.heard = receive()
+                    return self.heard
+                self.line.receive_audio = receive_and_keep
                 self.line_state = [0.0] * len(taps or [0])
                 self.down_line = [0.0] * (2 * half + 400)
                 self.down_at = float(half)
@@ -109,6 +121,10 @@ def main():
             if drop > 4096:
                 del self.down_line[:drop]
                 self.down_at -= drop
+            if a.echo_db is not None and len(self.heard) == len(out):
+                # self.heard is on the line; out is scaled onto it by into_courier
+                gain = 10 ** (-a.echo_db / 20) / self.into_courier
+                out = [y + gain * e for y, e in zip(out, self.heard)]
             if not a.linear:
                 out = bytes(linear_to_ulaw(max(-32768, min(32767, round(y)))) for y in out)
             return super()._exchange(dsc, channel, out)

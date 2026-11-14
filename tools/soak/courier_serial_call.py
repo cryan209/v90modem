@@ -12,8 +12,8 @@ ssh; --env passes K=V to it, e.g. --env MODE=v90 --env 'SRV_INIT=ATE0;ATS0=1'.
 
 The modem is set from AT&F1 (never written to NVRAM; ATZ afterwards restores
 the stored profile).  After CONNECT each side sends --lines numbered lines and
-the lines that arrive exactly are counted.  After the call ATI6 and ATI11 (the
-Courier's own link diagnostics) are saved, and the server's log, G.711 taps
+the lines that arrive exactly are counted.  After the call ATI6, ATI11 and ATY11 (the
+Courier's own link diagnostics and line-probe report) are saved, and the server's log, G.711 taps
 and RTP CSVs are pulled into artifacts/<name>/.  Needs pyserial (a venv).
 """
 import argparse
@@ -131,6 +131,8 @@ def main():
     for c in ["ATI6", "ATI11"]:
         open(os.path.join(out, c + ".txt"), "wb").write(send(c, 4))
     send("ATH0")
+    # The line-probe table only prints on hook, and ATZ clears it.
+    open(os.path.join(out, "ATY11.txt"), "wb").write(send("ATY11", 8))
     send("ATZ")
     p.close()
 
