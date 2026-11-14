@@ -1951,9 +1951,22 @@ earlier hardware x2 attempt, on a VG224 port against the emulated I-modem
 (3 October), also failed, and its V.90 reached 45333 there. Controls that
 would decide it, none run yet:
 
-- the native firmware answering this Courier on this line (courier-emu's
-  `tools/run_imodem_inbound_trace.py`); it has to run from a wired host, and
-  this Mac reaches Asterisk through a VPN tunnel;
+- the native firmware answering this Courier on this line. **Tried twice
+  from this Mac the same day; neither call got through V.8, so it decides
+  nothing.** courier-emu's `tools/run_imodem_inbound_trace.py` registered
+  Ie030002 (`S54=0 S58=48`, `S0=1`) as 2903 and the Courier dialled it
+  (`courier_serial_call.py --no-server --dial 2903`). Call 1: RTP reaches
+  this Mac in bursts over its VPN tunnel (97 gaps over 60 ms in 50.6 s, the
+  longest 118 ms, about one every 0.52 s, 0 packets lost), the emulator
+  filled each with 320 idle samples, and the I-modem never answered CM; the
+  Courier sent CM for 49 s. Call 2, with `--bri-sip-rtp-delay-ms 160`: the
+  I-modem heard 4 s of unbroken CM and still sent no JM. Its ANSam lasts
+  3.5 s and it goes on to a 2250 Hz answer tone; the Courier fell to V.22
+  1200 with no protocol. The first CM reached it 2.5 s into that ANSam, so
+  it had about 1 s of CM. Whether 3.5 s is the firmware's ANSam or the
+  emulated supervisor's clock running fast is courier-emu's question. This
+  control needs a wired host and an I-modem that completes V.8 at this
+  path delay;
 - this Courier on a port whose clock is within a few ppm of its own, or the
   Cisco taking its clock from something other than the BRI;
 - another x2 client, if one exists, on FXS 0/3/0.

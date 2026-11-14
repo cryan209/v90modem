@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--dial", default="2902")
     ap.add_argument("--dev", default="/dev/cu.usbserial-FT4TQOFT")
+    ap.add_argument("--no-server", action="store_true",
+                    help="only dial: something else answers --dial (e.g. the emulated I-modem)")
     a = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,7 +58,7 @@ def main():
 
     # The remote shell splits this once: quote only what must stay one word.
     envs = " ".join("'" + e.replace("'", "'\\''") + "'" for e in [f"LINES={a.lines}"] + a.env)
-    srv = subprocess.Popen(SSH + [f"pct exec 117 -- bash -c \"cd {REMOTE} && env {envs} "
+    srv = None if a.no_server else subprocess.Popen(SSH + [f"pct exec 117 -- bash -c \"cd {REMOTE} && env {envs} "
                                   f"bash tools/soak/courier_serial_server.sh {a.name} {a.hold}\""],
                            stdout=subprocess.PIPE, text=True)
     srvout = []
@@ -65,7 +67,8 @@ def main():
         for line in srv.stdout:
             srvout.append(line.strip())
             note("srv: " + line.strip())
-    threading.Thread(target=reader, daemon=True).start()
+    if srv:
+        threading.Thread(target=reader, daemon=True).start()
 
     p = serial.Serial(a.dev, 115200, timeout=0.2, rtscts=True)
 
@@ -86,11 +89,12 @@ def main():
 
     for c in ["AT&F1", "ATE1V1Q0X4S0=0"] + a.at:
         send(c)
-    while "READY" not in srvout and srv.poll() is None:
-        time.sleep(0.5)
-    if "READY" not in srvout:
-        sys.exit("server did not start")
-    time.sleep(6)                                   # registration
+    if srv:
+        while "READY" not in srvout and srv.poll() is None:
+            time.sleep(0.5)
+        if "READY" not in srvout:
+            sys.exit("server did not start")
+        time.sleep(6)                               # registration
     p.reset_input_buffer()
     p.write(f"ATDT{a.dial}\r".encode())
 
@@ -130,6 +134,8 @@ def main():
     send("ATZ")
     p.close()
 
+    if not srv:
+        return 0
     subprocess.run(SSH + ["pct exec 117 -- touch /tmp/x2hw-stop"])
     try:
         srv.wait(timeout=30)
