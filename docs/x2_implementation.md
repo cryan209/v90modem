@@ -15,9 +15,9 @@ Courier 403 feedback reaches native CONNECT and upstream B1 acquisition.
 The PCM response-mask correction below establishes complete messages in both
 directions against that emulator. The engine enters DATA after accepted MP/E
 and upstream B1 acquisition. LAPM is qualified against emulated peers in
-both roles (Courier as client, Ie030002 as server). Against a hardware
-Courier on an analogue line the server does not connect yet: see "A hardware
-Courier on a Cisco FXS line (14 November 2026)".
+both roles (Courier as client, Ie030002 as server), and since 15 November
+2026 a hardware Courier on an analogue line connects to the server: see
+"The hardware Courier connects (15 November 2026)".
 
 ## Implemented
 
@@ -1817,6 +1817,66 @@ is wrong; see the correction above.) A host for it would have to be another prod
 sharing this DSP code, or a path that static search cannot see (a tag
 loaded from a runtime structure). Running Ie030002 on an A-law NET3 profile
 with S58 = 52 sends the same command set as µ-law, with no `6b`.
+
+## The hardware Courier connects (15 November 2026)
+
+Five calls of five from the Courier on FXS 0/3/0 to our server (e2aff088):
+`CONNECT 48000/ARQ/x2/LAPM/V42BIS` at the Courier, 32000/24000 at entry on
+our side, 40 of 40 lines exact each way on four of them (20 of 20 on the
+first), then the Courier's in-data rate change to index 11, **50666/31200**,
+with 0 blocks resent and 0 retrains, one call held three minutes. Four
+defects of ours stood between the first live call and this, each found on
+the hardware and each fixed against the native server's own downstream:
+
+1. **The -6 dBm constellation.** Ie030002 `95cb..95d4` selects it when both
+   INFO0 bodies carry capability bit 10 (`0400`). Ours is `3dff` and does.
+   A Courier at its defaults (S58=0) sends `25ff`; the emulator rig runs it
+   with S58=48, which sends `21ff`, so this never showed offline. In that
+   mode E is `95 97 9d 9f a7 ad b5 bf d5` and every data bank comes from a
+   second set (`x2_short_banks_high.h`, from the original bank builder with
+   `ffd9` bit 2; index 1 is `96 99 9c 9f a5 ab b2 bd d5`, the native
+   capture's alphabet). We sent the low set, the Courier measured E against
+   the wrong levels, its rate metric fell under the floor and it retrained:
+   the `MP none` failure of every call on 14 November. On a perfect emulated
+   line with the Courier at S58=0, `ME_X2_HIGH_POWER=0` reproduces that
+   failure exactly, and without it the call connects.
+2. **The startup record.** The native server sends no alignment group and
+   does not reset at startup: E's mapper and scrambler run on (40002 ones)
+   and the record starts on the next six-sample frame boundary, every 96
+   bits. We stopped E, sent 54 alignment samples (on `a5`, not a level of
+   the -6 dBm E table), reset and then sent the record. The emulated Courier
+   accepts that; the hardware repeated MP for 3 s without ACK and retrained.
+   The alignment group and reset belong to the in-data rate change, which
+   keeps them. `ME_X2_STARTUP_ALIGN=1` restores the old form.
+3. **Our own echo.** The -6 dBm downstream returns under the Courier's
+   16-point MP at about 17 dB, and about half its frames failed CRC. The
+   server now runs the line echo canceller (`v34_line_ec.c`) with TRAIN_B as
+   its echo-only window: bulk delay 2334 samples (291.8 ms), echo RMS 137
+   to 9 (23.9 dB) on the live call. `ME_X2_LEC=0` turns it off.
+4. **E detection.** E needed the two MP frames before it CRC-clean on one
+   hypothesis, and the Courier's E follows one or two acknowledged MPs. An
+   equalized hypothesis now needs to have qualified at some point and to
+   hold the most valid frames of its kind. The MP receiver also trains on
+   the Courier's first burst, which brought the first qualified MP from
+   15.11 s to 14.4 s into the call.
+
+**How the cause was found.** The Courier's verdict is its rate metric
+(captured at Courier 403 `E2EC` with `--capture-rate`): an SNR in dB plus a
+fixed 8.75, so the lowest threshold `2c40` is 35.5 dB. White noise 38 dB
+down gave `2ec1`, 32 dB gave `28c0`, the clean line `3d88`. That made the
+failure a level question, and comparing the two INFO0s answered it. The
+marker trace now prints both INFO0 bodies and the constellation chosen.
+
+Not established: these calls ran with the Cisco off the BRI clock (the
+Courier 24 ppm slow of the port). Whether they also pass at the 80 ppm of
+the BRI-slaved clock has not been tried. One call of eight in this series
+never started training because our V.34 front end did not report the end
+of the Courier's first burst (UPSTREAM_WAIT timeout); not followed up. Our
+x2 client still has only the low banks, and sends bit 10 or not as before.
+
+The sections below are the route here. Their conclusions about the clock,
+line filtering and echo were steps on the way, and several are marked
+superseded.
 
 ## A hardware Courier on a Cisco FXS line (14 November 2026)
 
