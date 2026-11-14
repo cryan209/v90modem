@@ -1905,16 +1905,58 @@ Courier's upstream reaching the engine untouched): a half-sample offset, a
 250 Hz high-pass and a 3900 Hz low-pass each still end in RECORD_WAIT with
 `MP none`. The upstream side is not involved.
 
-Not established: whose fault that is. A real Courier trained on real x2
-servers through real codecs, so either our downstream training differs from
-a real server's in a way only an imperfect channel shows (the doc above has
-always listed the initial training scrambler state as a hypothesis, and on
-an exact bearer a receiver needs no equalizer and no reference), or the
-emulator's Courier cannot train through any channel. The control is the
-native pair: Ie030002 as server against the same emulated Courier through
-the same impaired line. If it connects, diff its A/B/C/D/E against ours
-sample for sample under the same Courier upstream. The resampler itself
-requantises to PCMU (about 38 dB), which a real line does not.
+### The native control: Ie030002 fails through the same lines, and our training is its training
+
+`tools/probe_x2_native_line.py` runs courier-emu's own pair (Ie030002 as
+server, the same emulated Courier 403, `S54=0 S58=48` both ends) and filters
+the I-modem's downstream with the same static impairments.
+
+| line | Courier 403 | Ie030002 |
+|---|---|---|
+| exact | CONNECT 48000/ARQ/x2/LAPM/V42BIS | CONNECT 33333/ARQ/x2/LAPM/V42BIS |
+| `--phase 0.5` | NO CARRIER | CONNECT 33333 x2, then NO CARRIER |
+| `--highpass 250` | NO CARRIER | V.34 21600 fallback, then NO CARRIER |
+| `--cutoff 3900` | NO CARRIER | V.34 21600 fallback, then NO CARRIER |
+| `--cutoff 3500 --highpass 250` | NO CARRIER | V.34 19200 fallback, then NO CARRIER |
+
+So the emulated Courier cannot train x2 through any line that is not
+sample-exact, whichever server sends. The offline reproduction above is
+therefore a property of the emulated Courier (or of its line model), not
+evidence against our server, and it cannot decide the hardware failure.
+A real Courier trained through real codecs, so the emulator is missing
+something a real one has; the obvious candidate is sampling-clock steering
+(its codec model runs a fixed 9.6 kHz ADC phase against the 8 kHz line).
+That belongs to courier-emu.
+
+The same run saved the I-modem's downstream (`--save-downstream`), and
+against ours on the exact bearer:
+
+- Pattern A (363 samples) and TRAIN_B are **identical sample for sample**:
+  the first 21267 samples from the start of A agree, 20911 of 20916 B signs.
+  The two streams part only where each server starts J, which the Courier's
+  S-bar times.
+- Descrambled with GPC (x^-18, x^-23), both read the same: B is all ones, J
+  repeats the 12-bit word `9b0`, the last group before C is `99f`, C is all
+  ones on code `c1` for 6000 samples, D is the same six-code cycle
+  `9e 28 a1 21 a8 1e` for 1152 samples, then E on the nine-level alphabet.
+
+So the initial training scrambler state, listed as a hypothesis since the
+first implementation, is right, and our A/B/J/C/D are the native server's.
+
+What is left for the hardware failure is on the line side: the Courier runs
+79.9 ppm slow of the Cisco's clock (which follows BRI0/1/0, +62 ppm against
+the host), and both PCM modes fail on this line (x2 at the training verdict,
+V.90 right after our Sd) while V.34 reads 41.8 dB. The same Courier's only
+earlier hardware x2 attempt, on a VG224 port against the emulated I-modem
+(3 October), also failed, and its V.90 reached 45333 there. Controls that
+would decide it, none run yet:
+
+- the native firmware answering this Courier on this line (courier-emu's
+  `tools/run_imodem_inbound_trace.py`); it has to run from a wired host, and
+  this Mac reaches Asterisk through a VPN tunnel;
+- this Courier on a port whose clock is within a few ppm of its own, or the
+  Cisco taking its clock from something other than the BRI;
+- another x2 client, if one exists, on FXS 0/3/0.
 
 ### MP receiver: equalized hypotheses
 
