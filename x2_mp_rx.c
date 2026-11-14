@@ -82,11 +82,22 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
             /* Best among its own kind: an equalized hypothesis runs some
              * twenty samples behind the direct ones, and on a clean bearer
              * the direct hypothesis declares E at the sample it always has. */
-            unsigned best=0,first=timing<X2_MP_RX_EQ?0:X2_MP_RX_EQ;
+            unsigned best=0,most=0,first=timing<X2_MP_RX_EQ?0:X2_MP_RX_EQ;
             unsigned last=timing<X2_MP_RX_EQ?X2_MP_RX_EQ:X2_MP_RX_HYPOTHESES;
-            for(unsigned t=first;t<last;++t)for(unsigned p=0;p<2;++p)
+            for(unsigned t=first;t<last;++t)for(unsigned p=0;p<2;++p) {
                 if(r->hypotheses[t][p].repeats>best)best=r->hypotheses[t][p].repeats;
-            if(h->ones==20 && h->repeats>=2 && h->repeats>=best && !r->e_detected) {
+                if(r->hypotheses[t][p].valid>most)most=r->hypotheses[t][p].valid;
+            }
+            /* An equalized hypothesis on a real line loses frames (a
+             * hardware Courier: 24 of 77 CRC-valid in the 0.7 s before its
+             * E), and its E follows one or two acknowledged MPs, so the two
+             * frames before E are often not both clean. There E needs the
+             * hypothesis to have qualified at some point and to hold the
+             * most valid frames of its kind. The direct hypotheses keep the
+             * stricter running count. */
+            unsigned standing=timing<X2_MP_RX_EQ ? (h->repeats>=2 && h->repeats>=best)
+                                                 : (h->qualified && h->valid>=most);
+            if(h->ones==20 && standing && !r->e_detected) {
                 r->e_detected=1;r->e_timing=timing;r->e_phase=phase;
                 r->e_sample=r->samples;
             }
@@ -101,7 +112,7 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
     if(h->position==104) {
         x2_mp_t mp;h->position=0;
         if(x2_mp_decode(h->frame,&mp)) {++r->rejected_frames;h->repeats=0;return;}
-        ++r->valid_frames;
+        ++r->valid_frames;++h->valid;
         if(timing>=X2_MP_RX_EQ)++r->eq_valid_frames;
         /* Ignore the acknowledgement bit for repeat qualification: the
          * acknowledged final frame must retain all negotiated parameters. */
@@ -109,6 +120,7 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
            && !memcmp(h->previous_mp.words+1,mp.words+1,6))++h->repeats;
         else h->repeats=1;
         h->previous_mp=mp;
+        if(h->repeats>=2)h->qualified=1;
         if(h->repeats>=2 && r->received)r->received(r->context,&mp);
     }
 }

@@ -3541,6 +3541,7 @@ static x2_session_t g_x2;
 static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
 static bool g_x2_upstream_prepared, g_x2_upstream_started;
+static bool g_x2_lec = false;   /* x2 server line echo canceller armed (me_x2_rx_locked) */
 static bool g_x2_reneg_seen;
 static bool g_x2_data_stack_started;
 static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
@@ -13589,6 +13590,17 @@ static bool me_x2_tx_locked(uint8_t *codewords, int count)
         for(int i=0;i<count;i++)
             if(first+(uint64_t)i>=from && first+(uint64_t)i<from+len)codewords[i]=0xff;
     }
+    if (g_x2_lec) {
+        /* The canceller's reference: the codewords as they leave. */
+        int16_t reference[320];
+        for (int offset = 0; offset < count;) {
+            int chunk = count - offset;
+            if (chunk > 320) chunk = 320;
+            for (int i = 0; i < chunk; i++) reference[i] = pcm_to_linear(codewords[offset + i]);
+            v34_line_ec_tx(&g_lec, reference, chunk);
+            offset += chunk;
+        }
+    }
     if(g_x2.symmetric)me_x2_symmetric_progress_locked();
     me_x2_progress_locked();
     return true;
@@ -13675,6 +13687,8 @@ static void me_x2_start_locked(void)
     g_mod = ME_MOD_X2;
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
+    v34_line_ec_reset(&g_lec);
+    g_x2_lec = !client && !symmetric && parse_env_int("ME_X2_LEC", 1) != 0;
     /* The peer's INFO0 can overlap SpanDSP's V.8 completion wait. Preserve
      * that real waveform, just as the V.90 INFO0a seam already does. */
     {
@@ -13695,8 +13709,32 @@ static void me_x2_start_locked(void)
            (unsigned long long)g_rx_audio_samples);
     me_x2_progress_locked();
 }
+/* x2 server on a real line: our own downstream comes back (a Cisco FXS
+ * port: 291.8 ms later, 28.9 dB down, one fixed filter to the noise floor)
+ * under the Courier's MP, E and upstream data. With the -6 dBm constellation
+ * that left its 16-point MP at about 17 dB and half the frames failed CRC.
+ * During TRAIN_B the Courier is silent and we send white two-level training,
+ * so that is the echo-only window, as TRN1d/Jd is for V.90. It opens 500 ms
+ * into B, after the Courier's own burst has drained from the round trip, and
+ * closes at 2 s, before its S can arrive (2.3 s after it heard pattern A).
+ * The fit is used only if it removes 6 dB, so an echo-free bearer is left
+ * alone. ME_X2_LEC=0 disables it. */
 static void me_x2_rx_locked(const int16_t *samples, int count)
 {
+    int16_t cleaned[2048];
+    if (g_x2_lec && count > 0 && count <= (int) (sizeof(cleaned)/sizeof(cleaned[0]))) {
+        char lec_msg[256];
+        bool window = g_x2.stage == X2_TRAIN_B
+                      && g_x2.stage_samples >= 4000 && g_x2.stage_samples < 16000;
+        lec_msg[0] = 0;
+        memcpy(cleaned, samples, (size_t) count*sizeof(cleaned[0]));
+        if (g_lec.training && g_x2.stage != X2_TRAIN_B)
+            v34_line_ec_abort_window(&g_lec);
+        if (v34_line_ec_rx(&g_lec, cleaned, count, window, lec_msg, sizeof(lec_msg))
+            && lec_msg[0])
+            ME_LOG("[ME] x2 %s\n", lec_msg);
+        samples = cleaned;
+    }
     x2_session_rx(&g_x2, samples, (size_t)count);
     if(g_x2.client) {
         /* Phase 2 only: after the marker the downstream is decoded from the
@@ -20567,6 +20605,8 @@ static void me_tx_audio_impl(int16_t *amp, int len)
             if (count>320) count=320;
             x2_session_tx(&g_x2,raw,(size_t)count);
             for(int i=0;i<count;++i)amp[offset+i]=pcm_to_linear(raw[i]);
+            if (g_x2_lec)
+                v34_line_ec_tx(&g_lec, amp+offset, count);
             offset+=count;
         }
         me_x2_progress_locked();

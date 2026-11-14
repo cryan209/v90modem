@@ -6,6 +6,9 @@ typedef struct {
     x2_scrambler_t descrambler;
     uint8_t frame[104];
     unsigned ones, position, previous_rotation, repeats;
+    /* Two agreeing CRC-valid MPs seen at some point, and how many valid
+       frames in all: what E is judged against on a line that loses frames. */
+    unsigned qualified, valid;
     x2_mp_t previous_mp;
 } x2_mp_rx_hypothesis_t;
 /* Timing hypotheses 0..9 sample the low-pass output directly, a quarter
