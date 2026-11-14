@@ -194,7 +194,15 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
         s->a_reversals=s->b_reversed=s->b_present=s->b_stable=0;
         s->b_samples=s->b_position=s->b_crossing_valid=0;
     }
-    if(next==X2_TRAIN_C)x2_mp_rx_init(&s->mp_rx,mp_received,s);
+    /* The Courier's first burst (PP, TRN) trains the MP receiver's
+     * equalizers and baud clock before any MP is framed: on a hardware
+     * Courier that halved the time to the first qualified MP (14.85 s
+     * against 15.11 s into the call) and doubled the CRC-valid frames. */
+    if(next==X2_UPSTREAM_WAIT){x2_mp_rx_init(&s->mp_rx,mp_received,s);s->mp_rx.train_only=1;}
+    if(next==X2_TRAIN_C) {
+        if(s->mp_rx.train_only)x2_mp_rx_restart(&s->mp_rx);
+        else x2_mp_rx_init(&s->mp_rx,mp_received,s);
+    }
     if(next==X2_CLIENT_MARKER)s->info_clock=s->info_position=0;
     /* A client retrain's tone exchange is the answer side's; from the probe
        on it is the client again. */
@@ -234,7 +242,11 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * the current allocation, so the observed I-modem cannot tell the
          * two apart; nothing here suggests the startup allocation instead. */
         if(s->reneg && x2_short_profile_power(1,s->reneg_config.independent_signs,s->high_power,&c))s->stage=X2_FAILED;
-        if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
+        if(s->record_continues) {
+            /* E's mapper as it stands; only its source changes. */
+            s->record_continues=0;
+            s->training_mapper.get_bit=record_bit;s->training_mapper.user_data=s;
+        } else if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
 static void fail(x2_session_t *s,x2_session_failure_t why)
@@ -285,6 +297,9 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
      * 25ff; with S58 bit 4 set it sends 21ff and both stay on the low set.
      * Server only: the client's receiver has the low banks alone. */
     s->high_power=!s->client && !s->symmetric && (body&0x400) && (s->info_body&0x400);
+    {   const char *align=getenv("ME_X2_STARTUP_ALIGN");
+        s->startup_align=align && atoi(align)!=0;
+    }
     {   /* ME_X2_HIGH_POWER=0: a TEST of the old behaviour, the low set
            whatever the two INFO0s say. */
         const char *force=getenv("ME_X2_HIGH_POWER");
@@ -461,7 +476,8 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
 {
     size_t k;unsigned i;
     if(!s||!samples)return;
-    if(s->stage>=X2_TRAIN_C && s->stage<=X2_PAYLOAD && !s->mp_rx.e_detected)
+    if(!s->client && s->stage>=X2_UPSTREAM_WAIT && s->stage<=X2_PAYLOAD && !s->mp_rx.e_detected
+       && (s->stage>=X2_TRAIN_C || s->mp_rx.train_only))
         x2_mp_rx_audio(&s->mp_rx,samples,count);
     for(k=0;k<count;++k,++s->rx_samples) {
         double phase=2*PI*(s->answering?1200:2400)*(double)(s->rx_samples%20)/8000;
@@ -570,7 +586,8 @@ unsigned x2_session_renegotiating(const x2_session_t *s)
  * fell back to Tone A 1.5 s later (docs/x2_implementation.md, 19 Oct). */
 static uint8_t align_code(const x2_session_t *s,unsigned position)
 {
-    return s->reneg ? (uint8_t)((s->reneg_config.banks[position][0]&0xff)|0x80) : 0xa5;
+    return s->reneg ? (uint8_t)((s->reneg_config.banks[position][0]&0xff)|0x80)
+                    : s->high_power ? 0x95 : 0xa5;
 }
 size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 {
@@ -682,10 +699,23 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             if(n==10001)stage(s,X2_RECORD_WAIT);
             break;
         case X2_RECORD_WAIT:
-            if(s->mp_valid) {
+            /* Startup, as Ie030002 sends it (native capture, 15 November
+             * 2026): E's mapper and scrambler run on, and on a six-sample
+             * frame boundary the source changes from ones to the record.
+             * No alignment group and no reset: those belong to the in-data
+             * rate change (C936/C9F8). A hardware Courier never
+             * acknowledged the record behind a startup alignment group.
+             * ME_X2_STARTUP_ALIGN=1 restores it, a TEST of the old form. */
+            if(s->mp_valid && s->startup_align) {
                 stage(s,X2_RECORD_ALIGN);
-                code=0xa5;s->stage_samples=1;
-            } else x2_pcm_tx_g711(&s->training_mapper,&code,1);
+                code=align_code(s,0);s->stage_samples=1;
+            } else {
+                if(s->mp_valid && s->training_mapper.output_position==6) {
+                    s->record_continues=1;
+                    stage(s,X2_RECORD_TX);
+                }
+                x2_pcm_tx_g711(&s->training_mapper,&code,1);
+            }
             break;
         case X2_RECORD_ALIGN:
             /* C936/C939/C9F8: eight +++--- groups, then one inverted

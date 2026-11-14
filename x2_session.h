@@ -40,6 +40,9 @@ typedef struct {
     /* Both INFO0s carry capability bit 10: E, the record and every data
        bank come from the -6 dBm set (x2_short_profiles_high). */
     unsigned high_power;
+    /* Startup record: continue E's mapper (native form), or the old
+       alignment group and reset (ME_X2_STARTUP_ALIGN=1). */
+    unsigned record_continues, startup_align;
     uint32_t info_body;         /* our 17-bit INFO0 body (ITU bits 12..28) */
     x2_sym_link_t sym;
     uint64_t tx_samples, rx_samples;

@@ -280,28 +280,35 @@ static void source_activation_test(void)
     static const uint8_t record[]={0xff,0xff,0x11,0x4a,0xfb,0xff,3,0,0x80,0x61,0x1f,0};
     for(unsigned b=0;b<3;++b) {
         x2_session_t s;x2_mp_t mp={{0x344,0x3fe,0,0x500},0};uint8_t octets[160],records[72];
+        static uint8_t training[10122];
         x2_session_init(&s);s.marker_valid=1;
         /* Reach E through its real initializer, avoiding seeded mapper internals. */
         s.stage=X2_TRAIN_D;s.stage_samples=1151;x2_session_tx(&s,octets,1);
         x2_session_set_payload_source(&s,source_bit,NULL);source_calls=0;
-        session_output(&s,NULL,10002,blocks[b]);
+        session_output(&s,training,10002,blocks[b]);
         assert(s.stage==X2_RECORD_WAIT && !source_calls);
-        session_output(&s,octets,120,blocks[b]);
+        session_output(&s,training+10002,120,blocks[b]);
         assert(s.stage==X2_RECORD_WAIT && !source_calls);
         /* Waiting for MP must continue training, without inserting silence. */
-        for(unsigned i=0;i<120;++i)assert(octets[i]!=0x7f);
+        for(unsigned i=0;i<120;++i)assert(training[10002+i]!=0x7f);
         x2_session_receive_mp(&s,&mp);
         assert(s.mp_valid && s.selected_index==1 && s.upstream_rate_n==10);
         assert(s.peer_mp.words[1]==0x03fe && s.downstream_rate_mask==0x7fff);
         assert(s.data_config.banks[0][1]==0xa8a8); /* Data alphabet, not E's A7. */
-        session_output(&s,octets,54,blocks[b]);
-        assert(s.stage==X2_RECORD_TX && !source_calls);
-        for(unsigned i=0;i<54;++i)
-            assert(octets[i]==(uint8_t)(0xa5^((i%6>=3?0x80:0)^(i>=48?0x80:0))));
+        /* Ie030002's startup (native capture, 15 November 2026): no
+         * alignment group and no reset. E's mapper and scrambler run on
+         * and the record starts on the next frame boundary, so it decodes
+         * only with the state carried from the first E frame. */
         session_output(&s,records,sizeof(records),blocks[b]);
         assert(s.stage==X2_RECORD_TX && !source_calls); /* MP alone cannot release it. */
         x2_pcm_state_t mapper={0};x2_scrambler_t scrambler;
         x2_scrambler_init(&scrambler,18,0);
+        for(unsigned frame=0;frame<sizeof(training)/6;++frame) {
+            uint64_t bits;
+            assert(!x2_pcm_decode(&s.training_mapper.config,&mapper,training+frame*6,&bits));
+            for(unsigned i=0;i<24;++i)
+                assert(x2_descramble_bit(&scrambler,(bits>>i)&1)==1 || frame==0);
+        }
         for(unsigned r=0;r<3;++r) {
             uint8_t decoded[12]={0};
             for(unsigned frame=0;frame<4;++frame) {
