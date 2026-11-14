@@ -117,6 +117,20 @@ def main():
     parser.add_argument('--codec-cutoff', type=float, default=0.0,
                         help='with --clock-ppm: low-pass both directions at this '
                              'frequency first, as a G.712 codec does (3400)')
+    parser.add_argument('--line-fir', type=Path,
+                        help='with --clock-ppm: filter both directions with these '
+                             'taps (one per line), e.g. a response measured on a '
+                             'real line, instead of --codec-cutoff/--codec-highpass')
+    parser.add_argument('--line-taps', type=int, default=16,
+                        help='with --clock-ppm: half-length of the resampling '
+                             'sinc (16 rolls off above about 3.6 kHz at half a sample)')
+    parser.add_argument('--line-linear', action='store_true',
+                        help='with --clock-ppm: hand the Courier the line in linear '
+                             'samples instead of requantising it to PCMU (a real '
+                             'analogue line adds no mu-law noise of its own)')
+    parser.add_argument('--line-noise-db', type=float, default=None,
+                        help='with --line-linear: add white noise this many dB '
+                             'below the downstream RMS, per sample')
     parser.add_argument('--line-down-only', action='store_true',
                         help='with --clock-ppm 0: impair only our downstream; the '
                              "Courier's upstream reaches the engine untouched")
@@ -276,9 +290,11 @@ def main():
 
     if args.clock_ppm is not None:
         import math
+        import random
+        random.seed(1)
         resampled_peer = probe.EnginePeer
         ratio = 1 + args.clock_ppm * 1e-6
-        half = 16
+        half = args.line_taps
 
         def interpolate(history, position):
             base = int(position)
@@ -304,6 +320,9 @@ def main():
             if args.codec_highpass > 0:
                 codec = [a - b for a, b in zip(codec, low_pass(args.codec_highpass))]
 
+        if args.line_fir:
+            codec = [float(v) for v in args.line_fir.read_text().split()]
+
         def band_limit(state, samples):
             if not codec:
                 return samples
@@ -325,9 +344,14 @@ def main():
                     self.courier_at = self.engine_at = half + args.clock_phase
                     self.engine_due = bytearray()
                     self.courier_codec, self.engine_codec = [], []
+                    self.line_power = 0.0
                 if not octets:
                     return b''
                 if args.line_down_only:
+                    if ratio != 1 and len(self.engine_line) == 2 * half:
+                        # room for the reader to gain on (or fall behind) the
+                        # engine: 400 samples covers 100 ppm for 500 s
+                        self.engine_line.extend([0.0] * 400)
                     reply = super().exchange(octets)
                     self.engine_line.extend(band_limit(
                         self.engine_codec, [probe.ulaw_to_linear(v) for v in reply]))
@@ -347,14 +371,19 @@ def main():
                     self.engine_line.extend(band_limit(
                         self.engine_codec, [probe.ulaw_to_linear(v) for v in reply]))
                 line = self.engine_line
-                out = bytearray()
+                out = [] if args.line_linear else bytearray()
                 while len(out) < len(octets):
                     if self.engine_at + half < len(line):
-                        out.append(probe.linear_to_ulaw(
-                            max(-32768, min(32767, round(interpolate(line, self.engine_at))))))
+                        value = interpolate(line, self.engine_at)
+                        if args.line_noise_db is not None:
+                            self.line_power += (value * value - self.line_power) / 4000
+                            value += random.gauss(0, math.sqrt(self.line_power)
+                                                  * 10 ** (-args.line_noise_db / 20))
+                        out.append(float(value) if args.line_linear else probe.linear_to_ulaw(
+                            max(-32768, min(32767, round(value)))))
                         self.engine_at += ratio
                     else:
-                        out.append(0xff)
+                        out.append(0.0 if args.line_linear else 0xff)
                 drop = int(min(self.courier_at, len(self.courier_line))) - 4 * half
                 if drop > 4096:
                     del self.courier_line[:drop]
@@ -363,8 +392,13 @@ def main():
                 if drop > 4096:
                     del self.engine_line[:drop]
                     self.engine_at -= drop
-                return bytes(out)
+                return out if args.line_linear else bytes(out)
 
+        if args.line_linear:
+            # analog() turns each octet we return into a linear sample; let a
+            # float through as the sample it already is.
+            decode = probe.ulaw_to_linear
+            probe.ulaw_to_linear = lambda v: v if isinstance(v, float) else decode(v)
         probe.EnginePeer = ResampledPeer
 
     def native_payload(command, *a, **kw):

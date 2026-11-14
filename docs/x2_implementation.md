@@ -1869,7 +1869,72 @@ What the line is, measured on these calls:
   S-bar-d and TRN1d, and it retrained 480 ms after our Sd left. Not
   followed up here.
 
+### What survives, after the corrections below (read this first)
+
+The two sections after this one drew conclusions from a line model that
+requantised the filtered signal to PCMU. That was the model's fault, and
+most of those conclusions fell when the line was kept linear
+(`--line-linear`). What stands at the end of 14 November:
+
+| downstream line, linear samples, emulated Courier 403 | our server | Ie030002 |
+|---|---|---|
+| exact | DATA | CONNECT 48000 |
+| half a sample off, 192-tap interpolator | DATA | - |
+| 250 Hz high-pass | DATA | - |
+| 3900 Hz low-pass | DATA | - |
+| the live line's measured response, one way and round trip (`--line-fir`) | DATA, DATA | - |
+| white noise 38, 44, 50, 56 dB below the signal | DATA at each | - |
+| clock 5 ppm fast (both directions) | DATA | - |
+| clock 10 ppm fast, downstream only | DATA | NO CARRIER |
+| clock 40 ppm fast, downstream only | - | NO CARRIER |
+| clock 80 ppm fast, downstream only | RECORD_WAIT, `MP none` | NO CARRIER |
+| clock 80 ppm slow, both directions / downstream only | RECORD_WAIT, `MP none` | NO CARRIER |
+
+So of everything tried, only a clock offset between the network and the
+Courier reproduces the live failure, it does so at the offset measured on
+the live line (the Courier is 79.9 ppm slow of the Cisco), and the native
+server fails it as well. Band-limiting, a timing-phase offset, noise and
+the round trip do not. The earlier failures with a 3900 Hz low-pass, a
+250 Hz high-pass and a half-sample offset were the requantisation (a
+filtered two-level signal forced back onto mu-law codes) and, for the
+half-sample case, the 32-tap interpolator's roll-off above about 3.6 kHz.
+
+Two measurements on the live taps go with it:
+
+- **The gateway delivers our downstream cleanly.** Our TRAIN_B returns in
+  our own receive tap 291.8 ms later, 28.9 dB down. One fixed 256-tap filter
+  fitted on half of a 1.9 s window explains the other half to 28.4 dB,
+  leaving RMS 5.1, which is the idle line's noise floor (RMS 5). The
+  response is within 2.3 dB from 200 Hz to 3400 Hz, -2.8 dB at 3600,
+  -13.5 dB at 3800 and -18 dB at 100 Hz, round trip. No drift, no
+  processing, no law conversion.
+- **In V.90 the Courier does not react to our Sd at all.** Three calls with
+  `ME_V90_SD_RTD_HOLD=0` sent Sd 290 ms earlier than the two with the hold;
+  the Courier's retrain came 3.96-3.98 s after INFO1a on every one of the
+  five, and on a sixth where we sent no Sd. It times out. Both PCM modes
+  fail on this line the same way: the Courier behaves as if our PCM-domain
+  signal never locks.
+
+What that does and does not establish. The emulated Courier gives up x2 at
+10 ppm against its own native server, which no shipped modem can have as a
+real limit (its own crystal is worse), so the emulator is probably missing
+the Courier's clock tracking (its codec clock is set through ASIC port
+`6b`, courier-emu docs/codec-sample-rates.md) and its number is not the
+hardware's. But the hardware fails at 80 ppm with the emulator's exact
+signature, on a line where everything else measures clean, and the clock
+on this line is wrong for a PCM modem: the Cisco follows BRI0/1/0, 54 to
+62 ppm fast of the host, where a real network clock is within 1 ppm. A
+PCM downstream is converted at the gateway's clock and nothing our server
+sends can change that. The test that decides it is on the Cisco, not on
+the modem: take its clock from its own oscillator instead of the BRI
+(`no network-clock-select 1 BRI0/1/0`), redial, and read the Courier's
+Tone A against the port's clock again.
+
 ### Reproduced offline: the server only works over a sample-exact bearer
+
+**Superseded in part: see the section above.** The low-pass, high-pass and
+half-sample rows below were artefacts of the line model.
+
 
 `tools/probe_x2_host_courier.py` drives the emulated Courier over its
 "digital line", which hands our codewords to the Courier's codec model one
@@ -1906,6 +1971,11 @@ Courier's upstream reaching the engine untouched): a half-sample offset, a
 `MP none`. The upstream side is not involved.
 
 ### The native control: Ie030002 fails through the same lines, and our training is its training
+
+**Superseded in part.** The native runs in this table went through the same
+requantising line, so they say nothing about filtering; the native server's
+failure under clock drift (above) was measured on the linear line. The
+sample comparison of the two servers' training further down stands.
 
 `tools/probe_x2_native_line.py` runs courier-emu's own pair (Ie030002 as
 server, the same emulated Courier 403, `S54=0 S58=48` both ends) and filters

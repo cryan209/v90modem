@@ -10,7 +10,12 @@ tools/probe_x2_host_courier.py puts between OUR server and the same Courier
 compared on one line.  Everything after `--` goes to the courier-emu tool.
 
   probe_x2_native_line.py [--phase 0.5] [--cutoff 3900] [--highpass 250]
+                          [--ppm 10] [--linear]
                           [--save-downstream FILE] -- <pair tool arguments>
+
+--ppm resamples the downstream so the network clock runs that many ppm fast
+of the Courier (as --clock-ppm --line-down-only does for our server), and
+--linear hands the Courier linear samples instead of requantising to PCMU.
 
 --save-downstream keeps the I-modem's downstream PCMU as it left the server
 (before the line), for a sample-level comparison with our own.
@@ -46,6 +51,8 @@ def main():
     ap.add_argument('--phase', type=float, default=0.0)
     ap.add_argument('--cutoff', type=float, default=0.0)
     ap.add_argument('--highpass', type=float, default=0.0)
+    ap.add_argument('--ppm', type=float, default=0.0)
+    ap.add_argument('--linear', action='store_true')
     ap.add_argument('--save-downstream', type=Path)
     ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
@@ -61,22 +68,50 @@ def main():
     impaired = a.phase or a.cutoff or a.highpass
     taps = line_filter(a.phase, a.cutoff, a.highpass) if impaired else None
     saved = a.save_downstream.open('wb') if a.save_downstream else None
+    ratio = 1 + a.ppm * 1e-6
+    half = 96
+    if a.linear:
+        import courier_emu.bearer_line as bearer_line
+        decode = bearer_line.ulaw_to_linear
+        bearer_line.ulaw_to_linear = lambda v: v if isinstance(v, float) else decode(v)
+
+    def interpolate(history, position):
+        base = int(position)
+        total = 0.0
+        for k in range(-half + 1, half + 1):
+            x = k - (position - base)
+            weight = 1.0 if abs(x) < 1e-9 else math.sin(math.pi * x) / (math.pi * x)
+            total += history[base + k] * weight * (0.54 + 0.46 * math.cos(math.pi * x / half))
+        return total
 
     class LineBearer(pair.BearerLineLink):
         def _exchange(self, dsc, channel, octets):
             if saved:
                 saved.write(octets)
-            if taps:
-                if not hasattr(self, 'line_state'):
-                    self.line_state = [0.0] * len(taps)
-                out = bytearray()
-                for v in octets:
-                    self.line_state.append(float(ulaw_to_linear(v)))
+            if not (taps or a.ppm or a.linear):
+                return super()._exchange(dsc, channel, octets)
+            if not hasattr(self, 'line_state'):
+                self.line_state = [0.0] * len(taps or [0])
+                self.down_line = [0.0] * (2 * half + 400)
+                self.down_at = float(half)
+            for v in octets:
+                y = float(ulaw_to_linear(v))
+                if taps:
+                    self.line_state.append(y)
                     del self.line_state[0]
                     y = sum(x * t for x, t in zip(self.line_state, taps))
-                    out.append(linear_to_ulaw(max(-32768, min(32767, round(y)))))
-                octets = bytes(out)
-            return super()._exchange(dsc, channel, octets)
+                self.down_line.append(y)
+            out = []
+            for _ in octets:
+                out.append(interpolate(self.down_line, self.down_at) if a.ppm else self.down_line[int(self.down_at)])
+                self.down_at += ratio
+            drop = int(self.down_at) - 4 * half
+            if drop > 4096:
+                del self.down_line[:drop]
+                self.down_at -= drop
+            if not a.linear:
+                out = bytes(linear_to_ulaw(max(-32768, min(32767, round(y)))) for y in out)
+            return super()._exchange(dsc, channel, out)
 
     pair.BearerLineLink = LineBearer
     sys.argv = [str(EMU / 'tools/probe_imodem_analog_pair.py'), *rest]
