@@ -1925,10 +1925,60 @@ signature, on a line where everything else measures clean, and the clock
 on this line is wrong for a PCM modem: the Cisco follows BRI0/1/0, 54 to
 62 ppm fast of the host, where a real network clock is within 1 ppm. A
 PCM downstream is converted at the gateway's clock and nothing our server
-sends can change that. The test that decides it is on the Cisco, not on
-the modem: take its clock from its own oscillator instead of the BRI
-(`no network-clock-select 1 BRI0/1/0`), redial, and read the Courier's
-Tone A against the port's clock again.
+sends can change that. **That test was run and cleared the clock: see the
+next section.**
+
+### The clock was not it, and what else was closed (14-15 November)
+
+The Cisco was taken off the BRI clock (`no network-clock-select 1
+BRI0/1/0`, not saved). The Courier's Tone A then read 2399.9422 Hz and its
+guard tone 1799.9566 Hz, **-24.1 ppm** against the port (was -79.9), and
+the x2 call failed exactly as before: marker `4d`, second burst 1.7 s,
+Tone A, `MP none`. So the clock offset is not the cause, and the emulated
+Courier's failure under drift is the emulator's.
+
+Closed on the same evidence standard, all against the hardware or its taps:
+
+- **The Courier hears our pattern A.** Its first burst is the emulated
+  call's training sequence symbol for symbol (the differential-symbol
+  histograms agree window by window through the new equalizer) and runs
+  8661-8742 symbols against 7207, which is the round trip plus our later J
+  detection: it stops when A reaches it.
+- **The Courier's own view of the line is good.** `ATY11` after a V.34 call
+  (the table prints only on hook and `ATZ` clears it) reads level 10 from
+  300 to 3300 Hz, 11 at 3450, 13 at 3600, 16 at 3750, 12 at 150. `ATI11`:
+  SNR 40.2 dB, receive -13.0 dBm, near echo loss 14.5 dB (20.6 on another
+  call).
+- **Its echo is not the simple cause.** `ATS39=16` drops its transmit from
+  RMS 1980 to 716 (8.8 dB), and its echo with it; same failure.
+- **Its PCM status word after the V.90 attempts is `00EF`** (bit names from
+  the supervisor's own table, courier-emu docs/x2-v90-protocol-selection.md):
+  x2 and V.90 enabled, V.8 completed, server/client pair established,
+  channel supports x2/V.90, both rolloff grades. On one call that never
+  offered V.90 it was `004F`, without "channel supports".
+- **Our pre-training signals are close to the native server's.** RMS, native
+  then ours: answer tone 2127 / 4087, JM 2870 / 3227, INFO0 and Tone A
+  2457 / 2093, probe 2450 / 2427, pattern A 3935 / 3935, B 3772 / 3772.
+- **J starts at the same sample in both servers** (20367 after pattern A)
+  and ends on the Courier's S-bar in both; live it lasts 2832 samples, the
+  round trip, where the exact line gives 912 (ours) and 1200 (native).
+- **E uses the same nine levels at the same RMS** (3904 / 3922) but is not
+  the same sequence, and its spectrum below 300 Hz differs by a few dB.
+  The Courier's verdict comes about 2300 samples into E. Not followed up.
+
+Offline, with the caveat that the emulated Courier fails these against
+Ie030002 as well and so cannot judge our server: an inverted downstream
+(`--line-invert`) connects; the Courier's own transmit returned 2 ms late
+(`--line-echo-db`) fails at 20 and 30 dB and connects at 40 dB, for both
+servers.
+
+Where that leaves it: every signal we send before and during training that
+has been compared matches the native server's, the line is clean by our
+measurement and by the Courier's, and the Courier still rejects its
+training. The rejection is decided inside the Courier, and the next step
+that is ours is to find which test it fails: trace the emulated firmware
+from the end of its TRN to the Tone A branch on a failing run, name the
+quantity it compares, then measure that quantity on the live taps.
 
 ### Reproduced offline: the server only works over a sample-exact bearer
 
