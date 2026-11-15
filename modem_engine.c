@@ -3541,6 +3541,8 @@ static x2_session_t g_x2;
 static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
 static bool g_x2_upstream_prepared, g_x2_upstream_started;
+static const uint8_t *g_echo_ref_tap;   /* v90_engine_replay --echo-ref, defined below */
+static long g_echo_ref_len;
 static bool g_x2_lec = false;   /* x2 server line echo canceller armed (me_x2_rx_locked) */
 static bool g_x2_reneg_seen;
 static bool g_x2_data_stack_started;
@@ -13607,7 +13609,14 @@ static bool me_x2_tx_locked(uint8_t *codewords, int count)
         for (int offset = 0; offset < count;) {
             int chunk = count - offset;
             if (chunk > 320) chunk = 320;
-            for (int i = 0; i < chunk; i++) reference[i] = pcm_to_linear(codewords[offset + i]);
+            for (int i = 0; i < chunk; i++) {
+                /* v90_engine_replay --echo-ref: the echo in the tap is of
+                   the recorded transmit, not of what this replay sends. */
+                uint64_t k = g_g711_tx_octets + (uint64_t)(offset + i);
+                reference[i] = pcm_to_linear(g_echo_ref_tap
+                    ? (k < (uint64_t)g_echo_ref_len ? g_echo_ref_tap[k] : 0xff)
+                    : codewords[offset + i]);
+            }
             v34_line_ec_tx(&g_lec, reference, chunk);
             offset += chunk;
         }

@@ -128,6 +128,29 @@ static int v34_rx_data_lean(void)
 #endif
 /*- End of function --------------------------------------------------------*/
 
+/* The zero-delay derotator below was the only carrier tracker the DATA path
+   had.  The V.90/x2 T/3 upstream receiver has its own (v90_t3_carrier), ahead
+   of it on the same symbols, so there this one is a second loop in cascade,
+   three times faster (1/32 a symbol against 0.010) and fed every symbol's
+   angle at equal weight.  On a 31200 bit/s constellation its own noise is
+   0.15 degrees RMS with excursions past 1 degree lasting 20 to 35 ms, which
+   at the outer points is most of a decision distance (hardware Courier, 15
+   November 2026).  It holds still while the T/3 tracker runs. */
+static int v34_data_derot_tracks(v34_rx_state_t *s)
+{
+    static int mode = -1;
+
+    if (mode < 0)
+    {
+        const char *e = getenv("V34_V90_T3_DATA_DEROT");
+
+        mode = (e  &&  atoi(e) != 0) ? 1 : 0;
+    }
+    /*endif*/
+    return mode  ||  !(s->v90_t3_acquired  &&  s->v90_t3_carrier_enabled);
+}
+
+
 /* Supervised B1 equalizer conditioning, off: it was an experiment on the
    clause-correct second-Tone-B timing (it shared that switch's name, with the
    opposite default) and applying the incomplete conditioning generally costs
@@ -1541,6 +1564,8 @@ skip_gain_report:
                        all.  Two thirds is the distance of a symbol unrelated to
                        the lattice; half of that keeps the gradient honest. */
                     if (sym_mag > 0.5f && tgt_mag > 0.5f
+                        &&
+                        v34_data_derot_tracks(s)
                         &&
                         ((g_re - t_re)*(g_re - t_re)
                          + (g_im - t_im)*(g_im - t_im)) < V34_DATA_DECISION_GATE)
