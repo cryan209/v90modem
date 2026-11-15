@@ -410,6 +410,14 @@ static void check_v90_info_wire_boundaries(void)
         assert(info_wire_crc(bits + 12, 46) == 0);
         for (int i = 58; i < 62; i++) assert(bits[i] == 1);
 
+        /* V.90 9.2.1.1.8: silence follows INFO1d, so the first attempt is
+           one sequence; each INFO1a timeout adds one to the next group
+           (8.2.3.1 permits a group), up to four. */
+        const int sync[] = {1,1,1,1,0,1,1,1,0,0,1,0};
+        for (int retries = 0; retries < 5; retries++)
+        {
+        int copies = retries < 3 ? retries + 1 : 4;
+        s->tx.v90_info1a_total_retries = retries;
         info1_baud_init(s);
         /* V.90 8.2.3.1: one arbitrary point precedes the whole group. */
         previous = get_info1_baud(s);
@@ -420,15 +428,15 @@ static void check_v90_info_wire_boundaries(void)
             bits[count++] = differential_bit(previous, point);
             previous = point;
         }
-        assert(count == 4*109 && s->tx.current_getbaud != get_info1_baud);
-        const int sync[] = {1,1,1,1,0,1,1,1,0,0,1,0};
-        for (int frame = 0; frame < 4; frame++)
+        assert(count == copies*109 && s->tx.current_getbaud != get_info1_baud);
+        for (int frame = 0; frame < copies; frame++)
         {
             const int *f = bits + frame*109;
             assert(memcmp(f, sync, sizeof(sync)) == 0);
             assert(info_wire_crc(f + 12, 93) == 0);
             for (int i = 105; i < 109; i++) assert(f[i] == 1);
             assert(memcmp(f, bits, 109*sizeof(*f)) == 0);
+        }
         }
         v34_free(s);
     }

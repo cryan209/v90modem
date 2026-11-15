@@ -1769,49 +1769,58 @@ So:
   38666-40000. v90ras carries the code for the Eicon cards (9 October
   recipe). It is a cost to every analogue caller that honours INFO0d.
 
-## V.90 from the hardware Courier: it does not always react to Sd (2026-11-16, open)
+## V.90 from the hardware Courier: our repeated INFO1d lay over its Phase 3 echo training (2026-11-16, fixed)
 
 Courier V.Everything (ID_SDL 4.03) on Cisco FXS 7800, dialling our digital
-side. Not fixed. What is established:
+side. It reached V.90 on some calls with a 40 ms receive buffer and never
+with the default 200 ms; the rest fell back to V.34 after a retrain.
 
-- **Outcome is random at a short round trip and never at a long one.**
-  First Phase 3 attempt reaching Jd, by our receive jitter buffer
-  (`ME_JB_MS`; RTDEd in brackets): 40 ms (149 ms) 5 of 12 on the rig
-  (`/root/x2live`, main at 5e590e24) and 2 of 2 on v90ras; 60 ms (159 ms)
-  1 of 6; 80, 100 and 200 ms (179, 199, 309 ms) 0 of 10. Calls that pass
-  reach V.90 data at 40000 to 52000; calls that fail fall back to V.34
-  after the Courier's retrain. v90ras's `ME_V90_MAX_TX_DBM0_CODE=23` and
-  `ME_V90_TRN2D_SYMBOLS=6000` do not change it (0 of 3 against 1 of 3,
-  alternated, 40 ms).
-- **A failing call is the Courier not reacting to Sd.** On a passing call
-  its Ja stops 236 ms after our Sd starts (tap samples, RTDEd 149 ms). On a
-  failing call Ja runs on for 527 ms after our Sd starts and then turns
-  into the retrain tone. That instant does not move with Sd: with Sd sent
-  160 ms later the retrain came 541 ms after it instead of 664 to 683 ms.
-  So the Courier gives up about 1.0 s after it starts Ja, having heard
-  about 380 ms of our Sd and TRN1d.
-- **Our Sd is the same on passing and failing calls**: `a1 ff a1 21 7f 21`
-  64 times, then S-bar-d, byte for byte, U_INFO=78, starting at any of the
-  frame phases 0, 2 and 4 in both groups; RTP transmit has no gap within
-  1.5 s of it. Sd left 2.94 to 2.98 s after INFO1a on both.
-- **The emulated Courier 403 reproduces the long-path half**
-  (`tools/probe_x2_host_courier.py --modulation v90 --pty-source
-  --path-delay-ms N`, clean line): 0, 40, 75 and 100 ms each way connect
-  52000/V90; 150 ms connects with `ME_V90_SD_RTD_HOLD=0` (Sd arrives
-  904 ms after the Courier starts Ja) and fails with the hold (260 ms
-  held, arrival 1164 ms). So its deadline for Sd lies between 904 and
-  1164 ms after it starts Ja, well inside 9.3.2.4's 1500 ms, and the
-  9.3.1.3 hold of 49a33091 (arrival three round trips plus 60 ms after Ja
-  starts) crosses it at a round trip of about 280 to 370 ms. slmodemd on a
-  317 to 339 ms round trip needs arrival past 951 to 1017 ms; whether one
-  value serves both depends on where in that range the Courier's deadline
-  is. Not yet swept.
-- **Not established:** why Sd goes undetected on the live line when it
-  arrives in time. The emulator on a clean line does not show it. Not yet
-  tried: the emulator with hybrid echo (the Courier reports a near echo
-  loss of 14.4 dB on this port, and it is double-talking Ja when Sd
-  arrives), and what the Cisco port does to the first packets after our
-  three seconds of digital silence.
-- `tools/soak/courier_serial_server.sh` forces x2 by default
-  (`AT+MS=X2`); a V.90 call needs `--env MODE=v90 --env
-  'SRV_INIT=ATE0;ATS0=1'`.
+**Cause.** V.90 9.2.1.1.8 has the digital modem silent after INFO1d. We sent
+four INFO1d sequences as one group (8.2.3.1 permits a group; f2f8fe8b) and cut
+the group only when INFO1a had been decoded. The Courier answers the first
+sequence, is silent 70 ms and starts Phase 3, training its echo canceller on
+its own S, PP and TRN. On our taps our transmit stopped as its INFO1a ended
+and its S began 80 ms later, so at the Courier our second and third INFO1d
+lay over its INFO1a, its 70 ms and the first (round trip - 80) ms of S and
+PP: 69 ms at a 149 ms round trip, 229 ms at 309 ms.
+
+**Symptom.** The Courier then missed our Sd-to-S-bar-d transition under its
+own Ja (9.3.2.4): Ja ran on and it retrained 500 to 541 ms after Sd left us,
+about 350 ms after Sd reached it, whatever the time since it started Ja
+(3400, 3440 and 3520 ms after its S on three failing calls). On a passing
+call Ja stops 160 to 170 ms after Sd leaves us. Our Sd was byte-identical on
+both. First Phase 3 past Sd, old code, by `ME_JB_MS` (RTDEd): 40 ms (149 ms)
+5 of 12; 60 ms (159 ms) 1 of 6; 80 to 200 ms (179 to 309 ms) 0 of 13.
+
+**Fix.** The first attempt is one INFO1d, then silence; each INFO1a timeout
+adds a sequence to the next group, up to the old four, for a peer that needs
+a second sync word (`info1d_copies()`, `ME_V90_INFO1D_COPIES=4` restores the
+fixed group). Live, same day, calls that reached Phase 3: 200 ms buffer 5 of
+5 and 40 ms buffer 4 of 4 past Sd first time, all CONNECT 52000 V.90; the
+old group alternated at 200 ms, 0 of 3.
+
+**What misled.** "It gives up 1.0 s after it starts Ja" was read off calls
+with one round trip; aligned on Sd across round trips the retrain follows
+Sd, not Ja. The emulated Courier on a clean line has no echo to cancel, so
+it never showed this.
+
+Still open, both seen on this rig and neither touched by the fix:
+
+- **Phase 2 ends in a non-V.90 INFO1a on about one call in five** (2 of 11
+  new-code calls, and as often before): we enter `INFO0_RETRY` 40 ms into
+  the first Tone B silence and re-send INFO0d where the Courier expects
+  silence for its L1/L2; its INFO1a then fails the V.90 form check and the
+  call runs as V.34.
+- **The Courier's own limit on Sd is about 1.0 to 1.1 s after it starts
+  Ja**, inside 9.3.2.4's 1500 ms. Emulated 403, clean line: Sd arriving
+  904 ms after Ja starts connects, 1164 ms does not; live, 987 ms connects.
+  The 9.3.1.3 hold of 49a33091 puts arrival at three round trips plus
+  60 ms, which passes that at a round trip of about 315 ms; the rig's
+  default buffer gives 309 ms. slmodemd needs the hold at 317 to 339 ms, so
+  above about 300 ms no one setting serves both.
+- With hybrid echo (`--line-echo-db 14.4`) or a +80 ppm line clock the
+  emulated Courier passes Sd and retrains later, in DIL or Phase 4; not
+  compared with the hardware.
+
+`tools/soak/courier_serial_server.sh` forces x2 by default (`AT+MS=X2`); a
+V.90 call needs `--env MODE=v90 --env 'SRV_INIT=ATE0;ATS0=1'`.

@@ -848,6 +848,7 @@ static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s);
 static complex_sig_t get_phase4_baud(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static int info1a_repeats(v34_state_t *s);
+static int info1d_copies(v34_state_t *s);
 static void infomarksa_baud_init(v34_state_t *s);
 static int info1c_wait_bauds(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
@@ -6939,7 +6940,7 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
                shall transmit silence and condition its receiver to receive
                INFO1a.  Do NOT call s_not_s_baud_init() which would start
                Phase 3 S/S̄ and overwrite RX state. */
-            if (s->tx.tone_duration < 4)
+            if (s->tx.tone_duration < info1d_copies(s))
             {
                 /* V.90 §8.2.3.1 explicitly permits multiple INFO sequences
                    as a group, with only the first preceded by an arbitrary
@@ -6949,8 +6950,8 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
                 s->tx.tone_duration++;
                 s->tx.txptr = 0;
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: repeating INFO1d contiguously (%d/4)\n",
-                         s->tx.tone_duration);
+                         "Tx - V.90: repeating INFO1d contiguously (%d/%d)\n",
+                         s->tx.tone_duration, info1d_copies(s));
             }
             else if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
             {
@@ -6976,6 +6977,46 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
    group.  Four matches what the digital side already sends for INFO1d;
    ME_V90_ANALOGUE_INFO1A_REPEATS raises it for a peer that needs longer to
    arrive at its INFO receive state. */
+/* How many INFO1d sequences go out as one contiguous group.
+
+   V.90 9.2.1.1.8: "After sending INFO1d, the digital modem shall transmit
+   silence and condition its receiver to receive INFO1a."  The analogue modem
+   answers the first INFO1d, is silent for 70 ms and starts Phase 3 (9.3.2.1),
+   where it trains its echo canceller on its own S, PP and TRN against that
+   silence.  We used to send four sequences (8.2.3.1 permits a group) and cut
+   them only once INFO1a had been decoded, so the tail reached the analogue
+   modem a round trip later: the second and third copies lay over its INFO1a,
+   its 70 ms and the first (round trip - 80) ms of its S and PP.
+
+   A USR Courier (ID_SDL 4.03, Cisco FXS) then missed our Sd-to-S-bar-d
+   transition under its own Ja and retrained about 350 ms after Sd reached it.
+   First Phase 3 past Sd, by round trip: 149 ms 5 of 12, 159 ms 1 of 6, 179 to
+   309 ms 0 of 10 -- the more of PP we covered, the worse.  With one sequence,
+   live 2026-11-16 at 309 ms: see docs/v90_hardware_interop.md.
+
+   So the first attempt is one sequence.  A peer that does need a second sync
+   word to frame on does not answer; each INFO1a timeout then adds a sequence
+   to the next group, up to the old four.  ME_V90_INFO1D_COPIES fixes the
+   count (4 restores the old behaviour). */
+static int info1d_copies(v34_state_t *s)
+{
+    const char *env = getenv("ME_V90_INFO1D_COPIES");
+    int n;
+
+    if (env  &&  *env)
+    {
+        long v = strtol(env, NULL, 10);
+
+        if (v >= 1  &&  v <= 8)
+            return (int) v;
+        /*endif*/
+    }
+    /*endif*/
+    n = 1 + s->tx.v90_info1a_total_retries;
+    return (n > 4)  ?  4  :  n;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int info1a_repeats(v34_state_t *s)
 {
     const char *env;
