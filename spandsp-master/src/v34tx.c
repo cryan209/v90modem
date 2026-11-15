@@ -849,6 +849,59 @@ static complex_sig_t get_phase4_baud(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static int info1a_repeats(v34_state_t *s);
 static int info1d_copies(v34_state_t *s);
+
+/* ME_V90_INFO0A_REPEAT_CHECK=0: take every reported first Tone A reversal at
+   its word, as before 2026-11-16. */
+static bool v90_info0a_repeat_check(void)
+{
+    const char *env = getenv("ME_V90_INFO0A_REPEAT_CHECK");
+
+    return !(env  &&  env[0] == '0');
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Leaving the 9.2.1.2.1 INFO0d repeats for Tone B.  While the analogue modem
+   was repeating INFO0a every 0 bit of it was a phase change of Tone A, and
+   the reversal detector counted them: live, a Courier's four repeats left a
+   "reversal" pending, we answered it with our Tone B reversal and silence the
+   moment the repeats ended, and from there we ran one whole reversal
+   transaction ahead of it (it sent its FIRST reversal 455 ms later, when our
+   second Tone B reached it).  None of those counts is 9.2.2.1.3's reversal,
+   which it sends only after 50 ms of the Tone B we are about to start. */
+static void v90_info0_recovery_resume_tone_b(v34_state_t *s)
+{
+    if (!v90_info0a_repeat_check())
+        return;
+    /*endif*/
+    v90_phase2_reset_transactions(s);
+    s->tx.v90_first_reversal_unconfirmed = false;
+    /* A repeat still being framed is waited out in INFO0_SEEN. */
+    s->tx.v90_info0a_repeat_framing = (s->rx.bit_count > 0);
+    s->tx.v90_info0_ack_end_time = s->rx.sample_time;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* A repeated INFO0a has just been read in Tone B.  Is it one the analogue
+   modem sent before our acknowledged INFO0d could have reached it?
+
+   V.34 11.2.2.2.1 has it repeat INFO0a until an INFO0 with bit 28 set
+   arrives, and every INFO0d that reaches it after that is a "repeated INFO0d"
+   that starts it again.  Answering each repeat still in flight with another
+   group therefore never ends: live, with a 309 ms round trip, a Courier and
+   this modem exchanged INFO0a and INFO0d every 480 ms until the call was
+   dropped (2 of 5 calls).  So for a second after a group, which covers any
+   round trip 9.2 allows for, the repeats are let pass under Tone B; the
+   analogue modem stops when the group has reached it and sends 9.2.2.1.3's
+   reversal after 50 ms of that tone.  Repeats still arriving after the second
+   mean the group was lost, and get another. */
+static bool v90_info0a_repeat_in_flight(const v34_state_t *s)
+{
+    return v90_info0a_repeat_check()
+           &&  s->tx.v90_info0_ack_end_time > 0
+           &&  s->rx.sample_time - s->tx.v90_info0_ack_end_time < SAMPLE_RATE;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void infomarksa_baud_init(v34_state_t *s);
 static int info1c_wait_bauds(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
@@ -3137,6 +3190,9 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
     int bit;
     complex_sig_t digital_point;
 
+    if (s->rx.bit_count > 0)
+        s->tx.v90_info_rx_activity_time = s->rx.sample_time;
+    /*endif*/
     bit = get_data_bit(&s->tx);
     /* Table 7/V.90 bits 58:61 are all fill ones. Preserve this baud's
        differential point before a completion handler reinitializes lastbit
@@ -3220,6 +3276,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                          reason);
                 initial_ab_not_ab_baud_init(s);
                 s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                v90_info0_recovery_resume_tone_b(s);
                 /* V.92 9.4.1.2.1: after the INFO0 recovery "the digital modem
                    shall then proceed according to 9.4.1.1.3", i.e. the short
                    procedure goes on when both ends asked for it. */
@@ -3260,6 +3317,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                              s->rx.info0_received);
                     initial_ab_not_ab_baud_init(s);
                     s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                    v90_info0_recovery_resume_tone_b(s);
                     if (s->tx.v92_short_armed  &&  s->rx.info0_received  &&  v92_short_phase2_agreed(s))
                         v92_short_begin(s, "digital");
                     /*endif*/
@@ -4105,6 +4163,9 @@ static int second_b_reversal_wait_bauds(v34_state_t *s)
 
 static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
 {
+    if (s->rx.bit_count > 0)
+        s->tx.v90_info_rx_activity_time = s->rx.sample_time;
+    /*endif*/
     /* Calling side */
     switch (s->tx.stage)
     {
@@ -4231,6 +4292,56 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
            repeat; otherwise the repeat regresses both modems to INFO0 recovery
            after ranging has already advanced (the source of the multi-second
            live Phase 2 loop). */
+        if (s->tx.v90_info0a_repeat_framing)
+        {
+            /* See FIRST_NOT_B_WAIT: a repeated INFO0a is being framed.  Its
+               bits are phase changes of Tone A and none of them is the
+               9.2.2.1.3 reversal, so hold Tone B until the frame ends, then
+               count reversals afresh.  V.34 11.2.1.2.1 (which 9.2.1.2.1
+               follows): repeated INFO0a is answered with INFO0d, bit 28 set;
+               the branch below does that for a frame that passed its CRC,
+               and a frame that failed it is answered the same way here. */
+            if (!s->rx.v90_repeated_info0a_pending  &&  s->rx.bit_count > 0)
+                break;
+            /*endif*/
+            s->tx.v90_info0a_repeat_framing = false;
+            v90_phase2_reset_transactions(s);
+            s->rx.v90_repeated_info0a_pending = true;
+        }
+        /*endif*/
+        if (s->rx.v90_repeated_info0a_pending  &&  v90_info0a_repeat_in_flight(s))
+        {
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: repeated INFO0a %d ms after our acknowledged INFO0d; in flight, holding Tone B\n",
+                     (int) ((s->rx.sample_time - s->tx.v90_info0_ack_end_time)/(SAMPLE_RATE/1000)));
+            s->rx.v90_repeated_info0a_pending = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            v90_phase2_reset_transactions(s);
+            break;
+        }
+        /*endif*/
+        if (v90_phase2_reversal_pending(s)
+            &&  v90_info0a_repeat_check()
+            &&  s->tx.v90_info0_ack_end_time > 0
+            &&  s->tx.v90_info_rx_activity_time > 0
+            &&  s->rx.sample_time - s->tx.v90_info_rx_activity_time < 120*(SAMPLE_RATE/1000))
+        {
+            /* In the 9.2.1.2.1 recovery only.  A Courier ends each repeated
+               INFO0a group with one more phase change about 45 ms after the
+               last bit we frame, then holds Tone A for 170 to 185 ms before
+               the next group; the detector reports that change 60 ms after
+               the frame.  The reversal of 9.2.2.1.3 needs 50 ms of our Tone B
+               at the analogue modem first, and came 455 ms after its last
+               INFO0a on the call this was measured on (340 ms on a call
+               with no recovery, which this does not touch). */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: Tone A \"reversal\" %d ms after an INFO0a frame; not 9.2.2.1.3's\n",
+                     (int) ((s->rx.sample_time - s->tx.v90_info_rx_activity_time)/(SAMPLE_RATE/1000)));
+            v90_phase2_reset_transactions(s);
+            s->rx.received_event = V34_EVENT_NONE;
+            break;
+        }
+        /*endif*/
         if (v90_phase2_reversal_pending(s))
         {
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
@@ -4239,6 +4350,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->rx.v90_repeated_info0a_pending = false;
             s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 1;
+            s->tx.v90_first_reversal_unconfirmed = true;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_OK
@@ -4267,8 +4379,34 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_NOT_B_WAIT:
         /* Continue sending pure tone for 40+-1ms (V.34/11.2.1.1.3) */
+        if (s->tx.v90_first_reversal_unconfirmed  &&  s->rx.bit_count > 0
+            &&  v90_info0a_repeat_check())
+        {
+            /* INFO0a is binary DPSK on Tone A, so the first 0 bit of a
+               repeated INFO0a (11.2.2.2.1 recovery; the analogue modem sends
+               it when our INFO0d has not reached it in time) is a phase
+               reversal of Tone A, and the reversal detector reports it as
+               9.2.2.1.3's.  The real one is followed by steady tone; this one
+               by the INFO sync code eight bauds later, inside our 40 ms.
+
+               A USR Courier (ID_SDL 4.03) repeats INFO0a on about one call in
+               five, when its first INFO0a and our INFO0d cross.  We then
+               reversed Tone B and fell silent in the middle of its recovery,
+               re-sent INFO0d from the silence, and it answered with an INFO1a
+               that is not V.90's: the call ran as V.34.  So take the reversal
+               back and keep Tone B going while the frame is read. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: the Tone A \"reversal\" opened a repeated INFO0a (sync %d bauds into the 40 ms); holding Tone B\n",
+                     s->tx.tone_duration);
+            s->tx.v90_first_reversal_unconfirmed = false;
+            s->tx.v90_info0a_repeat_framing = true;
+            s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+            break;
+        }
+        /*endif*/
         if (++s->tx.tone_duration == 24)
         {
+            s->tx.v90_first_reversal_unconfirmed = false;
             /* 40ms has passed - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.v90_b_rev_time = s->rx.sample_time;
@@ -4894,6 +5032,10 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
                target_bits active. */
             s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
             s->tx.stage = V34_TX_STAGE_V90_PHASE2_B;
+            s->tx.v90_first_reversal_unconfirmed = false;
+            s->tx.v90_info0a_repeat_framing = false;
+            s->tx.v90_info0_ack_end_time = 0;
+            s->tx.v90_info_rx_activity_time = 0;
             s->tx.tone_duration = 0;
             v90_prime_info0a_tone_a_rx(s, "after INFO0d");
         }

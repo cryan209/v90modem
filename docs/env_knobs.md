@@ -239,6 +239,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_ANALOGUE_DIL` | modem_engine.c |  | d | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_INFO1A_REPEATS` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_INFO1D_TIMEOUT` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
+| `ME_V90_INFO0A_REPEAT_CHECK` | v34tx.c | 1 | dh | digital modem, Phase 2: a first Tone A "reversal" followed by the INFO sync inside our 40 ms is a repeated INFO0a (V.34 11.2.2.2.1), not 9.2.2.1.3's reversal; 0 takes every reported reversal at its word |
 | `ME_V90_INFO1D_COPIES` | v34tx.c | 1, +1 per INFO1a timeout, max 4 | dh | V.90 9.2.1.1.8: INFO1d sequences sent as one group before the silence; 4 restores the old fixed group, which lay over the analogue modem's Phase 3 echo training |
 | `ME_V90_ANALOGUE_INFO1D_WAIT_MS` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_JA_SD_BAR_MS` | v90_analogue_tx.c |  | d | V.90 analogue role: configuration and the open real-loop investigation |

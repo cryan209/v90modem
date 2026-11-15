@@ -1225,6 +1225,17 @@ typedef struct
                monotonic count; TX advances this cursor one transaction at a
                time so a later INFO/tone event cannot erase peer progress. */
     int v90_phase2_reversals_consumed;
+    /* Digital modem, full Phase 2: the first Tone A reversal has been
+       reported but its 40 ms of steady tone is still running, and the
+       "reversal" turned out to open a repeated INFO0a. */
+    bool v90_first_reversal_unconfirmed;
+    bool v90_info0a_repeat_framing;
+    /* rx.sample_time when the last 9.2.1.2.1 group of acknowledged INFO0d
+       ended and Tone B resumed; 0 if none has been sent. */
+    span_sample_timer_t v90_info0_ack_end_time;
+    /* rx.sample_time when the receiver was last inside an INFO frame while
+       the digital modem was in its INFO0d/Tone B stages. */
+    span_sample_timer_t v90_info_rx_activity_time;
     /*! \brief Number of durable Phase 2 L2-complete transactions already
                consumed by the TX state machine. */
     int v90_phase2_l2_consumed;

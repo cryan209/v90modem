@@ -1804,13 +1804,9 @@ with one round trip; aligned on Sd across round trips the retrain follows
 Sd, not Ja. The emulated Courier on a clean line has no echo to cancel, so
 it never showed this.
 
-Still open, both seen on this rig and neither touched by the fix:
+Still open, seen on this rig and not touched by the fix (the Phase 2
+fallback that was listed here is the next section):
 
-- **Phase 2 ends in a non-V.90 INFO1a on about one call in five** (2 of 11
-  new-code calls, and as often before): we enter `INFO0_RETRY` 40 ms into
-  the first Tone B silence and re-send INFO0d where the Courier expects
-  silence for its L1/L2; its INFO1a then fails the V.90 form check and the
-  call runs as V.34.
 - **The Courier's own limit on Sd is about 1.0 to 1.1 s after it starts
   Ja**, inside 9.3.2.4's 1500 ms. Emulated 403, clean line: Sd arriving
   904 ms after Ja starts connects, 1164 ms does not; live, 987 ms connects.
@@ -1824,3 +1820,51 @@ Still open, both seen on this rig and neither touched by the fix:
 
 `tools/soak/courier_serial_server.sh` forces x2 by default (`AT+MS=X2`); a
 V.90 call needs `--env MODE=v90 --env 'SRV_INIT=ATE0;ATS0=1'`.
+
+## V.90 from the hardware Courier: its repeated INFO0a read as Tone A reversals (2026-11-16, fixed)
+
+Same rig. On 5 of 14 calls (old code, alternated) Phase 2 ended in an INFO1a
+that is not V.90's and the call ran as V.34 at 21600 to 31200.
+
+**What the Courier does.** When its INFO0a and our INFO0d cross it goes into
+the INFO0 recovery of V.34 11.2.2.2.1 (V.90 9.2.2.2.1): it repeats INFO0a,
+about 95 ms of frame, one more phase change 45 ms after the last bit we
+frame, then 170 to 185 ms of Tone A, until an INFO0d with bit 28 set has
+reached it. Its repeats never carry bit 28 themselves. Every INFO0d that
+reaches it after it has stopped starts it again.
+
+**What we did.** INFO0a is binary DPSK on Tone A, so each 0 bit is a phase
+reversal of Tone A and the reversal detector counted them as 9.2.2.1.3's.
+Measured on one call (RTDEd 309 ms): we answered the first repeat's first
+0 bit with our Tone B reversal and silence, re-sent INFO0d from the
+silence, took a count left over from the repeats as the next reversal the
+moment that ended, and were then one whole reversal transaction ahead: the
+Courier sent its first real reversal at 7.96 s, 455 ms after its last
+INFO0a, when what reached it was our second Tone B. Its INFO1a after that
+fails the V.90 form check (`reserved=33/00 U_INFO=1`).
+
+**Fix** (`v34tx.c`, digital modem, full Phase 2; `ME_V90_INFO0A_REPEAT_CHECK=0`
+restores the old behaviour):
+
+- A first "reversal" followed by the INFO sync code inside our 40 ms of
+  11.2.1.1.3 is taken back; Tone B continues while the frame is read.
+- Reversals counted while INFO0a was repeating are dropped when Tone B
+  resumes after the acknowledged INFO0d.
+- For one second after that INFO0d, further repeats are let pass under Tone
+  B instead of being answered. Answering each repeat still in flight never
+  ends: with the first two points alone, 2 of 5 live calls exchanged INFO0a
+  and INFO0d every 480 ms until the call dropped.
+- In the recovery only, a "reversal" less than 120 ms after an INFO frame
+  is the frame's trailing phase change, not the reversal (which needs 50 ms
+  of our Tone B at the Courier first).
+
+Live, alternated, 309 ms round trip: with the fix 14 of 14 CONNECT 52000
+V.90, 10 of them through the recovery, all on the first Phase 2; without it
+9 of 14, and all 5 calls that met the repeat fell back to V.34. The recovery
+costs about 1.9 s (first reversal answered at 8.86 s instead of 6.96 s).
+Regression: `reference-data/artifacts/courier-v90-info0a-repeat` in
+`tests/fast.list`.
+
+Not established: why the Courier repeats on some calls and not others (its
+first INFO0a and our INFO0d overlap on all of them), and whether any other
+analogue modem repeats INFO0a the same way.
