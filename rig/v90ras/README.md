@@ -968,5 +968,4 @@ commit's `v34tx.c` and `private/v34.h`, which differ from 121c6c53's by
 `sip_v90_modem.pre-ba9e61ba`. Only `v90ras` was restarted, with no call
 up; the lines registered. Verified live: the hardware Courier (FXS 7800)
 dialling 2950 four times, CONNECT 50666/ARQ/V90/LAPM each time. The
-x2live rig tree on CT 117 holds the same two files uncommitted over
-5e590e24.
+x2live rig tree on CT 117 is at ba9e61ba.
