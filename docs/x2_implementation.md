@@ -1912,11 +1912,30 @@ link timeouts and 1 NAK.
 - Live, three 60 s calls: one had the same excursion 8.5 s after the rate
   change (0.547 against 0.542, "resumed" 32519 bits later) and the Courier
   counted 0 blocks resent and 0 link timeouts, 60 of 60 lines each way.
-- Not established: what the excursion is. It came 16.7 s and 8.5 s after
-  the change to 31200 in the two calls that had it, and it did not
-  reproduce in a replay of the first call's tap on either platform (that
-  replay loses the upstream 2.5 s into data, which the live call did not,
-  so it is not a faithful replay past that point).
+- **The excursion was ours (fixed, 5e590e24).** The DATA path's zero-delay
+  derotator kept tracking behind the T/3 upstream receiver's own carrier
+  loop: a second loop in cascade, three times faster (1/32 a symbol
+  against 0.010) and fed every symbol's angle at equal weight. Its angle
+  wanders 0.15 degrees RMS and swung to -0.8 to -1.13 degrees for 20 to
+  35 ms at each excursion, which at the outer points of the 31200
+  constellation is most of a decision distance. It now holds still while
+  the T/3 tracker runs (`V34_V90_T3_DATA_DEROT=1` restores it).
+  - Replays, old against new: mean decision error 0.1507 to 0.1429 and
+    0.1520 to 0.1446, peak fast error 0.605 to 0.327 and 0.616 to 0.316,
+    excursions 14 to 2 and 12 to 0 (16-symbol mean above 0.4).
+  - Four V.90 dial-in taps (v90ras): 26400 SNR +0.15 to +0.2 dB on three,
+    9600 unchanged, none worse.
+  - Live, four 60 s calls: no excursion on any (it was 2 calls of 13).
+  - What it was not, each tried on the replay: the T/3 carrier loop's
+    gain (0.001 to 0.12, with and without power weighting and an
+    inner-points-only detector), its 0.35 lock gate, the equalizer's
+    decision-directed step (0.0005 to 0.02), the timing loop (its
+    fraction ramps smoothly through the excursion), RTP timing, and the
+    line (level and peaks unchanged through it).
+  - `v90_engine_replay --echo-ref` did not feed the x2 server's line echo
+    canceller the recorded transmit, so an x2 replay lost the upstream
+    2.5 s into data. With that fixed the replay reproduces the excursion
+    at 43.000 s against the call's 42.994 s.
 - Our own estimate from that SNR is 24000 to 26400 bit/s against the
   31200 we ask for. The trellis carries it (0 blocks resent on 12 of 13
   calls before the fix), so the rate was left alone.
