@@ -13853,8 +13853,19 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
                 else trace_phase("X2 upstream E -> B1 acquisition");
             }
         }
-        if (g_x2.stage == X2_UPSTREAM_WAIT
-            && v34_get_phase3_j_trn16(g_v34) >= 0) {
+        /* J ends the Courier's first burst (V.34 10.1.3.6). The V.34 Phase
+           3 demodulator freezes its equalizer 256T into TRN and can lose
+           the burst before J (hardware Courier, 15 November 2026: one call
+           in fourteen, J never decoded in the 1.5 s it was held), so the
+           x2 burst receiver's own J framer counts as well. */
+        bool v34_j = v34_get_phase3_j_trn16(g_v34) >= 0
+                     && parse_env_int("ME_X2_V34_J", 1) != 0;
+        if (g_x2.stage == X2_UPSTREAM_WAIT && (v34_j || g_x2.mp_rx.j_detected)) {
+            trace_phase("X2 upstream J: V.34 receiver %s, burst receiver %s (timing %u, %s TRN, MP RX sample %llu)",
+                        v34_j ? "yes" : "no",
+                        g_x2.mp_rx.j_detected ? "yes" : "no", g_x2.mp_rx.j_timing,
+                        g_x2.mp_rx.j_trn16 ? "16-point" : "4-point",
+                        (unsigned long long)g_x2.mp_rx.j_sample);
             x2_session_upstream_j(&g_x2);
         }
 

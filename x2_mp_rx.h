@@ -66,6 +66,16 @@ typedef struct {
      * on the 4-point constellation, two differential bits per symbol. */
     unsigned four_point;
     uint64_t e_sample;
+    /* The Courier's first upstream burst ends in J (V.34 10.1.3.6, Table
+     * 18: a 16-bit pattern repeated, 4-point, differential, scrambled),
+     * held until our downstream reaches it. Framed here while train_only
+     * is set, on every timing and phase hypothesis, so the start of our
+     * downstream does not rest on the V.34 Phase 3 demodulator alone. */
+    x2_scrambler_t j_descrambler[X2_MP_RX_HYPOTHESES][2];
+    uint32_t j_window[X2_MP_RX_HYPOTHESES][2];
+    uint8_t j_rotation[X2_MP_RX_HYPOTHESES][2], j_run[X2_MP_RX_HYPOTHESES][2];
+    unsigned j_detected, j_trn16, j_timing;
+    uint64_t j_sample;
 } x2_mp_rx_t;
 void x2_mp_rx_init(x2_mp_rx_t *rx, x2_mp_received_t received, void *context);
 void x2_mp_rx_audio(x2_mp_rx_t *rx, const int16_t *samples, size_t count);

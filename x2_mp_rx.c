@@ -48,7 +48,10 @@ void x2_mp_rx_init(x2_mp_rx_t *r,x2_mp_received_t received,void *context)
     r->warm_until=1000;
     for(unsigned i=0;i<10;++i)r->next_symbol[i]=i*0.25;
     for(unsigned i=0;i<X2_MP_RX_HYPOTHESES;++i)
-        for(unsigned j=0;j<2;++j)x2_scrambler_init(&r->hypotheses[i][j].descrambler,5,0);
+        for(unsigned j=0;j<2;++j) {
+            x2_scrambler_init(&r->hypotheses[i][j].descrambler,5,0);
+            x2_scrambler_init(&r->j_descrambler[i][j],5,0);
+        }
 }
 void x2_mp_rx_restart(x2_mp_rx_t *r)
 {
@@ -124,6 +127,26 @@ void x2_mp_rx_bit(x2_mp_rx_t *r,unsigned timing,unsigned phase,unsigned bit)
         if(h->repeats>=2 && r->received)r->received(r->context,&mp);
     }
 }
+/* V.34 (10/1996) 10.1.3.6, Table 18, first bit in time as the MSB: J before
+ * a 4-point TRN is 0000 1001 1001 0001, before a 16-point TRN 0000 1101 1001
+ * 0001. Two identical 16-bit periods, any alignment, on sixteen symbols
+ * running: scrambled TRN matches one symbol by chance once in 2^27. */
+static void j_dibit(x2_mp_rx_t *r,unsigned timing,unsigned p,unsigned dibit)
+{
+    uint32_t w=r->j_window[timing][p];
+    for(unsigned k=0;k<2;++k)
+        w=(w<<1)|x2_descramble_bit(&r->j_descrambler[timing][p],(dibit>>k)&1);
+    r->j_window[timing][p]=w;
+    unsigned lo=w&0xffff,kind=2;
+    if((w>>16)==lo)for(unsigned n=0;n<16 && kind==2;++n) {
+        unsigned rotated=((lo<<n)|(lo>>(16-n)))&0xffff;
+        if(rotated==0x0991)kind=0;else if(rotated==0x0d91)kind=1;
+    }
+    if(kind==2){r->j_run[timing][p]=0;return;}
+    if(++r->j_run[timing][p]>=16 && !r->j_detected) {
+        r->j_detected=1;r->j_trn16=kind;r->j_timing=timing;r->j_sample=r->samples;
+    }
+}
 static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
 {
     double power=re*re+im*im,rr=re*re-im*im,ii=2*re*im;
@@ -131,7 +154,7 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
     r->power[timing]+=alpha*(power-r->power[timing]);
     r->fourth_re[timing]+=alpha*(rr*rr-ii*ii-r->fourth_re[timing]);
     r->fourth_im[timing]+=alpha*(2*rr*ii-r->fourth_im[timing]);
-    if(r->samples<r->warm_until||r->train_only)return;
+    if(r->samples<r->warm_until)return;
     double reference=sqrt(r->power[timing]);
     /* The equalizer's output is normalised and carrier-gated already. */
     if(timing<X2_MP_RX_EQ && reference<100)return;
@@ -159,6 +182,12 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
         unsigned rotation=(unsigned)((int)lround((angle-base)/90)+8)%4;
         unsigned z=(4-rotation+offset[orbit])%4;
         x2_mp_rx_hypothesis_t *h=&r->hypotheses[timing][p];
+        if(r->train_only) {
+            unsigned z4=(4-(unsigned)((int)lround((angle-45)/90)+8)%4)%4;
+            j_dibit(r,timing,p,(z4+4-r->j_rotation[timing][p])%4);
+            r->j_rotation[timing][p]=(uint8_t)z4;
+            continue;
+        }
         if(r->four_point) {
             /* Points at 45 degrees; the same clockwise differential
              * convention as the 16-point quadrant bits, LSB first, GPA.
