@@ -193,6 +193,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_X2_STARTUP_ALIGN` | x2_session.c | (unset) | td | 1 restores the alignment group and mapper reset before the startup record: the form before 15 November 2026, which a hardware Courier never acknowledged. |
 | `ME_X2_LEC` | modem_engine.c | 1 | d | 0 disables the x2 server's line echo canceller (fitted during TRAIN_B, when the Courier is silent). |
 | `ME_X2_V34_J` | modem_engine.c | 1 | d | 0 ignores the V.34 Phase 3 receiver's J at the end of the Courier's first burst, leaving the x2 burst receiver's J framer as the only trigger for our downstream. |
+| `ME_X2_SQUELCH_EC` | modem_engine.c | 0 | d | 1 squelches the x2 upstream on a decision-error excursion even under an established LAPM/MNP link, as before 15 November 2026 (it is always squelched without error control). |
 | `ME_X2_HIGH_POWER` | x2_session.c | (unset) | td | 0 forces the low x2 constellation whatever the two INFO0s say: the behaviour before 15 November 2026, which a Courier at its defaults (INFO0 25ff) rejects. |
 | `ME_X2_RETRAIN_ON_LOSS` | modem_engine.c | 0 | td | itself when ITS receiver fails (9.5.2.1), which we now answer. |
 | `ME_X2_SERVER_SILENCE_MS` | modem_engine.c | 1000 | t | ME_X2_SERVER_SILENCE_AFTER_MS=<a>, ME_X2_SERVER_SILENCE_MS=<d>: a TEST |

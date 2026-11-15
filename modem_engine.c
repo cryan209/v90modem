@@ -11681,7 +11681,18 @@ static void v34_put_bit_cb(void *user_data, int bit)
            && g_x2_upstream_started
            && (g_x2.stage==X2_PAYLOAD || g_x2.stage==X2_DATA_STARTUP)
            && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
-            if(me_x2_upstream_squelched())return;
+            /* Under an established error-control link the frame check
+               already rejects what a hit corrupts, and the squelch's one
+               second of clean decisions before it resumes turns a 0.15 s
+               hit into a 1 s outage (hardware Courier, 15 November 2026:
+               LAPM at 31200, 32597 bits dropped, 13 blocks resent and two
+               link timeouts at the Courier). Squelch only what would reach
+               the DTE unchecked. */
+            bool checked=(g_data_stack.framing==DS_FRAMING_V42
+                          || g_data_stack.framing==DS_FRAMING_MNP)
+                         && ds_link_is_ready(&g_data_stack)
+                         && parse_env_int("ME_X2_SQUELCH_EC", 0) == 0;
+            if(me_x2_upstream_squelched() && !checked)return;
             me_data_rx_first_bit();
             me_x2_upstream_put(bit);
         }
