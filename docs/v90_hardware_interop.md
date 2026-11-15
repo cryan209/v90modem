@@ -1768,3 +1768,50 @@ So:
   -13 dBm0 declaration (U_INFO 95 -> 79), and drn falls from 50666 to
   38666-40000. v90ras carries the code for the Eicon cards (9 October
   recipe). It is a cost to every analogue caller that honours INFO0d.
+
+## V.90 from the hardware Courier: it does not always react to Sd (2026-11-16, open)
+
+Courier V.Everything (ID_SDL 4.03) on Cisco FXS 7800, dialling our digital
+side. Not fixed. What is established:
+
+- **Outcome is random at a short round trip and never at a long one.**
+  First Phase 3 attempt reaching Jd, by our receive jitter buffer
+  (`ME_JB_MS`; RTDEd in brackets): 40 ms (149 ms) 5 of 12 on the rig
+  (`/root/x2live`, main at 5e590e24) and 2 of 2 on v90ras; 60 ms (159 ms)
+  1 of 6; 80, 100 and 200 ms (179, 199, 309 ms) 0 of 10. Calls that pass
+  reach V.90 data at 40000 to 52000; calls that fail fall back to V.34
+  after the Courier's retrain. v90ras's `ME_V90_MAX_TX_DBM0_CODE=23` and
+  `ME_V90_TRN2D_SYMBOLS=6000` do not change it (0 of 3 against 1 of 3,
+  alternated, 40 ms).
+- **A failing call is the Courier not reacting to Sd.** On a passing call
+  its Ja stops 236 ms after our Sd starts (tap samples, RTDEd 149 ms). On a
+  failing call Ja runs on for 527 ms after our Sd starts and then turns
+  into the retrain tone. That instant does not move with Sd: with Sd sent
+  160 ms later the retrain came 541 ms after it instead of 664 to 683 ms.
+  So the Courier gives up about 1.0 s after it starts Ja, having heard
+  about 380 ms of our Sd and TRN1d.
+- **Our Sd is the same on passing and failing calls**: `a1 ff a1 21 7f 21`
+  64 times, then S-bar-d, byte for byte, U_INFO=78, starting at any of the
+  frame phases 0, 2 and 4 in both groups; RTP transmit has no gap within
+  1.5 s of it. Sd left 2.94 to 2.98 s after INFO1a on both.
+- **The emulated Courier 403 reproduces the long-path half**
+  (`tools/probe_x2_host_courier.py --modulation v90 --pty-source
+  --path-delay-ms N`, clean line): 0, 40, 75 and 100 ms each way connect
+  52000/V90; 150 ms connects with `ME_V90_SD_RTD_HOLD=0` (Sd arrives
+  904 ms after the Courier starts Ja) and fails with the hold (260 ms
+  held, arrival 1164 ms). So its deadline for Sd lies between 904 and
+  1164 ms after it starts Ja, well inside 9.3.2.4's 1500 ms, and the
+  9.3.1.3 hold of 49a33091 (arrival three round trips plus 60 ms after Ja
+  starts) crosses it at a round trip of about 280 to 370 ms. slmodemd on a
+  317 to 339 ms round trip needs arrival past 951 to 1017 ms; whether one
+  value serves both depends on where in that range the Courier's deadline
+  is. Not yet swept.
+- **Not established:** why Sd goes undetected on the live line when it
+  arrives in time. The emulator on a clean line does not show it. Not yet
+  tried: the emulator with hybrid echo (the Courier reports a near echo
+  loss of 14.4 dB on this port, and it is double-talking Ja when Sd
+  arrives), and what the Cisco port does to the first packets after our
+  three seconds of digital silence.
+- `tools/soak/courier_serial_server.sh` forces x2 by default
+  (`AT+MS=X2`); a V.90 call needs `--env MODE=v90 --env
+  'SRV_INIT=ATE0;ATS0=1'`.
