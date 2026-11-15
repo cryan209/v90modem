@@ -1871,7 +1871,7 @@ Not established: these calls ran with the Cisco off the BRI clock (the
 Courier 24 ppm slow of the port). Whether they also pass at the 80 ppm of
 the BRI-slaved clock has not been tried. One call of eight in this series
 never started training because our V.34 front end did not report the end
-of the Courier's first burst (UPSTREAM_WAIT timeout); not followed up. Our
+of the Courier's first burst (UPSTREAM_WAIT timeout); fixed, see below. Our
 x2 client still has only the low banks, and sends bit 10 or not as before.
 
 **Rates on the hardware Courier (15 November 2026, 10 calls).** Every call
@@ -1901,6 +1901,32 @@ settles at a decision error of 0.134 to 0.160 (0.027 to 0.031 at 24000).
 In one call of ten the squelch then fired 17.8 s later (error 0.554), and
 the Courier counted 13 blocks resent, 2 link timeouts and 1 NAK; the other
 nine calls had 0 resent. Not followed up.
+
+**The start that never began (fixed, dbc8b5ee).** One call of fourteen
+stayed in `UPSTREAM_WAIT` until its timeout. Its receive tap is not
+marginal in level or timing, and the difference was the build: replayed
+through the engine it reaches J every time on arm64 (macOS) and never on
+x86-64 (the server), at any of six sample alignments. The V.34 Phase 3
+demodulator freezes its equalizer 256T into TRN; the two builds' bit
+decisions part about 3100 symbols into TRN, and from there the x86-64 one
+never decodes the J the Courier holds for 1.5 s (best J score 26 of 32,
+which is what scrambled TRN scores by chance). The Courier then gives up
+with Tone A.
+- The x2 burst receiver (`x2_mp_rx.c`) now frames J itself while it trains
+  on burst 1: 4-point differential dibits through GPA, on all fifteen
+  timing and both phase hypotheses, and two identical 16-bit periods of
+  V.34 Table 18's J on sixteen symbols running. Either detector starts our
+  downstream.
+- On the failed tap, on x86-64, it fires in the frame the V.34 detector
+  would have (rx sample 36640). On three good taps it fires in the same
+  20 ms frame as the V.34 detector, so good calls transmit as before.
+- Live: 3 of 3 connect (50666/31200, 30 of 30 lines each way), one of
+  them with the V.34 J ignored (`ME_X2_V34_J=0`).
+- Not done: the V.34 demodulator's own loss of burst 1 is still there.
+  Nothing after J has needed it so far (MP, E and B1 come from the burst
+  receiver and the T/3 template fit), but that is three live calls.
+- Replay a tap on the platform that ran the call. An arm64 replay of an
+  x86-64 call can pass where the call failed.
 
 The sections below are the route here. Their conclusions about the clock,
 line filtering and echo were steps on the way, and several are marked
