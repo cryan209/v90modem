@@ -1896,11 +1896,30 @@ is `7fff`, so index 11 is the Courier's own pick from its rate metric.
   has been run through the Cisco port), so whether a server can do better
   than index 11 here is open.
 
-**Upstream margin at 31200.** After the change our upstream receiver
-settles at a decision error of 0.134 to 0.160 (0.027 to 0.031 at 24000).
-In one call of ten the squelch then fired 17.8 s later (error 0.554), and
-the Courier counted 13 blocks resent, 2 link timeouts and 1 NAK; the other
-nine calls had 0 resent. Not followed up.
+**Upstream at 31200: the squelch made the outage (fixed, 55ff38b9).** The
+receive SNR is the same at both upstream rates, 36.0 to 36.7 dB: the
+decision error settles at 0.027 to 0.031 at 24000 and 0.134 to 0.160 at
+31200 only because the 31200 constellation is denser in the same units
+(mean symbol power 142 against 670). In one call of ten the fast error then
+touched the squelch level for a moment (0.554 against 0.535, one 0.15 s
+window at 0.235), and the squelch, which needs a second of clean decisions
+to resume, dropped 32597 bits. The Courier counted 13 blocks resent, 2
+link timeouts and 1 NAK.
+- The squelch is for calls without error control. With V.42 or MNP
+  established the bits now go to the data stack and the frame check
+  decides; the excursion is still traced. `ME_X2_SQUELCH_EC=1` restores
+  the old behaviour.
+- Live, three 60 s calls: one had the same excursion 8.5 s after the rate
+  change (0.547 against 0.542, "resumed" 32519 bits later) and the Courier
+  counted 0 blocks resent and 0 link timeouts, 60 of 60 lines each way.
+- Not established: what the excursion is. It came 16.7 s and 8.5 s after
+  the change to 31200 in the two calls that had it, and it did not
+  reproduce in a replay of the first call's tap on either platform (that
+  replay loses the upstream 2.5 s into data, which the live call did not,
+  so it is not a faithful replay past that point).
+- Our own estimate from that SNR is 24000 to 26400 bit/s against the
+  31200 we ask for. The trellis carries it (0 blocks resent on 12 of 13
+  calls before the fix), so the rate was left alone.
 
 **The start that never began (fixed, dbc8b5ee).** One call of fourteen
 stayed in `UPSTREAM_WAIT` until its timeout. Its receive tap is not
