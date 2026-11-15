@@ -955,3 +955,18 @@ Built in `/root/vpcm-fix6` (the 5e590e24 deploy tree plus the commit's
 `sip_v90_modem.pre-8223cf37`. Only `v90ras` was restarted, with no call
 up; ten lines registered. Verified live: the hardware Courier (FXS 7800)
 dialling 2950 twice, CONNECT 50666/ARQ/V90/LAPM both times.
+
+## Deployed ba9e61ba (2026-11-16 10:44)
+
+V.90 Phase 2: a repeated INFO0a is no longer read as the Tone A reversal
+(`docs/v90_hardware_interop.md`, last section).
+`ME_V90_INFO0A_REPEAT_CHECK=0` restores the old behaviour.
+Built clean in `/root/vpcm-fix6` (the 8223cf37 deploy tree plus the
+commit's `v34tx.c` and `private/v34.h`, which differ from 121c6c53's by
+8223cf37 and this change only), binary md5 87b6ed14…, kept as
+`/opt/v90ras/sip_v90_modem.ba9e61ba`; the previous binary is
+`sip_v90_modem.pre-ba9e61ba`. Only `v90ras` was restarted, with no call
+up; the lines registered. Verified live: the hardware Courier (FXS 7800)
+dialling 2950 four times, CONNECT 50666/ARQ/V90/LAPM each time. The
+x2live rig tree on CT 117 holds the same two files uncommitted over
+5e590e24.
