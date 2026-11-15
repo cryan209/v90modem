@@ -942,3 +942,16 @@ is replay-only and was left out), md5 bd61363b…, kept as
 `/opt/v90ras/sip_v90_modem.5e590e24`; the previous binary is
 `sip_v90_modem.pre-5e590e24`. Only `v90ras` was restarted, with no call
 up; ten lines registered. Not yet verified with a live V.90 call.
+
+## Deployed 8223cf37 (2026-11-16 07:32)
+
+V.90 9.2.1.1.8: one INFO1d, then silence; the old group of four lay over
+the analogue modem's Phase 3 echo training (`docs/v90_hardware_interop.md`,
+last section). `ME_V90_INFO1D_COPIES=4` restores the group.
+Built in `/root/vpcm-fix6` (the 5e590e24 deploy tree plus the commit's
+`v34tx.c`, which differs from 121c6c53's by this change only; md5
+93191533…), binary md5 af38fa52…, kept as
+`/opt/v90ras/sip_v90_modem.8223cf37`; the previous binary is
+`sip_v90_modem.pre-8223cf37`. Only `v90ras` was restarted, with no call
+up; ten lines registered. Verified live: the hardware Courier (FXS 7800)
+dialling 2950 twice, CONNECT 50666/ARQ/V90/LAPM both times.
