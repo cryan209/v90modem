@@ -1874,6 +1874,34 @@ never started training because our V.34 front end did not report the end
 of the Courier's first burst (UPSTREAM_WAIT timeout); not followed up. Our
 x2 client still has only the low banks, and sends bit 10 or not as before.
 
+**Rates on the hardware Courier (15 November 2026, 10 calls).** Every call
+enters at index 1 (32000/24000) and the Courier asks for one change about
+9.4 s into data, always to index 11 (50666/31200). Entry at index 1 is the
+protocol, not a choice of ours: the Courier's first MP is
+`0344/03fe/0000/0500`, ceiling field 1, as it is against Ie030002. Our W2
+is `7fff`, so index 11 is the Courier's own pick from its rate metric.
+- The pick does not depend on downstream level. With `ATS58=48` (INFO0
+  `21ff`, low constellation) the Courier receives us at -20.3 dBm instead
+  of -13.6 dBm, reports 53.3 dB instead of 54.1 dB, and still picks index
+  11. A 6.7 dB level change that moves the SNR by 0.8 dB rules out line
+  noise and the residue of its own echo (its transmit level is -17.8 dBm
+  in both) as the limit: what limits it scales with our signal.
+- `x2 Status ... 01,00 473D` is identical on every call. It is the DSP's
+  tag-`6b` status word (bits 15:14 and 7:6 are the two printed fields), not
+  a rate mask or a measurement.
+- The emulated Courier in the current courier-emu tree picks index 3 on a
+  clean line with either constellation, so it cannot stand in for the
+  hardware on this question.
+- Not established: what Ie030002 would get on this line (no native server
+  has been run through the Cisco port), so whether a server can do better
+  than index 11 here is open.
+
+**Upstream margin at 31200.** After the change our upstream receiver
+settles at a decision error of 0.134 to 0.160 (0.027 to 0.031 at 24000).
+In one call of ten the squelch then fired 17.8 s later (error 0.554), and
+the Courier counted 13 blocks resent, 2 link timeouts and 1 NAK; the other
+nine calls had 0 resent. Not followed up.
+
 The sections below are the route here. Their conclusions about the clock,
 line filtering and echo were steps on the way, and several are marked
 superseded.
