@@ -925,3 +925,20 @@ Live, MT9234 3 of 3 pass (46666-48000/26400, 175/175, 175/175, 174/174
 pings): each logs "the peer's CP enables at most 26400 bps", with no
 renegotiation or retrain in 180 s (2 of 3 passed before, the third lost
 after the 28800 ask).
+
+## Deployed 5e590e24 (2026-11-15 23:33)
+
+V.90/x2 upstream: the DATA path's zero-delay derotator holds still while
+the T/3 upstream receiver's own carrier tracker runs. The two were in
+cascade on the same symbols, and the older loop's own noise (0.15 degrees
+RMS, excursions past 1 degree for 20 to 35 ms) sat on the upstream
+(`docs/x2_implementation.md`, "Upstream at 31200"). Replayed on four taps
+from `/var/tmp/v90ras/calls`, old against new: 26400 SNR +0.15 to +0.2 dB
+on three, 9600 unchanged, none worse. `V34_V90_T3_DATA_DEROT=1` restores
+the old loop.
+Built in `/root/vpcm-fix6` (121c6c53's tree plus the commit's
+`v34rx_data.c`, checked byte for byte; the commit's `modem_engine.c` hunk
+is replay-only and was left out), md5 bd61363b…, kept as
+`/opt/v90ras/sip_v90_modem.5e590e24`; the previous binary is
+`sip_v90_modem.pre-5e590e24`. Only `v90ras` was restarted, with no call
+up; ten lines registered. Not yet verified with a live V.90 call.
