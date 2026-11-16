@@ -998,5 +998,13 @@ binary md5 b5000454…, kept as `/opt/v90ras/sip_v90_modem.d75fc379`; the
 previous binary is `sip_v90_modem.pre-d75fc379`. Only `v90ras` was restarted,
 with no call up; the lines registered. Not live-verified.
 
-The x2live rig tree on CT 117 is at 30c9049d (2026-11-17 09:46): the Sd
-arrival cap and the rig scripts' ME_JB_MS=40.
+V.90 digital modem (ed18b0f9, 2026-11-17 11:44): the Ja heuristic fallback
+cannot start before the peer's TRN, so it no longer sends Sd during the
+analogue modem's TRN (live against our own analogue role: 0/2 -> 4/4). It
+only ever releases later than before. Built in `/root/vpcm-fix6` with the
+commit's `modem_engine.c` diff applied (`/root/ja-ed18b0f9.patch`), binary
+md5 4ca2f815…, kept as `/opt/v90ras/sip_v90_modem.ed18b0f9`; the previous
+binary is `sip_v90_modem.pre-ed18b0f9`. Only `v90ras` was restarted, with no
+call up; the lines registered. Not live-verified against v90ras's callers.
+
+The x2live rig tree on CT 117 is at ed18b0f9 (2026-11-17 11:45).
