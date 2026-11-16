@@ -254,3 +254,28 @@ No stops, no retrains (`reference-data` not kept; `/root/slmx/r7910-*` in CT
 Next: find what the DATA receiver does that TRN does not (DATA has the
 zero-delay decision-aided derotator after the taps and Mueller-Muller timing),
 or measure our own transmitter's TRN floor, which sets the loopback 33.7 dB.
+
+## V.90 downstream ceiling against slmodemd (2026-11-17)
+
+Proxmox rig, slmodemd dialling our x2live build at 30c9049d (`ME_JB_MS=40`,
+RTDEd about 146 ms), `AT+MS=90`, one call per row except the default.
+slmodemd designs the downstream itself (V.90 8.5) within the power we
+declare in INFO0d bits 33:37 (`ME_V90_MAX_TX_DBM0_CODE`), so its design
+report gives the noise it measured in DIL and the points per frame phase:
+
+| Declared | Code | noiseEnergy | Points | Rate |
+|---|---|---|---|---|
+| -3 dBm0 | 5 | +34.67 | 47 | 50667 |
+| -5 dBm0 | 9 | +15.97 | 61 | 53333 |
+| -6 dBm0 (default) | 11 | +12.45 | 65 | 54667, 6/6 calls |
+| -7 dBm0 | 13 | +10.12 | 67 | 54667 |
+| -9 dBm0 | 17 | +8.3 to +9.4 | 67 | 53333 |
+| -11 dBm0 | 21 | +9.39 | 67 | 52000 |
+
+Noise grows with level above -7 dBm0, so it is distortion, and below that
+it settles near +9 while the power cap removes rate. Its log puts the next
+step (56000) at about 72 points. The default is already at the peak; 56000
+needs that noise floor lower. Not established whose it is: our downstream
+is codeword-exact to the DS0, and slmodemd hears it through the d-modem
+shim's 8 to 9.6 kHz sinc resampler. Every call carried 23,400 to 23,950
+lines each way with none missing.
