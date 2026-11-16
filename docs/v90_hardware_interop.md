@@ -1918,6 +1918,20 @@ Corrections to the list two sections up, from the day's calls:
 - Still seen about once in 20 calls and not explained: Sd and Jd go out,
   no S comes back, and the Courier retrains 3.3 s after Jd; its next
   INFO1a is then not V.90's and the call runs as V.34.
+  2026-11-17, from the one such call with taps (`d3_v90_4`, RTDEd 299 ms;
+  one in about 50 V.90-mode calls after 8223cf37): the Courier does react
+  to Sd (its Ja stops, then 5.4 s of silence at the level of a passing
+  call's) and never sends S; on passing calls S follows our Jd by about
+  0.7 s. Everything of ours matches the passing calls at the same round
+  trip: Sd hold plus Ja age 658 ms against 658 ms, our transmitted Jd
+  byte-identical (`tools/v90_jd_decode.py`: same frame, CRC 0x76ee valid),
+  no transmit RTP gap over 32 ms. It is the only failing call with receive
+  RTP loss (18 single packets spread over the call), but `p2_1_4` lost 17
+  at the same density and reached V.90, so that does not separate them.
+  The Courier's `ATI11` gives `V.90 Status 00EF`, the same word as every
+  V.34 fallback, so it carries no reason. Not ours on any evidence we
+  hold; the open question is what reached the Courier (the Cisco port's
+  per-call packet counters were not captured).
 - One plain V.34 call of 8 that day (server in V.34 mode) stalled in Phase 3
   with our J unanswered until the Courier dropped the line; not looked at,
   and none of the changes above is on the plain V.34 path.
