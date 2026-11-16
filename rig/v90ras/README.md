@@ -997,3 +997,6 @@ the commit's `v90.c` hunk applied as a patch (`/root/cap-d75fc379.patch`),
 binary md5 b5000454…, kept as `/opt/v90ras/sip_v90_modem.d75fc379`; the
 previous binary is `sip_v90_modem.pre-d75fc379`. Only `v90ras` was restarted,
 with no call up; the lines registered. Not live-verified.
+
+The x2live rig tree on CT 117 is at 30c9049d (2026-11-17 09:46): the Sd
+arrival cap and the rig scripts' ME_JB_MS=40.
