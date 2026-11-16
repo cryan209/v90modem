@@ -985,3 +985,15 @@ as `/opt/v90ras/sip_v90_modem.ecb4832c`; the previous binary is
 up; the lines registered. Verified live: the hardware Courier (FXS 7800)
 dialling 2950 six times, CONNECT 50666 V.90 each time. The x2live rig tree
 on CT 117 is at ecb4832c.
+
+## Deployed d75fc379 (2026-11-17 09:26)
+
+V.90 digital modem: the 9.3.1.3 Sd hold now also keeps Sd's arrival no later
+than 950 ms after the analogue modem starts Ja (a USR Courier's own deadline
+is fixed near 960-1000 ms; `docs/v90_hardware_interop.md`). At v90ras's 40 ms
+buffer (RTDEd about 150 ms) the hold is zero anyway, so nothing changes here
+unless the round trip passes about 300 ms. Built in `/root/vpcm-fix6` with
+the commit's `v90.c` hunk applied as a patch (`/root/cap-d75fc379.patch`),
+binary md5 b5000454…, kept as `/opt/v90ras/sip_v90_modem.d75fc379`; the
+previous binary is `sip_v90_modem.pre-d75fc379`. Only `v90ras` was restarted,
+with no call up; the lines registered. Not live-verified.
