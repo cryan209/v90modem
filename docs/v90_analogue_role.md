@@ -951,6 +951,14 @@ no CONNECT in 120 s. Open.
 - Our receive side could re-find the frame phase after a slip (the digital
   role does), but that would not rescue the card's upstream receiver.
   Check `show network-clocks` on TopRouter before running these again.
+- **Cause and fix (2026-11-17 12:41).** TopRouter's primary clock was
+  `Backplane` (internal PLL): `network-clock-select 1 BRI0/1/0` had been
+  removed, unsaved, for a test on 14-15 November
+  (`docs/x2_implementation.md`) and never restored. Put back (needs a
+  `shutdown`/`no shutdown` of BRI0/1/0 to take effect; still not saved), so
+  `show network-clocks` reads BRI0/1/0 primary. Then both cards, A-law,
+  first attempt: CONNECT 56000/31200 in V.90 at +17.1/+17.2 s, PPP with PAP
+  up, 20 pings with 0% loss, no retrain.
 
 
 `tools/eicon_call_batch.py` dials 7910 and 7900, which are now the MultiTech

@@ -15,6 +15,7 @@ Stop with Ctrl-C.  Host 192.168.88.62 (see rig/v90ras/README.md).
 """
 
 import argparse
+import os
 import getpass
 import socket
 import sys
@@ -76,6 +77,13 @@ def main():
     ap.add_argument("--host", default="192.168.88.62")
     ap.add_argument("--out", required=True)
     ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--cmd-file",
+                    help="each poll, run the show commands in this file "
+                         "(one per line; only lines starting with 'show'), "
+                         "log their output, then delete the file")
+    ap.add_argument("--config-file",
+                    help="each poll, apply this file's lines in 'configure "
+                         "terminal' (not saved), log the echo, then delete it")
     a = ap.parse_args()
 
     user = input("Cisco username: ")
@@ -95,6 +103,29 @@ def main():
     with open(a.out, "a") as f:
         while True:
             stamp = time.time()
+            if a.cmd_file and os.path.exists(a.cmd_file):
+                with open(a.cmd_file) as cf:
+                    cmds = [c.strip() for c in cf if c.strip().startswith("show ")]
+                os.remove(a.cmd_file)
+                for c in cmds:
+                    t.send(c)
+                    out = t.read_until([prompt]).decode(errors="replace")
+                    f.write(f"=== {time.time():.3f} CMD {c}\n{out}\n")
+                f.flush()
+            if a.config_file and os.path.exists(a.config_file):
+                with open(a.config_file) as cf:
+                    lines = [c.strip() for c in cf if c.strip()]
+                os.remove(a.config_file)
+                cfg_prompt = prompt[:-1] + b"(config)#"
+                t.send("configure terminal")
+                log = t.read_until([cfg_prompt]).decode(errors="replace")
+                for c in lines:
+                    t.send(c)
+                    log += t.read_until([b"#"]).decode(errors="replace")
+                t.send("end")
+                log += t.read_until([prompt]).decode(errors="replace")
+                f.write(f"=== {time.time():.3f} CONFIG\n{log}\n")
+                f.flush()
             t.send("show call active voice brief")
             out = t.read_until([prompt]).decode(errors="replace")
             f.write(f"=== {stamp:.3f} {time.strftime('%H:%M:%S', time.localtime(stamp))}\n")

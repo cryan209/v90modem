@@ -1008,3 +1008,9 @@ binary is `sip_v90_modem.pre-ed18b0f9`. Only `v90ras` was restarted, with no
 call up; the lines registered. Not live-verified against v90ras's callers.
 
 The x2live rig tree on CT 117 is at ed18b0f9 (2026-11-17 11:45).
+
+TopRouter clock (2026-11-17 12:41): `network-clock-select 1 BRI0/1/0` had
+been off since the 14-15 November x2 test, so the Diva BRIs slipped 55.6 ppm
+against the router. Restored in the running config and BRI0/1/0 bounced;
+**not saved** (`write memory` to keep it over a reload). Check
+`show network-clocks` shows BRI0/1/0 primary before any Diva test.
