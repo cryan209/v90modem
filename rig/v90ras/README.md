@@ -969,3 +969,19 @@ commit's `v34tx.c` and `private/v34.h`, which differ from 121c6c53's by
 up; the lines registered. Verified live: the hardware Courier (FXS 7800)
 dialling 2950 four times, CONNECT 50666/ARQ/V90/LAPM each time. The
 x2live rig tree on CT 117 is at ba9e61ba.
+
+## Deployed ecb4832c (2026-11-16 22:22)
+
+V.90 digital modem: one point before INFO0d instead of 16 bauds of carrier
+(the cause of a Courier's INFO0a repeats), and the 53 ms that complete V.8's
+75 ms of silence before it (`docs/v90_hardware_interop.md`, last section).
+`ME_V34_INFO0_PREAMBLE_BAUDS=16` and `ME_V90_PHASE2_START_SILENCE_MS=0`
+restore the old behaviour.
+Built in `/root/vpcm-fix6` (the ba9e61ba deploy tree plus the commit's
+`v34tx.c` and `spandsp/v34.h`, and the commit's `modem_engine.c` hunks
+applied as a patch, offsets -3 and -71 lines), binary md5 8fde6f20…, kept
+as `/opt/v90ras/sip_v90_modem.ecb4832c`; the previous binary is
+`sip_v90_modem.pre-ecb4832c`. Only `v90ras` was restarted, with no call
+up; the lines registered. Verified live: the hardware Courier (FXS 7800)
+dialling 2950 six times, CONNECT 50666 V.90 each time. The x2live rig tree
+on CT 117 is at ecb4832c.
