@@ -146,6 +146,14 @@ def main():
     parser.add_argument('--path-delay-ms', type=int, default=0,
                         help='one-way bearer delay added in each direction (a live '
                              'SIP/FXS path measured about 150 ms each way)')
+    parser.add_argument('--line-drop', default='',
+                        help='comma-separated downstream sample indices (8 kHz, '
+                             "counted at the Courier's end of the path) where a "
+                             '20 ms packet of our downstream is lost')
+    parser.add_argument('--line-drop-fill', choices=['silence', 'repeat'],
+                        default='repeat',
+                        help='what the gateway plays for a lost packet: idle PCMU '
+                             'or the previous packet again (packet loss concealment)')
     args = parser.parse_args()
     if args.native_chunk_bytes < 0:
         parser.error('--native-chunk-bytes must be nonnegative')
@@ -293,6 +301,39 @@ def main():
                 return tail
 
         probe.EnginePeer = DelayedPeer
+
+    if args.line_drop:
+        lost_peer = probe.EnginePeer
+        drops = sorted(int(s) for s in args.line_drop.split(','))
+        frame = 160
+
+        class LossyPeer(lost_peer):
+            """Downstream RTP loss as the gateway conceals it: each listed
+            downstream sample index starts a lost 20 ms packet, replaced by
+            idle PCMU (--line-drop-fill silence) or the previous packet
+            repeated (repeat), before anything else on the line."""
+            def exchange(self, octets):
+                out = bytearray(super().exchange(octets))
+                if not hasattr(self, 'down_n'):
+                    self.down_n = 0
+                    self.down_hist = bytearray(b'\xff' * frame)
+                    self.drop_log = []
+                for i in range(len(out)):
+                    n = self.down_n + i
+                    hit = next((d for d in drops if d <= n < d + frame), None)
+                    if hit is not None:
+                        if n == hit:
+                            self.drop_log.append(n)
+                            print(f'[line-drop] downstream packet lost at sample {n} '
+                                  f'({n / 8000:.3f} s)', flush=True)
+                        out[i] = (0xff if args.line_drop_fill == 'silence'
+                                  else self.down_hist[(n - hit) % frame])
+                    else:
+                        self.down_hist[n % frame] = out[i]
+                self.down_n += len(out)
+                return bytes(out)
+
+        probe.EnginePeer = LossyPeer
 
     if args.clock_ppm is not None:
         import math

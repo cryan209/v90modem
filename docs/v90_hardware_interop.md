@@ -1932,6 +1932,29 @@ Corrections to the list two sections up, from the day's calls:
   V.34 fallback, so it carries no reason. Not ours on any evidence we
   hold; the open question is what reached the Courier (the Cisco port's
   per-call packet counters were not captured).
+  **Offline reproduction (2026-11-17): one lost downstream packet inside
+  Sd.** `tools/probe_x2_host_courier.py --modulation v90 --pty-source
+  --path-delay-ms 75 --line-drop N` drops the 20 ms packet starting at
+  Courier-side sample N and plays the previous packet again, as gateway
+  concealment does (`--line-drop-fill silence` for idle). Our Sd is at
+  samples 96288-96672 (64 x 6), S-bar-d from 96672, TRN1d after it, Jd
+  from about 116600, identical on every run. One lost packet:
+  - starting at 96300 or 96640: the live failure exactly. The Courier stops
+    Ja, is silent, sends no S, retrains 3.24 s after our Jd (live 3.3 s),
+    and its next INFO1a is not V.90's.
+  - 96400 or 96560: same retrain, CONNECT 31200/V34 after three.
+  - 96500, 96700: V.90 at 48000 and 54666. 96000, 96150, 96250, 96780 and
+    later, one in mid-Phase 2, three in TRN1d, one or two in Jd (also as
+    silence): 52000/V90 like the no-loss baseline.
+  So the exposed window is about 500 samples, three packets, at the
+  Sd-to-S-bar-d transition (9.3.2.4), which the Courier times its Jd
+  search from; a repeated packet slips Sd's 6-symbol period (160 mod 6 =
+  4). At the 0.2 to 0.9 % packet loss seen on lossy calls that is roughly
+  one call in 50 to 200, consistent with what was seen live. TRN1d and Jd
+  tolerate loss because Jd repeats. Not yet confirmed live: whether a
+  failing call has a lost packet in our-to-Cisco direction at that instant
+  (`tools/soak/cisco_call_poll.py` logs the router's per-call counters
+  every 2 s; the Courier's serial adapter was not attached).
 - One plain V.34 call of 8 that day (server in V.34 mode) stalled in Phase 3
   with our J unanswered until the Courier dropped the line; not looked at,
   and none of the changes above is on the plain V.34 path.
