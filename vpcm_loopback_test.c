@@ -867,12 +867,13 @@ scenario_done:
 static bool test_v90_sd_round_trip_hold(void)
 {
     static const struct { int age, rtd, margin, want; } c[] = {
-        {635, 339, 60, 103},    /* the failing class: Sd was 31 ms early */
-        {635, 319, 60,  63},    /* the usual class on that rig */
+        {635, 339, 60,   0},    /* slmodemd rig: arrival 974 ms already past 950 */
+        {455, 319, 60, 176},    /* 243 wanted, arrival cap 950 - 319 - 455 */
         {635, 150, 60,   0},    /* short path: already past two round trips */
         {353, 243, 60, 193},    /* MT5634 behind the AudioCodes */
-        {100, 400, 60, 500},    /* §9.3.1.3's 500 ms */
-        {600, 450, 60, 302},    /* §9.3.2.4: 1500 - 100 - 48 - 450 - 600 */
+        {100, 400, 60, 450},    /* arrival cap: 950 - 400 - 100 */
+        {200, 250, 60, 360},    /* 2 x 250 + 60 - 200, arrival 810 */
+        {600, 450, 60,   0},    /* arrival cap: already past 950 */
         {900, 400, 60,   0},    /* two round trips already gone */
         {1300, 400, 60,  0},    /* no room left: send at once */
         {635,   0, 60,   0},    /* no round trip measured */
@@ -889,8 +890,8 @@ static bool test_v90_sd_round_trip_hold(void)
             return false;
         }
     }
-    vpcm_log("PASS: V.90 Sd leaves two round trips after Ja, within 9.3.1.3 "
-             "and 9.3.2.4");
+    vpcm_log("PASS: V.90 Sd leaves two round trips after Ja, within 9.3.1.3, "
+             "9.3.2.4 and a 950 ms arrival");
     return true;
 }
 

@@ -877,7 +877,17 @@ void v90_set_sd_delay_ms(v90_state_t *s, int ms)
  * analogue modem; never more than the clause's 500 ms, and never so late
  * that the Sd-to-S-bar-d transition (48 ms of Sd, one more one-way trip)
  * misses §9.3.2.4's 1500 ms from the start of Ja, with 100 ms in hand.
- * Why: v90_hold_sd_for_round_trip_locked() in modem_engine.c. */
+ * Why: v90_hold_sd_for_round_trip_locked() in modem_engine.c.
+ *
+ * Nor later than Sd ARRIVING 950 ms after the analogue modem started Ja.
+ * A USR Courier does not wait the clause's 1500 ms: emulated (403, clean
+ * line), Sd arriving 954 and 964 ms after it starts Ja connects V.90 and
+ * 1004 and 1014 ms do not, at round trips of 218 and 288 ms alike, so its
+ * deadline is fixed; three round trips plus the margin crossed it above
+ * about 300 ms.  slmodemd wants arrival three of ITS round trips after Ja,
+ * so above about 320 ms it loses this hold; chosen 2026-11-17 in favour of
+ * the fixed deadline (docs/v90_hardware_interop.md). */
+#define V90_SD_ARRIVAL_MAX_MS 950
 int v90_sd_round_trip_hold_ms(int ja_age_ms, int rtd_ms, int margin_ms)
 {
     int want;
@@ -887,6 +897,8 @@ int v90_sd_round_trip_hold_ms(int ja_age_ms, int rtd_ms, int margin_ms)
         return 0;
     want = 2 * rtd_ms + margin_ms - ja_age_ms;
     latest = 1500 - 100 - 48 - rtd_ms - ja_age_ms;
+    if (latest > V90_SD_ARRIVAL_MAX_MS - rtd_ms - ja_age_ms)
+        latest = V90_SD_ARRIVAL_MAX_MS - rtd_ms - ja_age_ms;
     if (want > latest)
         want = latest;
     if (want > 500)
