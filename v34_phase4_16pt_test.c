@@ -393,6 +393,10 @@ static void check_v90_info_wire_boundaries(void)
                                   NULL, NULL, NULL, NULL);
         assert(s);
         v34_set_v90_mode(s, law);
+        /* V.90 8.2.3.1: one point at an arbitrary carrier phase precedes
+           INFO0d, not 16 bauds of what the analogue modem hears as Tone B. */
+        assert(s->tx.current_getbaud == get_transmission_preamble_baud);
+        assert(s->tx.txbits == 1);
         /* V.92 9.3/Table 17 retains INFO1d's 109-bit framing. */
         s->tx.v92_info0_capable = v92 != 0;
         s->rx.info0_raw_26_27 = v92 ? 1 : 0;

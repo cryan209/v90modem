@@ -1024,6 +1024,10 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
+/*! Hold the first INFO0 back by ms of silence; call straight after
+    v34_set_v90_mode() when the caller has not itself kept V.8's 75 ms. */
+SPAN_DECLARE(void) v34_tx_hold_first_info0(v34_state_t *s, int ms);
+
 /*! Experimental K56flex common Phase 2 (Draft 0.23 4.1; V.34 11.2.1.2.5).
     Align the shaped CC reversal with the unshaped L1 probe on transmit.
     Does not alter RX measurement, manufacture INFO1, or enter DATA. */

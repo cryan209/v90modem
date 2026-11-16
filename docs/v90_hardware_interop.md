@@ -1865,6 +1865,59 @@ costs about 1.9 s (first reversal answered at 8.86 s instead of 6.96 s).
 Regression: `reference-data/artifacts/courier-v90-info0a-repeat` in
 `tests/fast.list`.
 
-Not established: why the Courier repeats on some calls and not others (its
-first INFO0a and our INFO0d overlap on all of them), and whether any other
-analogue modem repeats INFO0a the same way.
+Why the Courier repeats at all is the next section.
+
+## V.90 from the hardware Courier: the INFO0a repeats were caused by our 16 bauds of carrier before INFO0d (2026-11-16, fixed)
+
+V.90 8.2.3.1 has an INFO sequence preceded by one point at an arbitrary
+carrier phase. SpanDSP's `transmission_preamble_init()` sends 16 bauds
+(27 ms) of unmodulated carrier "to allow things to stabilise", and INFO0d
+opens with four fill ones, so the Courier heard 33 ms of Tone B before any
+INFO0d bit. Detecting Tone B before INFO0d has been received is exactly what
+9.2.2.2.1 (V.34 11.2.2.2.1) has the analogue modem answer with repeated
+INFO0a.
+
+- Live, alternated, same build: 16 bauds, INFO0 recovery on 5 of 14 calls;
+  one baud, 0 of 14, and 14 of 14 CONNECT 52000 V.90. A further 30 calls
+  with one baud as the default: 0 recoveries, 29 CONNECT 52000 V.90.
+- Emulated Courier 403 on a band-limited line (`probe_x2_host_courier.py
+  --modulation v90 --clock-ppm 80 --line-linear --codec-cutoff 3400`):
+  recovery on every run with 16 bauds, none with one. That line is the
+  offline bench for this; on a codeword-exact line it never repeats.
+
+So the digital modem now sends one point (`ME_V34_INFO0_PREAMBLE_BAUDS`).
+The other roles keep 16: with one point everywhere `v34_duplex_test` at
+10 dB SNR no longer holds its 2400 bit/s start, so our own INFO0 receiver
+leans on the lead-in at low SNR. The handling of repeats in the previous
+section stays for peers that repeat for their own reasons.
+
+Our analogue role had the mirror defect, shown by `engine_pair_test` with
+`V92_SHORT_TEST_INFO0_RECOVERY=1` once the two ends' lead-ins differed: it
+took the first 0 bit of a repeated INFO0d for the Tone B reversal (V.92
+9.4.1.1.3). It now waits out a "reversal" that the INFO sync code follows
+inside its 40 ms, as the digital side does.
+
+**The silence after JM.** V.8 7.4 has 75 +- 5 ms between JM and INFO0d. The
+V.8 answerer hands over as soon as its FSK transmitter has drained (the
+timer in `V8_SIGA` is commented out, as in upstream SpanDSP) and V.90 mode
+skips the V.34 startup silence, so it was 22 ms on the line on every call
+(28 taps). The engine now holds the first INFO0d 53 ms more
+(`v34_tx_hold_first_info0()`, `ME_V90_PHASE2_START_SILENCE_MS`). Against
+the Courier this did not change the repeats (1 of 5 calls with 82 ms, 1 of
+5 with 22 ms, 16-baud lead-in on both). It is there because the clause asks
+for it. Plain V.34 is untouched (97 ms: 22 plus its own 75; making it one
+75 ms broke a V.34 engine pair) and so is a Quick Connect start, which
+keeps its own 600 codewords.
+
+Corrections to the list two sections up, from the day's calls:
+
+- "The Courier's own limit on Sd is about 1.0 to 1.1 s" does not hold as a
+  hard limit: with Sd arriving 1017 ms after its Ja starts (RTDEd 319 ms)
+  5 of 6 calls passed Sd. First attempt past Sd by RTDEd, new code: 299 ms
+  21 of 21, 309 ms 17 of 17, 319 ms 5 of 6.
+- Still seen about once in 20 calls and not explained: Sd and Jd go out,
+  no S comes back, and the Courier retrains 3.3 s after Jd; its next
+  INFO1a is then not V.90's and the call runs as V.34.
+- One plain V.34 call of 8 that day (server in V.34 mode) stalled in Phase 3
+  with our J unanswered until the Courier dropped the line; not looked at,
+  and none of the changes above is on the plain V.34 path.

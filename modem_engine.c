@@ -5246,6 +5246,9 @@ static bool me_k56flex_enabled(void)
     return me_k56flex_mode() != 0;
 }
 
+/* Phase 2 is being started by a Quick Connect short Phase 1, which has kept
+ * its own 75 ms of silence, not by the V.8 answerer.  Cleared when V.8 starts. */
+static bool     g_phase2_after_qc = false;
 static int me_start_or_restart_v8_locked(int answer_tone);
 
 /* ME_K56FLEX_CLIENT_PROBE=<ms>: experiment for a calling V.34 modem whose INFO1c
@@ -6371,6 +6374,8 @@ static int me_start_or_restart_v8_locked(int answer_tone)
 {
     bool v8_calling = g_v8_calling_override >= 0 ? g_v8_calling_override != 0 : g_calling_party;
     v8_parms_t v8_parms;
+
+    g_phase2_after_qc = false;
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = v8_calling ? MODEM_CONNECT_TONES_NONE
                                                   : answer_tone;
@@ -14522,6 +14527,7 @@ static void me_qc_finish(void)
         ME_LOG("[ME] V.92 9.2.4.3: short Phase 1 complete (%ld symbols, QTS at %ld); Phase 2\n",
                g_qc.total, g_qc.qts_start);
     trace_phase("V92 QC: short Phase 1 complete -> Phase 2");
+    g_phase2_after_qc = true;
     /* What V.8 would have settled on, as far as the rest of the call can
      * tell: the analogue modem is a V.90 modem (it signalled V.92 in QC1a)
      * and its INFO0a will say the rest. */
@@ -14809,6 +14815,15 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34) {
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+            /* V.8 7.4: 75 +- 5 ms of silence between JM and INFO0d.  The V.8
+               answerer hands over once its FSK transmitter has drained, which
+               left 22 ms on the line; these 53 ms make it 75.  (Against a USR
+               Courier it did not change how often it repeats INFO0a, 1 call
+               in 5 either way: it is here because the clause asks for it.)
+               ME_V90_PHASE2_START_SILENCE_MS=0 restores the 22 ms. */
+            if (!g_calling_party && !g_phase2_after_qc)
+                v34_tx_hold_first_info0(
+                    g_v34, parse_env_int("ME_V90_PHASE2_START_SILENCE_MS", 53));
             v34_set_v92_info0_capabilities(g_v34,
                                             g_v92_info0_local_advertised ? 1 : 0,
                                             (g_v92_info0_local_advertised

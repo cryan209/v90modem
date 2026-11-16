@@ -239,6 +239,8 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_ANALOGUE_DIL` | modem_engine.c |  | d | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_INFO1A_REPEATS` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_INFO1D_TIMEOUT` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
+| `ME_V34_INFO0_PREAMBLE_BAUDS` | v34tx.c | 1 (V.90 digital modem), 16 (other roles) | dh | bauds of unmodulated carrier before the first INFO0; V.90 8.2.3.1 asks for one point, and 16 from the digital modem is Tone B before INFO0d, which sends a Courier into INFO0 recovery |
+| `ME_V90_PHASE2_START_SILENCE_MS` | modem_engine.c | 53 | dh | silence the V.90 digital answerer keeps before INFO0d, on top of the 22 ms the V.8 handover leaves, to make V.8 7.4's 75 ms; 0 restores the 22 ms |
 | `ME_V90_INFO0A_REPEAT_CHECK` | v34tx.c | 1 | dh | digital modem, Phase 2: a first Tone A "reversal" followed by the INFO sync inside our 40 ms is a repeated INFO0a (V.34 11.2.2.2.1), not 9.2.2.1.3's reversal; 0 takes every reported reversal at its word |
 | `ME_V90_INFO1D_COPIES` | v34tx.c | 1, +1 per INFO1a timeout, max 4 | dh | V.90 9.2.1.1.8: INFO1d sequences sent as one group before the silence; 4 restores the old fixed group, which lay over the analogue modem's Phase 3 echo training |
 | `ME_V90_ANALOGUE_INFO1D_WAIT_MS` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |

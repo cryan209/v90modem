@@ -3162,7 +3162,29 @@ static void transmission_preamble_init(v34_state_t *s)
     /* Send some bits as the modulator starts up, to allow things to stabilise before the
        important data goes out. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - transmission_preamble_init()\n");
-    s->tx.txbits = 16;
+    /* V.90 8.2.3.1: an INFO sequence is preceded by ONE point at an arbitrary
+       carrier phase.  SpanDSP sends 16 bauds, 27 ms of unmodulated carrier,
+       "to allow things to stabilise".  From the digital modem that carrier is
+       Tone B arriving before INFO0d, which is exactly what sends the analogue
+       modem into the INFO0 recovery of 9.2.2.2.1: a USR Courier (ID_SDL 4.03)
+       did so on 5 of 12 live calls with 16 bauds and 0 of 12 with one,
+       alternated, 2026-11-16, and the emulated one (band-limited line) on
+       every run with 16 and none with one.  The other roles keep 16 until
+       they have been measured.  ME_V34_INFO0_PREAMBLE_BAUDS overrides. */
+    s->tx.txbits = (s->tx.v90_mode  &&  !s->tx.calling_party)  ?  1  :  16;
+    {
+        const char *env = getenv("ME_V34_INFO0_PREAMBLE_BAUDS");
+
+        if (env  &&  *env)
+        {
+            long n = strtol(env, NULL, 10);
+
+            if (n >= 1  &&  n <= 64)
+                s->tx.txbits = (int) n;
+            /*endif*/
+        }
+        /*endif*/
+    }
     s->tx.txptr = 0;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.current_modulator = V34_MODULATION_CC;
@@ -3874,6 +3896,26 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
     case V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN:
         if (k56_repeated_info0c_reranging(s))
             break;
+        /*endif*/
+        if (s->tx.v90_mode  &&  s->tx.calling_party  &&  s->rx.bit_count > 0
+            &&  s->tx.tone_duration < 23
+            &&  v90_info0a_repeat_check())
+        {
+            /* The analogue modem's side of the check in FIRST_NOT_B_WAIT.
+               INFO0d is binary DPSK on Tone B, so the first 0 bit of a
+               repeated INFO0d (9.2.1.2.1, V.92 9.4.1.2.1) is a phase reversal
+               of Tone B; the INFO sync code that follows it inside our 40 ms
+               says it was not the reversal of 9.2.1.1.3 / V.92 9.4.1.1.3.
+               Keep Tone A and wait for the real one. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: the Tone B \"reversal\" opened a repeated INFO0d (sync %d bauds into the 40 ms); holding Tone A\n",
+                     s->tx.tone_duration);
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.phase2_reversal_count = 0;
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_FIRST_A;
+            break;
+        }
         /*endif*/
         /* Continue sending phase reversed pure tone for 40+-1ms */
         if (++s->tx.tone_duration == 24
@@ -12261,6 +12303,25 @@ SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s)
                  "silent until the far end's Phase 3 J\n");
     }
     /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Hold the first INFO0 back by `ms` of silence.  Call straight after
+   v34_set_v90_mode(), which starts INFO0 at once on the understanding that
+   whoever ran V.8 has already kept the 75 +- 5 ms of V.8 7.4.  A V.92 quick
+   connect start does keep it (600 codewords, v92_qc_engine_test); the V.8
+   answerer does not: it hands over as soon as its FSK transmitter has
+   drained, and INFO0d followed JM by 22 ms on the line (28 live taps,
+   2026-11-16). */
+SPAN_DECLARE(void) v34_tx_hold_first_info0(v34_state_t *s, int ms)
+{
+    if (!s  ||  ms <= 0  ||  s->tx.stage != V34_TX_STAGE_INITIAL_PREAMBLE  ||  s->tx.txptr != 0)
+        return;
+    /*endif*/
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - %d ms of silence before INFO0 completes V.8's 75 ms\n", ms);
+    s->tx.training_stage = 0x100;
+    tx_silence_init(s, ms);
 }
 /*- End of function --------------------------------------------------------*/
 
