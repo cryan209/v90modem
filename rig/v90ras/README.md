@@ -1011,6 +1011,6 @@ The x2live rig tree on CT 117 is at ed18b0f9 (2026-11-17 11:45).
 
 TopRouter clock (2026-11-17 12:41): `network-clock-select 1 BRI0/1/0` had
 been off since the 14-15 November x2 test, so the Diva BRIs slipped 55.6 ppm
-against the router. Restored and BRI0/1/0 bounced; saved with `write memory` at 12:44, which also saved any other unsaved running-config changes (e.g. the 2026-11-13 `compand-type a-law` on 0/3/3, if still present).
+against the router. Restored and BRI0/1/0 bounced; saved with `write memory` at 12:44, which also saved any other unsaved running-config changes; that included the 2026-11-13 `compand-type a-law` on 0/3/3, which was then reverted (`no compand-type a-law`, saved 12:45, 0/3/3 back to the default µ-law).
 Check
 `show network-clocks` shows BRI0/1/0 primary before any Diva test.
