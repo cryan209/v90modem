@@ -275,7 +275,22 @@ report gives the noise it measured in DIL and the points per frame phase:
 Noise grows with level above -7 dBm0, so it is distortion, and below that
 it settles near +9 while the power cap removes rate. Its log puts the next
 step (56000) at about 72 points. The default is already at the peak; 56000
-needs that noise floor lower. Not established whose it is: our downstream
-is codeword-exact to the DS0, and slmodemd hears it through the d-modem
-shim's 8 to 9.6 kHz sinc resampler. Every call carried 23,400 to 23,950
+needs that noise floor lower.
+
+**Whose noise (measured 2026-11-17, call `slm90-noise-1`, 54667).** Our TX tap
+(`live-tx.g711`) decoded and resampled ideally to 9.6 kHz (Kaiser beta 12),
+against what slmodemd received (`/tmp/dm_to_dsp.raw` in CT 100, after the
+shim's 257-tap sinc at `DM_RS_HEADROOM=0.25`): a constant offset of 816
+samples all call (no drift), single-gain correlation 0.987, and after a
+41-tap least-squares fit (gain 0.2487) the residual is 57 dB down through
+Phase 2's tones but only 24 to 25 dB down in every second of DIL and data.
+By band over 30 to 90 s: below 2 kHz the error is 54 to 57 dB under the
+signal, 2 to 3 kHz 45 dB, 3 to 3.6 kHz 35 dB, 3.6 to 4 kHz 19 dB, and in
+the 4 to 4.8 kHz image band it exceeds the signal. So what slmodemd hears
+differs from our downstream almost entirely at the band edge, which is the
+shim's 8 to 9.6 kHz conversion of a broadband PCM signal, not our
+transmission. The shim's notes (`rig/d-modem/d-modem.c`, the DM_RS_TAPS
+block) already record that a sharper edge (513, 1025 taps) and a lower
+cutoff both make SmartLink worse, so this rig's 54667 is a property of the
+rig, and 56000 against slmodemd is not something our side can buy. Every call carried 23,400 to 23,950
 lines each way with none missing.
