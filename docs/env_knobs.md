@@ -151,6 +151,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_JA_CONCEDE_ATTEMPTS` | modem_engine.c |  | sd |  |
 | `ME_V90_JA_DEADLINE_SEC` | modem_engine.c |  | sd | the deadline. |
 | `ME_V90_JA_HEURISTIC_FALLBACK_MS` | modem_engine.c | 500 | tsdh | clause, so it is a knob with both measurements beside it. |
+| `ME_V90_JA_TRN_ALLOW_T` | modem_engine.c | 2048 | dh | symbols of peer TRN allowed after the first captured Phase 3 bits before the Ja fallback clock may start (9.3.2.3) |
 | `ME_V90_JA_TEMPLATE` | modem_engine.c |  | td |  |
 | `ME_V90_JD_RESYNC_SYMBOLS` | v90.c, vpcm_loopback_test.c |  | ct | Keep this test deterministic even when it is run from a live-modem |
 | `ME_V90_JD_RTD_ALLOWANCE` | v90.c |  | d | the allowance only ever makes us more patient than the minimum. |

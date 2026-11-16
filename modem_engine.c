@@ -10790,15 +10790,51 @@ static bool v90_ja_heuristic_allowed(const char *source)
 
         if (g_v90_ja_first_suppressed_ms == 0)
             g_v90_ja_first_suppressed_ms = trace_now_ms();
+        if (!anchor_on_ja)
+            start = g_v90_ja_first_suppressed_ms;
+        /* NOR MAY IT START BEFORE JA CAN HAVE BEGUN.  The first suppressed
+         * attempt can be the 70 ms silence §9.3.2.1 puts after INFO1a, which
+         * comes BEFORE the peer's S, S-bar, PP and TRN; 500 ms from there
+         * ends inside TRN.  Measured live against our own analogue role
+         * (artifacts/v90ad-live-1, x2live tree): gap suppressed at +8915 ms,
+         * TRN bits from +9130 ms, fallback released Sd at +9435 ms, the
+         * descriptor parsed at +10080 ms -- the peer saw Sd during its TRN,
+         * gave up on Ja (§9.3.2.4) and the call fell back to V.22bis, 0/2;
+         * with the fallback off it was 2/2 at 56000/31200.  The captured
+         * "Ja" bits begin with TRN, whose length §9.3.2.3 bounds only below
+         * (512T); allow 2048T of it (what our analogue role and the peers
+         * measured here send) before §9.3.1.3's wait can begin.  This only
+         * ever releases LATER than the old anchor, so RasFinder (parse
+         * 2.1-2.8 s after the first bits) is unaffected; SmartLink's ~1.9 s
+         * patience after it starts Ja still has >1 s of margin at 3200
+         * baud. */
+        if (!anchor_on_ja && g_v90_ja_first_bits_ms != 0 && g_v34) {
+            static const int baud_hz[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+            int code = v34_get_rx_baud_rate(g_v34);
+            long trn_t = parse_env_int("ME_V90_JA_TRN_ALLOW_T", 2048);
+            uint64_t trn_end;
+
+            if (code < 0 || code >= 6)
+                code = 0;
+            trn_end = g_v90_ja_first_bits_ms
+                      + (uint64_t) (trn_t * 1000 / baud_hz[code]);
+            if (trn_end > start)
+                start = trn_end;
+        }
         if (start != 0
             && fallback_ms > 0
-            && trace_now_ms() - start >= (uint64_t) fallback_ms) {
+            && trace_now_ms() >= start + (uint64_t) fallback_ms) {
             ME_LOG("[ME] V.90 Ja: no descriptor %ld ms after %s; allowing %s "
-                   "heuristic (ME_V90_JA_HEURISTIC_FALLBACK_MS)\n",
+                   "heuristic (ME_V90_JA_HEURISTIC_FALLBACK_MS; now=%llu "
+                   "suppressed=%llu first_bits=%llu start=%llu)\n",
                    fallback_ms,
                    anchor_on_ja ? "the first Ja bit (9.3.1.3)"
-                                : "the first suppressed attempt",
-                   source);
+                                : "the first suppressed attempt and TRN",
+                   source,
+                   (unsigned long long) trace_now_ms(),
+                   (unsigned long long) g_v90_ja_first_suppressed_ms,
+                   (unsigned long long) g_v90_ja_first_bits_ms,
+                   (unsigned long long) start);
             return true;
         }
     }

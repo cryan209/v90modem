@@ -907,6 +907,16 @@ ME_V90_ROLE=analogue ME_JB_MS=40"`, `AT+MS=V90` in both init strings, u-law):
   which is why the offline pairing never shows it.
 - Server with `ME_V90_JA_HEURISTIC_FALLBACK_MS=0`: 2 of 2 CONNECT 56000 /
   31200 V.90 LAPM/V.42bis, 40 of 40 lines exact each way, no retrain.
+- **Fixed 2026-11-17.** The clock started on §9.3.2.1's 70 ms silence after
+  INFO1a, before the peer's S, PP and TRN. The fallback now cannot start
+  before the first captured Phase 3 bits plus 2048T of TRN
+  (`ME_V90_JA_TRN_ALLOW_T`; §9.3.2.3 bounds TRN only below, at 512T). It
+  only ever releases later than before, so RasFinder (parse 2.1-2.8 s after
+  the first bits) is unaffected. Moving the anchor into the future exposed an
+  unsigned `now - start` that wrapped and released at once (Sd 260 ms after
+  the gap); the test is now `now >= start + fallback`. Default server: 4 of
+  4 CONNECT 56000/31200, 40 of 40 lines exact each way, no fallback fired.
+  The fast-tier analogue rows no longer set the fallback to 0.
 
 **Our analogue side to the Diva cards** (`tools/eicon_ppp_direct.py --ext
 7930|7920 --mode v90 --role analogue`, one call each): V.8 selects V.90, Phase
