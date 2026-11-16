@@ -925,6 +925,34 @@ ME_V90_ROLE=analogue ME_JB_MS=40"`, `AT+MS=V90` in both init strings, u-law):
 recognise for 7.3 s and retrain (9.5.2). Four attempts per call, all the same;
 no CONNECT in 120 s. Open.
 
+**Rerun 2026-11-17 on ed18b0f9** (CT 117 `/root/x2live`, artifacts
+`diva-v90-79x0-2` and `-alaw-1`):
+- μ-law (the tool's default): both cards stall in Phase 4 as before. That is
+  the wrong law for these spans: controllers 7/8 are A-law, and the
+  4 November 56000/31200 result used `--law alaw`.
+- A-law: the 7920 reaches DATA at 56000/31200 two seconds after Phase 4
+  starts, on every attempt, then the card sends Tone B about 4 s later
+  (before LAPM is up) and retrains (§9.5.2.2). The 7930 still stalls in
+  Phase 4.
+- **What breaks them is a sample slip at 55.6 ppm.** The card's TRN2d/MP
+  codewords sit on our CPt grid (16 levels per frame position, 99% of
+  samples), but the frame position steps back one sample every 2.25 s
+  (18000 samples): at 16.55, 18.80, 21.05 and 23.30 s on the 7930 and
+  16.60, 18.85, 21.10 s on the 7920, μ-law; the 7930 shows the same in A-law.
+  The RTP we receive is continuous (2998 packets, every seq/ts step 1/160,
+  timestamps within 3 ppm of wall time over 59.94 s), and the Cisco leg is
+  `Tele 0/1/0` g711alaw, `Transcoded: No`, playout 55 ms, 0 lost. So the
+  sample goes missing between the Diva BRI and TopRouter's DSP, not in our
+  path. The same slip times relative to call start on both calls fit a
+  fixed-depth TDM-to-packet buffer running against a 55.6 ppm offset.
+  On 10 November controllers 7/8 measured 0 slips (`docs/eicon_soak_ppp.md`),
+  so TopRouter's clock source or the cards' TE/NT setting has changed since.
+  The card's Tone B in data mode is the same slip on our upstream.
+- Our receive side could re-find the frame phase after a slip (the digital
+  role does), but that would not rescue the card's upstream receiver.
+  Check `show network-clocks` on TopRouter before running these again.
+
+
 `tools/eicon_call_batch.py` dials 7910 and 7900, which are now the MultiTech
 ISI card's numbers: both answer V.34 only (no PCM in V.8) and reach V.34 31200
 data, and nothing on them runs the echo menu any more, so its V.90 echo rows
