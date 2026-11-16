@@ -1955,6 +1955,23 @@ Corrections to the list two sections up, from the day's calls:
   failing call has a lost packet in our-to-Cisco direction at that instant
   (`tools/soak/cisco_call_poll.py` logs the router's per-call counters
   every 2 s; the Courier's serial adapter was not attached).
+  **Where Sd sits in our RTP packets does not fix it (2026-11-17).** A
+  diagnostic knob (not kept) started Sd at sample P of a 160-sample packet,
+  P = 0, 6 ... 156, and each of our real packets overlapping Sd, S-bar-d
+  and the start of TRN1d was lost in turn (102 runs, emulated Courier, 75 ms
+  each way). With the lost packet replaced by the previous one, P = 54 to
+  72 survives every single loss (16 of 16 V.90) and every other P loses
+  V.90 on one to three. With the lost packet played as silence, P = 54 and
+  60 lose V.90 on 2 of 4, 66 and 72 on 1 of 4, P = 120 on 1 of 4 and P = 0
+  on 1 of 3; the packet in the middle of Sd fails at every P. So the best
+  phase depends on the gateway's concealment, which neither model is, and
+  no phase makes Sd survive both. Sd (384T) and S-bar-d (48T) are fixed
+  (8.4.4); our Jd no-S resync waits for the 9.3.1.5 S deadline, which the
+  Courier's retrain beats; and after the retrain the Courier itself
+  chooses V.34 (its INFO1a c2a baud 6 -> 4) although our INFO0d/INFO1d
+  still offer PCM. Batch note: a shell `while read` loop that starts the
+  probe in the background must give it `< /dev/null`; under zsh every such
+  run failed V.8 and connected V.32 14400.
 - One plain V.34 call of 8 that day (server in V.34 mode) stalled in Phase 3
   with our J unanswered until the Courier dropped the line; not looked at,
   and none of the changes above is on the plain V.34 path.
