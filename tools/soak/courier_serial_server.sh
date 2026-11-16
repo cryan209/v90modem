@@ -12,6 +12,9 @@
 # READY when registered, SRVCONNECT <line> at CONNECT, and the count of the
 # caller's lines that arrived exactly.  Taps, RTP CSVs, server.log and
 # pty-rx.bin land in artifacts/<name>/.  Touch /tmp/x2hw-stop to end early.
+# ME_JB_MS=40 as v90ras: this LAN path jitters 3-5 ms, and the 200 ms default
+# made RTDEd about 310 ms (past the Courier's fixed Sd deadline; pass
+# ME_JB_MS=200 as a K=V to reproduce the older calls).
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/rig_server.sh" || exit 2
 NAME=${1:?usage: courier_serial_server.sh <name> <hold-seconds> [K=V ...]}
@@ -21,7 +24,7 @@ DIR=$PWD/artifacts/$NAME; mkdir -p "$DIR"
 PTY=/tmp/x2hw-server
 [ -n "$(rig_server_pids "$PORT")" ] && rig_server_kill "$PORT" && sleep 1
 rm -f "$PTY" /tmp/x2hw-stop
-env SIP_FORCE_PCMU=1 ME_MODE="${MODE:-x2}" VPCM_G711_TAP_DIR="$DIR" VPCM_ME_VERBOSE=1 "$@" \
+env SIP_FORCE_PCMU=1 ME_JB_MS=40 ME_MODE="${MODE:-x2}" VPCM_G711_TAP_DIR="$DIR" VPCM_ME_VERBOSE=1 "$@" \
   timeout $((HOLD + 150)) ./sip_v90_modem --sip-server asterisk.net.cryan.nz \
     --username "$USER_" --password "$USER_" --local-port "$PORT" --rtp-port "$RTP" \
     --pty-link "$PTY" --verbose > "$DIR/server.log" 2>&1 &

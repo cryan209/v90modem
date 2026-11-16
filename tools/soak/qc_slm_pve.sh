@@ -37,13 +37,16 @@ DIR=/root/qc/$NAME
 ox() { pct exec $CT_OURS -- bash -c "$1"; }
 sx() { pct exec $CT_SLM -- bash -c "$1"; }
 
+# Our server runs ME_JB_MS=40 as v90ras does (LAN, 3-5 ms jitter); the 200 ms
+# default gave RTDEd 317-339 ms, past where the Sd hold and a Courier's fixed
+# Sd deadline can both be met.  OURS_ENV='ME_JB_MS=200' reproduces older calls.
 # Stop OUR server only, by its SIP port: CT_OURS also runs the live v90ras and
 # v90isdn services, and `pkill -x sip_v90_modem` took all of them down at every
 # call boundary (2026-11-11; systemd restarted them, their calls were lost).
 KILL_OURS='for p in $(ps -eo pid=,args= | awk "/[s]ip_v90_modem .*--local-port 5074 /{print \$1}"); do kill $p; done'
 
 ox "$KILL_OURS; sleep 1; mkdir -p $DIR; rm -f /tmp/v90slm; pkill -f '[c]at /tmp/v90slm'; true"
-ox "cd ${SRV_DIR:-/root/v90modem} && ( env SIP_FORCE_PCMU=1 ME_MODE=v92 ME_LAPM_XID_OPTION_OCTETS=auto VPCM_G711_TAP_DIR=$DIR $OURS_ENV \
+ox "cd ${SRV_DIR:-/root/v90modem} && ( env SIP_FORCE_PCMU=1 ME_JB_MS=40 ME_MODE=v92 ME_LAPM_XID_OPTION_OCTETS=auto VPCM_G711_TAP_DIR=$DIR $OURS_ENV \
     nohup timeout $((HOLD + 90)) ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username $OUR_ACCT --password $OUR_ACCT \
     --local-port 5074 --rtp-port 14100 --pty-link /tmp/v90slm --verbose > $DIR/server.log 2>&1 & ); sleep 5"
 ox "stty -F /tmp/v90slm raw -echo; ( cat /tmp/v90slm > $DIR/pty-rx.bin & ) ; true"

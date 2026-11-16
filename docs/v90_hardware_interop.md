@@ -1824,7 +1824,14 @@ fallback that was listed here is the next section):
   slmodemd's need scales with the round trip (three bulk delays), so above
   about 320 ms the two cannot both be met by any hold. Most of a round
   trip that long is our own receive jitter buffer (`ME_JB_MS`, default
-  200 ms; v90ras runs 40 ms, RTDEd about 150 ms).
+  200 ms; v90ras runs 40 ms, RTDEd about 150 ms). Since d75fc379 the hold
+  caps arrival at 950 ms, and the two LAN rig scripts
+  (`tools/soak/courier_serial_server.sh`, `tools/soak/qc_slm_pve.sh`) now
+  run `ME_JB_MS=40` as v90ras does: their paths jitter 3 to 5 ms. The
+  200 ms default stays for paths that jitter all call (HSF and RasFinder
+  calls: 80 to 195 ms in every 5 s window); the fixed no-discard buffer
+  also keeps a setup burst (300 ms on the tower interop calls) for the
+  rest of the call, on top of `ME_JB_MS`.
 - With hybrid echo (`--line-echo-db 14.4`) or a +80 ppm line clock the
   emulated Courier passes Sd and retrains later, in DIL or Phase 4; not
   compared with the hardware.
