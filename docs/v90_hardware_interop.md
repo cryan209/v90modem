@@ -1814,6 +1814,17 @@ fallback that was listed here is the next section):
   60 ms, which passes that at a round trip of about 315 ms; the rig's
   default buffer gives 309 ms. slmodemd needs the hold at 317 to 339 ms, so
   above about 300 ms no one setting serves both.
+  2026-11-17, emulated 403 on a clean line, Sd arrival moved with
+  `ME_V90_SD_RTD_MARGIN_MS` (arrival = RTDEd + Ja age + hold, after the
+  Courier starts Ja): at RTDEd 218 ms, 804 to 954 ms connect V.90 and
+  1004 to 1104 ms fail; at 288 ms, 864 to 964 ms connect and 1014 to
+  1164 ms end in V.34 31200. **The deadline is fixed, about 960 to 1000 ms,
+  not tied to the round trip.** The hold's 3 x RTDEd + 60 ms crosses it at
+  about 300 to 315 ms, live slightly later (1017 ms passed 5 of 6).
+  slmodemd's need scales with the round trip (three bulk delays), so above
+  about 320 ms the two cannot both be met by any hold. Most of a round
+  trip that long is our own receive jitter buffer (`ME_JB_MS`, default
+  200 ms; v90ras runs 40 ms, RTDEd about 150 ms).
 - With hybrid echo (`--line-echo-db 14.4`) or a +80 ppm line clock the
   emulated Courier passes Sd and retrains later, in DIL or Phase 4; not
   compared with the hardware.
