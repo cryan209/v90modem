@@ -891,3 +891,31 @@ which is the same limitation as Finding 5 in
 statement about the transmitter. The Ja check that does hold is in
 `v90_analogue_tx_test` itself, which demodulates its own symbols back to a
 CRC-checked descriptor.
+
+## Live runs, 2026-11-17 (x2live tree at 30c9049d, CT 117)
+
+**Our analogue side to our digital side over Asterisk** (`tools/soak/x2_live_pair.sh`
+with `SRV_ENV="ME_MODE=v90 ME_JB_MS=40"`, `CLI_ENV="ME_MODE=v90
+ME_V90_ROLE=analogue ME_JB_MS=40"`, `AT+MS=V90` in both init strings, u-law):
+- Default server: 0 of 2 reach V.90. The digital side's Ja fallback
+  (`ME_V90_JA_HEURISTIC_FALLBACK_MS`, 500 ms after the first suppressed
+  energy-gap attempt) released Sd at +9435 ms on a gap inside our analogue
+  side's S/PP/TRN; the descriptor parsed at +10080 ms. Our analogue side
+  received Sd before it had started Ja, then timed out in Ja (1.5 s) and
+  retrained, every attempt, and both fell back to V.22bis 2400 at 66 s.
+  Every engine_pair_test row runs the answerer with this fallback at 0,
+  which is why the offline pairing never shows it.
+- Server with `ME_V90_JA_HEURISTIC_FALLBACK_MS=0`: 2 of 2 CONNECT 56000 /
+  31200 V.90 LAPM/V.42bis, 40 of 40 lines exact each way, no retrain.
+
+**Our analogue side to the Diva cards** (`tools/eicon_ppp_direct.py --ext
+7930|7920 --mode v90 --role analogue`, one call each): V.8 selects V.90, Phase
+3 completes (Sd, TRN1d, Jd, DIL), Phase 4 starts with our CPt (drn 22, CP drn
+20); we receive Ri and TRN2d and send CP at +16077 ms, then receive nothing we
+recognise for 7.3 s and retrain (9.5.2). Four attempts per call, all the same;
+no CONNECT in 120 s. Open.
+
+`tools/eicon_call_batch.py` dials 7910 and 7900, which are now the MultiTech
+ISI card's numbers: both answer V.34 only (no PCM in V.8) and reach V.34 31200
+data, and nothing on them runs the echo menu any more, so its V.90 echo rows
+report 0 echoes.
