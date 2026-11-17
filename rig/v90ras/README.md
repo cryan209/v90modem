@@ -1032,3 +1032,23 @@ V.90 call fell back to V.34 within 11-20 s, the Courier itself reported
 19200 and stepped down to 9600-14400. So 21 costs the Courier nothing it had
 at 23; its V.90 not holding is a separate, older problem. The Win95 modems
 (manual dialling) and the MT9234 (unplugged) are unmeasured at 21.
+
+## Deployed 9ca245ef (2026-11-17 20:15)
+
+V.90 upstream B1 is also accepted on the shape of its error (>= 60% of
+components within 0.5 of the grid, distance <= 0.50), not only at distance
+<= 0.30: the Courier's real 28800 upstream read 0.34-0.41 and was abandoned
+to a retrain into V.34 (`docs/v90_hardware_interop.md`). Built in
+`/root/vpcm-fix6` with the commit's spandsp hunks (`/root/oos-9ca245ef.patch`;
+the objects including `private/v34.h` were deleted first), binary md5
+6cf703d1…, kept as `/opt/v90ras/sip_v90_modem.9ca245ef`; the previous binary
+is `sip_v90_modem.pre-9ca245ef`. Installed by rename (the running file is
+busy), only `v90ras` restarted, with no call up; the lines registered.
+
+Not live-verified: on the 4 Courier calls straight after, the Courier itself
+declined V.90 in its INFO1a (downstream code 3, 3000 baud, U_INFO 11) on every
+call, so no B1 was ever checked. The same INFO1a decline was 5 of the 8
+earlier v90ras Courier calls, but 0 of 2 into the x2live test server
+(`courier_serial_call.py --env MODE=v90`). The v90ras service runs
+`ME_V34_BAUD=3200`, `ME_V34_B1_RENEG=1` and `ME_V34_B1_RATE_MARGIN_DB=3`, which
+the test server does not; that is the first place to look.
