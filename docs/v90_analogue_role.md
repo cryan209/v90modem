@@ -977,7 +977,21 @@ no CONNECT in 120 s. Open.
   their INFO0d carries V.92 Table 16 bits 26/27 = 0 (both cards, logged by
   the new `INFO0d V.92 bits` line), while our INFO0a sets bit 26. Our offer
   is on the wire: in engine_pair_test with the same AT+MS, our digital side
-  reads our INFO0a as `capability(bit26)=1` and selects V.92. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+  reads our INFO0a as `capability(bit26)=1` and selects V.92.
+- **Our digital role against the cards, same day.** Dialling the cards with
+  `--role digital` gives V.34 31200 both ways, 4 of 4 with PPP and 0% ping
+  loss: an answering Diva is itself a digital modem, so V.8 cannot pick
+  V.90. With the cards dialling v90ras as V.90 analogue modems
+  (`CTRL=7|8 /tmp/diva_batch.sh`, `AT+MS=V90A,0`, ed18b0f9 deployed, 60 s
+  holds), 4 of 4 reached V.90 data at **40000/31200** with PPP up, 55-56 of
+  56-57 pings intact, upstream SNR 36.7 dB, no retrain. 40000 is the card's
+  own CP (drn=10; Table 14 (drn+20)*8000/6) after a DIL of N=197
+  (LSP=LTP=66), with our INFO0d declaring -6 dBm0. That is the same 40000
+  as every earlier Diva-to-v90ras call (10 of 10 on 2026-11-10), so it is
+  not new. In the other direction, our analogue role picks 56000 on the
+  same lines. Why the card stops at 40000 is not in its mlog (training
+  progress codes only); the next step is to check that the DIL we transmit
+  is what N=197/LSP=66/LTP=66 asks for. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
