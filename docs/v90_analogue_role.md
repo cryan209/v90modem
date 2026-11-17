@@ -1131,6 +1131,20 @@ no CONNECT in 120 s. Open.
     `divas_cfg.rc.bak-ctrl8-ulaw-20261118-100952`); a control call afterwards
     matched the baseline exactly (stop at `00c3`, V.34 31200, codec
     {89..19}).
+  - **Controller 3, mu-law end to end (same day): the one-segment offset is
+    A-law only.** Controller 3 is already forced mu-law (`CCardLAW[3]=2`);
+    its router port, voice-port 0/0/1 (BRI0/0/1), was found A-law, so it was
+    set to mu-law for the run (router: `g711ulaw`, `Transcoded: No`) and put
+    back to A-law afterwards, unsaved. Four calls (`CTRL=3`, 2902, engine
+    mu-law, code 23, TRN2d 6000): V.8 completed, and the card's CPt codec
+    set **equals** its transmit set ({90,87,...,27} -> {90,87,...,27}),
+    against the 16-Ucode step on every A-law call. V.90 still did not
+    complete: no S 2000 ms after our J, repeated retrains, and the calls
+    settled in V.34 at 9600-31200 (0 of 4 V.90). Controller 3 is known to
+    slip about 34 ppm against the router clock, which breaks Jd/Ri; the slip
+    was not measured on these calls, so this run cannot say whether the
+    card's V.90 code works in mu-law. As found, controller 3 runs a law
+    mismatch (card mu-law, router port A-law).
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
