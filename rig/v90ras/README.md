@@ -1024,3 +1024,11 @@ and 6/6 at code 23 (40000/31200); codes 13-17 fail its Phase 4
 (docs/v90_analogue_role.md). The setting applies to every caller of v90ras,
 and only the Diva has been measured at 21. Revert to 23 if another caller
 loses V.90.
+
+Courier (FT4TQOFT, FXS 7800, dialling 2950), 4 calls per code: code 21 gave
+V.90 data on 2/4 (45333, 52000), code 23 on 1/4 (50666). At either code every
+V.90 call fell back to V.34 within 11-20 s, the Courier itself reported
+`CONNECT 26400/V34` on all 8, and the calls without V.90 went straight to V.34
+19200 and stepped down to 9600-14400. So 21 costs the Courier nothing it had
+at 23; its V.90 not holding is a separate, older problem. The Win95 modems
+(manual dialling) and the MT9234 (unplugged) are unmeasured at 21.
