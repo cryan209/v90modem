@@ -1082,9 +1082,27 @@ no CONNECT in 120 s. Open.
   - Our spec handling, checked: INFO0d bit 39 (PCM coding, A-law = 1) comes
     from the call's law (`v34_set_v90_mode`, `v34tx.c:1178`); Ucode to A-law
     matches Table 1; DIL, Ri/R-bar-i and the CP layout were checked above.
-    INFO0d bit 38 is 1 (power measured at the codec output). Untested
-    diagnostic, not a fix: an A-law call with bit 39 or bit 38 forced to 0,
-    to see whether the card's segment offset keys off either bit.
+    INFO0d bit 38 is 1 (power measured at the codec output).
+  - **Live A/B, 18 November: the card's failure keys off INFO0d bit 39.**
+    A-law end to end (2906, controller 8, code 23, TRN2d 6000, our engine
+    A-law throughout; `V90_INFO0D_B38`/`B39` from 6fe200a5; arms alternated,
+    `/root/info0d_ab.sh` on CT 117):
+
+    | Arm | Calls | Result | Card's CPt/CP |
+    |---|---|---|---|
+    | as specified (bit 39 = 1) | 3 | 0/3 V.90; stop at `00c3`, V.34 31200 | tx {105..30} -> codec {89..19} |
+    | bit 38 = 0 | 2 | 0/2 V.90; V.34 31200 | tx {85..30} -> codec {70..19} |
+    | **bit 39 = 0** | 2 | **2/2 V.90 DATA, 36000, first attempt** | CP tx {106..32} -> codec {90..20} |
+
+    The one-segment codec offset is still there with bit 39 = 0, so it is
+    not what breaks Phase 4. What breaks it is the card's handling of a
+    digital modem that declares A-law. Declaring mu-law while sending A-law
+    codewords works because A-law and mu-law Ucode n are within 0.2 dB above
+    Ucode 90 (1-3 dB lower down). That is non-compliant (Table 3 bit 39
+    must give the coding in use), costs rate (36000 vs 41333 on the mu-law
+    route) and is a peer-specific workaround at best. The compliant
+    arrangement for Diva-class peers stays our engine in mu-law with the
+    network converting.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
