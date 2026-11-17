@@ -1063,3 +1063,10 @@ window (distance 0.376 at 75.6% near, 0.384 at 71.5%), with no retrain: the
 fix is live-verified. `ME_V34_BAUD=3200`, `ME_V34_B1_RENEG=1` and
 `ME_V34_B1_RATE_MARGIN_DB=3` on the test server changed nothing (52000/28800).
 Dial the Courier from `AT&F1`.
+
+Courier A/B from `AT&F1` (2026-11-17 21:00, alternated 21/23/21/23, 3 calls
+per arm): V.90 + LAPM/V.42bis on 12/12. Code 21: 52000/28800 6/6; code 23:
+50666/28800 6/6. So 21 is one step better for the Courier too, and stays.
+Every B1 was accepted on its first window by the shape gate: distance
+0.344-0.427, 68.0-75.2% within 0.5 of the grid. Five of the twelve read above
+0.40, which the gate before 9ca245ef would have abandoned to a retrain.
