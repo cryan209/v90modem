@@ -1169,8 +1169,24 @@ no CONNECT in 120 s. Open.
     offset). So the card's V.90 works in mu-law; its A-law path is what
     fails (and its A-law codec-set step is A-law only). voice-port 0/0/1 was
     put back to A-law afterwards, then (same day, on request) set to mu-law
-    and saved (`write memory`), so controller 3 is now mu-law at both ends
-    and clock-locked.
+    and saved (`write memory`), so controller 3 is now mu-law at both ends.
+  - **Soak on controller 3 (same day): the lock is loose, not fixed.** Three
+    10-minute PPP soaks into v90ras (`CTRL=3 DIAL=2950`, 600 s holds): 56000
+    held 323 s, 31200 (V.34) 54 s, 56000 75 s; 30-40% of pings lost, none
+    corrupt. Each call ended with our V.42 giving up (`T401 retries
+    exhausted (N400 20)`): the card stopped acknowledging our downstream,
+    while our upstream receiver read 0 bad frames at 37 dB to the end.
+    `slip2.py` on the card's `SAMPLE[]` against our taps: soak 1 (tap
+    line0-121031) 15 one-sample slips between 171 and 361 s, 11 drops and 4
+    repeats, all on whole-second marks (x.74-x.77 s) 1-33 s apart; soak 3
+    (line0-124654) one at 73.4 s, a second before the teardown; soak 2
+    (line0-124618) three. So card 1331's synchronising mode corrects in
+    single-sample steps instead of tracking: the 33.7 ppm drift is gone but
+    every step breaks the V.90 downstream frame. The clock chain is the
+    cause: TopRouter takes its clock from card 12196 (controller 8 is NT and
+    is `network-clock-select 1 BRI0/1/0`), and card 1331 then locks to the
+    router through controller 3. A clean rig would make the router the only
+    master and every Diva port TE following it.
   - **Our transmission is identical in the failing and working A-law arms.**
     Both take UINFO 78 from the card's INFO1a (base4 also logged a
     corrupted INFO1a with U_INFO=13, correctly rejected) and send TRN1d
