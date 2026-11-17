@@ -1103,6 +1103,22 @@ no CONNECT in 120 s. Open.
     route) and is a peer-specific workaround at best. The compliant
     arrangement for Diva-class peers stays our engine in mu-law with the
     network converting.
+  - **The card's declared codec law copies ours; its DSP runs mu-law.** CP
+    bit 35 (codec type) follows our INFO0d bit 39: with bit 39 = 0 our
+    server logs `codec-output=mu-law SIP=A-law`; with bit 39 = 1 it logs no
+    mismatch, so the card declared A-law (inferred from the missing line,
+    bit 35 not decoded directly). The card's `SAMPLE[]` dump shows our A-law
+    codes arriving as same-level mu-law codes, so the B channel is A-law and
+    the card converts to mu-law before its DSP. Most likely mechanism:
+    declared A-law, the card demaps with A-law level tables against the
+    mu-law samples its DSP actually sees, and cannot demap TRN2d/MP;
+    declared mu-law, its tables match its own samples and our A-law codes
+    sit within 0.2 dB above Ucode 90 (1-3 dB lower down), so it trains, at
+    reduced rate. The one-segment codec offset appears both ways, so it is
+    a separate 6 dB loss the card assumes, not the cause. This is also why
+    the mu-law engine with Asterisk converting (41333) works: it hands the
+    card the law its DSP really uses. Not confirmed from the card's
+    firmware.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
