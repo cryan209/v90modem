@@ -990,8 +990,32 @@ no CONNECT in 120 s. Open.
   as every earlier Diva-to-v90ras call (10 of 10 on 2026-11-10), so it is
   not new. In the other direction, our analogue role picks 56000 on the
   same lines. Why the card stops at 40000 is not in its mlog (training
-  progress codes only); the next step is to check that the DIL we transmit
-  is what N=197/LSP=66/LTP=66 asks for. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+  progress codes only).
+- **DIL check, same day.** Two route differences, measured separately with
+  the card dialling a test server on x2live (controller 8, 2 calls per arm):
+  - v90ras's `sip.env` carries `ME_V90_MAX_TX_DBM0_CODE=23` (INFO0d -12
+    dBm0, the 9 October Eicon recipe), and its lines are mu-law, so Asterisk
+    converts to the BRI's A-law. On that route the card's CPt has a single
+    constellation (tx Ucodes 90..27, no bit 128) and CP drn=10, 40000.
+  - A-law end to end (account 2906, Asterisk relays A-law, the Cisco BRI
+    voice ports are 0 dB in and out): **V.90 fails Phase 4 on 4 of 4 calls,
+    with code 11 (-6 dBm0) and with code 23**, and falls back to V.34
+    31200. The card's CPt sets **bit 128** (Table 14: the constellation at
+    its codec differs from ours) with the codec set exactly 16 Ucodes (one
+    segment, 6 dB) below the transmit set: tx {121..49} -> codec {105..35}
+    at -6 dBm0, tx {105..30} -> codec {89..19} at -12 dBm0. After our TRN2d
+    and MP it keeps repeating CPt, never sends CP, and retrains.
+  - Ours, checked: our Ucode-to-A-law table equals V.90 Table 1 (128 of
+    128); our TRN2d uses exactly the card's transmit Ucodes (Ucode 108 only
+    in frame position 5, presumably its second constellation). Nothing in
+    Asterisk's endpoint or dialplan for 2906 applies gain.
+  - Not settled: whether a real 6 dB pad exists on the A-law route or the
+    card mis-infers one from our A-law DIL. The card's mlog `SAMPLE[]` high
+    byte matches our DIL over 2000 samples (r=0.990, apparent +8.4 dB), but
+    not over 8000 (r=0.45), so the dump is not a continuous byte-exact
+    capture and cannot decide it. The test that would: a byte-exact capture
+    at the card's side of the BRI, or a known-level tone sent A-law to the
+    card and read back. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
