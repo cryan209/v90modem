@@ -1994,7 +1994,7 @@ Corrections to the list two sections up, from the day's calls:
   with our J unanswered until the Courier dropped the line; not looked at,
   and none of the changes above is on the plain V.34 path.
 
-## V.90 from the hardware Courier: upstream B1 refused at 0.34-0.41 lattice distance (2026-11-17, open)
+## V.90 from the hardware Courier: upstream B1 refused at 0.34-0.41 lattice distance (2026-11-17, fixed offline)
 
 Courier (FT4TQOFT, FXS 7800) into v90ras at INFO0d code 21 and 23: V.90 data on
 3 of 8 calls, every one abandoned by our upstream receiver ("B1 giving up after
@@ -2027,3 +2027,13 @@ with LAPM, 40/40 lines both ways; call 2 abandoned the same way.
   re-acquisition taps (2026-11-10, ctrl 8) as the negative fixture.
 - The v90ras call at code 23 read 0.688 (template) and 0.523 (4-point
   placement): white, a separate failure from the noisy-but-real case.
+
+**Fix (shape gate).** The out-of-sample check now also counts the components
+within 0.5 of the grid (white: 50% at any power) and calls an acquisition good
+at >= 60% with distance <= 0.50, as well as at distance <= 0.30. Replayed on CT
+117: Courier 69.7-77.7%, held 31200 acquisitions 88.9-92.6%, white windows
+46.7-50.6% (three v90ras Courier calls, still refused 7/7 and given up).
+Courier call 1 is now accepted on its first window, call 2 instead of being
+abandoned. Call 2 then runs upstream DATA at decision error 0.11 and our own
+9.6 renegotiation steps it to 26400 after 1 s; the replay diverges there, so
+whether that step holds needs live calls.

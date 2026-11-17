@@ -475,6 +475,18 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     splits them with a margin either side; 21600 loopback reads 0.053-0.074. */
 #define V34_V90_T3_ACQ_GOOD_DIST            0.30f
 
+/*! ...unless the error has the SHAPE of a real constellation.  A white one
+    puts each axis's error uniform on [-1, 1), so half the components land
+    within 0.5 of the grid at any power; a real one peaks at zero however
+    noisy.  The hardware Courier's 28800 upstream is real and noisy (about
+    35 dB; LAPM clean) and reads 0.336-0.405 from the grid, so 0.30 refused it
+    and the call retrained into V.34.  Replayed on CT 117 (2026-11-17): Courier
+    69.7-77.7% near, held 31200 acquisitions 88.9-92.6%, white windows
+    46.7-50.6%.  60% sits in that gap; the distance cap keeps a half-white
+    window out. */
+#define V34_V90_T3_ACQ_GOOD_NEAR            0.60f
+#define V34_V90_T3_ACQ_NEAR_MAX_DIST        0.50f
+
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
     noise burst -- and it must be SHORT, because everything that goes wrong

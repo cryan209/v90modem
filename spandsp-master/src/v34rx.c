@@ -15596,6 +15596,7 @@ search:
         double dist = 0.0;
         double power = 0.0;
         int counted = 0;
+        int near = 0;
 
         /* The filter under test was solved on B1's 128 symbols and is then
            held still for 256 more.  A peer on its own clock turns under it:
@@ -15647,6 +15648,11 @@ search:
             dist += (t_re - yd.re)*(t_re - yd.re) + (t_im - yd.im)*(t_im - yd.im);
             power += yd.re*yd.re + yd.im*yd.im;
             counted++;
+            /* Shape, not size: a white constellation puts each axis's error
+               uniform on [-1, 1), so half the components land within 0.5 of
+               the grid whatever the noise power; a real one, however noisy,
+               peaks at zero. */
+            near += (fabsf(t_re - yd.re) < 0.5f) + (fabsf(t_im - yd.im) < 0.5f);
         }
         /*endfor*/
         if (counted >= V34_V90_T3_VALIDATE_SYMBOLS/2)
@@ -15677,8 +15683,10 @@ search:
             V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 out-of-sample check: lattice distance "
                      "%.3f, symbol power %.1f against the template's %.1f, "
-                     "over %d symbols\n",
-                     mean_dist, mean_power, template_power, counted);
+                     "over %d symbols, %.1f%% of components within 0.5 of the "
+                     "grid (white: 50%%)\n",
+                     mean_dist, mean_power, template_power, counted,
+                     100.0*near/(2.0*counted));
             /* Hold out for a GOOD acquisition -- distance as a fraction of
                the symbol power carrying it, see V34_V90_T3_ACQ_GOOD_SNR --
                and settle for a merely passable one only when the retries are
@@ -15691,8 +15699,11 @@ search:
             bool power_ok = (mean_power
                                  <= V34_V90_T3_VALIDATE_POWER_RATIO
                                         *template_power);
+            double near_frac = near/(2.0*counted);
             bool good = power_ok  &&  rel <= V34_V90_T3_ACQ_GOOD_SNR
-                        &&  mean_dist <= V34_V90_T3_ACQ_GOOD_DIST;
+                        &&  (mean_dist <= V34_V90_T3_ACQ_GOOD_DIST
+                             ||  (near_frac >= V34_V90_T3_ACQ_GOOD_NEAR
+                                  &&  mean_dist <= V34_V90_T3_ACQ_NEAR_MAX_DIST));
             bool passable = power_ok  &&  mean_dist <= V34_V90_T3_VALIDATE_ERR;
             bool retries_left = (s->v90_t3_acq_retries
                                      < V34_V90_T3_ACQ_MAX_RETRIES);
