@@ -1015,7 +1015,23 @@ no CONNECT in 120 s. Open.
     not over 8000 (r=0.45), so the dump is not a continuous byte-exact
     capture and cannot decide it. The test that would: a byte-exact capture
     at the card's side of the BRI, or a known-level tone sent A-law to the
-    card and read back. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+    card and read back.
+  - **Settled the same day: there is no pad; the card assumes one.** Inside
+    the stretch where the card's `SAMPLE[]` high byte aligns with our DIL,
+    every one of our A-law codes maps to a single card byte (6 of 6
+    occurrences each), and those bytes are our levels re-encoded as mu-law
+    at 0 dB (A 504 -> u 460, 528 -> 492, 8064 and 7808 -> 7932). So the card
+    converts A-law to mu-law internally and receives our levels unchanged.
+    Its CPt, though, says each transmit Ucode arrives at its codec about
+    6.2 dB lower (A-law Ucode 105 -> mu-law Ucode 89, 102 -> 86, ... 30 ->
+    19) and its TRN1d ratio field says the same, so it expects TRN2d/MP
+    6 dB below what reaches it and cannot demap them (progress stops at
+    `00c3`, it repeats CPt and retrains). Checked on our side as well: Ri is
+    2028T of Ucode 78 and R-bar-i exactly 24T (§9.4.1.2), and the CP mask
+    layout (all transmit sets, then all codec sets) matches Table 14
+    (272+gamma:271+delta). Not yet known: why the card measures a 6 dB pad
+    from our A-law DIL. The next check is to log the Ja descriptor's
+    training/reference Ucodes and compare them with the DIL we transmit. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
