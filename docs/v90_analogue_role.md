@@ -1050,7 +1050,13 @@ no CONNECT in 120 s. Open.
     {89..19}), stop at `00c3`, V.34 31200. So the failure follows our
     engine running A-law, whatever the SIP codec: the card's pad reading
     comes from receiving A-law Ucode levels, and the mu-law engine plus
-    Asterisk's conversion is the only working arrangement. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+    Asterisk's conversion is the only working arrangement.
+  - Code 11 (INFO0d -6 dBm0, our default) on the same mu-law route: 0 of
+    4. The card's CPt has no pad (single set, tx {105..39}, against
+    {90..27} at code 23), but Phase 4 still fails: with TRN2d 6000 it
+    stops at `00c3`, without it at `00c1`, and every call falls back to
+    V.34 28800. So code 23, the 9 October recipe, is what lets the card
+    complete Phase 4, and it is also what caps it at 40000. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
