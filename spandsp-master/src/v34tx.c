@@ -1020,6 +1020,19 @@ static logging_state_t *tx_log_state(v34_tx_state_t *s)
  * declaration.  ME_V90_MAX_TX_DBM0_CODE moves it,
  * and v90.c's 8.5.2 check reads the same variable, so the value we announce
  * and the value we enforce can no longer drift apart. */
+/* Diagnostic only (V.90 Table 3 bits 38/39): force an INFO0d bit to 0 or 1
+ * to see which of them a peer's codec-level reading keys off.  Forcing bit
+ * 39 against the bearer law is non-compliant; never set it in a deployment. */
+static int v90_info0d_bit_override(const char *name, int normal)
+{
+    const char *value = getenv(name);
+
+    if (value  &&  (value[0] == '0'  ||  value[0] == '1')  &&  value[1] == '\0')
+        return value[0] - '0';
+    return normal ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int v90_info0d_max_power_code(void)
 {
     static int cached = -1;
@@ -1173,9 +1186,9 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, v90_info0d_max_power_code(), 5);
         /* 38       Power measurement at codec output (1) or modem terminals (0).
                     SIP/RTP = codec output */
-        bitstream_put(&bs, &t, 1, 1);
+        bitstream_put(&bs, &t, v90_info0d_bit_override("V90_INFO0D_B38", 1), 1);
         /* 39       PCM coding in use: 0 = u-law, 1 = A-law */
-        bitstream_put(&bs, &t, s->v90_pcm_law, 1);
+        bitstream_put(&bs, &t, v90_info0d_bit_override("V90_INFO0D_B39", s->v90_pcm_law), 1);
         /* 40       Set to 1 = ability to operate V.90 with upstream symbol rate 3429 */
         bitstream_put(&bs, &t, 0, 1);
         /* 41       Reserved — set to 0 */
