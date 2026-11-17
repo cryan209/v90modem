@@ -1993,3 +1993,37 @@ Corrections to the list two sections up, from the day's calls:
 - One plain V.34 call of 8 that day (server in V.34 mode) stalled in Phase 3
   with our J unanswered until the Courier dropped the line; not looked at,
   and none of the changes above is on the plain V.34 path.
+
+## V.90 from the hardware Courier: upstream B1 refused at 0.34-0.41 lattice distance (2026-11-17, open)
+
+Courier (FT4TQOFT, FXS 7800) into v90ras at INFO0d code 21 and 23: V.90 data on
+3 of 8 calls, every one abandoned by our upstream receiver ("B1 giving up after
+7 windows (out-of-sample distance)"), a 9.5.1.1 retrain, then V.34. Into the
+x2live server (`courier_serial_call.py --env MODE=v90`): call 1 52000/28800
+with LAPM, 40/40 lines both ways; call 2 abandoned the same way.
+
+- Both calls do find the right B1: in-sample fit 100.0% (template tap 4,
+  trellis 0; call 2 only after the 4-point training placement). Out of sample
+  they read 0.380/0.344 (call 1) and 0.404 (call 2) at symbol power 418-438.
+  `V34_V90_T3_ACQ_GOOD_DIST` (0.30) refuses all of them; call 1 survived only
+  because its 0.344 passes the last-resort 0.40 once the retries are spent,
+  and call 2's 0.404 misses that by 0.004. The rejection line quotes only the
+  relative limit (0.00093 against 0.002, which passes), not the absolute
+  0.30 that fails.
+- The replay (`v90_engine_replay live-rx.g711 ulaw --sync --echo-ref`, on CT
+  117) reproduces call 2 exactly: 0.405 on all 7 windows, give-up. All seven
+  retries re-run the same placement and get the same answer.
+- Call 1's DATA symbols (`ME_V90_UPSTREAM_SYM_DUMP`, 28000 symbols) are
+  noise, not a wrong scale or lattice: radial bias under 0.02 at every
+  amplitude, mean |error| per axis 0.167 on the inner points rising to 0.244
+  on the outermost (about 35 dB). The logged "sym err" sits at 0.11 all call
+  and LAPM carried the data clean. So the Courier's acquisitions are real
+  and merely noisier than the Diva's held ones (0.036-0.176); they overlap
+  the Diva's lost re-acquisitions (0.392-0.646) in absolute distance.
+- An absolute distance cannot separate a noisy real constellation from a
+  white one at this power. A whiteness test would: white puts |error| uniform
+  on [0,1) per axis (mean 0.5, half the components beyond 0.5), call 1's
+  error is peaked at 0.17-0.24. Validating that needs the Diva's lost
+  re-acquisition taps (2026-11-10, ctrl 8) as the negative fixture.
+- The v90ras call at code 23 read 0.688 (template) and 0.523 (4-point
+  placement): white, a separate failure from the noisy-but-real case.
