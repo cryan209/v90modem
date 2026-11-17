@@ -34,6 +34,11 @@ def main():
                     help='V.90 role; a real analogue modem on the far end needs digital')
     ap.add_argument('--ext', help='number to dial (default 7900/7910 by law); the MultiTech BRI is 2910, A-law')
     ap.add_argument('--pings', type=int, default=30)
+    ap.add_argument('--ping-wait', type=int, default=5,
+                    help='ping -W seconds (an 84-byte ping round trip is ~6.5 s at 300 bps)')
+    ap.add_argument('--ping-interval', type=float, default=1.0)
+    ap.add_argument('--pppd-opt', action='append', default=[],
+                    help='extra pppd argument (repeat), e.g. lcp-restart 10 at 300 bps')
     ap.add_argument('--local-port', type=int, default=5078)
     ap.add_argument('--rtp-port', type=int, default=14600)
     ap.add_argument('--binary', type=Path, default=ROOT / 'sip_v90_modem')
@@ -165,7 +170,8 @@ def main():
                     ['/usr/sbin/pppd', 'notty', 'nodetach', 'local', 'noauth', 'nodefaultroute',
                      'noproxyarp', 'noipv6', 'noccp', 'novj', 'nopersist', 'logfd', '2',
                      'ipcp-accept-local', 'ipcp-accept-remote', 'lcp-echo-interval', '10',
-                     'lcp-echo-failure', '6', 'debug', '0.0.0.0:'] + authentication,
+                     'lcp-echo-failure', '6', 'debug', '0.0.0.0:'] + authentication
+                    + [w for o in args.pppd_opt for w in o.split()],
                     stdin=slave, stdout=slave, stderr=out)
                 deadline = time.monotonic() + 60
                 peer_ip = None
@@ -183,7 +189,7 @@ def main():
                 if not peer_ip:
                     raise TimeoutError('IPCP negotiation')
                 result['peer_ip'] = peer_ip
-                ping = subprocess.run(['ping', '-n', '-c', str(args.pings), '-i', '1', '-W', '5', peer_ip],
+                ping = subprocess.run(['ping', '-n', '-c', str(args.pings), '-i', '%g' % args.ping_interval, '-W', str(args.ping_wait), peer_ip],
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=args.pings * 6 + 30)
                 (d / 'ping.log').write_bytes(ping.stdout)
                 result['ping_status'] = ping.returncode

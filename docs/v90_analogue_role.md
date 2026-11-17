@@ -959,6 +959,28 @@ no CONNECT in 120 s. Open.
   `show network-clocks` reads BRI0/1/0 primary. Then both cards, A-law,
   first attempt: CONNECT 56000/31200 in V.90 at +17.1/+17.2 s, PPP with PAP
   up, 20 pings with 0% loss, no retrain.
+- **Modulation matrix, same day (13:00-13:25), both cards, A-law, one call
+  each, our modem dialling** (`tools/eicon_ppp_direct.py --law alaw --ms
+  AT+MS=<m>`, 20 pings unless noted): every row CONNECT, PPP with PAP up,
+  0% ping loss.
+
+  | AT+MS | 7920 | 7930 |
+  |---|---|---|
+  | V92 | V.90 56000/31200 | V.90 56000/31200 |
+  | V34 | 31200 | 31200 |
+  | V32B | 14400 | 14400 |
+  | V22B | 2400 | 2400 |
+  | V22 | 1200 | 1200 |
+  | V21 | 300, 5 pings, RTT 6.5 s | 300, 5 pings, RTT 6.6 s |
+
+  `AT+MS=V92` was answered as V.90: V.8 selected V.90 and there was no V.92
+  exchange, so the cards were never offered or never took V.92 upstream; not
+  chased further. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+  frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
+  answer arrives and both sides keep retransmitting (42 frames received,
+  all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
+  10"` (and pap/ipcp) PPP comes up; pings need `--ping-wait 20
+  --ping-interval 10`, because an 84-byte ping round trip is 6.5 s at 300 bps.
 
 
 `tools/eicon_call_batch.py` dials 7910 and 7900, which are now the MultiTech
