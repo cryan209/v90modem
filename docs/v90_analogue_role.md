@@ -1170,6 +1170,20 @@ no CONNECT in 120 s. Open.
     fails (and its A-law codec-set step is A-law only). voice-port 0/0/1 was
     put back to A-law afterwards (unsaved changes only), which leaves
     controller 3's normal setup law-mismatched as found.
+  - **Our transmission is identical in the failing and working A-law arms.**
+    Both take UINFO 78 from the card's INFO1a (base4 also logged a
+    corrupted INFO1a with U_INFO=13, correctly rejected) and send TRN1d
+    (§8.4.5) as 0x9B/0x1B with mixed signs, which is A-law Ucode 78 in the
+    Recommendation's Table 1 (linear 3904; mu-law Ucode 78 is 0xB1, 3772).
+    TRN2d uses the card's CPt transmit set; the pad repair that would send
+    its codec set is off. The only difference between the arms is the
+    truthful INFO0d bit 39. Likely mechanism, not proven: the card's
+    TRN1d-ratio field and codec set both say our A-law levels arrive
+    6.02 dB (one segment, 16 Ucodes) low, which is what a receiver gets if
+    it reads A-law's native 13-bit linear values on mu-law's 14-bit scale
+    without the factor of 2. Halving a level moves it down exactly one
+    segment, so in the Ucode domain it shows as a 16-Ucode step rather than
+    the nearest-level fit tested above.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
