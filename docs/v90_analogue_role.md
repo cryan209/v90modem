@@ -1061,8 +1061,13 @@ no CONNECT in 120 s. Open.
     13, 15 and 17 (-7, -8, -9 dBm0) all fall back to V.34 28800-31200;
     19 gives 1 of 2 into V.90 (downstream 42666), 21 (-11 dBm0) gives 2 of
     2 at 41333/31200. So the card completes Phase 4 only at -10 dBm0 or
-    quieter, and 21 beats code 23's 40000. Rerun 21 against 23 alternated
-    before changing the rig default.
+    quieter, and 21 beats code 23's 40000.
+  - Code 21 vs 23 alternated A/B (4 rounds, 2 calls per arm per round):
+    every call that reached our server went to V.90 data, code 21 6/6 at
+    41333/31200 and code 23 6/6 at 40000/31200. The other 4 calls never
+    reached us (Diva NO DIALTONE/NO ANSWER, no INVITE in our log; the
+    first calls after a server restart, before it re-registered). Code 21
+    is the better setting for the Diva on the mu-law route.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
