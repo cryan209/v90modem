@@ -973,9 +973,11 @@ no CONNECT in 120 s. Open.
   | V22 | 1200 | 1200 |
   | V21 | 300, 5 pings, RTT 6.5 s | 300, 5 pings, RTT 6.6 s |
 
-  `AT+MS=V92` was answered as V.90: V.8 selected V.90 and there was no V.92
-  exchange, so the cards were never offered or never took V.92 upstream; not
-  chased further. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+  `AT+MS=V92` was answered as V.90 because **the cards do not offer V.92**:
+  their INFO0d carries V.92 Table 16 bits 26/27 = 0 (both cards, logged by
+  the new `INFO0d V.92 bits` line), while our INFO0a sets bit 26. Our offer
+  is on the wire: in engine_pair_test with the same AT+MS, our digital side
+  reads our INFO0a as `capability(bit26)=1` and selects V.92. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart

@@ -19247,10 +19247,18 @@ static void prepare_v90_analogue_phase3_locked(void)
      * 9.5.2 omits INFO0 on retrain: retain the last valid law/power. */
     {
         v34_v90_info0a_t info0d;
-        if (v34_get_v90_received_info0a(g_v34, &info0d))
+        if (v34_get_v90_received_info0a(g_v34, &info0d)) {
             vpcm_analogue_peer_note(&g_v90a_peer, info0d.info0d_extensions_valid,
                 info0d.info0d_pcm_alaw, info0d.info0d_max_power_code,
                 info0d.info0d_power_measured_at_codec_output);
+            /* V.92 Table 16: INFO0d bit 26 = short Phase 2, bit 27 = V.92
+             * capable.  Logged so "AT+MS=V92 answered as V.90" can be
+             * told apart from a digital modem that never offered V.92. */
+            ME_LOG("[ME] V.90 analogue: INFO0d V.92 bits raw26_27=0x%X "
+                   "(capable(bit27)=%d, short-phase2(bit26)=%d); we offered %d\n",
+                   info0d.raw_26_27, (info0d.raw_26_27 & 2) != 0,
+                   (info0d.raw_26_27 & 1) != 0, g_enable_v92 ? 1 : 0);
+        }
     }
     ME_LOG("[ME] V.90 analogue PCM: %s (%s INFO0d, bearer %s)\n",
            me_v90a_pcm_law() == ME_LAW_ALAW ? "A-law" : "mu-law",
