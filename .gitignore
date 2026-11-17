@@ -252,3 +252,25 @@ tools/eicon/__pycache__/
 test-logs/
 
 /v90_b1_state_test
+
+# Test binaries added after the list above
+fax_hdx_handoff_test
+jbuf_gap_test
+k56flex_7910_p1_test
+k56flex_client_splice
+k56flex_client_tx_test
+k56flex_modulate
+line_supervisor_test
+media_clock_test
+mt5634mu_bulk_write_test
+v34_carrier_gradient_test
+v34_line_ec_test
+v42_stress_test
+v8_access_test
+v90_reneg_engine_test
+v90_upstream_hold_test
+v90_upstream_slip_test
+v92_su_test
+vpcm_analogue_peer_test
+x2_client_test
+spandsp-master/src/.v34-opt-cflags

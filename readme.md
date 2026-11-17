@@ -55,7 +55,7 @@ To explore without a SIP account or hardware:
 
 Local loopback demonstrates the modem but does not validate a real phone path.
 
-## Status (26 October 2026)
+## Status (18 November 2026)
 
 Data connections work, but this is an interoperability project, not a
 qualified replacement for every hardware modem. A loopback pass or a CONNECT
@@ -64,16 +64,16 @@ evidence is.
 
 | Area | Evidence | Still open |
 |---|---|---|
-| **V.90 analogue caller** | Eicon Diva hardware: 56000 down / 31200 up, both laws, LAPM/V.42bis; 26-minute transfers, PPP and HTTP | Other peers and networks |
-| **V.90 digital answerer** (the main goal) | Byte-exact PCM downstream; reaches data mode live against the RasFinder's analogue modems | Upstream can still lose sync mid-call; sustained transfers across chipsets |
-| **V.92** | slmodemd: 38666 up / 48000 down, 1 MiB each way receiver-verified ([details](docs/v92_upstream_trellis.md)); 36000/53333 also exercised; Quick Connect in engine tests | A hardware V.92 peer; Quick Connect against a real modem |
-| **V.34** | Eicon hardware both laws; 35-minute soaks to extension 7900 (400/400 lines) and PPP to 7910 (900/900 pings) | Sustained transfers as answerer; an occasional retrain against 7910 |
-| **V.32bis, V.22bis, V.21, V.23, Bell 103/212A** | Engine-pair payload tests; V.22bis rides out short carrier drops (found against a CX93001) | Broad hardware coverage |
-| **Error control** | V.42/LAPM, V.42bis, V.44; MNP 2-4 connected on 8 of 9 live calls; MNP5 codec matches 284 independent modem-reference wire segments | MNP5 hardware interoperability is not yet qualified ([details](docs/mnp.md)) |
+| **V.90 digital answerer** (the main goal) | The `v90ras` 10-line dial-in server takes live V.90 calls into data mode from Win95/Cisco FXS modems, Eicon Diva cards (40000-41333, mu-law), a USR Courier (52000/50666 from `AT&F1`, 6/6), the MT5634 and the RasFinder (20/24) | The upstream is still the weaker direction (Courier B1 needs the 9ca245ef shape gate); Diva over an A-law route fails Phase 4; the Intel V.92 serial modem stalls after our Jd |
+| **V.90 analogue caller** | Eicon Diva hardware: 56000 down / 31200 up, both laws, LAPM/V.42bis, 26-minute transfers, PPP and HTTP; connects to both Diva cards again since the TopRouter BRI clock fix (bb4e1b79) | Other peers and networks |
+| **V.92** | slmodemd: PCM upstream 36000 / downstream 54666, 5/5 first attempt, 240 s gapless payload (9d69c8cf); Quick Connect in engine tests and against slmodemd | A hardware V.92 peer; slmodemd's retrained V.92 startup (we fall back to V.90); our analogue role does not answer V.92 retrains |
+| **V.34** | Eicon hardware both laws to 31200 (3200 dense path, 7/7 against the 7930); 35-minute soaks; Diva modulation matrix passes V.90/V.34/V.32bis/V.22bis/V.22/V.21 on both cards | Sustained transfers as answerer; V.34 §§11.5-11.7 recovery coverage |
+| **V.32bis, V.22bis, V.21, V.23, Bell 103/212A** | Engine-pair payload; Diva matrix above; V.21/V.23/Prestel against the CompuSpec M1000 | Broad hardware coverage |
+| **Error control** | V.42/LAPM, V.42bis, V.44; MNP 2-4 on 8 of 9 live calls; MNP5 implemented and reference-checked (4b6a4bb0) | MNP5 against hardware |
 | **Fax** | Eicon pages both ways, both laws, up to 28800 bit/s | 33600 (class 2.1) on hardware |
-| **V.91, clear channel, V.110/V.120** | Two of our own endpoints over SIP | A foreign digital peer and a byte-exact bearer |
-| **x2** | Server and analogue client, with LAPM, against original Courier firmware in an emulator | Real hardware |
-| **K56flex** | Server: duplex data against a native HSF client; V.8bis with a real server (Eicon 7910) | Hardware data connection; a client for real servers |
+| **x2** | Real USR Courier hardware: 5/5 at 50666/31200; client and server live over Asterisk with 10-minute byte-exact soaks | Wider peer coverage |
+| **K56flex** | Client to the Eicon 7910 at 52000/31200 with PPP; the MT5634MU hardware client connects to our server at 44000/46000 with V.42bis | Sustained checked payload |
+| **V.91, clear channel, V.110/V.120** | Two of our own endpoints; V.120 and clear channel through the Eicon 7900 TA | A foreign V.91 peer |
 
 Headline result: on 8 October, two unbroken V.90 calls to the Eicon card ran
 about 26.5 minutes each and checked **16,177,152 payload bytes** with no

@@ -2,7 +2,7 @@
 
 This guide takes you from a source checkout to a modem call and explains how to
 attach an application. For current interoperability limits, see the
-[status table](../readme.md#status-26-october-2026). A supported modulation is
+[status table](../readme.md#status-18-november-2026). A supported modulation is
 not a promise that every hardware peer or VoIP provider will work.
 
 ## 1. Choose the connection you need

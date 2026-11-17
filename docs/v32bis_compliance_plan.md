@@ -3,7 +3,7 @@
 This project needs a standards-compliant ITU-T V.32bis implementation, not a
 teaching modem or a "V.32bis-like" approximation. The local normative source is:
 
-- [T-REC-V.32bis-199102-I!!PDF-E.pdf](/Users/scottcryan/v90modem/ITU%20Docs/T-REC-V.32bis-199102-I!!PDF-E.pdf)
+- [T-REC-V.32bis-199102-I!!PDF-E.pdf](../ITU%20Docs/T-REC-V.32bis-199102-I!!PDF-E.pdf)
 
 ## Current RasFinder hardware boundary (2026-10-20)
 

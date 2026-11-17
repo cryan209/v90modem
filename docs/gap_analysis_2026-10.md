@@ -1,5 +1,27 @@
 # Open work: reliability and interoperability
 
+## Refresh, 18 November 2026 (read first)
+
+A documentation review against history through `6c3a41f7`, not a new test
+run. Where the 29 October list below disagrees, this wins:
+
+- **Closed:** x2 on real hardware (Courier 5/5, 50666/31200); MNP5 is
+  implemented (4b6a4bb0), not "unimplemented"; V.92 PCM upstream against
+  slmodemd 5/5 first attempt at 36000/54666 (9d69c8cf); V.90 analogue role
+  against both Diva cards (bb4e1b79, the slips were the TopRouter clock).
+- **V.90 digital upstream** (P1) has moved: the `v90ras` server now carries
+  live data from Win95/Cisco, Diva, Courier, MT5634 and RasFinder peers.
+  Open: Courier-class noisy upstream B1 (shape gate 9ca245ef, watch for false
+  accepts), Diva over an A-law route failing Phase 4, the Intel serial modem
+  stalling after our Jd.
+- **Deployed but never live-verified:** post-§9.6 B1 re-acquisition
+  (60ecf54c); the Sd round-trip hold (49a33091) on the AudioCodes path; the
+  rate A/B for DIL repeat-until-S (809636b2) on peers other than the Diva.
+- **V.92:** slmodemd's retrained V.92 startup fails (we withdraw the PCM
+  offer); our analogue role does not answer V.92 retrains; no hardware V.92
+  peer yet (CX93001 is the candidate).
+- **V.91:** upstream mask and data-mode renegotiation still missing.
+
 ## Current backlog (evidence through 29 October 2026)
 
 This is the working list, refreshed from the topic notes and committed history
@@ -28,8 +50,8 @@ gate. The V.34 caller-direction corruption is closed (see Completed below).
 
 | Work | What is already demonstrated | Remaining qualification / next action | Source |
 |---|---|---|---|
-| **V.92 with physical hardware** | slmodemd PCM upstream at 36000 / 53333 downstream, clean for 170 s; Quick Connect in engine tests. The old claim that PCM upstream has never worked is superseded. | Full startup and exact payload with a hardware V.92 peer, then retrain, Quick Connect/short phases and modem-on-hold. slmodemd's retrained PCM-upstream startup is separately open. | [V.92 startup](v92_full_startup.md), [Quick Connect](v92_quick_connect.md), [README status](../readme.md#status-26-october-2026) |
-| **Broader hardware coverage** | V.90 analogue caller has Eicon hardware soaks, both laws, LAPM/V.42bis, PPP and exact HTTP. Legacy families have engine-pair payload; V.22bis also has hardware evidence. | Expand peers and networks for V.90 analogue, V.92 analogue and the legacy ladder. V.91/V.110/V.120 need a foreign digital endpoint and byte-exact bearer. Do not infer qualification from two instances of our own engine. | [Eicon soaks](eicon_soak_ppp.md), [hardware procedure](v90_hardware_interop.md), [README status](../readme.md#status-26-october-2026) |
+| **V.92 with physical hardware** | slmodemd PCM upstream at 36000 / 53333 downstream, clean for 170 s; Quick Connect in engine tests. The old claim that PCM upstream has never worked is superseded. | Full startup and exact payload with a hardware V.92 peer, then retrain, Quick Connect/short phases and modem-on-hold. slmodemd's retrained PCM-upstream startup is separately open. | [V.92 startup](v92_full_startup.md), [Quick Connect](v92_quick_connect.md), [README status](../readme.md#status-18-november-2026) |
+| **Broader hardware coverage** | V.90 analogue caller has Eicon hardware soaks, both laws, LAPM/V.42bis, PPP and exact HTTP. Legacy families have engine-pair payload; V.22bis also has hardware evidence. | Expand peers and networks for V.90 analogue, V.92 analogue and the legacy ladder. V.91/V.110/V.120 need a foreign digital endpoint and byte-exact bearer. Do not infer qualification from two instances of our own engine. | [Eicon soaks](eicon_soak_ppp.md), [hardware procedure](v90_hardware_interop.md), [README status](../readme.md#status-18-november-2026) |
 | **Fax upper rate and robustness** | Real Eicon pages in both directions and both laws up to 28800. T.30 Annex F is no longer a missing integration task. | Qualify 33600/class 2.1 on hardware and extend page/turnaround/recovery coverage. Check the later results in the fax notes rather than their early “absent” descriptions. | [Eicon fax results](eicon_v34_fax_20261009.md), [Annex F investigation](t30_annex_f_v34_fax.md), [HDX audit](v34_hdx_conformance_audit.md) |
 | **Multi-line deployment and setup load** | `--lines N` provides supervised process-per-line operation; local concurrent payload and a single-line CPU measurement exist. A per-call context rewrite is not a prerequisite for a pool of lines. | Qualify the supervisor behind the rig PBX, including registration/contact limits, restart/recycle, simultaneous training and sustained payload. Re-measure CPU under concurrent setup; the 10 October numbers below are not a current capacity guarantee. | [multi-line](multi_line.md), historical CPU measurement below |
 | **Cross-platform test baseline** | `tools/run_tests.py` runs fast/slow lists independently and reports all failures; the old stop-at-first-failure runner blocker is resolved. A fresh clone builds with `make -j` on macOS/ARM and on Debian 12 x86-64 (gcc 12, glibc 2.36; 29 October, a new CT on vmhost). `make test-fast` there: 638/645. Two are the HSF rows (they need the sibling `../cruft` checkout). The other five were V.34 duplex rows (fast.list 136, 180, 190, 202, 260), traced to the Phase 4 TRN slicer in P1 and fixed; `make test-fast` is now 645/645 on macOS and 643/645 on Linux, the two being the HSF rows that need `../cruft`. Row 180's rates are identical on both platforms; the 40 dB A-law row is bounded (`V34_DUPLEX_EXPECT_MAX_RATES`) because its step within the noise band is platform-dependent. | Run the HSF rows on Linux with a `cruft` checkout. Establish clean macOS/ARM and Linux/x86-64 results. Recheck the historical K56flex floating-point-margin row before calling it a current failure; do not carry forward the old 86/87 count. | [test runner](../tools/run_tests.py), [fast list](../tests/fast.list), [slow list](../tests/slow.list) |
