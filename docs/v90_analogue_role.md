@@ -1068,6 +1068,23 @@ no CONNECT in 120 s. Open.
     reached us (Diva NO DIALTONE/NO ANSWER, no INVITE in our log; the
     first calls after a server restart, before it re-registered). Code 21
     is the better setting for the Diva on the mu-law route.
+  - **Ucode-numbering theory ruled out (18 November, offline).** Decoding
+    Table 1 for both laws on one 16-bit scale (both full scales within
+    0.03 dB): A-law Ucode n and mu-law Ucode n differ by under 0.2 dB above
+    Ucode 90 (A105 13056 vs mu105 12924), so a law/numbering mix-up cannot
+    produce a 16-Ucode offset there. The card's codec set is, at all five
+    points checked, exactly "the mu-law Ucode of the same level, minus 16":
+    A121 -> 105, A105 -> 89, A102 -> 86, A49 -> 35 (same-level mu 51),
+    A30 -> 19 (same-level mu 35). So the card converts our levels correctly
+    and then places them one whole segment (6 dB) lower. Halving the level
+    does not fit at the low end (A30/2 -> mu 23, not 19), so it is a segment
+    step in the Ucode domain, not a 13-bit vs 14-bit scale error.
+  - Our spec handling, checked: INFO0d bit 39 (PCM coding, A-law = 1) comes
+    from the call's law (`v34_set_v90_mode`, `v34tx.c:1178`); Ucode to A-law
+    matches Table 1; DIL, Ri/R-bar-i and the CP layout were checked above.
+    INFO0d bit 38 is 1 (power measured at the codec output). Untested
+    diagnostic, not a fix: an A-law call with bit 39 or bit 38 forced to 0,
+    to see whether the card's segment offset keys off either bit.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
