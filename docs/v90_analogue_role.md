@@ -1042,7 +1042,15 @@ no CONNECT in 120 s. Open.
     `V90_TX_CODEC_MASKS` switch, not committed) did not help: 0 of 2, the
     same stop at `00c3` and fall back to V.34. On this route the card
     therefore fails whichever of its two sets we send; the working route
-    remains mu-law with the Asterisk conversion (v90ras, 40000/31200). V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+    remains mu-law with the Asterisk conversion (v90ras, 40000/31200).
+  - `ME_PCMU_ALAW_BEARER=1` on the mu-law route (account 2902, v90ras's
+    code 23 and TRN2d 6000, controller 8, 2 calls per arm): without it
+    2 of 2 CONNECT 40000 (single CPt set, tx {90..27}); with it 0 of 2,
+    the same CPt as the A-law route (bit 128, tx {105..30} -> codec
+    {89..19}), stop at `00c3`, V.34 31200. So the failure follows our
+    engine running A-law, whatever the SIP codec: the card's pad reading
+    comes from receiving A-law Ucode levels, and the mu-law engine plus
+    Asterisk's conversion is the only working arrangement. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
