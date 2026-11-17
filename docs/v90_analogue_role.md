@@ -1140,11 +1140,16 @@ no CONNECT in 120 s. Open.
     set **equals** its transmit set ({90,87,...,27} -> {90,87,...,27}),
     against the 16-Ucode step on every A-law call. V.90 still did not
     complete: no S 2000 ms after our J, repeated retrains, and the calls
-    settled in V.34 at 9600-31200 (0 of 4 V.90). Controller 3 is known to
-    slip about 34 ppm against the router clock, which breaks Jd/Ri; the slip
-    was not measured on these calls, so this run cannot say whether the
-    card's V.90 code works in mu-law. As found, controller 3 runs a law
-    mismatch (card mu-law, router port A-law).
+    settled in V.34 at 9600-31200 (0 of 4 V.90). **Measured slip on call
+    c3u2:** the card's mlog `SAMPLE[]` dump is 3595 blocks of 260 samples
+    (index = byte offset 0-0500); its high byte is our transmitted PCM.
+    Locating 1501 blocks in our TX tap, consecutive blocks are 260 samples
+    apart 1461 times and 261 apart 12 times, every one at a multiple of
+    3.71 s (22.7, 26.41, 33.79 ... 115.07 s): the card drops one of our
+    samples every 3.71 s, 33.7 ppm, in one direction. That breaks V.90, so
+    this run says nothing about whether the card's V.90 works in mu-law.
+    Tool: `/root/slip2.py <mlog> <live-tx.g711>` on CT 117. As found,
+    controller 3 runs a law mismatch (card mu-law, router port A-law).
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
