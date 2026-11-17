@@ -1116,6 +1116,21 @@ no CONNECT in 120 s. Open.
     observed facts are that it fails with bit 39 = 1 and trains (36000)
     with bit 39 = 0 while receiving the same A-law codewords, and that the
     one-segment codec offset appears both ways.
+  - **mu-law end to end on controller 8 could not be built (18 November).**
+    Controller 8 is ISDN 7920 on TopRouter BRI0/1/0, voice-port 0/1/0 (also
+    the network-clock source). With voice-port 0/1/0 set to mu-law (router
+    showed `g711ulaw`, `Transcoded: No`) and controller 8 given controller
+    3's force-u-law RAM init (offset 0x10 = 2, `CCardLAW[8]=2`, driver
+    reloaded), the card still transmitted A-law: its idle octet was 0xD5 and
+    its 1300 Hz calling tone fit 17.0 dB decoded as A-law against 11.2 dB
+    as mu-law. The law mismatch stopped V.8 on 4 of 4 calls (card cycled
+    TRAINPROGRESS 0020-002a; we heard no CM and fell to V.22bis or NO
+    CARRIER). So the force-law RAM byte does not take on controller 8 (card
+    12196), or works differently from controller 3 (card 1331). Both ends
+    were restored (router unsaved change reverted, `divas_cfg.rc` from
+    `divas_cfg.rc.bak-ctrl8-ulaw-20261118-100952`); a control call afterwards
+    matched the baseline exactly (stop at `00c3`, V.34 31200, codec
+    {89..19}).
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
