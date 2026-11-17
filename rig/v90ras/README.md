@@ -1014,3 +1014,13 @@ been off since the 14-15 November x2 test, so the Diva BRIs slipped 55.6 ppm
 against the router. Restored and BRI0/1/0 bounced; saved with `write memory` at 12:44, which also saved any other unsaved running-config changes; that included the 2026-11-13 `compand-type a-law` on 0/3/3, which was then reverted (`no compand-type a-law`, saved 12:45, 0/3/3 back to the default µ-law).
 Check
 `show network-clocks` shows BRI0/1/0 primary before any Diva test.
+
+## Diva power code 21 (2026-11-17)
+
+`sip.env` now carries `ME_V90_MAX_TX_DBM0_CODE=21` (-11 dBm0) instead of 23,
+with `ME_V90_TRN2D_SYMBOLS=6000` unchanged. In an alternated A/B on the
+mu-law route the Diva reached V.90 data on 6/6 calls at code 21 (41333/31200)
+and 6/6 at code 23 (40000/31200); codes 13-17 fail its Phase 4
+(docs/v90_analogue_role.md). The setting applies to every caller of v90ras,
+and only the Diva has been measured at 21. Revert to 23 if another caller
+loses V.90.
