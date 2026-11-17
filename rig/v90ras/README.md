@@ -1052,3 +1052,14 @@ earlier v90ras Courier calls, but 0 of 2 into the x2live test server
 (`courier_serial_call.py --env MODE=v90`). The v90ras service runs
 `ME_V34_BAUD=3200`, `ME_V34_B1_RENEG=1` and `ME_V34_B1_RATE_MARGIN_DB=3`, which
 the test server does not; that is the first place to look.
+
+**Correction (2026-11-17 20:40): the INFO1a declines were the Courier's stored
+profile, not v90ras.** The ad hoc dial script reset with `ATZ`, which loads the
+Courier's NVRAM profile; from `AT&F1` (what `courier_serial_call.py` uses) it
+connects `52000/ARQ/V90/LAPM/V42BIS` into 2950 on 2/2 calls, PPP starting.
+That also confounds the code 21 vs 23 Courier counts above (all `ATZ`). On
+those two `AT&F1` calls the deployed shape gate accepted B1 on its first
+window (distance 0.376 at 75.6% near, 0.384 at 71.5%), with no retrain: the
+fix is live-verified. `ME_V34_BAUD=3200`, `ME_V34_B1_RENEG=1` and
+`ME_V34_B1_RATE_MARGIN_DB=3` on the test server changed nothing (52000/28800).
+Dial the Courier from `AT&F1`.
