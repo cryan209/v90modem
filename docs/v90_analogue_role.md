@@ -1150,6 +1150,26 @@ no CONNECT in 120 s. Open.
     this run says nothing about whether the card's V.90 works in mu-law.
     Tool: `/root/slip2.py <mlog> <live-tx.g711>` on CT 117. As found,
     controller 3 runs a law mismatch (card mu-law, router port A-law).
+  - **Controller 3 clock fixed, and the card's V.90 works in mu-law (same
+    day).** Card 1331 (controllers 1-4) free-ran because (a) controller 3
+    was NT since 24 October while router BRI0/0/1 is also the network side
+    (LT-S), and (b) the card was in standard sync mode. Making controller 3
+    TE again (the six lines that differ from
+    `divas_cfg.rc.before-hwic-nt3-20261024`: `CCardNT[3]=0`, `CCardL2[3]=3`,
+    `CCardP2P[3]=1` and their RAM/pcinit values) left the 33.7 ppm drift
+    unchanged (3 slips 3.67-3.71 s apart). Setting card 1331 to
+    synchronising mode on port 3 (`L1SyncOpMode` pcinit 0x71 = 1,
+    `L1SyncPortNo` 0x72 = 2 in instance 1; `CCard_SYNC_MODE[1]=1`,
+    `CCard_SYNC_PORT[1]=2`) removed it: 4 events in +1/-1 pairs, net zero,
+    over 50 s. Backups `divas_cfg.rc.bak-ctrl3-te-20261118-105501` (before
+    both changes). Router voice-port 0/0/1 set to mu-law for the run only:
+    5 calls, mu-law end to end (`CTRL=3`, 2902): **3/5 V.90 DATA at 56000**
+    on the first Phase 4 attempt, 1 reached V.90 then fell to V.34, 1 went
+    to V.34 31200. The card's CP carried a single constellation (no codec
+    offset). So the card's V.90 works in mu-law; its A-law path is what
+    fails (and its A-law codec-set step is A-law only). voice-port 0/0/1 was
+    put back to A-law afterwards (unsaved changes only), which leaves
+    controller 3's normal setup law-mismatched as found.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
