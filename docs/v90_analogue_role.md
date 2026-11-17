@@ -1030,8 +1030,19 @@ no CONNECT in 120 s. Open.
     2028T of Ucode 78 and R-bar-i exactly 24T (§9.4.1.2), and the CP mask
     layout (all transmit sets, then all codec sets) matches Table 14
     (272+gamma:271+delta). Not yet known: why the card measures a 6 dB pad
-    from our A-law DIL. The next check is to log the Ja descriptor's
-    training/reference Ucodes and compare them with the DIL we transmit. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+    from our A-law DIL.
+  - **Our DIL is exact.** With `V90_DIL_DESC_LOG=1` the card asked for
+    N=197, H=10 and REF=Ucode 0 in all eight Uchords, LSP=LTP=66. Rebuilt
+    independently from §8.4.1 (segments (H+1)*6 = 66T, TP 1 = training
+    Ucode, SP 1 = positive) and Table 1's A-law codewords, the expected
+    13002 codewords match our transmit tap with 0 mismatches. So the card
+    gets exactly the DIL it asked for and still reports a 6 dB pad; the
+    misreading is in its own A-law handling.
+  - Transmitting its codec-side set instead (a temporary
+    `V90_TX_CODEC_MASKS` switch, not committed) did not help: 0 of 2, the
+    same stop at `00c3` and fall back to V.34. On this route the card
+    therefore fails whichever of its two sets we send; the working route
+    remains mu-law with the Asterisk conversion (v90ras, 40000/31200). V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
