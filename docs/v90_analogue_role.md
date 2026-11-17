@@ -1056,7 +1056,15 @@ no CONNECT in 120 s. Open.
     {90..27} at code 23), but Phase 4 still fails: with TRN2d 6000 it
     stops at `00c3`, without it at `00c1`, and every call falls back to
     V.34 28800. So code 23, the 9 October recipe, is what lets the card
-    complete Phase 4, and it is also what caps it at 40000. V.21 first failed PPP at pppd's defaults: a 45-byte LCP
+    complete Phase 4, and it is also what caps it at 40000.
+  - Power-code sweep on the same route (TRN2d 6000, 2 calls per code):
+    13, 15 and 17 (-7, -8, -9 dBm0) all fall back to V.34 28800-31200;
+    19 gives 1 of 2 into V.90 (downstream 42666), 21 (-11 dBm0) gives 2 of
+    2 at 41333/31200. So the card completes Phase 4 only at -10 dBm0 or
+    quieter, and 21 beats code 23's 40000. Rerun 21 against 23 alternated
+    before changing the rig default.
+
+V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
   answer arrives and both sides keep retransmitting (42 frames received,
   all parsed, so the data path was clean). With `--pppd-opt "lcp-restart
