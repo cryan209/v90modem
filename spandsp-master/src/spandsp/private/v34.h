@@ -2771,6 +2771,13 @@ typedef struct
     complexf_t data_timing_decision;
     float data_timing_phase;
     float data_timing_frequency;
+    /*! The frequency term a healthy data mode had settled at, and the baud
+        rate it was learned at (0 = none yet).  It measures the peer's clock
+        against ours, which a §11.6 renegotiation or §11.5 retrain does not
+        change, so each later entry into data mode starts from it rather
+        than from zero (v34rx_data.c). */
+    float data_timing_frequency_carry;
+    int data_timing_carry_baud;
     float data_timing_power;
     int data_timing_count;
     float data_decision_baseline;

@@ -1755,3 +1755,37 @@ the grid. It fails without the latch.
 Rig: `tools/soak/courier_serial_call.py <name> --env MODE=v34 --env
 'SRV_INIT=ATE0;AT+MS=V34;ATS0=1'` (pyserial venv). The Mac replay of a
 Courier tap is faithful through Phase 4 and the 11.6 but not in data mode.
+
+### Why the Courier's 31200 went white: the clock loop restarted at zero (2026-11-18)
+
+Not SNR. On tk-5, after the Courier's 11.6, 31200 started 0.20 from the grid
+(the 26400 eye of 0.045 scaled to the denser lattice) and went white (0.66)
+within 400 symbols. It did so with no rotation (under 0.5 degrees per 32
+symbols), with gain held to within 1%, and the same with data-mode DD-LMS
+frozen. The replay reproduces it exactly.
+
+The cause was the data-mode Mueller-Muller loop. Its frequency term had settled
+at 0.0358 (1/192-sample steps per symbol, about 80 ppm: the Courier's clock
+against ours), and every DATA entry reset it to 0. From zero it takes about
+20 s to relearn, and 26400 rides out the walk while 31200 does not.
+
+`v34rx_data.c` now carries the term, settled (4096 symbols) and learned while
+decoding (EMA below half of `V34_DATA_LOST_ERR`), into each later data mode of
+the call, scaled by the ratio of baud rates.
+
+- **Replay:** 31200 holds at 0.12-0.14 and is confirmed.
+- **Live, with `ME_LEC_NO_TRACK=1`:** 31200 confirmed on 2 of 3 calls (35.6 and
+  35.2 dB; the Courier's ATI6 reads 21600/31200).
+- **Third call:** lost 31200 after 1.6 s; its 11.6 came only 10 s into the data
+  mode, before the loop had settled.
+
+**Still open:** with tracking on, the line echo canceller's tracker makes a
+false ~+140 ms jump on this rig (1054 -> about 2180 samples). It happens:
+
+- during or just after an 11.6 on 2 of 3 calls;
+- with a 2 s hold-off on each data entry, 2 s into the FIRST data mode on 3 of
+  3 calls.
+
+It is therefore not caused by the 11.6, and gating the tracker around the 11.6
+does not remove it. The receiver then sits at about 28 dB, which is enough for
+26400 but not for 31200. That jump, not the receiver, now caps this rig.

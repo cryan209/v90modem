@@ -639,7 +639,27 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->data_decision_count = 0;
                 s->data_timing_error = 0.0f;
                 s->data_timing_phase = 0.0f;
-                s->data_timing_frequency = 0.0f;
+                /* Start the clock loop from the frequency an earlier data mode
+                   in this call learned.  The term is the peer's clock offset
+                   (in 1/192-sample steps per symbol, so it scales with the
+                   symbol period) and survives any §11.6 or §11.5.  From zero
+                   the loop needs ~20 s to re-learn it: against the USR Courier
+                   at 3429 it had settled at 0.0358 (~80 ppm), restarted at 0
+                   after the Courier's 11.6, and the sampling instant walked
+                   off the eye -- 26400 rode that out but 31200 went from 0.20
+                   to white (0.66) in 400 symbols with no rotation, no gain
+                   change, and the same with the equalizer frozen. */
+                if (s->data_timing_carry_baud > 0)
+                {
+                    s->data_timing_frequency = s->data_timing_frequency_carry
+                                             *(float) s->data_timing_carry_baud
+                                             /(float) baud_rate_parameters[s->baud_rate].baud_rate;
+                }
+                else
+                {
+                    s->data_timing_frequency = 0.0f;
+                }
+                /*endif*/
                 s->data_timing_power = 0.0f;
                 s->data_timing_count = 0;
                 /* The centroid steer's reference is latched once the data
@@ -1492,6 +1512,15 @@ skip_gain_report:
                                                     fminf(0.25f, s->data_timing_frequency));
                     s->data_timing_phase += mm_gain*s->data_timing_error
                                           + s->data_timing_frequency;
+                    /* Only a settled loop on a receiver that is still
+                       decoding is worth carrying into the next data mode. */
+                    if (s->data_timing_count >= 4096
+                        &&  s->data_grid_err_ema < 0.5f*V34_DATA_LOST_ERR)
+                    {
+                        s->data_timing_frequency_carry = s->data_timing_frequency;
+                        s->data_timing_carry_baud = baud_rate_parameters[s->baud_rate].baud_rate;
+                    }
+                    /*endif*/
                     if (fabsf(s->data_timing_phase) >= 1.0f)
                     {
                         int correction = s->data_timing_phase > 0.0f ? 1 : -1;
