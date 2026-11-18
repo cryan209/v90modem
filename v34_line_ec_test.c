@@ -65,6 +65,8 @@ typedef struct
     int moved_after;    /* samples after move_at the canceller moved */
     double echo_rms;
     double residual_rms;  /* of (output - far end) after the move settles */
+    int l1;             /* bulk delays before/after the move; 0 = L1/L2 */
+    int l2;
 } run_t;
 
 static void run(run_t *r)
@@ -127,7 +129,7 @@ static void run(run_t *r)
         for (int i = 0;  i < BLOCK;  i++)
         {
             int n = b + i;
-            int lag = (r->move_at >= 0  &&  n >= TRAIN + r->move_at)  ?  L2  :  L1;
+            int lag = (r->move_at >= 0  &&  n >= TRAIN + r->move_at)  ?  (r->l2 ? r->l2 : L2)  :  (r->l1 ? r->l1 : L1);
             double e = 0.0;
             double p = 0.0;
 
@@ -218,6 +220,33 @@ int main(void)
     {
         printf("FAIL: moved to an alias of a periodic transmission\n");
         failures++;
+    }
+
+    /* A bulk delay shorter than the tracker's 1200-sample search range: the
+       USR Courier's 1054.  Until 2026-11-18 every echo prediction here was
+       made before the transmission it needs existed, read zeros and was
+       kept, so the tracker correlated against nothing and moved on noise. */
+    {
+        run_t d = {.total = 10*FS, .move_at = 4*FS, .period = 0, .l1 = 1054, .l2 = 1454};
+        run_t e = {.total = 60*FS, .move_at = -1, .period = 0, .l1 = 1054, .l2 = 1454};
+
+        printf("short bulk delay (1054), echo moved +400 at 4 s:\n");
+        run(&d);
+        printf("  shifts %d, delay change %+d, moved %.2f s after the echo did\n",
+               d.shifts, d.lag_change, d.moved_after/(double) FS);
+        if (d.lag_change != 400  ||  d.moved_after < 0  ||  d.moved_after > 2*FS)
+        {
+            printf("FAIL: a short-delay echo move was not followed\n");
+            failures++;
+        }
+        printf("short bulk delay (1054), never moves (60 s):\n");
+        run(&e);
+        printf("  shifts %d\n", e.shifts);
+        if (e.shifts != 0)
+        {
+            printf("FAIL: a stationary short-delay echo was moved\n");
+            failures++;
+        }
     }
 
     printf("%s\n", failures  ?  "v34_line_ec_test: FAILED"  :  "v34_line_ec_test: PASSED");

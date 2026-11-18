@@ -90,6 +90,9 @@ typedef struct
     int trk_sub;                            /* sub-window being accumulated */
     int trk_pos;                            /* samples into it */
     int trk_filled;                         /* complete sub-windows held */
+    int trk_dmin;                           /* earliest lag with a prediction */
+    int trk_cand_d;                         /* shift awaiting confirmation */
+    int trk_cand_age;                       /* decisions since it was seen; <0 none */
 } v34_line_ec_t;
 
 void v34_line_ec_reset(v34_line_ec_t *ec);

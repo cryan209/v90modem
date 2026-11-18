@@ -333,6 +333,15 @@ static void track_predict(v34_line_ec_t *ec, uint64_t from, uint64_t upto)
         for (int i = 0;  i < V34_LEC_TRACK_LPC;  i++)
             ec->trk_p[(ec->trk_next - 1 - (uint64_t) i) & TRK_MASK] = 0.0f;
     }
+    /* echo_at(m) needs transmitted samples up to m - lag + TAPS/2.  A
+       prediction made before they exist would read zeros and be kept:
+       predict only as far as has been sent. */
+    {
+        int64_t horizon = (int64_t) ec->tx_count - 1 + ec->lag - V34_LEC_TAPS/2;
+
+        if (horizon < (int64_t) upto)
+            upto = (horizon > 0)  ?  (uint64_t) horizon  :  0;
+    }
     for (  ;  ec->trk_next <= upto;  ec->trk_next++)
     {
         const uint64_t m = ec->trk_next;
@@ -354,6 +363,8 @@ static void track_reset(v34_line_ec_t *ec)
     ec->trk_sub = 0;
     ec->trk_pos = 0;
     ec->trk_filled = 0;
+    ec->trk_dmin = -TRK_R;
+    ec->trk_cand_age = -1;
     memset(ec->trk_acc, 0, sizeof(ec->trk_acc));
     memset(ec->trk_rac, 0, sizeof(ec->trk_rac));
 }
@@ -429,8 +440,19 @@ static int track_rx(v34_line_ec_t *ec, uint64_t n, float raw)
         ec->trk_rac[j] += (double) ec->trk_rx[0]*ec->trk_rx[j];
     }
     acc = ec->trk_acc[ec->trk_sub];
-    for (int d = -TRK_R;  d <= TRK_R;  d++)
-        acc[d + TRK_R] += y*ec->trk_pw[(n - (uint64_t) (int64_t) d) & TRK_MASK];
+    {
+        /* Lags whose predicted sample n - d is not yet predicted (an echo
+           earlier than the transmission allows) are left out, here and in
+           the decision. */
+        int dmin = (int) ((int64_t) n - (int64_t) ec->trk_next + 1);
+
+        if (dmin < -TRK_R)
+            dmin = -TRK_R;
+        if (dmin > ec->trk_dmin)
+            ec->trk_dmin = dmin;
+        for (int d = dmin;  d <= TRK_R;  d++)
+            acc[d + TRK_R] += y*ec->trk_pw[(n - (uint64_t) (int64_t) d) & TRK_MASK];
+    }
     if (++ec->trk_pos < V34_LEC_TRACK_SUB)
         return 0;
     /* A sub-window is complete: refresh the whitening filter for the next. */
@@ -452,6 +474,12 @@ static int track_rx(v34_line_ec_t *ec, uint64_t n, float raw)
         {
             float v = 0.0f;
 
+            if (i - TRK_R < ec->trk_dmin)
+            {
+                sum[i] = 0.0f;
+                continue;
+            }
+
             for (int s = 0;  s < V34_LEC_TRACK_NSUB;  s++)
                 v += ec->trk_acc[s][i];
             sum[i] = v;
@@ -468,7 +496,8 @@ static int track_rx(v34_line_ec_t *ec, uint64_t n, float raw)
         {
             int d = i - TRK_R;
 
-            if (abs(d - best_d) <= V34_LEC_TAPS  ||  abs(d) <= V34_LEC_TAPS)
+            if (abs(d - best_d) <= V34_LEC_TAPS  ||  abs(d) <= V34_LEC_TAPS
+                ||  d < ec->trk_dmin)
                 continue;
             floor_sum += (double) sum[i]*sum[i];
             floor_n++;
@@ -484,9 +513,26 @@ static int track_rx(v34_line_ec_t *ec, uint64_t n, float raw)
        noise: insist that the peak stands well clear of the next one too.
        Offline on the RasFinder's 9600 call the true peak is 9-12 sigma and
        the floor's largest about 3.5. */
+    if (ec->trk_cand_age >= 0  &&  ++ec->trk_cand_age > 2*V34_LEC_TRACK_NSUB)
+        ec->trk_cand_age = -1;
     if (best_d == 0  ||  sigma <= 0.0  ||  best < 6.0*sigma  ||  best < 3.0f*at0
         ||  best < 1.5f*second)
         return 0;
+    /* A moved echo stays moved: act only on a shift seen again in a window
+       sharing no samples with the one that first showed it.  Against the USR
+       Courier (2026-11-18, echo ~30 dB under the far signal) single-window
+       peaks at +52 to +55 ms passed every test above on 2 of 4 calls; one
+       moved back a second later, the other left the receiver at 28.7 dB.
+       A real playout move (the RasFinder's 80 ms) is followed 1 s later. */
+    if (ec->trk_cand_age < 0  ||  abs(best_d - ec->trk_cand_d) > V34_LEC_TAPS)
+    {
+        ec->trk_cand_d = best_d;
+        ec->trk_cand_age = 0;
+        return 0;
+    }
+    if (ec->trk_cand_age < V34_LEC_TRACK_NSUB)
+        return 0;
+    best_d = ec->trk_cand_d;
     ec->lag += best_d;
     ec->shifts++;
     track_reset(ec);

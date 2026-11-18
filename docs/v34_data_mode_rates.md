@@ -1789,3 +1789,34 @@ false ~+140 ms jump on this rig (1054 -> about 2180 samples). It happens:
 It is therefore not caused by the 11.6, and gating the tracker around the 11.6
 does not remove it. The receiver then sits at about 28 dB, which is enough for
 26400 but not for 31200. That jump, not the receiver, now caps this rig.
+
+### The tracker was blind below a 150 ms bulk delay (2026-11-18, fixed)
+
+`track_predict` ran the predicted echo 1200 samples (the search range) ahead of
+the received index. Each prediction was made once, at the first chance, and
+kept. With a bulk delay under that range, the transmitted samples it needed did
+not exist yet, so every prediction read zeros.
+
+- **What the tracker saw:** in the tf-4 replay, 0 of 2401 lags held a
+  prediction in steady state. It correlated against a 302-sample leftover from
+  arming, which produced a "29.8 sigma" peak at +1129.
+- **What the taps show:** a 64-tap least-squares fit of our transmission
+  against the received tap explains nothing above chance (-21 dB) at that lag,
+  or at any other lag.
+- **Why it hid:** the RasFinder's 238 ms delay was above the range, and
+  `v34_line_ec_test`'s long-delay cases are too. Its short-delay case only
+  passed through stale ring slots.
+
+Fix (`v34_line_ec.c`):
+
+- Predict only up to the transmitted horizon, and search only the lags that
+  can be predicted.
+- A move must be seen again in a window that shares no samples with the first.
+  Without this, transient +52 ms peaks still moved the delay on 2 of 4 calls.
+- A real move is now followed about 1 s later than before (1.74 s against
+  0.74 s in the unit test).
+
+Live against the Courier with tracking on, 31200 was confirmed on all 4 calls
+that reached data (35.0-35.1 dB; ATI6 reads 21600/31200), with no echo moves.
+The fifth call stalled in Phase 3 after our J, which is the separate, earlier
+problem.
