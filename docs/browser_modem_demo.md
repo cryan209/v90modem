@@ -62,6 +62,19 @@ python3 tools/package_modem_demo.py
 node web/modem-lab/test-offline.mjs
 ```
 
+The emsdk installer needs Python 3.10 or newer; on a Mac whose `python3` is the
+Command Line Tools' 3.9, set `EMSDK_PYTHON` and `EM_PYTHON` to a Homebrew
+`python3.13` for both `./emsdk install 4.0.16` and the build.
+
+Rebuilt 2026-11-19 from 20742534's sources (the previous build, 2026-10-17,
+predated 43 of its 119 sources). The builder now takes the engine sources from
+the `SRCS` that `make -pn` evaluates: the first `SRCS =` line alone missed
+every `SRCS +=`, including `async_capture.c`, which `modem_engine.c` now needs.
+`browser_peer.c` gained `di_carrier_loss_delay()` (S10 at its factory 14).
+All three checks pass: `test.mjs` 53/53 (V.34 33600/33600 clean and 28800 at
+30 dB noise, V.90 31200/56000, V.92 48000/56000, V.91 52000),
+`test-reliability.mjs` 6/6, `test-offline.mjs` 8/8.
+
 The builder uses only vendored sources, scalar WASM, and a separate portable
 header configuration. It stores objects under `reference-data/artifacts/wasm-build/`, checks
 source/header hashes before reuse, and never changes native objects or native

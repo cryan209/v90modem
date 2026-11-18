@@ -116,6 +116,8 @@ void di_set_pmhr_cb(di_pmhr_cb_t a){(void)a;}
 void di_report_pmhr(int a){(void)a;}
 void di_update_link(const v250_connect_report_t *a,const char *b,const char *c){(void)a;(void)b;(void)c;}
 int di_fax_active(void){return 0;}
+/* No AT interpreter here: S10 at its factory default, 14 (tenths of a second), as data_interface.c returns before one exists. */
+int di_carrier_loss_delay(void){return 14;}
 int di_fax_rx(const int16_t *a,int n){(void)a;return n;}
 int di_fax_tx(int16_t *a,int n){memset(a,0,n*sizeof(*a));return n;}
 int di_fax_v34hdx_profile(int a,int *b,int *c){(void)a;(void)b;(void)c;return 0;}

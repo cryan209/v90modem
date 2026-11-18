@@ -19,7 +19,10 @@ EMCC = os.environ.get('EMCC', shutil.which('emcc') or '/private/tmp/v90modem-ems
 def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     (WEB / 'dist').mkdir(exist_ok=True)
-    engine = re.search(r'^SRCS\s*= (.+)$', (ROOT / 'makefile').read_text(), re.M)[1].split()
+    # The final SRCS as make evaluates it: the first `SRCS =` line alone missed
+    # every `SRCS +=` (async_capture.c, which modem_engine.c needs, and vfc_*).
+    db = subprocess.run(['make', '-pn'], cwd=ROOT, capture_output=True, text=True).stdout
+    engine = re.search(r'^SRCS :?= (.+)$', db, re.M)[1].split()
     engine = [s for s in engine if s not in ('sip_modem.c', 'data_interface.c', 'fax_class2.c')]
     # Only modem/data DSP; no image, fax, TIFF, JPEG, or host libraries.
     names = '''alloc async bit_operations bitstream complex_filters complex_vector_float
