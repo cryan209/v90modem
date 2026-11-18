@@ -1,4 +1,4 @@
-let reliabilityResult=null,reliabilityRunning=false,reliabilityUrl=null,reliabilityToken=0;
+let payloadKind='message',chosenFile=null,fileUrl=null,reliabilityResult=null,reliabilityRunning=false,reliabilityUrl=null,reliabilityToken=0;
 import {transmit,receive,wav,RATE} from './fsk.mjs';
 import {inspectorText} from './negotiation.mjs';
 const $=id=>document.getElementById(id);
@@ -41,8 +41,38 @@ function updateStartup(){
  $('v34RateControl').hidden=mode!=='34';$('v34Rate').disabled=mode!=='34'||playing;
  $('startupHint').textContent=isLegacy()?'Legacy startup; V.8 and V.8bis are not used.':isPcm()?'Fixed downstream profile; V.8/V.8bis and line training are not run.':fsk?'FSK presets begin with an idle carrier.':optionalV8()?($('startupV8').checked?'V.8 negotiates the modulation; V.8bis adds an earlier capabilities exchange.':'V.25 answer tone and legacy startup; no V.8 menus.'):'V.8 is required for this mode; optionally prepend V.8bis.';
 }
-function updateCount(){const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;$('dial').disabled=n===0||n>240||playing;}
-function select(next){stop();mode=next;document.querySelectorAll('.mode').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
+const FILE_MAX=65536,fileCapable=()=>!isFsk()&&mode!=='v23',fileLimit=()=>isPcm()?60000:FILE_MAX;
+function updateCount(){
+ const n=new TextEncoder().encode($('message').value).length;$('byteCount').textContent=n;
+ if(payloadKind==='file'){
+  const size=chosenFile?.bytes.length||0,tooBig=size>fileLimit();
+  $('fileInfo').textContent=chosenFile?`${chosenFile.name} · ${size.toLocaleString('en')} bytes${tooBig?` · over the ${fileLimit().toLocaleString('en')}-byte limit for this mode`:''}`:'No file chosen';
+  $('dial').disabled=!size||tooBig||!fileCapable()||playing;
+ }else $('dial').disabled=n===0||n>240||playing;
+ for(const id of ['fileInput','fileSize','fileKind','fileGenerate','payloadMessage'])$(id).disabled=playing;
+ $('payloadFile').disabled=playing||!fileCapable();
+}
+function setPayload(kind){
+ payloadKind=kind==='file'&&fileCapable()?'file':'message';
+ for(const [id,k] of [['payloadMessage','message'],['payloadFile','file']]){$(id).classList.toggle('selected',payloadKind===k);$(id).setAttribute('aria-pressed',String(payloadKind===k));}
+ $('messagePane').hidden=payloadKind!=='message';$('filePane').hidden=payloadKind!=='file';updateCount();
+}
+function chooseFile(name,bytes){chosenFile={name,bytes};$('fileResult').hidden=true;$('saveFile').hidden=true;updateCount();}
+function generateFile(){
+ const size=Number($('fileSize').value),bytes=new Uint8Array(size);
+ if($('fileKind').value==='random')crypto.getRandomValues(bytes);
+ else{const line=new TextEncoder().encode('The quick brown fox jumps over the lazy dog. 0123456789\n');for(let i=0;i<size;i++)bytes[i]=line[i%line.length];}
+ chooseFile(`test-${size/1024}k-${$('fileKind').value}.${$('fileKind').value==='text'?'txt':'bin'}`,bytes);
+}
+function showFileResult(r){
+ const f=r.file;if(!f){$('fileResult').hidden=true;$('saveFile').hidden=true;return;}
+ const s=r.stats,rate=s.usefulBitsPerSecond?` · ${s.transferSeconds.toFixed(2)} s · ${Math.round(s.usefulBitsPerSecond).toLocaleString('en')} bit/s useful`:'';
+ $('fileResult').className='file-result '+(f.passed?'pass':'fail');$('fileResult').hidden=false;
+ $('fileResult').textContent=f.passed?`✓ ${f.name}: ${f.receivedBytes.toLocaleString('en')} bytes received byte-for-byte · CRC-32 ${f.receivedCrc}${rate}${f.ack?`\n← ${f.ack}`:''}`
+  :`✗ ${f.name}: ${f.receivedBytes.toLocaleString('en')} of ${f.size.toLocaleString('en')} bytes received${f.firstMismatch>=0?` · first mismatch at byte ${f.firstMismatch}`:''} · CRC-32 sent ${f.sentCrc}, received ${f.receivedCrc}`;
+ $('saveFile').hidden=!f.receivedBytes;
+}
+function select(next){stop();mode=next;setPayload(payloadKind);document.querySelectorAll('.mode').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
  $('modeTitle').textContent=descriptions[mode][0];$('modeDescription').textContent=descriptions[mode][1];
  updateStartup();$('engineBadge').textContent=isFsk()?'JAVASCRIPT · LIVE DSP':isPcm()?'WEBASSEMBLY · PCM PAYLOAD':'WEBASSEMBLY · REAL ENGINE';
  $('showConstellation').disabled=!hasConstellation();setPlot(hasConstellation()?'constellation':'spectrum');
@@ -124,7 +154,9 @@ function drawStats(t){
  const c=result.comparison,comparisonReady=c&&t>=(s.verifiedAtSeconds??s.simulationSeconds);$('quickComparison').hidden=!comparisonReady;
  if(comparisonReady)$('quickComparison').textContent=c.full.passed&&c.quick.passed?`Full startup ${c.full.connectSeconds.toFixed(2)} s · Quick Connect ${c.quick.connectSeconds.toFixed(2)} s · ${Math.abs(c.savedSeconds).toFixed(2)} s ${c.savedSeconds>=0?'saved':'longer'}. Two separate simulated calls; no stored real-line profile.`:'One comparison call did not verify its payload; no time saving is claimed.';
 }
-function draw(t){drawStats(t);drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
+// The file verdict appears when playback reaches verification (or the end).
+function drawFile(t){const f=result?.file,s=result?.stats;if(f&&(result.passed?t>=s.verifiedAtSeconds:t>=result.left.length/RATE-.02))showFileResult(result);else{$('fileResult').hidden=true;$('saveFile').hidden=true;}}
+function draw(t){drawStats(t);drawFile(t);drawInspector(t);const pos=Math.round(t*RATE);plot($('scope'),result?.left,pos);if(plotType==='spectrum')plot($('spectrum'),result?.left,pos,true);else plotConstellation(t);$('clock').textContent=t.toFixed(2).padStart(5,'0')+' s';}
 function tick(){if(!playing)return;elapsed=Math.min(context.currentTime-started,result.left.length/RATE);draw(elapsed);showEvents(elapsed);animation=requestAnimationFrame(tick);}
 async function play(){
  $('scopeLabel').textContent=result.waveform==='received'?'CALLER → ANSWERER · RECEIVED WAVEFORM · 8 kHz':isPcm()?'SERVER PCM WAVEFORM · 8 kHz':'CALLER WAVEFORM · 8 kHz';
@@ -135,7 +167,9 @@ async function play(){
  $('duration').textContent=(result.left.length/RATE).toFixed(2)+' s';$('download').disabled=false;$('exportCapture').disabled=!result.protocol;$('inspectTime').max=String(result.left.length/RATE);drawInspector(elapsed,true);
 }
 async function dial(){
- stop();const text=$('message').value;if(!text||new TextEncoder().encode(text).length>240)return;
+ stop();const fileRun=payloadKind==='file'&&!isFsk(),text=fileRun?chosenFile&&{file:chosenFile.bytes,name:chosenFile.name}:$('message').value;
+ if(fileRun?!text||text.file.length>fileLimit():!text||new TextEncoder().encode(text).length>240)return;
+ $('fileResult').hidden=true;$('saveFile').hidden=true;
  try{context??=new AudioContext();await context.resume();result=null;$('transferStats').hidden=true;$('inspectFollow').checked=true;$('inspectTime').value='0';$('inspectTime').max='0';$('inspectOutput').textContent='Generating a new capture…';playing=true;updateStartup();elapsed=0;lastInspect=-1;$('exportCapture').disabled=true;updateCount();$('stop').disabled=false;$('message').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
  $('received').textContent='';$('verification').textContent='AWAITING SIGNAL';$('events').textContent='';$('download').disabled=true;
  if(isFsk()){
@@ -214,6 +248,10 @@ $('inspector').addEventListener('toggle',()=>drawInspector(elapsed,true));for(co
 $('exportCapture').addEventListener('click',()=>{if(!result?.protocol)return;if(captureUrl)URL.revokeObjectURL(captureUrl);const {left,right,constellations,logs,...capture}=result;capture.coverage=result.kind==='pcm'?'Downstream payload only: fixed profile, exact server PCM codewords, independent decoded UTF-8 text; no dial-up handshake or upstream.':'Engine protocol logs, V.8 menu octets, logged packed INFO frames, full demodulated data-layer TX/RX bits, decoded HDLC frames, and exact G.711 DS0 codewords (hex). Not a complete demodulated startup bitstream.';captureUrl=URL.createObjectURL(new Blob([JSON.stringify(capture,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=captureUrl;a.download=`modem-${mode}-negotiation.json`;a.click();});
 $('showSpectrum').addEventListener('click',()=>{setPlot('spectrum');draw(elapsed);});$('showConstellation').addEventListener('click',()=>{setPlot('constellation');draw(elapsed);});
 $('startupV8').addEventListener('change',updateStartup);$('startupBis').addEventListener('change',updateStartup);
+$('payloadMessage').addEventListener('click',()=>setPayload('message'));$('payloadFile').addEventListener('click',()=>setPayload('file'));
+$('fileInput').addEventListener('change',async()=>{const f=$('fileInput').files[0];if(f)chooseFile(f.name,new Uint8Array(await f.arrayBuffer()));});
+$('fileGenerate').addEventListener('click',generateFile);
+$('saveFile').addEventListener('click',()=>{const f=result?.file;if(!f)return;if(fileUrl)URL.revokeObjectURL(fileUrl);fileUrl=URL.createObjectURL(new Blob([f.data]));const a=document.createElement('a');a.href=fileUrl;a.download='received-'+f.name;a.click();});
 $('dial').addEventListener('click',dial);$('stop').addEventListener('click',stop);$('message').addEventListener('input',updateCount);
 $('noise').addEventListener('input',()=>{$('noiseValue').textContent=['Clean','24 dB SNR','12 dB SNR','0 dB SNR'][$('noise').value];});
 document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>select(b.dataset.mode)));

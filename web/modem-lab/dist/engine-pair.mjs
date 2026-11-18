@@ -1,6 +1,20 @@
 import createModem from './modem-engine.mjs';
 import {negotiationRecords} from './negotiation.mjs';
 const additionalModes={v22:22,v22bis:222,v32bis:323,v23:23,bell212:212};
+// File payloads: {file:Uint8Array,name}. The caller sends a 4-byte length and
+// the file; the answerer replies with the byte count and CRC-32 it computed
+// from what it actually received. Pass/fail is a byte-for-byte comparison.
+export const FILE_LIMIT=65536;
+const crcTable=Array.from({length:256},(_,n)=>{let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;return c>>>0;});
+export function crc32(bytes){let c=0xffffffff;for(const b of bytes)c=crcTable[(c^b)&255]^(c>>>8);return (c^0xffffffff)>>>0;}
+const crcHex=bytes=>crc32(bytes).toString(16).padStart(8,'0');
+export function fileAck(name,bytes){return `ACK ${name}: ${bytes.length} bytes, CRC-32 ${crcHex(bytes)}`;}
+function checkFile(payload,mode){
+  if(!(payload.file instanceof Uint8Array)||!payload.file.length)throw new Error('Choose a non-empty file');
+  if(payload.file.length>FILE_LIMIT)throw new Error(`File exceeds ${FILE_LIMIT} bytes`);
+  if(['v21','bell103','v23'].includes(String(mode)))throw new Error('File transfer needs a modem with LAPM or a PCM payload path');
+  return {name:String(payload.name||'file.bin').replace(/[^\w.\- ]/g,'_').slice(0,64)||'file.bin',file:payload.file};
+}
 export function expand(code){const u=(~code)&255;const t=(((u&15)<<3)+132)<<((u>>4)&7);return ((u&128)?132-t:t-132)/32768;}
 export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,startup={v8:true,v8bis:false}){
   const line=validateLine(mode,startup.line);
@@ -12,6 +26,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
     return quick;
   }
 
+  const payload=typeof text==='string'?null:checkFile(text,mode);
   if(['x2','flex'].includes(String(mode)))return runPcmDemo(String(mode),text,onProgress,shouldStop);
   const engineId=additionalModes[mode]??Number(mode);
   if(![22,222,23,212,32,323,34,90,91,92].includes(engineId))throw new Error('Unsupported modem mode');
@@ -26,7 +41,17 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   if(a.HEAPU8.buffer===b.HEAPU8.buffer)throw new Error('Modem instances share memory');
   const frame=value=>{const body=new TextEncoder().encode(value),out=new Uint8Array(body.length+2);out[0]=body.length&255;out[1]=body.length>>8;out.set(body,2);return out;};
   const unframe=(m)=>{const n=m._browser_received_n(),data=m.HEAPU8.slice(m._browser_received(),m._browser_received()+n);if(n<2)return {text:'',complete:false};const size=data[0]|(data[1]<<8);if(size>65533)return {text:'',complete:false};return {text:new TextDecoder().decode(data.slice(2,Math.min(n,size+2))),complete:n>=size+2};};
-  const bytes=frame(text);if(bytes.length>60002)throw new Error('Message exceeds 60000 UTF-8 bytes');let replies=null;
+  let bytes,expectedAck;
+  if(payload){const n=payload.file.length;bytes=new Uint8Array(n+4);bytes.set([n&255,(n>>8)&255,(n>>16)&255,n>>>24]);bytes.set(payload.file,4);expectedAck=fileAck(payload.name,payload.file);}
+  else{bytes=frame(text);if(bytes.length>60002)throw new Error('Message exceeds 60000 UTF-8 bytes');expectedAck='ACK: '+text;}
+  // File mode drains the answerer every frame: its DTE buffer is 64 KB.
+  const inbox=payload?new Uint8Array(bytes.length):null;let inboxN=0,inboxOverflow=false,lastFileEvent=-1;
+  const drainFile=()=>{const n=b._browser_received_n();if(!n)return;const data=b.HEAPU8.subarray(b._browser_received(),b._browser_received()+n);
+    const room=inbox.length-inboxN;if(n>room)inboxOverflow=true;inbox.set(data.subarray(0,Math.min(n,room)),inboxN);inboxN+=Math.min(n,room);b._browser_clear_received();};
+  const fileState=()=>{if(inboxN<4)return {size:null,complete:false,data:null};const size=(inbox[0]|(inbox[1]<<8)|(inbox[2]<<16)|(inbox[3]<<24))>>>0;
+    return {size,complete:!inboxOverflow&&size===payload.file.length&&inboxN===size+4,data:inbox.subarray(4,Math.min(inboxN,size+4))};};
+  const fileLabel=(st)=>`${payload.name} · ${Math.max(0,inboxN-4).toLocaleString('en')} of ${payload.file.length.toLocaleString('en')} bytes`;
+  let replies=null;
   const pa=a._malloc(bytes.length);let pb=0;
   a.HEAPU8.set(bytes,pa);
   a._browser_init(engineId,1,startupFlags,startup.v34MaxRate||0);b._browser_init(engineId,0,startupFlags,startup.v34MaxRate||0);
@@ -37,10 +62,12 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   const analogueActive=[22,222,23,212,32,323,34].includes(engineId)&&(line.noiseDb||line.lossDb||line.clockPpm);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
-  const callerCodewords=new Uint8Array(480000),answererCodewords=new Uint8Array(480000);
+  // Messages finish inside 60 s; a file may need up to 600 s at 1,200 bit/s.
+  const maxBlocks=payload?30000:3000;
+  const callerCodewords=new Uint8Array(maxBlocks*160),answererCodewords=new Uint8Array(maxBlocks*160);
   const left=[],right=[],events=[],constellations=[];let at=0,bt=0,doneAt=0,connectedAt=null,lastState='',lastRx='',lastReply='';
   try{
-    for(let block=0;block<3000;block++){
+    for(let block=0;block<maxBlocks;block++){
       if(shouldStop())throw new Error('Call cancelled');
       simTime=(block+1)*.02;
       const sa=a._browser_step(),sb=b._browser_step();
@@ -66,10 +93,15 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
         if(at<bytes.length)at+=a._browser_send(pa+at,bytes.length-at);
         if(replies && bt<replies.length)bt+=b._browser_send(pb+bt,replies.length-bt);
       }
-      const remote=unframe(b),local=unframe(a),rx=remote.text,reply=local.text;
-      if(remote.complete && !replies){replies=frame('ACK: '+rx);pb=b._malloc(replies.length);b.HEAPU8.set(replies,pb);}
+      let rx,remoteComplete,local=unframe(a),reply=local.text,rxMatches;
+      if(payload){drainFile();const st=fileState();remoteComplete=st.complete;rx=fileLabel(st);
+        rxMatches=remoteComplete&&st.data.every((v,i)=>v===payload.file[i]);
+        if(remoteComplete&&!replies){replies=frame(fileAck(payload.name,st.data));pb=b._malloc(replies.length);b.HEAPU8.set(replies,pb);}
+        if(rx!==lastRx&&!remoteComplete&&time-lastFileEvent<.5)rx=lastRx;else if(rx!==lastRx)lastFileEvent=time;}
+      else{const remote=unframe(b);rx=remote.text;remoteComplete=remote.complete;rxMatches=rx===text;
+        if(remoteComplete && !replies){replies=frame('ACK: '+rx);pb=b._malloc(replies.length);b.HEAPU8.set(replies,pb);}}
       if(rx!==lastRx||reply!==lastReply){events.push({time,received:rx,reply});lastRx=rx;lastReply=reply;}
-      if(rx===text && reply==='ACK: '+text && at===bytes.length && replies && bt===replies.length && !doneAt){doneAt=time;events.push({time,message:'Payload verified in both directions'});}
+      if(rxMatches && reply===expectedAck && at===bytes.length && replies && bt===replies.length && !doneAt){doneAt=time;events.push({time,message:'Payload verified in both directions'});}
       if(doneAt && time>doneAt+1)break;
       if(block%50===0){onProgress({time,state:events.at(-1)?.message||'Training'});await new Promise(resolve=>setTimeout(resolve,0));}
     }
@@ -80,7 +112,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
     const hex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
     const g711={callerTx:hex(callerCodewords.subarray(0,length)),answererTx:hex(answererCodewords.subarray(0,length))};
     const negotiation=negotiationRecords({protocol,bitClock,wireBits});
-    const payloadBytes=bytes.length-2,replyBytes=new TextEncoder().encode('ACK: '+text).length;
+    const payloadBytes=bytes.length-(payload?4:2),replyBytes=new TextEncoder().encode(expectedAck).length;
     const stats={connectSeconds:connectedAt,verifiedAtSeconds:doneAt||null,transferSeconds:doneAt?doneAt-connectedAt:null,
       verifiedBytes:doneAt?payloadBytes+replyBytes:0,callerBytes:doneAt?payloadBytes:0,answererBytes:doneAt?replyBytes:0,
       usefulBitsPerSecond:doneAt&&doneAt>connectedAt?(payloadBytes+replyBytes)*8/(doneAt-connectedAt):null,
@@ -88,16 +120,22 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
       invalidHdlcFrames:engineId===23?null:negotiation.frames.filter(f=>!f.valid).length,
       clippedSamples:a._browser_line_clipped()+b._browser_line_clipped(),simulationSeconds:length/8000};
     return {stats,line,waveform:analogueActive?'received':'transmitted',modulation:a.UTF8ToString(a._browser_modulation()),left:l,right:r,events,startup,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
-      rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate()};
+      rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate(),
+      ...(payload?{file:fileResult(payload,fileState().data,inboxOverflow,lastReply,!!doneAt)}:{})};
   }finally{a._free(pa);b._free(pb);a._browser_destroy();b._browser_destroy();}
 }
 
+function fileResult(payload,data,overflow,reply,passed){
+  const received=data?data.slice():new Uint8Array(0);
+  return {name:payload.name,size:payload.file.length,receivedBytes:received.length,overflow,sentCrc:crcHex(payload.file),receivedCrc:crcHex(received),
+    firstMismatch:received.findIndex((v,i)=>v!==payload.file[i]),ack:reply,passed,data:received};
+}
 // Two isolated instances: the receiver receives only DS0 codewords and a
 // fixed public profile. This is a downstream payload demonstration, not startup.
 async function runPcmDemo(mode,text,onProgress,shouldStop){
- const id=mode==='x2'?2:56,name=mode==='x2'?'x2':'K56flex';
- const bytes=new TextEncoder().encode(text);
- if(bytes.length>60000)throw new Error('Message exceeds 60000 UTF-8 bytes');
+ const id=mode==='x2'?2:56,name=mode==='x2'?'x2':'K56flex',payload=typeof text==='string'?null:checkFile(text,mode);
+ const bytes=payload?payload.file:new TextEncoder().encode(text);
+ if(bytes.length>60000)throw new Error(payload?'PCM file demos carry at most 60000 bytes':'Message exceeds 60000 UTF-8 bytes');
  const packet=new Uint8Array(bytes.length+2);packet[0]=bytes.length&255;packet[1]=bytes.length>>8;packet.set(bytes,2);
  onProgress({time:0,state:'Encoding downstream PCM payload'});
  await new Promise(resolve=>setTimeout(resolve,0));if(shouldStop())throw new Error('Call cancelled');
@@ -113,19 +151,20 @@ async function runPcmDemo(mode,text,onProgress,shouldStop){
   if(n<2)throw new Error(name+' decoder rejected the received codewords');
   const data=b.HEAPU8.slice(decoded,decoded+n),size=data[0]|(data[1]<<8);
   if(size>n-2)throw new Error('Corrupt PCM message length');
-  const received=new TextDecoder().decode(data.slice(2,2+size));
+  const got=data.slice(2,2+size),received=payload?`${payload.name} · ${size.toLocaleString('en')} of ${bytes.length.toLocaleString('en')} bytes`:new TextDecoder().decode(got);
   const prefix=2400,length=prefix+samples+4000,left=new Float32Array(length),right=new Float32Array(length);
   left.set(Float32Array.from(octets,expand),prefix);
-  const end=(prefix+samples)/8000,passed=received===text;
+  const end=(prefix+samples)/8000,passed=payload?got.length===bytes.length&&got.every((v,i)=>v===bytes[i]):received===text;
   return {kind:'pcm',mode,profile:mode==='x2'?'Short-record allocation 15; B=37, MD=5; GPC':'µ-law, 56000 bit/s, no impairment report',
    left,right,events:[{time:0,message:name+' downstream PCM · fixed profile · no dial-up negotiation'},
-    {time:.3,message:'Encoding '+bytes.length+' UTF-8 bytes at 56,000 bit/s'},
+    {time:.3,message:'Encoding '+bytes.length+(payload?' file bytes':' UTF-8 bytes')+' at 56,000 bit/s'},
     {time:end,received},{time:end,message:passed?'Payload verified':'Payload mismatch'}],
    received,reply:'',passed,rate:56000,txRate:56000,rxRate:0,constellations:[],protocol:[],droppedProtocol:0,
    negotiation:{records:[],frames:[]},wireBits:{},bitClock:[],g711:{serverTx:Array.from(octets,x=>x.toString(16).padStart(2,'0')).join('')},
    stats:{connectSeconds:null,verifiedAtSeconds:end,transferSeconds:samples/8000,verifiedBytes:passed?bytes.length:0,callerBytes:passed?bytes.length:0,answererBytes:0,
     usefulBitsPerSecond:passed?bytes.length*8/(samples/8000):null,retrainRequests:0,invalidHdlcFrames:null,clippedSamples:0,simulationSeconds:length/8000},
-   pcm:{samples,frameSamples:mode==='x2'?6:8,frameBits:mode==='x2'?42:56,sourceBytes:bytes.length,decodedBytes:size},logs:[]};
+   pcm:{samples,frameSamples:mode==='x2'?6:8,frameBits:mode==='x2'?42:56,sourceBytes:bytes.length,decodedBytes:size},logs:[],
+   ...(payload?{file:fileResult(payload,got,false,'',passed)}:{})};
  }finally{a._free(src);a._free(tx);b._free(rx);b._free(decoded);}
 }
 

@@ -45,6 +45,22 @@ there are no external scripts, fonts, audio files, or network requests.
   answerer constructs its `ACK: ` reply from the **received** message.
   The UI checks that both decoded messages match. Application length
   framing bounds messages separately from the underlying line-bit stream.
+* **File transfer:** the payload switch offers *File* in place of the message,
+  for every engine-pair mode except V.23 (75 bit/s upstream, asynchronous)
+  and for the x2/K56flex PCM demos (at most 60000 bytes there). Choose a file
+  or generate 4/16/64 KB of random bytes or repeating text; the cap is 65536
+  bytes. The caller sends a four-byte little-endian length and the file over
+  LAPM. The answerer's 64 KB DTE buffer is drained into JavaScript every
+  20 ms frame, so files never depend on that buffer's size. The answerer
+  replies `ACK <name>: <n> bytes, CRC-32 <hex>` computed from what it
+  **received**, and the run passes only when the received bytes equal the
+  sent bytes one for one and that ACK reaches the caller. File calls may run
+  for up to 600 simulated seconds, against 60 s for messages. The verdict
+  appears when playback reaches verification, and the received file can be
+  saved. Measured (node, clean line): 64 KB of random bytes over V.90 takes
+  18.1 s at 29,050 bit/s useful against a 31,200 bit/s upstream. Repeating
+  text over V.34 reaches 332,086 bit/s useful because V.42bis compresses it,
+  so judge line throughput with random bytes.
 * **Plots:** waveform and spectrum use the generated TX audio. The advanced
   constellation uses actual equalized RX symbol reports from the answerer,
   through the existing passive `line_monitor` tap, at 200 ms intervals.
@@ -305,7 +321,7 @@ capture, so the lab disables those controls and exposes the profile and raw
 codewords in the signal inspector and JSON export instead.
 
 Browser regressions check ASCII, NULs, varied characters, UTF-8, 240-byte and
-12000-byte messages, cancellation, payload recovery and sample accounting
+12000-byte messages, file transfers (V.90, V.34, V.92 and x2, byte-for-byte with CRC-32 ACKs, plus the size and mode rejections), cancellation, payload recovery and sample accounting
 for both modes. Damaged-codeword tests require rejection or changed decoded
 text, and malformed frame lengths must reject. Offline regressions execute
 both modes through the packaged HTML's file runner and check startup/QAM

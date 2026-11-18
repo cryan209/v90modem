@@ -2,7 +2,7 @@ import createModem from './dist/modem-engine.mjs';
 import assert from 'node:assert/strict';
 import {transmit,receive,wav} from './dist/fsk.mjs';
 import {hdlcFrames,inspectorText,negotiationRecords} from './dist/negotiation.mjs';
-import {runPair,validateLine,delayLine,checkPcmRates} from './dist/engine-pair.mjs';
+import {runPair,validateLine,delayLine,checkPcmRates,crc32,fileAck,FILE_LIMIT} from './dist/engine-pair.mjs';
 const examples=['A','\0\0\0',String.fromCharCode(...Array.from({length:95},(_,i)=>i+32)),'Kia ora — hello 🌏','x'.repeat(240)];
 for(const profile of ['v21','bell103'])for(const text of examples)for(const snr of [99,24,12]){
  const tx=transmit(text,profile,snr),rx=receive(tx.samples,profile);
@@ -17,6 +17,22 @@ const stereo=new DataView(wav(new Float32Array([.5,-.5]),new Float32Array([-.25,
 assert.equal(stereo.getUint16(22,true),2);assert.equal(stereo.getUint32(40,true),8);
 assert.equal(stereo.getInt16(44,true),16384);assert.equal(stereo.getInt16(46,true),-8192);
 console.log('PASS: FSK sample-only decoding, both tone pairs, clean/noisy, offset acquisition, UTF-8, 240 bytes, WAV header');
+// File payloads: byte-for-byte verified, answerer's ACK computed from what it received.
+assert.equal(crc32(new TextEncoder().encode('123456789')),0xcbf43926);
+{
+ let state=99;const random=Uint8Array.from({length:FILE_LIMIT},()=>(state=(Math.imul(state,1664525)+1013904223)>>>0)>>>24);
+ const text=new TextEncoder().encode('The quick brown fox jumps over the lazy dog.\n'.repeat(400));
+ for(const [mode,file,name] of [[90,random,'random.bin'],[34,text,'fox.txt'],[92,random.subarray(0,4096),'small.bin'],['x2',random.subarray(0,20000),'pcm.bin']]){
+  const r=await runPair(mode,{file,name});
+  assert.ok(r.passed&&r.file.passed,`File over ${mode} failed`);
+  assert.equal(r.file.receivedBytes,file.length);assert.deepEqual(r.file.data,file);
+  if(mode!=='x2'){assert.equal(r.file.ack,fileAck(name,file));assert.equal(r.reply,fileAck(name,file));assert.equal(r.stats.callerBytes,file.length);}
+  console.log(`PASS: file over ${mode}, ${file.length} bytes byte-for-byte, CRC-32 ${r.file.receivedCrc}, ${Math.round(r.stats.usefulBitsPerSecond)} bit/s useful`);
+ }
+ await assert.rejects(runPair(90,{file:new Uint8Array(FILE_LIMIT+1),name:'big'}),/File exceeds/);
+ await assert.rejects(runPair('v23',{file:random.subarray(0,10),name:'a'}),/File transfer needs/);
+ await assert.rejects(runPair('flex',{file:random.subarray(0,60001),name:'a'}),/at most 60000/);
+}
 for(const mode of [32,90])for(const text of ['Hello from the browser!','Kia ora — hello 🌏','0123456789'.repeat(24)]){
  const result=await runPair(mode,text);
  assert.ok(result.passed,`Mode ${mode} failed training or payload`);
