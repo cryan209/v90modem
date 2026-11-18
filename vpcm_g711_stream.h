@@ -1,3 +1,9 @@
+/* G.711 DS0 octet FIFO for the offline V.PCM harness: one direction of a
+ * simulated call, sized in 8 kHz codewords (64-sample frames by default).
+ * Codewords pass through byte-exact (no companding or gain; CLAUDE.md
+ * constraint 1), with an optional raw tap of every octet written.
+ * Used by vpcm_call.c; no live-call caller (the engine's RTP path is
+ * sip_modem.c). */
 #ifndef VPCM_G711_STREAM_H
 #define VPCM_G711_STREAM_H
 

@@ -1,3 +1,11 @@
+/* V.34 INFO frame collector, CRC check and field parsers for the offline
+ * decoders (phase12_decode, vpcm_decode, v92_proc_eval_test).  Collects
+ * bits after the 0x372 sync, checks the CRC (V.34 10.1.2.3.2) and parses
+ * INFO0 (10.1.2.3.3), INFO1c (10.1.2.3.4) and INFO1a (10.1.2.3.5), plus
+ * the V.90 INFO0a/1a/1d variants (V.90 8.2.3.2, Tables 8-11).  The
+ * try_*_recovery helpers search bit shifts, a one-bit slip or one/two bit
+ * errors for a frame that passes CRC: capture forensics only, never use
+ * them to accept INFO on a live call. */
 #ifndef V34_INFO_DECODE_H
 #define V34_INFO_DECODE_H
 

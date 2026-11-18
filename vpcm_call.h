@@ -1,3 +1,10 @@
+/* One simulated telephone call endpoint for the offline V.PCM harness: a
+ * TX and an RX G.711 stream (vpcm_g711_stream.c), a coarse call state
+ * (dial tone, dial, ringing, answer, run, hang-up) and the V.90/V.91 run
+ * mode, plus raw and stereo-WAV taps of both directions.  The call states
+ * are bookkeeping only; no signalling or tones are generated here.
+ * Driven by vpcm_call_pair.c and vpcm_loopback_test; modem_engine.c does
+ * not use it. */
 #ifndef VPCM_CALL_H
 #define VPCM_CALL_H
 

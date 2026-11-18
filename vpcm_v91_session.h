@@ -1,3 +1,10 @@
+/* V.91 startup and data sequencing over two v91.c state machines, for the
+ * offline V.PCM loopback.  Steps both modems through Phase 1 (8.1), INFO
+ * (7.8), DIL (7.3), SCR (7.11), CP (7.2) and Es/B1 (7.5, 7.1) per the 8.2
+ * start-up procedure, then data mode (6.3 frames, 6.5 transparent mode).
+ * On a robbed-bit path it applies the robbed-bit-safe constellations, or
+ * clears down when transparent mode (8.7, granted by CP bit 18) is
+ * denied.  The live V.91 path is in modem_engine.c and v91.c. */
 #ifndef VPCM_V91_SESSION_H
 #define VPCM_V91_SESSION_H
 

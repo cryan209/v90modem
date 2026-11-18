@@ -1,3 +1,8 @@
+/* Caller/answerer pair of vpcm_call endpoints joined back to back, for the
+ * offline V.PCM loopback (vpcm_loopback_test).  Moves codewords between the
+ * two calls, optionally forcing the LSB of every sixth codeword to model a
+ * robbed-bit-signalling DS0, and runs the duplex V.91 data phase chunk
+ * by chunk with per-direction bit-error counts. */
 #ifndef VPCM_CALL_PAIR_H
 #define VPCM_CALL_PAIR_H
 

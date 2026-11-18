@@ -1,3 +1,11 @@
+/* V.90 / V.92 end-to-end "startup contract" for the offline V.PCM loopback
+ * (vpcm_loopback_test; not in SRCS).  Runs a digital and an analogue side
+ * through Phase 1, Phase 2 (V.90 9.2, INFO0a/1a per 8.2.3), Phase 3 DIL
+ * and SCR, Phase 4 CP/Es/B1, then a timed data phase, and checks both
+ * payloads byte for byte: downstream V.90 PCM (clause 5) and upstream V.34
+ * (V.90) or V.92 PCM.  The digital DIL is seeded from a Ja profile
+ * (vpcm_v92_init_digital_dil_from_ja).  Phase 4 is approximated with the
+ * shared CP/B1 helpers, so a pass says nothing about live interop. */
 #ifndef VPCM_V90_SESSION_H
 #define VPCM_V90_SESSION_H
 
