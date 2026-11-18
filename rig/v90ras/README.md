@@ -1118,3 +1118,12 @@ ec1433ff…) is kept as `/opt/v90ras/sip_v90_modem.fcdd1e78`; the previous
 binary (5640b4d3, b6cce84b…) is `sip_v90_modem.pre-fcdd1e78`. Installed by
 rename with no call or PPP interface up, then `v90ras` and `v90isdn` were
 restarted.
+
+## Deployed d793be41 (2026-11-18)
+
+Plain-V.34 Phase 3 now ends PP conditioning where PP ends instead of training
+into TRN (`docs/v34_data_mode_rates.md`, "The Courier's Phase 3 stall after
+our J"). V.90 Phase 3 is untouched. The binary (md5 3dbc7e8d…) is kept as
+`/opt/v90ras/sip_v90_modem.d793be41`; the previous binary (fcdd1e78) is
+`sip_v90_modem.pre-d793be41`. Installed with no call or PPP interface up, then
+`v90ras` and `v90isdn` were restarted.
