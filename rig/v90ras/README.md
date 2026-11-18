@@ -1153,3 +1153,19 @@ takes. Built in `/root/deploy-5640b4d3` (checked out at 20742534). The binary
 binary (876d0ed6, f4cda747…) is `sip_v90_modem.pre-20742534`. Installed by
 rename with no call or PPP interface up, then `v90ras` and `v90isdn` were
 restarted; all ten lines re-registered.
+
+## Deployed 83abe5a4 (2026-11-19)
+
+Noise robustness for both analogue roles plus the digital side's V.92 PCM
+upstream (`docs/v90_analogue_role.md`, "Downstream decision under loop
+noise"; `docs/v92_quick_connect.md`, "Precoded upstream margin raised to
+4σ"). Only the last affects calls this server answers: V.92 callers'
+PCM-upstream CPd is now designed at 4σ, not 3σ. Against slmodemd on the rig
+(3 alternated pairs) the upstream went 36000 → 34666, with 0 frames rejected
+on both arms and the same traffic. Built in `/root/deploy-5640b4d3` (checked
+out at 83abe5a4). The binary (md5 5b506c84…) is kept as
+`/opt/v90ras/sip_v90_modem.83abe5a4`; the previous binary (20742534,
+2dd8beb4…) is `sip_v90_modem.pre-83abe5a4`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted; both are
+active and the lines re-registered. The A/B build trees `/root/margin-a` and
+`/root/margin-b` and the script `/root/margin_ab.sh` (on vmhost) remain.
