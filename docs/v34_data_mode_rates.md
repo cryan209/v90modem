@@ -1555,10 +1555,9 @@ Regression rows:
 **Still open:**
 - ~~2743/21600 at 42 dB loses delays 5 and 13 on either measure.~~ That was
   the Godard loop (next section).
-- `v90_engine_replay` of `rf-bbs-2` no longer reaches data mode (it diverges
-  in training with today's 11.5/11.6 changes), so the RasFinder drift case
-  has no offline check. It runs at 3200 baud, so it stays on the
-  centroid, now with the integral path. It needs a live call.
+- ~~`v90_engine_replay` of `rf-bbs-2` no longer reaches data mode.~~
+  Restored 2026-11-18; the cause was not the 11.5/11.6 changes (next
+  section).
 
 ## The Godard loop is out of DATA on the plain V.34 path (2026-11-09)
 
@@ -1607,4 +1606,55 @@ there were no errors: 2743 asks 24000 from a 33.2 dB reading, and 2800 asks
 26400 at 35.5.
 
 Regression row in `tests/slow.list`: 2743/21600 at 42 dB, delay 5.
+
+## rf-bbs-2 replay restored; the Phase 4 TRN coherence gate fails a retrain (2026-11-18)
+
+The replay had three problems. Two were in how it was run, one is in the receiver.
+
+- **Run it at the call's own profile.** The call ran 3200/31200 with no 3429
+  row in INFO1c. The default is now 3429/33600, so a default replay sends a
+  different INFO1c and is invalid from Phase 2. Use `ME_V34_BAUD=3200
+  ME_V34_BPS=31200`.
+- **Use `--sync --echo-ref`.** Without `--echo-ref` the line canceller
+  cancels the replay's transmit, not the echo in the tap. The startup Phase 4
+  TRN then reads 17.1 dB, against 33.3 dB with it. Under zsh a quoted
+  `"--sync --echo-ref"` is passed as ONE argument and ignored, so check for
+  the `echo reference` line in the log.
+- **Our MP must match the recording.** Today's rate policy asks 28800 where
+  the live call asked 24000, and the recorded peer sends 24000 whatever the
+  replay asks. `--at "AT+MS=V34,1,2400,31200,2400,24000"` caps the receive
+  direction at the live rate. +MS is a ceiling, not a floor.
+
+**The receiver defect: the Phase 4 TRN coherence gate (a0f2450b,
+`ME_V34_P4_TRN_COH`, 0.35).** Bisected over 721 commits, 5ee34af0 (good)
+to a2224ae0 (bad), first bad is a0f2450b. The call's 11.5 retrain starts
+Phase 4 TRN from a worse Phase 3 solution than startup (Phase 3 TRN distance
+0.339 vs 0.280; output level 0.45-1.9 in the first symbols). Coherence peaks
+at 0.58, so DD-LMS starts at symbol 256. It dips to 0.32 at symbol 384 while
+DD is still converging. The gate then hands the taps back to blind CMA, and
+TRN ends at 4.6 dB. With the gate off, the same TRN reads 33.4 dB. Data mode
+then runs at 24000, 0.033-0.042 from the grid (live: 0.08).
+
+Three fixes were tried. Each restored this replay or kept the gate's rows,
+never both:
+
+| change | rf-bbs-2 retrain TRN | gated fast rows |
+|---|---|---|
+| gate off (`ME_V34_P4_TRN_COH=0`) | 33.4 dB | 8 rows fail (mostly 3429 baud) |
+| latch open once DD starts | 33.4 dB | 5 rows fail (e.g. 3000/9600 u-law, caller TRN 3.2 dB) |
+| hysteresis: close at 0.5/0.7/0.85 of the gate | 3.9-4.1 dB | pass |
+| differential coherence z^4[n]*conj(z^4[n-1]) | 5.2 dB | pass |
+
+The z^4 phase does turn (17 -> 141 degrees over 600 symbols), but even the
+rotation-invariant measure stays at 0.1-0.4 for most of that TRN. No
+coherence threshold separates "poor but DD recovers it" here from "unlocked"
+on the duplex rows. **Open:** a gate that tells those two apart, or a better
+Phase 3 solution after an 11.5 retrain. The retrain also carries a stale
+PP-residual accumulator (`phase3_pp_resid_*`, diagnostic only: 464 bauds
+reported for a 232-baud PP).
+
+Regression row in `tests/fast.list` (1.7 s): the replay with the gate off,
+as above, must enter data at 24000 and hold the first 12 reports under 0.1
+from the grid. It fails on the default gate, so it checks the data-mode
+timing path on the RasFinder's 16.5 ppm clock, not the gate.
 

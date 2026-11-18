@@ -201,6 +201,13 @@ V34_DUPLEX_DELAY=5 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 3200 9600 alaw
 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 3200 9600 alaw
 V34_DUPLEX_DELAY=17 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2743 9600 alaw
 ./v34_duplex_test 2400 9600 alaw
+# RasFinder plain V.34 (rf-bbs-2, 16.5 ppm far clock): the replay follows the
+# live call through its 11.5 retrain into data mode at 24000 and holds the
+# grid.  Live profile (3200/31200), live TX as echo reference, our receive ask
+# capped at the live 24000 so our MP matches the recording, and the Phase 4
+# TRN coherence gate off: on the default gate the retrain's TRN reads 4.6 dB
+# (docs/v34_data_mode_rates.md, "rf-bbs-2 replay restored").
+sh -c 'ME_V34_P4_TRN_COH=0 ME_MODE=v34 ME_V34_BAUD=3200 ME_V34_BPS=31200 ME_LAPM_XID_OPTION_OCTETS=auto ./v90_engine_replay reference-data/artifacts/rf-bbs-2/live-rx.g711 ulaw --dial --split --sync --echo-ref --at "AT+MS=V34,1,2400,31200,2400,24000" > "$TMPDIR/rf-bbs-2.log" 2>&1 && grep -q "enter DATA: rate=24000" "$TMPDIR/rf-bbs-2.log" && grep -o "distance to grid [0-9.]*" "$TMPDIR/rf-bbs-2.log" | head -12 | awk "{n++; if (\$4 >= 0.1) bad++} END {exit !(n == 12 && bad == 0)}"'
 ./v34_duplex_test 2743 9600 ulaw
 ./v34_duplex_test 2743 9600 alaw
 ./v34_duplex_test 2800 9600 ulaw
