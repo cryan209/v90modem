@@ -1085,6 +1085,6 @@ RasFinder capture rf-bbs-2 an 11.5 retrain's TRN went from 4.6 to 33.4 dB
 `/opt/v90ras/sip_v90_modem.ecb14c36`; the previous binary (9ca245ef,
 6cf703d1…) is `sip_v90_modem.pre-ecb14c36`. Installed by rename, and only
 `v90ras` was restarted, with no call up; the lines registered. `v90isdn`
-shares the path but was not restarted, so it still runs 9ca245ef until its
-next restart. Not live-verified: no call has met an 11.5 retrain on this
+shares the path. It was restarted at 15:17 with no PPP link up, and all
+three of its processes run cd60dc75…; both lines are ready. Not live-verified: no call has met an 11.5 retrain on this
 build.
