@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {runReliability,crc32,FILE_LIMIT} from './dist/engine-pair.mjs';
+import {runReliability,crc32,FILE_LIMIT,expand,linearToUlaw,loopLine} from './dist/engine-pair.mjs';
 
 for(const settings of [{modes:[32]},{modes:[90,90]},{repeats:0},{durationSeconds:45},{startup:{v8:false}},{startup:{line:{noiseDb:30}}}]){
  let started=false;
@@ -47,6 +47,22 @@ console.log('PASS: sustained 60-second V.92 full-startup transfer at 80-ms delay
  }
  for(const row of r.rows){assert.equal(row.passed,1);assert.ok(row.meanFileSeconds>0);}
  console.log('PASS: file reliability, 64 KB both ways over '+r.calls.map(c=>`V.${c.mode} in ${c.fileSeconds.toFixed(2)} s`).join(', ')+', byte-for-byte');
+}
+{
+ // Analogue loop model: exact µ-law round trip, identity when off, honest grading under noise.
+ for(let c=0;c<256;c++){const r=linearToUlaw(expand(c)*32768);assert.ok(r===c||(c===0x7f&&r===0xff),`µ-law round trip ${c}`);}
+ const frame=Uint8Array.from({length:160},(_,i)=>i);assert.equal(loopLine(0,1)(frame),frame);
+ assert.notDeepEqual(loopLine(50,1)(frame),frame);
+ await assert.rejects(runReliability({modes:[34],startup:{line:{noiseDb:30,loopNoiseDb:30}}}),/either/);
+ let state=13;const file=Uint8Array.from({length:16384},()=>(state=(Math.imul(state,1664525)+1013904223)>>>0)>>>24);
+ const quiet=await runReliability({modes:[34,90,92],repeats:1,file:{file,name:'q.bin'},startup:{line:{loopNoiseDb:70}}});
+ for(const c of quiet.calls){assert.ok(c.passed,JSON.stringify(c));assert.equal(c.mismatchBytes,0);}
+ assert.equal(quiet.startup.line.loopNoiseDb,70);
+ const loud=await runReliability({modes:[34,92],repeats:1,file:{file,name:'n.bin'},startup:{line:{loopNoiseDb:30}}});
+ const v34=loud.calls.find(c=>c.mode===34),v92=loud.calls.find(c=>c.mode===92);
+ assert.ok(v34.passed,JSON.stringify(v34));assert.ok(v34.txRate<33600,'V.34 should fall back under -46 dBm0 loop noise');
+ if(!v92.passed){assert.equal(v92.usefulBitsPerSecond,null);assert.ok(v92.failureReason);}
+ console.log(`PASS: loop noise, -86 dBm0 all three pass; -46 dBm0 V.34 ${v34.txRate}/${v34.rxRate} passes, V.92 ${v92.passed?'passes':'fails honestly ('+v92.failureReason+')'}`);
 }
 const noisy=await runReliability({modes:[34],repeats:1,durationSeconds:30,startup:{line:{noiseDb:30}}});
 assert.equal(noisy.completedCalls,1);assert.equal(noisy.calls[0].requestedTrafficSeconds,30);

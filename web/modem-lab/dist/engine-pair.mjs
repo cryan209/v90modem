@@ -58,7 +58,9 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
   for(const [m,seed] of [[a,line.seed],[b,(line.seed+1)>>>0]]){
     if(m._browser_line_config(line.noiseDb,line.lossDb,line.clockPpm,seed)!==0)throw new Error('Unsupported analogue line settings');
   }
-  const toCaller=delayLine(line.delayMs*8),toAnswerer=delayLine(line.delayMs*8);
+  const toCallerDelay=delayLine(line.delayMs*8),toAnswererDelay=delayLine(line.delayMs*8);
+  const loopToCaller=loopLine(line.loopNoiseDb,(line.seed^0x5bd1e995)>>>0),loopToAnswerer=loopLine(line.loopNoiseDb,(line.seed^0x1b873593)>>>0);
+  const toCaller=f=>loopToCaller(toCallerDelay(f)),toAnswerer=f=>loopToAnswerer(toAnswererDelay(f));
   const analogueActive=[22,222,23,212,32,323,34].includes(engineId)&&(line.noiseDb||line.lossDb||line.clockPpm);
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
@@ -118,7 +120,7 @@ export async function runPair(mode,text,onProgress=()=>{},shouldStop=()=>false,s
       usefulBitsPerSecond:doneAt&&doneAt>connectedAt?(payloadBytes+replyBytes)*8/(doneAt-connectedAt):null,
       retrainRequests:protocol.filter(e=>/\[ME\].*(?:asking for.*retrain|retrain requested|requesting.*retrain)/i.test(e.line)).length,
       invalidHdlcFrames:engineId===23?null:negotiation.frames.filter(f=>!f.valid).length,
-      clippedSamples:a._browser_line_clipped()+b._browser_line_clipped(),simulationSeconds:length/8000};
+      clippedSamples:a._browser_line_clipped()+b._browser_line_clipped()+(loopToCaller.line?.clipped||0)+(loopToAnswerer.line?.clipped||0),simulationSeconds:length/8000};
     return {stats,line,waveform:analogueActive?'received':'transmitted',modulation:a.UTF8ToString(a._browser_modulation()),left:l,right:r,events,startup,protocol,bitClock,wireBits,g711,negotiation,droppedProtocol,constellations,received:lastRx,reply:lastReply,passed:!!doneAt,logs,
       rate:a._browser_rate(),txRate:a._browser_tx_rate(),rxRate:a._browser_rx_rate(),
       ...(payload?{file:fileResult(payload,fileState().data,inboxOverflow,lastReply,!!doneAt)}:{})};
@@ -179,13 +181,33 @@ export function delayLine(samples){
   return out;
  };
 }
+// Analogue loop between two G.711 codecs (lab model, both directions, any
+// mode): expand the codeword, add Gaussian loop noise, requantise to µ-law,
+// as the far codec (CO A/D upstream, the ATA's A/D downstream) would. This
+// is the simulated PSTN, not our media path; the DS0 the modems exchange is
+// still the codec output, one codeword per sample, so sample accounting is
+// unchanged. Noise rms is 2500·10^(-dB/20) on the 16-bit scale, the same
+// reference as the V.32/V.34 receive-line model in browser_peer.c.
+export function linearToUlaw(sample){
+ let s=Math.max(-32768,Math.min(32767,Math.round(sample)));const sign=s<0?0x80:0;if(sign)s=-s;
+ s=Math.min(s,32635)+0x84;let exponent=7;for(let mask=0x4000;!(s&mask)&&exponent>0;exponent--,mask>>=1);
+ return ~(sign|(exponent<<4)|((s>>(exponent+3))&15))&255;
+}
+export function loopLine(noiseDb,seed){
+ if(!noiseDb)return frame=>frame;
+ const rms=2500*10**(-noiseDb/20);let state=seed>>>0;const line={clipped:0};
+ const gaussian=()=>{let sum=0;for(let i=0;i<12;i++){state=(Math.imul(state,1664525)+1013904223)>>>0;sum+=(state>>>8)/16777216-.5;}return sum;};
+ const map=frame=>{const out=new Uint8Array(frame.length);for(let i=0;i<frame.length;i++){const v=expand(frame[i])*32768+rms*gaussian();if(v>32767||v<-32768)line.clipped++;out[i]=linearToUlaw(v);}return out;};
+ map.line=line;return map;
+}
 export function validateLine(mode,input={}){
- const line={noiseDb:0,lossDb:0,clockPpm:0,delayMs:0,seed:1234,...input};
- for(const key of ['noiseDb','lossDb','clockPpm','delayMs','seed'])if(!Number.isFinite(line[key]))throw new Error('Invalid line setting: '+key);
- if((line.noiseDb!==0&&(line.noiseDb<10||line.noiseDb>80))||line.lossDb<0||line.lossDb>30||Math.abs(line.clockPpm)>100
+ const line={noiseDb:0,lossDb:0,clockPpm:0,delayMs:0,loopNoiseDb:0,seed:1234,...input};
+ for(const key of ['noiseDb','lossDb','clockPpm','delayMs','loopNoiseDb','seed'])if(!Number.isFinite(line[key]))throw new Error('Invalid line setting: '+key);
+ if((line.noiseDb!==0&&(line.noiseDb<10||line.noiseDb>80))||(line.loopNoiseDb!==0&&(line.loopNoiseDb<10||line.loopNoiseDb>80))||line.lossDb<0||line.lossDb>30||Math.abs(line.clockPpm)>100
    ||!Number.isInteger(line.delayMs)||line.delayMs<0||line.delayMs>200||!Number.isInteger(line.seed)||line.seed<0||line.seed>4294967295)throw new Error('Line settings outside the supported range');
  if(!['32','34','v22','v22bis','v32bis','v23','bell212'].includes(String(mode))&&(line.noiseDb||line.lossDb||line.clockPpm))throw new Error('Analogue noise, attenuation and clock drift are supported for analogue modem modes only');
- if(['x2','flex'].includes(String(mode))&&line.delayMs)throw new Error('PCM payload demos use a fixed byte-exact line');
+ if(line.noiseDb&&line.loopNoiseDb)throw new Error('Choose either receiver line noise or analogue loop noise, not both');
+ if(['x2','flex'].includes(String(mode))&&(line.delayMs||line.loopNoiseDb))throw new Error('PCM payload demos use a fixed byte-exact line');
  return line;
 }
 
@@ -248,7 +270,7 @@ async function reliabilityCall(mode,attempt,duration,startup,line,onProgress,sho
  let retrainRequests=0;
  const capture=text=>{if(/\[ME\].*(?:asking for.*retrain|retrain requested|requesting.*retrain)/i.test(text))retrainRequests++;};
  const a=await createModem({print:capture,printErr:capture}),b=await createModem({print:capture,printErr:capture});
- let pa=0,pb=0,initializedA=false,initializedB=false,time=0,connectedAt=null,sendUntil=null,trafficBytes=0,trafficCaptured=false,disconnected=false,error=null,txRate=0,rxRate=0,clippedSamples=0,modulation='';
+ let loops=[],pa=0,pb=0,initializedA=false,initializedB=false,time=0,connectedAt=null,sendUntil=null,trafficBytes=0,trafficCaptured=false,disconnected=false,error=null,txRate=0,rxRate=0,clippedSamples=0,modulation='';
  const seed=(0x12345678+attempt)>>>0;
  const streams=[{tx:a,rx:b,next:reliabilityPattern(seed),expected:reliabilityPattern(seed)},
                 {tx:b,rx:a,next:reliabilityPattern(seed^0x9e3779b9),expected:reliabilityPattern(seed^0x9e3779b9)}]
@@ -264,7 +286,9 @@ async function reliabilityCall(mode,attempt,duration,startup,line,onProgress,sho
   for(const [m,seedValue] of [[a,line.seed],[b,(line.seed+1)>>>0]])if(m._browser_line_config(line.noiseDb,line.lossDb,line.clockPpm,seedValue))throw new Error('Invalid reliability channel');
   pa=a._malloc(4096);pb=b._malloc(4096);streams[0].pointer=pa;streams[1].pointer=pb;
   const ai=a._browser_input(),bi=b._browser_input(),ao=a._browser_output(),bo=b._browser_output();
-  const toCaller=delayLine(line.delayMs*8),toAnswerer=delayLine(line.delayMs*8);
+  const toCallerDelay=delayLine(line.delayMs*8),toAnswererDelay=delayLine(line.delayMs*8);
+  loops=[loopLine(line.loopNoiseDb,(seed^line.seed^0x5bd1e995)>>>0),loopLine(line.loopNoiseDb,(seed^line.seed^0x1b873593)>>>0)];
+  const toCaller=f=>loops[0](toCallerDelay(f)),toAnswerer=f=>loops[1](toAnswererDelay(f));
   a.HEAPU8.fill(255,ai,ai+160);b.HEAPU8.fill(255,bi,bi+160);
   // 60 s to connect, selected sustained interval, then 15 s to drain the
   // bounded in-flight window. A final partial interval never counts as a pass.
@@ -310,7 +334,7 @@ async function reliabilityCall(mode,attempt,duration,startup,line,onProgress,sho
    if(block%50===0){onProgress({time,state:connectedAt===null?'Training':file?`File transfer · ${Math.min(streams[0].received,file.length).toLocaleString('en')} up / ${Math.min(streams[1].received,file.length).toLocaleString('en')} down of ${file.length.toLocaleString('en')} bytes`:time<sendUntil?'Sustained transfer':'Draining queued data'});await new Promise(resolve=>setTimeout(resolve,0));}
   }
  }catch(e){if(shouldStop()||e.message==='Call cancelled')throw e;error=e.message;}
- finally{clippedSamples=(initializedA?a._browser_line_clipped():0)+(initializedB?b._browser_line_clipped():0);if(pa)a._free(pa);if(pb)b._free(pb);if(initializedA)a._browser_destroy();if(initializedB)b._browser_destroy();}
+ finally{clippedSamples=(initializedA?a._browser_line_clipped():0)+(initializedB?b._browser_line_clipped():0)+loops.reduce((n,l)=>n+(l.line?.clipped||0),0);if(pa)a._free(pa);if(pb)b._free(pb);if(initializedA)a._browser_destroy();if(initializedB)b._browser_destroy();}
  const mismatchBytes=streams.reduce((n,s)=>n+s.mismatches,0),receivedBytes=streams.reduce((n,s)=>n+s.received,0);
  const finishedInterval=file?fileDoneAt!==null:sendUntil!==null&&time>=sendUntil;
  const fileSeconds=fileDoneAt===null?null:fileDoneAt-connectedAt;

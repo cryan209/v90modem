@@ -190,12 +190,14 @@ async function dial(){
 function updateReliabilityControls(){
  const supported=['34','90','92'].includes(mode);
  $('reliabilityPanel').hidden=!supported;
- for(const id of ['reliabilityScope','reliabilityRepeats','reliabilityDuration','reliabilityV92'])$(id).disabled=playing;
+ for(const id of ['reliabilityScope','reliabilityRepeats','reliabilityDuration','reliabilityV92','reliabilityNoise'])$(id).disabled=playing;
  const incompatible=$('reliabilityScope').value==='all'&&mode==='34'&&['lineNoise','lineLoss','lineClock'].some(id=>Number($(id).value)!==0);
+ const loopNoise=Number($('reliabilityNoise').value),bothNoise=!!loopNoise&&mode==='34'&&Number($('lineNoise').value)!==0;
  const tooBig=reliabilityFile()&&chosenFile&&chosenFile.bytes.length>FILE_MAX,noFile=reliabilityFile()&&!chosenFile;
- $('reliabilityStart').disabled=!supported||playing||incompatible||noFile||tooBig;
+ $('reliabilityStart').disabled=!supported||playing||incompatible||noFile||tooBig||bothNoise;
  $('reliabilityHint').textContent=incompatible?'For a fair three-mode comparison, turn noise off, set attenuation to 0 dB and use synchronous clocks. Or test the current modem only.':'Uses the selected line settings, V.8bis and V.34 ceiling. Each call starts fresh; V.92 uses the startup selected here. Stop keeps completed results.';
  if(!incompatible&&reliabilityFile())$('reliabilityHint').textContent=noFile?'Choose or generate a file under 02 / Your payload (File) first.':tooBig?'The payload file is over 64 KB.':`Each call sends ${chosenFile.name} (${chosenFile.bytes.length.toLocaleString('en')} bytes) up and down at the same time, and checks both copies byte for byte.`;
+ if(!incompatible&&loopNoise)$('reliabilityHint').textContent=(bothNoise?'Turn Line impairments noise off: choose one noise model. ':'')+$('reliabilityHint').textContent+` Line noise adds ${$('reliabilityNoise').selectedOptions[0].text.split(' (')[0]} of Gaussian noise on the analogue loop in both directions, requantised to µ-law by the codec at each end; it applies to every mode, so a three-mode comparison stays fair.`;
  $('reliabilityCaption').textContent=RELIABILITY_CAPTION[reliabilityFile()?'file':'timed'];
  $('reliabilityExport').disabled=!reliabilityResult?.completedCalls;
 }
@@ -219,7 +221,7 @@ async function startReliability(){
  const settings={modes:$('reliabilityScope').value==='all'?[34,90,92]:[Number(mode)],repeats:Number($('reliabilityRepeats').value),
   ...(reliabilityFile()?{file:{file:chosenFile.bytes,name:chosenFile.name}}:{durationSeconds:Number($('reliabilityDuration').value)}),
   startup:{v8:true,v8bis:$('startupBis').checked,v34MaxRate:Number($('v34Rate').value),v92Startup:$('reliabilityV92').value,
-   line:{noiseDb:mode==='34'?Number($('lineNoise').value):0,lossDb:mode==='34'?Number($('lineLoss').value):0,clockPpm:mode==='34'?Number($('lineClock').value):0,delayMs:Number($('lineDelay').value)}}};
+   line:{noiseDb:mode==='34'?Number($('lineNoise').value):0,lossDb:mode==='34'?Number($('lineLoss').value):0,clockPpm:mode==='34'?Number($('lineClock').value):0,delayMs:Number($('lineDelay').value),loopNoiseDb:Number($('reliabilityNoise').value)}}};
  reliabilityResult=null;reliabilityRunning=true;playing=true;updateStartup();updateCount();$('message').disabled=true;$('stop').disabled=false;
  $('reliabilityTable').hidden=true;$('reliabilityFailures').hidden=true;$('reliabilityStatus').textContent='Starting fresh modem instances…';$('status').textContent='Reliability test running';
  $('download').disabled=true;$('exportCapture').disabled=true;document.querySelectorAll('.mode').forEach(b=>b.disabled=true);
@@ -243,7 +245,7 @@ async function startReliability(){
  }catch(e){stop();$('reliabilityStatus').textContent='Test stopped: '+e.message;}
 }
 $('reliabilityStart').addEventListener('click',startReliability);
-for(const id of ['reliabilityScope','reliabilityDuration','lineNoise','lineLoss','lineClock'])$(id).addEventListener('change',updateReliabilityControls);
+for(const id of ['reliabilityScope','reliabilityDuration','reliabilityNoise','lineNoise','lineLoss','lineClock'])$(id).addEventListener('change',updateReliabilityControls);
 $('reliabilityExport').addEventListener('click',()=>{
  if(!reliabilityResult?.completedCalls)return;if(reliabilityUrl)URL.revokeObjectURL(reliabilityUrl);
  reliabilityUrl=URL.createObjectURL(new Blob([JSON.stringify(reliabilityResult,null,2)],{type:'application/json'}));

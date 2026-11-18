@@ -1230,3 +1230,28 @@ V.21 first failed PPP at pppd's defaults: a 45-byte LCP
 ISI card's numbers: both answer V.34 only (no PCM in V.8) and reach V.34 31200
 data, and nothing on them runs the echo menu any more, so its V.90 echo rows
 report 0 echoes.
+
+## Downstream demap is exact-match, so it fails under loop noise (2026-11-19)
+
+The browser lab's analogue-loop noise model (`loopLine` in
+`web/modem-lab/dist/engine-pair.mjs`) expands each codeword, adds Gaussian
+noise and requantises to µ-law, as the ATA or CO codec would. Under that
+noise our analogue role's downstream breaks long before V.34 does. 64 KB file
+each way, one call per point, clean otherwise:
+
+| Loop noise | V.34 | V.90 (ours both ends) | V.92 |
+|---|---|---|---|
+| −86 dBm0 | pass, 33600 | pass, 31200/56000 | pass, 48000/56000 |
+| −76 dBm0 | pass, 33600 | 31200/52000, **downstream 2,680 of 65,536 bytes in 120 s**; upstream complete | no connection |
+| −71 dBm0 | pass, 33600 | 31200/50666, stalls the same way | no connection |
+| −66 dBm0 | pass, 33600 | 31200/48000, B1d 253 bit errors / 39 demap failures, disconnect | no connection |
+| −46 dBm0 | pass, 28800 | no connection | no connection |
+
+Cause: `v90_analogue_phase4.c:757`. When a received Ucode is not in the
+requested constellation, `v90_demap_*_frame` returns ≤0 and the whole frame is
+counted as a demap failure. Nothing slices to the nearest enabled point, so
+one quantisation step of noise on a small level loses a frame, and the DIL
+rate choice (52000 at −76 dBm0) does not leave enough distance for an exact
+match. A receiver should take the nearest constellation point in the linear
+domain (§5.4 defines only the transmitter's mapping). Not yet fixed. The
+lab's reliability panel ("Line noise") reproduces it in about 30 s.

@@ -500,6 +500,23 @@ line, 64 KB of random bytes each way takes 16.72 s over V.34 (62,714 bit/s),
 18.00 s over V.90 (58,254 bit/s) and 11.70 s over V.92 (89,622 bit/s), 9/9
 calls passing in the browser.
 
+### Analogue loop noise (2026-11-19)
+
+The reliability panel's *Line noise* adds Gaussian noise on the analogue loop
+in both directions, at −86, −76, −66, −56 or −46 dBm0. Each codeword is
+expanded, the noise is added, and the sum is requantised to µ-law, as the CO
+A/D (upstream) or the ATA's codec (downstream) would. The DS0 the modems
+exchange is still one codeword per sample, so sample accounting is unchanged.
+This is the simulated PSTN, not our media path, and it applies to every mode,
+so three-mode comparisons stay fair. The noise reference is the existing
+receive-line model's (rms 2500·10^(−dB/20) on the 16-bit scale). Calibrated
+against the µ-law digital milliwatt (rms 16017), that reference is
+−16.1 dBm0, so `loopNoiseDb` 70/60/50/40/30 is −86/−76/−66/−56/−46 dBm0. It
+cannot be combined with the V.34 receiver-line noise. Results: V.34 stays at
+33600 down to −66 dBm0 and passes at 28800 at −46 dBm0. V.90 and V.92 pass
+only at −86 dBm0; see v90_analogue_role.md ("Downstream demap is
+exact-match").
+
 The reliability regression runs two 30-second calls per mode, verifies over
 50,000 bytes in each direction on every call, and checks round ordering,
 summary arithmetic and directional rates. A separate 60-second V.92 Full
