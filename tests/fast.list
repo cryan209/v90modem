@@ -885,6 +885,10 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./v90_analogue_sd_test
 ./v34_pp_fit_test
 ./vpcm_loopback_test --all-tests
+# A robbed-bit trunk writes its A/B bit into the LSB, often a 1; --all-tests
+# only clears it.  Same cases with the bit set and alternating (~0.1 s each).
+V91_SIM_ROBBED_LSB=1 ./vpcm_loopback_test --robbed-tests
+V91_SIM_ROBBED_LSB=2 ./vpcm_loopback_test --robbed-tests
 # The coupled analogue<->digital Phase 2 harness.  It is the only in-tree
 # check that both halves of the §9.2.1.1/§9.2.2.1 tone choreography mesh,
 # and it costs ~0.1 s, so it runs by default rather than staying behind

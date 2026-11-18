@@ -39,7 +39,6 @@ static size_t vpcm_call_pair_transfer_codewords(vpcm_call_t *src_call,
     size_t written;
     size_t moved;
     size_t read_len;
-    size_t i;
 
     if (!src_call || !dst_call || !tx_codewords || !rx_codewords || codeword_len <= 0)
         return 0;
@@ -52,10 +51,8 @@ static size_t vpcm_call_pair_transfer_codewords(vpcm_call_t *src_call,
     moved = vpcm_g711_stream_read(&src_call->tx_stream, rx_codewords, (size_t) codeword_len);
     if (moved != (size_t) codeword_len)
         return 0;
-    if (robbed_bit) {
-        for (i = 5; i < moved; i += 6)
-            rx_codewords[i] &= 0xFE;
-    }
+    if (robbed_bit)
+        vpcm_v91_rob_codewords(rx_codewords, (int) moved);
 
     moved = vpcm_g711_stream_write(&dst_call->rx_stream, rx_codewords, moved);
     if (moved != (size_t) codeword_len)

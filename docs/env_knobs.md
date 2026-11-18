@@ -418,7 +418,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_TEST_LOST_MP_PRIME` | v34tx.c |  | td |  |
 | `V34_TEST_RENEG_NO_TRN` | v34tx.c |  | td | TEST HOOK V34_TEST_RENEG_NO_TRN=caller/answer/both: this role sends |
 | `V90_T3_SYMBOL_PROBE` | v34rx.c |  | dh | V90_T3_SYMBOL_PROBE=<data symbol index>: everything that went into |
-| `V91_SIM_ROBBED_LSB` | modem_engine.c |  | sd | Test hook: value written into that robbed LSB: 0 (default), 1, 2 = alternate |
+| `V91_SIM_ROBBED_LSB` | modem_engine.c, vpcm_v91_session.c |  | tsd | Test hook: value written into that robbed LSB: 0 (default), 1, 2 = alternate |
 | `V91_SIM_ROBBED_RX` | modem_engine.c |  | s | Test hook: simulated robbed-bit trunk on our RX, at cadence phase 0..5 |
 | `V91_TEST_ESCAPE_AFTER_MS` | modem_engine.c |  | sd | Test hooks: force an 8.3 escape to V.34 / an 8.4 retrain this many ms in |
 | `V91_TEST_RETRAIN_AFTER_MS` | modem_engine.c |  | sd | Test hooks: force an 8.3 escape to V.34 / an 8.4 retrain this many ms in |

@@ -100,6 +100,13 @@ void vpcm_cp_init_robbed_bit_safe_profile(vpcm_cp_frame_t *cp,
  * would be empty or the constellation table is full.
  */
 bool vpcm_cp_apply_robbed_bit_safe_slots(vpcm_cp_frame_t *cp, uint8_t slot_mask);
+/*
+ * Frame intervals (bit i = interval i) whose constellation holds only odd
+ * Ucodes.  Those codewords have LSB 0 in both laws, so a receiver may clear
+ * the LSB there before demapping: a 1 can only be a robbed-bit trunk's
+ * signalling bit, and nothing is lost.
+ */
+uint8_t vpcm_cp_odd_only_intervals(const vpcm_cp_frame_t *cp);
 int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high);
 
 void vpcm_cp_mask_set(uint8_t mask[VPCM_CP_MASK_BYTES], int ucode, bool enabled);

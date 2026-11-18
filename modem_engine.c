@@ -2005,9 +2005,10 @@ static bool g_v91_data_rx_synced;
 /* Robbed-bit trunks.  A robbed-bit trunk overwrites the LSB of every sixth
  * codeword.  The DIL receiver finds which intervals (v91_rx_dil_codewords);
  * the CP we send restricts them to odd Ucodes (7.2, per-interval
- * constellations), and g_v91_rx_robbed_phase -- that position in our
- * absolute RX count -- is where the receive path clears the LSB before
- * demapping (v91_live_receive_codewords_locked). */
+ * constellations), and the v91.c decoders clear the LSB in odd-only
+ * intervals before demapping, whatever bit the trunk wrote
+ * (vpcm_cp_odd_only_intervals).  g_v91_rx_robbed_phase is that position in
+ * our absolute RX count, for the trace. */
 static long long g_v91_tx_abs_pos;
 static long long g_v91_rx_abs_pos;
 static long long g_v91_rx_dil_start_abs;
@@ -3362,20 +3363,6 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
                 bit = (g_v91_sim_robbed_lsb == 2) ? (int)((pos / 6) & 1)
                                                   : g_v91_sim_robbed_lsb;
                 buf[i] = (uint8_t)((buf[i] & 0xFE) | bit);
-            }
-        }
-        /* Once the DIL has located the robbed position, its LSB carries the
-         * trunk's signalling bit, not ours.  The CP we sent restricts that
-         * interval to odd Ucodes, whose LSB is 0 in both laws, so clearing
-         * the received LSB recovers the transmitted codeword whatever the
-         * trunk wrote (an A or B bit of 1 would otherwise turn U into U-1
-         * and fail B1 and data).  Before that point the phase is -1; the
-         * codewords between the DIL and B1 are SCR/CP, which carry their
-         * bits in the sign (7.2, 7.11), so folding them is harmless. */
-        if (g_v91_rx_robbed_phase >= 0) {
-            for (i = 0; i < chunk; i++) {
-                if ((int)((base + i) % 6) == g_v91_rx_robbed_phase)
-                    buf[i] &= 0xFE;
             }
         }
         g_v91_rx_abs_pos = base + chunk;

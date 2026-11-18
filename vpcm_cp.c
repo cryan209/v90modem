@@ -735,6 +735,37 @@ bool vpcm_cp_mask_get(const uint8_t mask[VPCM_CP_MASK_BYTES], int ucode)
     return ((mask[byte_idx] >> bit_idx) & 1U) != 0;
 }
 
+uint8_t vpcm_cp_odd_only_intervals(const vpcm_cp_frame_t *cp)
+{
+    uint8_t out = 0;
+    int slot;
+
+    if (!cp || cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
+        return 0;
+    for (slot = 0; slot < VPCM_CP_FRAME_INTERVALS; slot++) {
+        const uint8_t *mask;
+        bool any = false;
+        bool even = false;
+        int ucode;
+
+        if (cp->dfi[slot] >= cp->constellation_count)
+            continue;
+        mask = cp->masks[cp->dfi[slot]];
+        for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+            if (!vpcm_cp_mask_get(mask, ucode))
+                continue;
+            any = true;
+            if (!(ucode & 1)) {
+                even = true;
+                break;
+            }
+        }
+        if (any && !even)
+            out |= (uint8_t) (1U << slot);
+    }
+    return out;
+}
+
 int vpcm_cp_mask_population(const uint8_t mask[VPCM_CP_MASK_BYTES])
 {
     int count;

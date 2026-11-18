@@ -1,6 +1,6 @@
 /* One-way codeword hop between two vpcm_call endpoints: reads the source's
  * TX stream, applies an optional caller-supplied transform (the loopback
- * passes a plain copy or a robbed-bit LSB mask) and writes the
+ * passes a plain copy or a robbed-bit LSB overwrite) and writes the
  * destination's RX stream.  Offline harness; no live-call caller. */
 #ifndef VPCM_LINK_H
 #define VPCM_LINK_H

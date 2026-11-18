@@ -186,15 +186,24 @@ Closed in the code, with the loopback suite (`vpcm_loopback_test --all-tests`),
   1.  Odd Ucodes have LSB 0 in both laws (checked over all 64 in each), so a 1
   turned U into U-1 on the robbed interval: `V91_SIM_ROBBED_LSB=1` failed every
   attempt at B1 (the other side then escaping to V.34 showed up as a CP decode
-  failure).  The receiver now clears the LSB at the robbed position located by
-  the DIL before demapping (`v91_live_receive_codewords_locked`), which is exact
-  because that interval carries only odd Ucodes.  `make v91-serial-pair-test`
-  runs phase 2 with LSB 0, 1 and alternating (A/B bits that differ).  Over 4
-  runs each, no attempt failed in V.91 start-up; the harness's other failures
-  (control-channel cleardown not seen, CONNECT timeouts) hit all three arms,
-  the LSB=0 arm most (7 of 10 attempts).  Not covered: the offline
-  `vpcm_loopback_test` transforms still only clear the LSB, and no real
-  robbed-bit trunk has been tested.
+  failure).  The `v91.c` decoders (`v91_rx_b1_codewords`, `v91_rx_codewords`)
+  now clear the LSB in every interval whose CP constellation is odd-only
+  (`vpcm_cp_odd_only_intervals`) before demapping.  A 1 there can only be the
+  trunk's, so this is exact, needs no alignment between the DIL and the data
+  framing, and serves the live engine and the offline harness alike (a first
+  version folded by absolute position in `modem_engine.c` and was removed).
+  Live, `make v91-serial-pair-test` runs phase 2 with LSB 0, 1 and alternating
+  (A/B bits that differ): over 4 runs each no attempt failed in V.91
+  start-up, and the harness's other failures (control-channel cleardown not
+  seen, CONNECT timeouts, a missing payload) hit all three arms, the LSB=0 arm
+  most (7 of 10 attempts).  Offline, every robbed-bit simulation goes through
+  `vpcm_v91_rob_codewords`, and `vpcm_loopback_test --robbed-tests` (13 cases,
+  both laws) runs in `tests/fast.list` with `V91_SIM_ROBBED_LSB=1` and `=2`;
+  `--all-tests` keeps the cleared case.  Before the decoder change those runs
+  failed at B1/Es, and one test asserted that robbing changes no codeword at
+  all, which holds only when the trunk clears the bit; it now checks that
+  only the robbed slot's LSB changes and that the data still decodes.  Not
+  covered: no real robbed-bit trunk has been tested.
 - The harness: `tools/v91_serial_pair_test.py` had silently stopped selecting
   V.91 (the V.8 offer no longer advertises it by default) and passed only about
   half the time at baseline because V.42 detection raced on loopback.  It now

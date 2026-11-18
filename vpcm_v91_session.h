@@ -50,6 +50,13 @@ typedef struct {
     uint8_t robbed_slot_mask;
 } vpcm_v91_startup_report_t;
 
+/* Offline robbed-bit trunk: overwrite the LSB of buf[5], buf[11], ... with
+ * the trunk's signalling bit, chosen by V91_SIM_ROBBED_LSB as on the live
+ * hook (modem_engine.c): 0 clears it (default), 1 sets it, 2 alternates 1/0
+ * on successive robbed frames, like A and B bits that differ.  Every offline
+ * robbed-bit simulation goes through here. */
+void vpcm_v91_rob_codewords(uint8_t *buf, int len);
+
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law);
 void vpcm_v91_session_reset(vpcm_v91_session_t *session);
 void vpcm_v91_session_set_state(vpcm_v91_session_t *session, vpcm_v91_modem_state_t state);

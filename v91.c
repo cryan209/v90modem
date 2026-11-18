@@ -999,11 +999,30 @@ int v91_tx_b1_codewords(v91_state_t *s,
     return V91_B1_SYMBOLS;
 }
 
+/* Copy one received frame, clearing the LSB in odd-only intervals: on a
+ * robbed-bit trunk that bit is the trunk's A/B signalling bit, which may be
+ * 1, and an odd Ucode always carries 0 there (vpcm_cp_odd_only_intervals).
+ * Only the robbed intervals are restricted to odd Ucodes (7.2, the CP the
+ * receiver sent), so this undoes the robbing whatever bit was written. */
+static const uint8_t *v91_rx_unrob_frame(uint8_t odd_only, const uint8_t *in,
+                                         uint8_t out[VPCM_CP_FRAME_INTERVALS])
+{
+    int i;
+
+    if (!odd_only)
+        return in;
+    for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        out[i] = (odd_only & (1U << i)) ? (uint8_t) (in[i] & 0xFE) : in[i];
+    return out;
+}
+
 bool v91_rx_b1_codewords(v91_state_t *s,
                          const uint8_t *g711_in,
                          int g711_len,
                          const vpcm_cp_frame_t *cp)
 {
+    uint8_t odd_only;
+    uint8_t unrobbed[VPCM_CP_FRAME_INTERVALS];
     uint32_t reg;
     int prev_sign;
     int d;
@@ -1022,11 +1041,14 @@ bool v91_rx_b1_codewords(v91_state_t *s,
     d = (int) cp->drn + 20;
     reg = s->rx_scramble_reg;
     prev_sign = s->rx_prev_sign;
+    odd_only = vpcm_cp_odd_only_intervals(cp);
     for (frame = 0; frame < V91_B1_SYMBOLS / VPCM_CP_FRAME_INTERVALS; frame++) {
         uint8_t bits[64];
 
         if (v90_demap_mapped_frame((v90_law_t) s->law, cp, d, &reg, &prev_sign,
-                                   g711_in + frame * VPCM_CP_FRAME_INTERVALS,
+                                   v91_rx_unrob_frame(odd_only,
+                                                      g711_in + frame * VPCM_CP_FRAME_INTERVALS,
+                                                      unrobbed),
                                    bits) != d)
             return false;
         for (int i = 0; i < d; i++) {
@@ -1759,6 +1781,7 @@ int v91_rx_codewords(v91_state_t *s,
     int in_pos;
     int out_pos;
     int d;
+    uint8_t odd_only;
 
     if (data_max <= 0 || g711_len <= 0)
         return 0;
@@ -1802,14 +1825,17 @@ int v91_rx_codewords(v91_state_t *s,
     in_pos = 0;
     out_pos = 0;
     d = s->active_k + 6;
+    odd_only = vpcm_cp_odd_only_intervals(&s->active_cp);
     while (in_pos + VPCM_CP_FRAME_INTERVALS <= g711_len) {
         uint8_t bits[64];
+        uint8_t unrobbed[VPCM_CP_FRAME_INTERVALS];
         bool cc = s->cc_rx_active && (s->rx_frame_index % V91_CC_FRAME_PERIOD) == 0;
         int first = cc ? 6 : 0;
 
         if (v90_demap_mapped_frame_cc((v90_law_t) s->law, &s->active_cp, d,
                                       &s->rx_scramble_reg, &s->rx_prev_sign,
-                                      g711_in + in_pos, cc, bits) != d)
+                                      v91_rx_unrob_frame(odd_only, g711_in + in_pos, unrobbed),
+                                      cc, bits) != d)
             return out_pos;
         in_pos += VPCM_CP_FRAME_INTERVALS;
         s->rx_frame_index++;

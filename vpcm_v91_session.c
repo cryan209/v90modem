@@ -1,15 +1,30 @@
 #include "vpcm_v91_session.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+void vpcm_v91_rob_codewords(uint8_t *buf, int len)
+{
+    /* Test hook: value the simulated trunk writes into the robbed LSB: 0 (default), 1, 2 = alternate */
+    const char *env = getenv("V91_SIM_ROBBED_LSB");
+    int mode = (env && *env) ? atoi(env) : 0;
+    int i;
+
+    if (!buf || len <= 0)
+        return;
+    for (i = 5; i < len; i += 6) {
+        int bit = (mode == 2) ? ((i / 6) & 1) : (mode == 1);
+
+        buf[i] = (uint8_t) ((buf[i] & 0xFE) | bit);
+    }
+}
 
 static void vpcm_v91_transport_codewords(bool robbed_bit,
                                          uint8_t *dst,
                                          const uint8_t *src,
                                          int len)
 {
-    int i;
-
     if (!dst || !src || len <= 0)
         return;
     if (!robbed_bit) {
@@ -17,8 +32,7 @@ static void vpcm_v91_transport_codewords(bool robbed_bit,
         return;
     }
     memcpy(dst, src, (size_t) len);
-    for (i = 5; i < len; i += 6)
-        dst[i] &= 0xFE;
+    vpcm_v91_rob_codewords(dst, len);
 }
 
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law)

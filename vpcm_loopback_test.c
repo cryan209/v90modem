@@ -7879,7 +7879,6 @@ static bool test_v91_robbed_bit_signalling(v91_law_t law)
         int mismatch_at;
         int sample_data_len;
         double effective_bps;
-        int j;
 
         total_bits = NOMINAL_10S_FRAMES * (28 + 20);
         total_bytes = total_bits / 8;
@@ -7933,8 +7932,7 @@ static bool test_v91_robbed_bit_signalling(v91_law_t law)
         }
 
         memcpy(pcm_rx, pcm_tx, (size_t) produced);
-        for (j = 5; j < produced; j += 6)
-            pcm_rx[j] &= 0xFE;
+        vpcm_v91_rob_codewords(pcm_rx, produced);
 
         consumed = v91_rx_codewords(&answerer_rx, data_out, total_bytes, pcm_rx, produced);
         mismatch_at = (consumed < total_bytes) ? consumed : first_mismatch_index(data_in, data_out, total_bytes);
@@ -9607,11 +9605,8 @@ static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
                                                 const uint8_t *src,
                                                 int len)
 {
-    int i;
-
     memcpy(dst, src, (size_t) len);
-    for (i = 5; i < len; i += 6)
-        dst[i] &= 0xFE;
+    vpcm_v91_rob_codewords(dst, len);
     vpcm_maybe_realtime_pace_samples(len);
 }
 
@@ -10660,8 +10655,9 @@ static bool test_v91_robbed_bit_session_rate_adaptation(v91_law_t law)
         return false;
     }
 
-    /* The negotiated constellation must be immune to LSB robbing in data
-       mode: the robbed transport may not change a single codeword. */
+    /* The robbed slot carries only odd Ucodes (LSB 0), so robbing can change
+       nothing but that slot's LSB, and only when the trunk writes a 1
+       (V91_SIM_ROBBED_LSB); the receiver must still decode every byte. */
     for (i = 0; i < (int) sizeof(data_in); i++)
         data_in[i] = (uint8_t) (0xA5 ^ (i * 29));
     if (v91_tx_codewords(&caller_tx, pcm, (int) sizeof(pcm), data_in, (int) sizeof(data_in))
@@ -10670,9 +10666,17 @@ static bool test_v91_robbed_bit_session_rate_adaptation(v91_law_t law)
         return false;
     }
     vpcm_transport_robbed_bit_codewords(robbed_pcm, pcm, (int) sizeof(pcm));
-    if (memcmp(pcm, robbed_pcm, sizeof(pcm)) != 0) {
-        fprintf(stderr, "V.91 robbed-trunk data stream still uses LSB-sensitive codewords in the robbed slot\n");
-        return false;
+    for (i = 0; i < (int) sizeof(pcm); i++) {
+        uint8_t allowed = (i % 6 == 5) ? 0x01 : 0x00;
+
+        if ((pcm[i] ^ robbed_pcm[i]) & ~allowed) {
+            fprintf(stderr, "V.91 robbed-trunk transport changed more than the robbed LSB at codeword %d\n", i);
+            return false;
+        }
+        if (i % 6 == 5 && (pcm[i] & 0x01)) {
+            fprintf(stderr, "V.91 robbed-trunk data stream uses an LSB-1 codeword in the robbed slot at %d\n", i);
+            return false;
+        }
     }
     if (v91_rx_codewords(&answerer_rx, data_out, (int) sizeof(data_out), robbed_pcm, (int) sizeof(robbed_pcm))
         != (int) sizeof(data_out)
@@ -11407,6 +11411,25 @@ static bool run_vpcm_session_suite(void)
         && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ULAW)
         && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ALAW)
         && test_v90_startup_contract_failure_cleanup();
+}
+
+/* Every robbed-bit case; run under each V91_SIM_ROBBED_LSB value by
+ * tests/fast.list (the default suites run it with the bit cleared). */
+static bool run_vpcm_robbed_suite(void)
+{
+    return test_vpcm_cp_robbed_bit_safe_profile()
+        && test_v91_robbed_bit_signalling(V91_LAW_ULAW)
+        && test_v91_robbed_bit_signalling(V91_LAW_ALAW)
+        && test_v91_robbed_bit_detection(V91_LAW_ULAW)
+        && test_v91_robbed_bit_detection(V91_LAW_ALAW)
+        && test_v91_robbed_bit_session_rate_adaptation(V91_LAW_ULAW)
+        && test_v91_robbed_bit_session_rate_adaptation(V91_LAW_ALAW)
+        && test_v91_undeclared_robbed_trunk_e2e(V91_LAW_ULAW)
+        && test_v91_undeclared_robbed_trunk_e2e(V91_LAW_ALAW)
+        && test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW)
+        && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
+        && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
+        && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW);
 }
 
 static bool run_vpcm_primitive_suite(void)
@@ -12992,6 +13015,7 @@ int main(int argc, char **argv)
     bool run_v91_e2e_call;
     bool run_v92_e2e_call;
     bool pcm_procedures = false;
+    bool robbed_only = false;
     int v91_e2e_seconds;
     int v92_e2e_seconds;
     v91_law_t v91_e2e_law;
@@ -13022,6 +13046,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--all-tests") == 0) {
             run_sessions = true;
             run_primitives = true;
+        } else if (strcmp(argv[i], "--robbed-tests") == 0) {
+            robbed_only = true;
         } else if (strcmp(argv[i], "--primitive-tests") == 0) {
             run_sessions = false;
             run_primitives = true;
@@ -13120,6 +13146,7 @@ int main(int argc, char **argv)
             printf("  --primitive-tests Add focused primitive/component tests.\n");
             printf("  --pcm-procedure-tests  Focused V.90/V.92 V.8, Phase 2/4 and PCM receiver checks.\n");
             printf("  --all-tests       Run both session and primitive suites.\n");
+            printf("  --robbed-tests    Only the robbed-bit cases (set V91_SIM_ROBBED_LSB=0/1/2).\n");
             printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
             printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
             printf("  --contract-path   Run the V.90/V.92 startup contract path (on by default;\n");
@@ -13187,6 +13214,12 @@ int main(int argc, char **argv)
         return run_v92_e2e_mode(v92_e2e_law, v92_e2e_seconds);
     }
 
+    if (robbed_only) {
+        if (!run_vpcm_robbed_suite())
+            return 1;
+        puts("vpcm_loopback_test: OK");
+        return 0;
+    }
     if (run_sessions && !run_vpcm_session_suite())
         return 1;
     if (run_primitives && !run_vpcm_primitive_suite())
