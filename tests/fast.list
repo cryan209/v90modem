@@ -189,9 +189,9 @@ sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e
 ./v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e-rx.ulaw ulaw 3200 9600 0.200125 0.2 cp-prime 500
 ./at_test_test
 ./clear_channel_test
-# The rows that recover payload without a single bit error.  Every rate that
-# trains at all now does, in both laws; only 3429 does not train, so the two
-# 3429 rows stay out.  `make v34-matrix-test` runs all twelve.
+# The 9600 symbol-rate matrix: all twelve rows (six rates, both laws) train
+# and recover payload without a single bit error.  `make v34-matrix-test`
+# runs the same twelve without stopping at the first failure.
 ./v34_duplex_test 2400 9600 ulaw
 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2400 9600 ulaw
 V34_DUPLEX_CLEARDOWN=4000 ./v34_duplex_test 2400 9600 ulaw
@@ -209,6 +209,8 @@ V34_DUPLEX_DELAY=17 V34_TEST_LOST_MP_PRIME=1 ./v34_duplex_test 2743 9600 alaw
 ./v34_duplex_test 3000 9600 alaw
 ./v34_duplex_test 3200 9600 ulaw
 ./v34_duplex_test 3200 9600 alaw
+./v34_duplex_test 3429 9600 ulaw
+./v34_duplex_test 3429 9600 alaw
 # 21600 bps, where the data-mode carrier and equalizer work shows.  These rows
 # all carried errors or recovered nothing before B1 was made to supply the
 # residual carrier frequency and the equalizer was allowed to adapt in data

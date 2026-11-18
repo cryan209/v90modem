@@ -87,8 +87,12 @@ encoding and precoder coefficients are session state.
    When this matrix was first run, every rate except 2400 timed out at
    60 s with nothing trained.  At 9600 bit/s it now trains 11 of the 12
    rows and recovers payload without error on 10 of them; those ten are
-   asserted by `make test`.  Open: 3429 u-law does not train, and 3000
-   u-law trains but takes 136 payload errors.
+   asserted by `make test`.  Then 3429 u-law did not train and 3000
+   u-law took 136 payload errors.  Re-run 2026-11-18: all twelve rows
+   train with 0 errors, and both u-law rows stay clean on 100k bits each
+   way at delays 0/1/5/7/13/23/79, so later Phase 3/4 and data-mode fixes
+   closed both (no single commit isolated).  The two rows joined
+   `tests/fast.list`.
 
    Four defects, each of which had to fall before the next was visible.
 

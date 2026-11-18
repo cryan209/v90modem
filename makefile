@@ -675,10 +675,9 @@ v70-g729a-test: $(V70_STACK_OBJS)
 v34_phase2_decode_test: $(V34_PHASE2_DECODE_TEST_OBJS)
 	$(CC) $(V34_PHASE2_DECODE_TEST_OBJS) -o $@ -lm
 
-# The full V.34 symbol-rate matrix.  Not in `make test`: only the rows listed
-# in that target complete today, and docs/v34_spec_gap.md item 5 tracks the
-# rest.  This target reports every row rather than stopping at the first
-# failure, so it is the one to run when working on the remaining rates.
+# The full V.34 symbol-rate matrix at 9600.  All twelve rows also run in
+# `make test` (tests/fast.list); this target reports every row rather than
+# stopping at the first failure.
 v34-matrix-test: v34_duplex_test
 	@for b in 2400 2743 2800 3000 3200 3429; do \
 	  for law in ulaw alaw; do \
@@ -693,9 +692,11 @@ v34-duplex-test: v34_duplex_test
 	./v34_duplex_test 2743 9600 alaw
 	./v34_duplex_test 2800 9600 ulaw
 	./v34_duplex_test 2800 9600 alaw
+	./v34_duplex_test 3000 9600 ulaw
 	./v34_duplex_test 3000 9600 alaw
 	./v34_duplex_test 3200 9600 ulaw
 	./v34_duplex_test 3200 9600 alaw
+	./v34_duplex_test 3429 9600 ulaw
 	./v34_duplex_test 3429 9600 alaw
 
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
