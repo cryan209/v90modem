@@ -1100,3 +1100,21 @@ kept as `/opt/v90ras/sip_v90_modem.5640b4d3`; previous (ecb14c36, cd60dc75…)
 is `sip_v90_modem.pre-5640b4d3`. Installed by rename with no call up;
 `v90ras` and `v90isdn` restarted with no PPP interface up. The bundle-loss
 11.6 path is new live behaviour here: watch for 11.6s that end in hang-up.
+
+## Deployed fcdd1e78 (2026-11-18)
+
+Two receiver fixes found against the USR Courier
+(`docs/v34_data_mode_rates.md`, sections from "Why the Courier's 31200 went
+white" on):
+- The data-mode M&M clock loop keeps its learned frequency across 11.6/11.5
+  re-entries (8779bd17).
+- The line echo canceller tracker predicts only transmitted samples, and a
+  move must be confirmed in a second window (fcdd1e78). Below a 150 ms bulk
+  delay the tracker had been blind and moved on noise. Real moves are now
+  followed about 1 s later, which matters for V.90 calls here.
+
+Built in `/root/deploy-5640b4d3` (checked out at fcdd1e78). The binary (md5
+ec1433ff…) is kept as `/opt/v90ras/sip_v90_modem.fcdd1e78`; the previous
+binary (5640b4d3, b6cce84b…) is `sip_v90_modem.pre-fcdd1e78`. Installed by
+rename with no call or PPP interface up, then `v90ras` and `v90isdn` were
+restarted.
