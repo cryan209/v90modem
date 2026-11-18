@@ -9161,6 +9161,18 @@ static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, i
         if (s->tx.v90_v34_fallback  &&  !mp_rate_n_is_valid(c_to_a))
             c_to_a = (s->tx.parms.max_bit_rate_code >> 1) + 1;
         /*endif*/
+        /* Diagnostic (docs/env_knobs.md): ME_V34_MP_C2A_NO_PROJECTION=1
+           offers our configured transmit ceiling instead of the answer
+           modem's INFO1a projection, leaving its MP to cap the rate
+           (11.4.1.1.3).  For A/Bs of whether a peer's projection is
+           conservative; not a setting. */
+        {
+            const char *e = getenv("ME_V34_MP_C2A_NO_PROJECTION");
+
+            if (e  &&  e[0] == '1'  &&  !s->tx.v90_v34_fallback)
+                c_to_a = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+            /*endif*/
+        }
     }
     else
     {

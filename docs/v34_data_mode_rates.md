@@ -1676,3 +1676,47 @@ Regression row in `tests/fast.list` (1.7 s), now on default settings: the
 replay must enter data at 24000 and hold the first 12 reports under 0.1 from
 the grid. It fails without the latch.
 
+
+## 3429 baud vs slmodemd, the Diva and the USR Courier (2026-11-18)
+
+**Our 3429 receiver is not the limit against any of the three.**
+
+- **slmodemd:** 3429/33600 both ways, 0 lines lost; our receive sits 0.13 from
+  the grid. As call modem our MP carried slmodemd's INFO1a projection (21600)
+  as the c2a maximum (`v34_tx_get_mp_rates_measured`), so our transmit stayed
+  at 21600 although slmodemd's MP allows 33600. Live A/B with
+  `ME_V34_MP_C2A_NO_PROJECTION=1`, arms alternated: 33600/33600 on 3/3 calls
+  with 0 lines lost, against 33600/21600 on 3/3 without it. The projection is
+  conservative for that peer. The knob is diagnostic; it is not the default,
+  because the projection is the only measurement of our transmit direction we
+  have, and asking too high a rate decodes white rather than degrading.
+- **Diva 7930/7920:** we offer 3429 (N=14) in INFO1c, and our L2 probe is flat
+  to 0.1 dB from 150 to 3750 Hz. The card picks 3200 in its INFO1a anyway.
+- **USR Courier (V.Everything 4.03d, FXS 7800, rig on this Mac):** trains 3429
+  at 26400-28800 c2a with our receive 0.02-0.08 from the grid (35.5 dB). What
+  costs the calls is **§11.6**: our B1 rate check opens an 11.6 within 0.5 s
+  of data, and the Courier answers with S, S-bar and MP and **no TRN**. After
+  our 1000 ms of TRN it never acknowledged our MP: 2.3 s of its MP frames in
+  the tap, bit 33 clear on every one (descrambled offline from the replay,
+  which is faithful through the 11.6). It then retrains (11.5), usually ending
+  at 2400 baud. With MP straight after S-bar (`V34_TEST_RENEG_NO_TRN=answer`)
+  it acknowledged and the call held 3429 (0.017 from the grid). It needs MP
+  immediately: cutting our TRN once its no-TRN MP had arrived (about 520 ms
+  of TRN) still failed. It behaves the same as the responder: when it opens
+  an 11.6 to step back up and we answer with 1000 ms of TRN, it retrains.
+- **The conflict:** our own engine needs the TRN. With the initiator's TRN at
+  0, the engine-pair bundle-loss row (`fast.list` "one §11.6 before hanging
+  up") renegotiates, decodes for about 2 s at 0.12 from the grid, then both
+  directions go white (0.55-0.66) and it hangs up; with 1000 ms it holds.
+  So "no TRN when we initiate" fixes the Courier but breaks our own
+  recovery. Not changed yet.
+- **Separate suspect:** the line echo canceller's tracker moved its bulk delay
+  by about one round trip (+137 to +147 ms, 974 -> ~2100 samples) in most
+  Courier calls, and in two of them our distance to grid rose right after it
+  (0.117 -> 0.53 -> white; 0.067 -> 0.23). Calls with `ME_LEC_NO_TRACK=1`
+  held 0.04, but the Courier's retrains, not ours, decided those calls, so
+  this is not proven.
+
+Rig: `tools/soak/courier_serial_call.py <name> --env MODE=v34 --env
+'SRV_INIT=ATE0;AT+MS=V34;ATS0=1'` (pyserial venv). The Mac replay of a
+Courier tap is faithful through Phase 4 and the 11.6 but not in data mode.
