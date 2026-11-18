@@ -1088,3 +1088,15 @@ RasFinder capture rf-bbs-2 an 11.5 retrain's TRN went from 4.6 to 33.4 dB
 shares the path. It was restarted at 15:17 with no PPP link up, and all
 three of its processes run cd60dc75…; both lines are ready. Not live-verified: no call has met an 11.5 retrain on this
 build.
+
+## Deployed 5640b4d3 (2026-11-18)
+
+V.34 11.6 without TRN: as initiator MP goes straight after S-bar; as
+responder our TRN ends when the initiator sent none; the Phase 4 TRN SNR
+ring is emptied per Phase 4; the bundle-loss 11.6 backs off before it
+starts (`docs/v34_data_mode_rates.md`, "3429 baud vs slmodemd, the Diva and
+the USR Courier"). Built in `/root/deploy-5640b4d3`; binary md5 b6cce84b…,
+kept as `/opt/v90ras/sip_v90_modem.5640b4d3`; previous (ecb14c36, cd60dc75…)
+is `sip_v90_modem.pre-5640b4d3`. Installed by rename with no call up;
+`v90ras` and `v90isdn` restarted with no PPP interface up. The bundle-loss
+11.6 path is new live behaviour here: watch for 11.6s that end in hang-up.
