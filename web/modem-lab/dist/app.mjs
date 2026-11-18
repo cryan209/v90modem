@@ -57,7 +57,7 @@ function setPayload(kind){
  for(const [id,k] of [['payloadMessage','message'],['payloadFile','file']]){$(id).classList.toggle('selected',payloadKind===k);$(id).setAttribute('aria-pressed',String(payloadKind===k));}
  $('messagePane').hidden=payloadKind!=='message';$('filePane').hidden=payloadKind!=='file';updateCount();
 }
-function chooseFile(name,bytes){chosenFile={name,bytes};$('fileResult').hidden=true;$('saveFile').hidden=true;updateCount();}
+function chooseFile(name,bytes){chosenFile={name,bytes};$('fileResult').hidden=true;$('saveFile').hidden=true;updateCount();updateReliabilityControls();}
 function generateFile(){
  const size=Number($('fileSize').value),bytes=new Uint8Array(size);
  if($('fileKind').value==='random')crypto.getRandomValues(bytes);
@@ -192,8 +192,11 @@ function updateReliabilityControls(){
  $('reliabilityPanel').hidden=!supported;
  for(const id of ['reliabilityScope','reliabilityRepeats','reliabilityDuration','reliabilityV92'])$(id).disabled=playing;
  const incompatible=$('reliabilityScope').value==='all'&&mode==='34'&&['lineNoise','lineLoss','lineClock'].some(id=>Number($(id).value)!==0);
- $('reliabilityStart').disabled=!supported||playing||incompatible;
+ const tooBig=reliabilityFile()&&chosenFile&&chosenFile.bytes.length>FILE_MAX,noFile=reliabilityFile()&&!chosenFile;
+ $('reliabilityStart').disabled=!supported||playing||incompatible||noFile||tooBig;
  $('reliabilityHint').textContent=incompatible?'For a fair three-mode comparison, turn noise off, set attenuation to 0 dB and use synchronous clocks. Or test the current modem only.':'Uses the selected line settings, V.8bis and V.34 ceiling. Each call starts fresh; V.92 uses the startup selected here. Stop keeps completed results.';
+ if(!incompatible&&reliabilityFile())$('reliabilityHint').textContent=noFile?'Choose or generate a file under 02 / Your payload (File) first.':tooBig?'The payload file is over 64 KB.':`Each call sends ${chosenFile.name} (${chosenFile.bytes.length.toLocaleString('en')} bytes) up and down at the same time, and checks both copies byte for byte.`;
+ $('reliabilityCaption').textContent=RELIABILITY_CAPTION[reliabilityFile()?'file':'timed'];
  $('reliabilityExport').disabled=!reliabilityResult?.completedCalls;
 }
 function renderReliability(summary){
@@ -203,14 +206,18 @@ function renderReliability(summary){
   const row=summary.rows.find(r=>r.mode===mode);$('reliabilityRow'+mode).hidden=!row;if(!row)continue;
   const values={Completed:`${row.completed}/${summary.repeats}`,Connected:`${row.connected}/${row.completed}`,Passed:`${row.passed}/${row.completed}`,
    Bytes:row.verifiedBytes.toLocaleString(),Mismatches:row.mismatchBytes.toLocaleString(),Retrains:String(row.retrainRequests),Drops:String(row.disconnects),
-   Connect:row.meanConnectSeconds===null?'—':row.meanConnectSeconds.toFixed(2)+' s',Throughput:row.meanUsefulBitsPerSecond===null?'—':Math.round(row.meanUsefulBitsPerSecond).toLocaleString()+' bit/s',Rates:row.rates.join(', ')||'—'};
+   Connect:row.meanConnectSeconds===null?'—':row.meanConnectSeconds.toFixed(2)+' s',FileTime:row.meanFileSeconds==null?'—':row.meanFileSeconds.toFixed(2)+' s',Throughput:row.meanUsefulBitsPerSecond===null?'—':Math.round(row.meanUsefulBitsPerSecond).toLocaleString()+' bit/s',Rates:row.rates.join(', ')||'—'};
   for(const [key,value] of Object.entries(values))$('reliability'+mode+key).textContent=value;
  }
  $('reliabilityExport').disabled=!summary.completedCalls;
 }
+const reliabilityFile=()=>$('reliabilityDuration').value==='file';
+const RELIABILITY_CAPTION={timed:'Completed calls only. Goodput combines upload and download. A pass requires the full interval and both streams verified, including queued data.',
+ file:'Completed calls only. Each call sends the payload file up and down at once; a pass requires both copies byte-for-byte within 120 seconds of connecting. Goodput is both copies over the file time.'};
 async function startReliability(){
- stop();result=null;$('transferStats').hidden=true;$('quickComparison').hidden=true;
- const settings={modes:$('reliabilityScope').value==='all'?[34,90,92]:[Number(mode)],repeats:Number($('reliabilityRepeats').value),durationSeconds:Number($('reliabilityDuration').value),
+ stop();if(reliabilityFile()&&!chosenFile)return;result=null;$('transferStats').hidden=true;$('quickComparison').hidden=true;
+ const settings={modes:$('reliabilityScope').value==='all'?[34,90,92]:[Number(mode)],repeats:Number($('reliabilityRepeats').value),
+  ...(reliabilityFile()?{file:{file:chosenFile.bytes,name:chosenFile.name}}:{durationSeconds:Number($('reliabilityDuration').value)}),
   startup:{v8:true,v8bis:$('startupBis').checked,v34MaxRate:Number($('v34Rate').value),v92Startup:$('reliabilityV92').value,
    line:{noiseDb:mode==='34'?Number($('lineNoise').value):0,lossDb:mode==='34'?Number($('lineLoss').value):0,clockPpm:mode==='34'?Number($('lineClock').value):0,delayMs:Number($('lineDelay').value)}}};
  reliabilityResult=null;reliabilityRunning=true;playing=true;updateStartup();updateCount();$('message').disabled=true;$('stop').disabled=false;
@@ -236,7 +243,7 @@ async function startReliability(){
  }catch(e){stop();$('reliabilityStatus').textContent='Test stopped: '+e.message;}
 }
 $('reliabilityStart').addEventListener('click',startReliability);
-for(const id of ['reliabilityScope','lineNoise','lineLoss','lineClock'])$(id).addEventListener('change',updateReliabilityControls);
+for(const id of ['reliabilityScope','reliabilityDuration','lineNoise','lineLoss','lineClock'])$(id).addEventListener('change',updateReliabilityControls);
 $('reliabilityExport').addEventListener('click',()=>{
  if(!reliabilityResult?.completedCalls)return;if(reliabilityUrl)URL.revokeObjectURL(reliabilityUrl);
  reliabilityUrl=URL.createObjectURL(new Blob([JSON.stringify(reliabilityResult,null,2)],{type:'application/json'}));

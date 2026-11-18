@@ -482,6 +482,24 @@ cover the maximum 135-second training/traffic/drain budget at ±100 ppm.
 The clean path bypasses the clock filter. G.711 codewords and the 160-sample
 callback cadence remain unchanged (V.90 §5).
 
+### File traffic (2026-11-19)
+
+"Traffic per call" also offers *The payload file, both ways*. Each call then
+sends the file chosen or generated under 02 / Your payload (at most 65536
+bytes) from caller to answerer and from answerer to caller at the same time,
+in place of the timed pseudorandom streams. The receiver-side check compares
+every byte against the file, and any byte past its end counts as a mismatch.
+A call passes when both copies are complete and exact within 120 simulated
+seconds of CONNECT; otherwise it fails with "File did not arrive both ways".
+The table gains *Avg file time* (CONNECT to both copies complete, passing
+calls). Goodput there is both copies' bits over that time. The export gives
+the file's name, size and CRC-32, and each call's `fileBytes` and
+`fileSeconds`. The worst-case budget is 60 + 120 = 180 s. At ±100 ppm that
+is 18 ms of drift, inside the 32 ms lookback above. Measured on a clean
+line, 64 KB of random bytes each way takes 16.72 s over V.34 (62,714 bit/s),
+18.00 s over V.90 (58,254 bit/s) and 11.70 s over V.92 (89,622 bit/s), 9/9
+calls passing in the browser.
+
 The reliability regression runs two 30-second calls per mode, verifies over
 50,000 bytes in each direction on every call, and checks round ordering,
 summary arithmetic and directional rates. A separate 60-second V.92 Full

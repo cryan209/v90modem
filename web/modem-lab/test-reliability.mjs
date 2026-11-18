@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {runReliability} from './dist/engine-pair.mjs';
+import {runReliability,crc32,FILE_LIMIT} from './dist/engine-pair.mjs';
 
 for(const settings of [{modes:[32]},{modes:[90,90]},{repeats:0},{durationSeconds:45},{startup:{v8:false}},{startup:{line:{noiseDb:30}}}]){
  let started=false;
@@ -35,6 +35,19 @@ const call=long.calls[0];assert.ok(call.passed,JSON.stringify(call));assert.equa
 assert.ok(call.verifiedBytes>600000);assert.equal(call.callerSentBytes,call.answererReceivedBytes);
 console.log('PASS: sustained 60-second V.92 full-startup transfer at 80-ms delay exceeds 600000 verified bytes');
 
+{
+ let state=11;const file=Uint8Array.from({length:FILE_LIMIT},()=>(state=(Math.imul(state,1664525)+1013904223)>>>0)>>>24);
+ await assert.rejects(runReliability({file:{file:new Uint8Array(FILE_LIMIT+1),name:'big'}}),/File exceeds/);
+ const r=await runReliability({repeats:1,file:{file,name:'r.bin'}});
+ assert.equal(r.status,'complete');assert.equal(r.durationSeconds,null);assert.deepEqual(r.file,{name:'r.bin',bytes:FILE_LIMIT,crc32:crc32(file).toString(16).padStart(8,'0')});
+ for(const c of r.calls){
+  assert.ok(c.passed,JSON.stringify(c));assert.equal(c.mismatchBytes,0);assert.equal(c.fileBytes,FILE_LIMIT);
+  assert.equal(c.callerReceivedBytes,FILE_LIMIT);assert.equal(c.answererReceivedBytes,FILE_LIMIT);assert.equal(c.sentBytes,2*FILE_LIMIT);
+  assert.ok(c.fileSeconds>0&&c.fileSeconds<120);assert.equal(c.usefulBitsPerSecond,2*FILE_LIMIT*8/c.fileSeconds);
+ }
+ for(const row of r.rows){assert.equal(row.passed,1);assert.ok(row.meanFileSeconds>0);}
+ console.log('PASS: file reliability, 64 KB both ways over '+r.calls.map(c=>`V.${c.mode} in ${c.fileSeconds.toFixed(2)} s`).join(', ')+', byte-for-byte');
+}
 const noisy=await runReliability({modes:[34],repeats:1,durationSeconds:30,startup:{line:{noiseDb:30}}});
 assert.equal(noisy.completedCalls,1);assert.equal(noisy.calls[0].requestedTrafficSeconds,30);
 if(noisy.calls[0].passed){assert.equal(noisy.calls[0].sentBytes,noisy.calls[0].receivedBytes);assert.equal(noisy.calls[0].mismatchBytes,0);}

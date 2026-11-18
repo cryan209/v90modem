@@ -153,7 +153,7 @@ reference-data/artifacts/jafb-500	77	41692304	v90.c
 reference-data/artifacts/k56flex-response-20261009	38	16226094	docs/mica_qam_firmware.md
 reference-data/artifacts/live-verify-231747Z	268	155535670	docs/v90_upstream_data_path.md
 reference-data/artifacts/lossretrain-ab-004426Z.log	1	2560	docs/project_history.md; docs/retrain_and_resync.md
-reference-data/artifacts/modem-lab.html	1	9846271	docs/browser_modem_demo.md; tools/package_modem_demo.py
+reference-data/artifacts/modem-lab.html	1	9851773	docs/browser_modem_demo.md; tools/package_modem_demo.py
 reference-data/artifacts/modem-showcase	81	10320906	tools/modem_showcase.py
 reference-data/artifacts/pcm	34681	20551072	docs/pcm_loopback_testing.md; tools/pcm_sweep.py
 reference-data/artifacts/rasfinder-flow-192655Z	5	3854984	modem_engine.c
