@@ -1127,3 +1127,17 @@ our J"). V.90 Phase 3 is untouched. The binary (md5 3dbc7e8d…) is kept as
 `/opt/v90ras/sip_v90_modem.d793be41`; the previous binary (fcdd1e78) is
 `sip_v90_modem.pre-d793be41`. Installed with no call or PPP interface up, then
 `v90ras` and `v90isdn` were restarted.
+
+## Deployed 876d0ed6 (2026-11-19)
+
+V.91 receive fix d68fb11e: at the robbed position found by the DIL the
+receiver clears the LSB before demapping, so a robbed-bit trunk that writes a
+1 there no longer fails B1 (`docs/v91_conformance_audit.md`, "Robbed LSB
+written as 1"). No effect on the V.90/V.34 calls this server normally takes:
+its paths have no robbed bits. 876d0ed6 itself only changes docs, the knob
+generator and comments. Built in `/root/deploy-5640b4d3` (checked out at
+876d0ed6). The binary (md5 f4cda747…) is kept as
+`/opt/v90ras/sip_v90_modem.876d0ed6`; the previous binary (d793be41,
+3dbc7e8d…) is `sip_v90_modem.pre-876d0ed6`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted; all ten
+lines re-registered.
