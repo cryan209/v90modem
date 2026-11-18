@@ -1187,6 +1187,22 @@ no CONNECT in 120 s. Open.
     is `network-clock-select 1 BRI0/1/0`), and card 1331 then locks to the
     router through controller 3. A clean rig would make the router the only
     master and every Diva port TE following it.
+  - **Router-as-master was tried and made it worse (same day, reverted).**
+    `no network-clock-select` (TopRouter backplane PLL free-running), card
+    1331 still synced from controller 3: three 600 s soaks into v90ras gave
+    no V.90 at all (V.34 16800/24000/28800, held 57/52/139 s, no IPCP),
+    against 56000 3/3 under the old chain. Slips were not measured, so the
+    cause is open; the chain hypothesis above is not supported. Controllers
+    4/7/8 could not follow as TE: with the router's BRI0/1/0, 0/1/1, 0/2/1 at
+    `layer1-emulate network` and the Diva at TE, layer 1 read ACTIVE both
+    ends but no D-channel frame ever arrived (router "output never", Diva
+    Layer2 Idle) although the Diva runtime config matched working
+    controller 3 -- most likely the cabling (crossed for Diva-NT). Restored
+    to the saved router config (`show archive config differences` empty;
+    `layer1-emulate user` needs the port shut first, and
+    `network-clock-select` needs the port reset) and the Diva backup
+    `divas_cfg.rc.bak-reclock-20261118-125009`; checks after: 8 and 7
+    41333 + IPCP, 4 28800 + IPCP, 3 V.90 54666.
   - **Our transmission is identical in the failing and working A-law arms.**
     Both take UINFO 78 from the card's INFO1a (base4 also logged a
     corrupted INFO1a with U_INFO=13, correctly rejected) and send TRN1d
