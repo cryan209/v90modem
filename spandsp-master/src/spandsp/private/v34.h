@@ -2489,6 +2489,15 @@ typedef struct
        conditioning window: a descrambler-independent front-end health check. */
     float phase3_pp_resid_sum;
     int phase3_pp_resid_count;
+    /* End-of-PP detector for plain V.34 Phase 3 (v34rx.c): 8-baud blocks of
+       the same residual, the best block so far, whether the last block stood
+       out, and the taps after the last block that did not. */
+    float phase3_pp_blk_acc;
+    int phase3_pp_blk_n;
+    float phase3_pp_blk_min;
+    bool phase3_pp_blk_high;
+    bool phase3_pp_good_valid;
+    complexf_t phase3_pp_good[V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN];
     /* Mean distance from the nearest 4-point constellation point over the TRN
        refine window, normalised by the point radius.  Small means the symbols
        are clean and any TRN failure is a mapping/descrambler choice; large

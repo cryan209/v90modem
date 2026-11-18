@@ -1820,3 +1820,34 @@ Live against the Courier with tracking on, 31200 was confirmed on all 4 calls
 that reached data (35.0-35.1 dB; ATI6 reads 21600/31200), with no echo moves.
 The fifth call stalled in Phase 3 after our J, which is the separate, earlier
 problem.
+
+### The Courier's Phase 3 stall after our J: PP conditioning ran into TRN (2026-11-18, fixed)
+
+On 3 of 9 calls the Courier never got past Phase 3 (tk-1..3, tr-1, tr-8): our
+receiver found the Courier's S, but its Phase 3 TRN decoded 54-60% ones (white)
+and J was never found.
+
+The cause is the equalizer's supervised conditioning on PP. It runs 232 bauds
+from the PP lock. PP lasts 288T (§10.1.3.6), so this assumes the lock comes
+early in PP.
+
+- **tr-8:** the lock came 139 bauds after we started looking. The 8-baud
+  residual settled at 0.25, then rose to 1.1-1.5 from conditioning baud 192:
+  PP had ended and the window was training on TRN. The window's mean residual
+  was 0.69, against 0.20 on calls that connect.
+- **Why trimming by the lock time is wrong:** the V.90 receiver's onset trim
+  was the obvious fix, but our S detection lands anywhere in the far S, so the
+  lock time cannot say where PP began. Trimming broke
+  `v34_duplex_test 3000 9600` at delay 7 (slow.list:85): it locks just as late,
+  yet its PP starts late and needs all 232 bauds.
+
+Fix (`v34rx.c`, plain V.34 only): detect the end of PP instead. Two 8-baud
+blocks in a row above max(0.5, 3x the best block), from baud 128 on, end the
+conditioning on the taps from before the first of them.
+
+- **Replays:** tr-8 and tr-1 stop at bauds 208/200 and confirm the Courier's
+  J. tr-9 and the duplex row never trigger, so they are unchanged.
+- **Live:** 10 of 10 Courier calls reached data, 7 at 31200 within a 30 s
+  hold; before the fix, 3 of 9 calls stalled. The "PP ended" line is
+  flow-level, so the live logs do not show which calls it fired on.
+- **Tests:** fast tier 747/747; slow tier 25/26, only the known x2 row failing.

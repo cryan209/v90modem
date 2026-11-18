@@ -9054,6 +9054,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->duration = s->phase3_pp_skip;
                 memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
                 s->phase3_pp_obs = 0;
+                s->phase3_pp_blk_acc = 0.0f;
+                s->phase3_pp_blk_n = 0;
+                s->phase3_pp_blk_min = 1.0e9f;
+                s->phase3_pp_blk_high = false;
+                s->phase3_pp_good_valid = false;
                 s->phase3_pp_match = 0;
                 /* Freeze AGC — the equalizer will now be conditioned with known
                    PP symbols at the current magnitude.  Freezing prevents AGC from
@@ -9134,9 +9139,60 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     {
                         s->phase3_pp_resid_sum += sqrtf(dre*dre + dim*dim)/den;
                         s->phase3_pp_resid_count++;
+                        s->phase3_pp_blk_acc += sqrtf(dre*dre + dim*dim)/den;
+                        s->phase3_pp_blk_n++;
                     }
                 }
                 v34_rx_tune_equalizer(s, sym, &pp_target);
+                /* Plain V.34: stop at the end of PP (288T, 10.1.3.6).  The
+                   conditioning runs 232 bauds from the lock, which assumes the
+                   lock came early in PP; when it comes late the window runs
+                   into TRN and trains against the wrong reference.  Against
+                   the USR Courier (2026-11-18) the lock came 139 bauds after
+                   we began looking, the 8-baud residual settled at 0.25 and
+                   then rose to 1.1-1.5 from baud 192, the window's mean was
+                   0.69-0.77, Phase 3 TRN then decoded 54-60% ones (white) and
+                   J was never found: 2 of 9 calls stalled after our J.  The
+                   lock time cannot say where PP began (our S detection lands
+                   anywhere in the far S), so watch for the end instead: two
+                   8-baud blocks in a row well above the best block end the
+                   conditioning, on the taps from before the first of them. */
+                if (!s->v90_mode  &&  !s->hdx_primary_resync  &&  s->phase3_pp_blk_n >= 8)
+                {
+                    float blk = s->phase3_pp_blk_acc/(float) s->phase3_pp_blk_n;
+                    bool high;
+
+                    s->phase3_pp_blk_acc = 0.0f;
+                    s->phase3_pp_blk_n = 0;
+                    if (blk < s->phase3_pp_blk_min)
+                        s->phase3_pp_blk_min = blk;
+                    /*endif*/
+                    high = pp_baud >= 128
+                        &&  blk > fmaxf(0.5f, 3.0f*s->phase3_pp_blk_min);
+                    if (high  &&  s->phase3_pp_blk_high  &&  s->phase3_pp_good_valid)
+                    {
+                        cvec_copyf(s->eq_coeff, s->phase3_pp_good,
+                                   V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 3: PP ended at conditioning baud %d (block residual %.3f, best %.3f); taps from before it restored\n",
+                                 pp_baud, blk, s->phase3_pp_blk_min);
+                        pp_baud = PHASE3_PP_TRAIN_BAUDS;
+                        s->duration = PHASE3_PP_TRAIN_BAUDS;
+                    }
+                    else
+                    {
+                        if (!high)
+                        {
+                            cvec_copyf(s->phase3_pp_good, s->eq_coeff,
+                                       V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+                            s->phase3_pp_good_valid = true;
+                        }
+                        /*endif*/
+                        s->phase3_pp_blk_high = high;
+                    }
+                    /*endif*/
+                }
+                /*endif*/
                 /* V.34 10.1.3.6 PP is not QPSK: equation 10-1 uses points at
                    multiples of 30 degrees.  The generic primary-training
                    carrier loop below snaps to the nearest four-point symbol,
