@@ -1141,3 +1141,15 @@ generator and comments. Built in `/root/deploy-5640b4d3` (checked out at
 3dbc7e8d…) is `sip_v90_modem.pre-876d0ed6`. Installed by rename with no call
 or PPP interface up, then `v90ras` and `v90isdn` were restarted; all ten
 lines re-registered.
+
+## Deployed 20742534 (2026-11-19)
+
+The robbed-LSB fix moved from `modem_engine.c` into the shared `v91.c`
+decoders: the LSB is cleared in every interval whose CP constellation is
+odd-only (`docs/v91_conformance_audit.md`, "Robbed LSB written as 1"). Same
+effect on a live call, and still none on the V.90/V.34 calls this server
+takes. Built in `/root/deploy-5640b4d3` (checked out at 20742534). The binary
+(md5 2dd8beb4…) is kept as `/opt/v90ras/sip_v90_modem.20742534`; the previous
+binary (876d0ed6, f4cda747…) is `sip_v90_modem.pre-20742534`. Installed by
+rename with no call or PPP interface up, then `v90ras` and `v90isdn` were
+restarted; all ten lines re-registered.
