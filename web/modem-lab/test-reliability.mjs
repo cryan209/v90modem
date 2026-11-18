@@ -58,11 +58,20 @@ console.log('PASS: sustained 60-second V.92 full-startup transfer at 80-ms delay
  const quiet=await runReliability({modes:[34,90,92],repeats:1,file:{file,name:'q.bin'},startup:{line:{loopNoiseDb:70}}});
  for(const c of quiet.calls){assert.ok(c.passed,JSON.stringify(c));assert.equal(c.mismatchBytes,0);}
  assert.equal(quiet.startup.line.loopNoiseDb,70);
+ // -76 dBm0: needs the analogue role's nearest-point slicer (V.90 downstream)
+ // and tolerant Phase 3 slot levels (V.92 S-bar-d), both Quick and full startup.
+ for(const v92Startup of ['quick','full']){
+  const mid=await runReliability({modes:[90,92],repeats:1,file:{file,name:'m.bin'},startup:{v92Startup,line:{loopNoiseDb:60}}});
+  for(const c of mid.calls){assert.ok(c.passed,`${v92Startup} `+JSON.stringify(c));assert.equal(c.mismatchBytes,0);}
+ }
+ // -66 dBm0: V.92 Quick needs the 4-sigma precoded upstream CPd margin (v90.c).
+ const v92mid=await runReliability({modes:[92],repeats:1,file:{file,name:'u.bin'},startup:{v92Startup:'quick',line:{loopNoiseDb:50}}});
+ assert.ok(v92mid.calls[0].passed,JSON.stringify(v92mid.calls[0]));
  const loud=await runReliability({modes:[34,92],repeats:1,file:{file,name:'n.bin'},startup:{line:{loopNoiseDb:30}}});
  const v34=loud.calls.find(c=>c.mode===34),v92=loud.calls.find(c=>c.mode===92);
  assert.ok(v34.passed,JSON.stringify(v34));assert.ok(v34.txRate<33600,'V.34 should fall back under -46 dBm0 loop noise');
  if(!v92.passed){assert.equal(v92.usefulBitsPerSecond,null);assert.ok(v92.failureReason);}
- console.log(`PASS: loop noise, -86 dBm0 all three pass; -46 dBm0 V.34 ${v34.txRate}/${v34.rxRate} passes, V.92 ${v92.passed?'passes':'fails honestly ('+v92.failureReason+')'}`);
+ console.log(`PASS: loop noise, -86 dBm0 all three pass, -76 dBm0 V.90 and V.92 (Quick and full) pass, -66 dBm0 V.92 Quick passes; -46 dBm0 V.34 ${v34.txRate}/${v34.rxRate} passes, V.92 ${v92.passed?'passes':'fails honestly ('+v92.failureReason+')'}`);
 }
 const noisy=await runReliability({modes:[34],repeats:1,durationSeconds:30,startup:{line:{noiseDb:30}}});
 assert.equal(noisy.completedCalls,1);assert.equal(noisy.calls[0].requestedTrafficSeconds,30);

@@ -514,8 +514,10 @@ against the µ-law digital milliwatt (rms 16017), that reference is
 −16.1 dBm0, so `loopNoiseDb` 70/60/50/40/30 is −86/−76/−66/−56/−46 dBm0. It
 cannot be combined with the V.34 receiver-line noise. Results: V.34 stays at
 33600 down to −66 dBm0 and passes at 28800 at −46 dBm0. V.90 and V.92 pass
-only at −86 dBm0; see v90_analogue_role.md ("Downstream demap is
-exact-match").
+at −86 and −76 dBm0 (the latter since the analogue role's nearest-point
+slicer and V.92's tolerant Phase 3 slots, 2026-11-19) and connect but stall
+from −66 dBm0; see v90_analogue_role.md ("Downstream decision under loop
+noise").
 
 The reliability regression runs two 30-second calls per mode, verifies over
 50,000 bytes in each direction on every call, and checks round ordering,

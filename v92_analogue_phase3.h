@@ -30,6 +30,11 @@ typedef struct {
     v90_dil_desc_t dil;
     uint32_t upstream_rate_mask; /* Table 20, 19 bits for 24000..48000 */
     bool cleardown;              /* 9.11: send drn = 0 in this side's CPu */
+    /* Compare Phase 3's slot levels with tolerance (V.90 §8.4.4) even on a
+     * G.711 bearer: behind a codec on a two-wire line the received Ucode
+     * wanders by a step, as the V.90 analogue role already allows.  0 keeps
+     * the exact digital-bearer test.  v92a_init_line() always tolerates. */
+    bool tolerant_slots;
 } v92a_config_t;
 
 /* Symbols of unusable Sd that v92a_init_line() reads as the 9.3.2.4

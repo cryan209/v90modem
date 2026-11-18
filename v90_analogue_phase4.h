@@ -151,6 +151,9 @@ const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s);
  * that ignored CPt produces nothing else, which is a different failure from
  * one that has not started transmitting. */
 int v90_analogue_phase4_demap_failures(const v90_analogue_phase4_t *s);
+/* Codewords the level-tolerant slicer moved to the nearest constellation
+ * point before the demap (0 with level_tolerance 0). */
+int v90_analogue_phase4_sliced_codewords(const v90_analogue_phase4_t *s);
 /* Breakdown of the above.  A codeword outside the named constellation says the
  * far end is not using the points we asked for; a modulus overflow says every
  * codeword was legal but the frame addressed more than K bits' worth of them,

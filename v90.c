@@ -1183,8 +1183,19 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
 /* With precoder coefficients in the CPd (6.4.2) the sigma is the feedback
  * equaliser's, and data mode then measures it: 24.6 DS0 designed, 22-24
  * in data.  4.0 on it designs 32000; forced against slmodemd (28 October,
- * 120 s each) 33333, 34666, 36000 and 37333 all rejected no frame. */
-#define V92_UPSTREAM_MARGIN_PRECODED 3.0
+ * 120 s each) 33333, 34666, 36000 and 37333 all rejected no frame.
+ *
+ * 4.0, not 3.0, since 2026-11-19.  TRN2u is 4-point PAM at high levels,
+ * where G.711's steps are wide enough to absorb loop noise ahead of the
+ * network A/D, so its sigma can be mostly equaliser residual while data's
+ * small points take the whole noise.  Browser lab, -66 dBm0 analogue-loop
+ * noise, V.92 Quick Connect: designed on TRN2u sigma 4.39 DS0, data measured
+ * 6.7 DS0, and at 3.0 the 48000 upstream rejected 2,105 frames in 350 s
+ * (64 KB file incomplete in 600 s); at 4.0 it kept 48000 and rejected none
+ * (file in 20.4 s).  The cost, live against slmodemd (3 alternated pairs,
+ * 2026-11-19): upstream 36000 -> 34666, both arms 0 frames rejected in
+ * 120 s (docs/v92_quick_connect.md). */
+#define V92_UPSTREAM_MARGIN_PRECODED 4.0
 
 /* V.92 Table 30: "the digital modem shall design the modulation parameters
  * assuming that, when the prefilter output multiplied by G has a

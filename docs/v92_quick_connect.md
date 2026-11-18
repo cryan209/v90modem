@@ -1037,3 +1037,30 @@ endpoint/driver scripts and per-call server/client archives); vmhost keeps
 `/root/v92-upstream-sweep/`. Independent archive grading rechecks payload
 bytes, rates, recovery traces and RTP accounting. Server, peer, endpoint and
 host-driver processes were confirmed stopped after the final unforced control.
+
+## Precoded upstream margin raised to 4σ (2026-11-19)
+
+`V92_UPSTREAM_MARGIN_PRECODED` (v90.c) is now 4.0, up from 3.0, matching
+the unprecoded margin. The digital side designs the CPd from the TRN2u σ.
+TRN2u is 4-point PAM at high levels, where G.711's steps are wide enough
+that loop noise ahead of the network A/D rarely moves a codeword, so that σ
+can be mostly equaliser residual. Data's small points take the whole noise.
+
+In the browser lab, with −66 dBm0 of analogue-loop noise and Quick Connect,
+the CPd was designed on σ 4.39 DS0 and data measured 6.7 DS0. At 3.0 the
+48000 upstream rejected 2,105 frames in 350 s, and a 64 KB file never
+finished in 600 s. At 4.0 it kept 48000, rejected no frames, and moved the
+file in 20.4 s. An 8.0 scratch build also rejected none, which is how
+spacing was confirmed as the lever. Clean and −76 dBm0 lines keep
+48000/56000.
+
+**Live cost, measured 2026-11-19 against slmodemd** (Proxmox rig, CT 100
+slmodemd_map vs CT 117, `/root/margin_ab.sh`, 3 alternated pairs, 150 s,
+PQC=0, \N3, payload both ways). Every call connected V.92 54666/54667, and
+both arms rejected 0 upstream frames in 120 s of data (rms distance to the
+nearest level 23.0–23.6 DS0). Lines carried were the same: A 28,200–28,400,
+B 28,150–28,550 each way. The only difference was the PCM upstream rate: A
+(3.0) chose 36000 on all three calls and B (4.0) chose 34666 on all three,
+one step lower (−3.7%), not the 32000 the old comment predicted. A better
+fix would measure σ at the levels data uses, rather than at TRN2u's, and
+return the margin to 3.0.

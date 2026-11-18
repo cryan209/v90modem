@@ -1231,27 +1231,63 @@ ISI card's numbers: both answer V.34 only (no PCM in V.8) and reach V.34 31200
 data, and nothing on them runs the echo menu any more, so its V.90 echo rows
 report 0 echoes.
 
-## Downstream demap is exact-match, so it fails under loop noise (2026-11-19)
+## Downstream decision under loop noise: nearest-point slicer (2026-11-19)
 
 The browser lab's analogue-loop noise model (`loopLine` in
 `web/modem-lab/dist/engine-pair.mjs`) expands each codeword, adds Gaussian
 noise and requantises to µ-law, as the ATA or CO codec would. Under that
-noise our analogue role's downstream breaks long before V.34 does. 64 KB file
-each way, one call per point, clean otherwise:
+noise our analogue roles broke long before V.34. The table shows a 64 KB file
+each way, one call per point, before and after the fixes below:
 
-| Loop noise | V.34 | V.90 (ours both ends) | V.92 |
+| Loop noise | V.34 | V.90 before → after | V.92 before → after |
 |---|---|---|---|
-| −86 dBm0 | pass, 33600 | pass, 31200/56000 | pass, 48000/56000 |
-| −76 dBm0 | pass, 33600 | 31200/52000, **downstream 2,680 of 65,536 bytes in 120 s**; upstream complete | no connection |
-| −71 dBm0 | pass, 33600 | 31200/50666, stalls the same way | no connection |
-| −66 dBm0 | pass, 33600 | 31200/48000, B1d 253 bit errors / 39 demap failures, disconnect | no connection |
+| −86 dBm0 | pass, 33600 | pass, 31200/56000 → same | pass, 48000/56000 → same |
+| −76 dBm0 | pass, 33600 | 31200/52000, downstream 2,680 of 65,536 bytes in 120 s → **pass** (18.0 s) | no connection → **pass**, Quick and full (11.7 s) |
+| −66 dBm0 | pass, 33600 | 31200/48000, disconnect → connects, 16,187 bytes down | no connection → connects; full 15,042 down, Quick 9,942 up |
+| −56 dBm0 | pass, 33600 | no connection → no connection | no connection → connects at 37333/38666, stalls |
 | −46 dBm0 | pass, 28800 | no connection | no connection |
 
-Cause: `v90_analogue_phase4.c:757`. When a received Ucode is not in the
-requested constellation, `v90_demap_*_frame` returns ≤0 and the whole frame is
-counted as a demap failure. Nothing slices to the nearest enabled point, so
-one quantisation step of noise on a small level loses a frame, and the DIL
-rate choice (52000 at −76 dBm0) does not leave enough distance for an exact
-match. A receiver should take the nearest constellation point in the linear
-domain (§5.4 defines only the transmitter's mapping). Not yet fixed. The
-lab's reliability panel ("Line noise") reproduces it in about 30 s.
+**V.90 Phase 4 data/training decision** (`v90_analogue_phase4.c`,
+`slice_frame()`). The demap returned ≤0 for any Ucode outside the requested
+constellation and dropped the whole six-symbol frame, so one quantisation
+step of noise lost a frame. §5.4 defines only the transmitter's mapping. The
+receiver now takes the nearest enabled point, sign included, in signed
+linear level before `v90_demap_*_frame`, whenever `level_tolerance > 0` (the
+engine default via `ME_V90A_SLOT_LEVELS`, the same switch that already makes
+Ri's level test tolerant). Tolerance 0 keeps the exact test for the digital
+bearer and for offline taps. The shared `v90_demap_*_frame()` in `v90.c` is
+unchanged, because V.91 and the offline decoders use a demap failure as a
+frame-phase signal. The Phase 4 log line now reports "sliced codewords".
+`v90_analogue_rx_test`'s one-step-noise case (a sparse CPt, every mapped
+codeword moved one Ucode) gives 2,766 sliced and B1d 48/48 with 0 bit
+errors. The exact test on the same stream gives 461 demap failures and no
+B1d.
+
+**V.92 Phase 3 slot levels** (`v92_analogue_phase3.c`,
+`v92a_config_t.tolerant_slots`). The engine's G.711 path called
+`v92a_init()`, whose Sd/S̄d slot tests were exact, so at −76 dBm0 every call
+ended "Sd-bar timeout (9.5.2.2.1)". It now uses the line front end's
+tolerances (zero slots 0.2, W slots 0.35) without that front end's Sd
+straddle, under the same `ME_V90A_SLOT_LEVELS` default. V.92 Phase 4 already
+decided in the linear domain (`v90a_linear_put` with the slicer
+constellation).
+
+**CP noise margin raised to 4σ** (`v90_analogue_phase4_build_cp()`,
+`ladder[] = {4.0, 3.0, …}`, which serves V.90 and V.92 alike). At 3σ to each
+decision boundary, a noise-limited CP passed B1d and then lost LAPM frames.
+With the 4σ top rung, a 64 KB file each way:
+
+| Loop noise | V.90 | V.92 (full startup) |
+|---|---|---|
+| none, −86 dBm0 | unchanged: 31200/56000, pass | unchanged: 48000/56000, pass |
+| −76 dBm0 | 31200/52000, pass | 48000/56000, pass |
+| −66 dBm0 | 46666 (was 48000); 56,622 of 65,536 down (was 16,187) | file complete both ways in 80.3 s, but on a V.90 fallback (31200/46666) |
+| −56 dBm0 | no connection | 31200/36000; 5,486 down (Quick: 58,025) |
+
+A clean or quiet line plans the same CP as before, because the measured σ
+there is below the G.711 quantisation step. Still open: at −66 dBm0 and noisier the remaining
+loss is LAPM frames at rates that pass B1d. V.92's PCM upstream at −66 dBm0
+(Quick Connect: 7,144 of 65,536 bytes up at 48000) was the digital side's
+CPd margin, now 4σ too (v92_quick_connect.md, "Precoded upstream margin
+raised to 4σ"). With it, V.92 Quick Connect passes at −66 dBm0
+(48000/56000, 20.4 s).

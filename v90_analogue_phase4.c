@@ -24,6 +24,8 @@
 
 /* §8.6.4: R and R̄ are six-symbol sequences; R̄ is exactly four repetitions. */
 #define R_PERIOD            6
+/* §5.4: a data frame is six symbols (the size of `frame` below). */
+#define P4_FRAME_LEN        6
 #define R_BAR_SYMBOLS       24
 /* Symbols of history the R hunt matches against — two whole periods.  §9.4.1.1
  * sends Ri for at least 192T, so there is no shortage of them. */
@@ -97,6 +99,8 @@ struct v90_analogue_phase4_s {
      * were previously indistinguishable -- see the note at the failure site. */
     int      demap_out_of_constellation;
     int      demap_modulus_overflow;
+    /* Codewords the line slicer moved to a different constellation point. */
+    int      sliced_codewords;
 
     /* Plain bits, as a sliding window for the MP hunt. */
     uint8_t  bits[MP_BIT_WINDOW];
@@ -303,6 +307,11 @@ static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
     v90_codeword_decompose(s->cfg.law, c, ucode, &sign);
     return sign;
 }
+
+static bool p4_level_tolerant(const v90_analogue_phase4_t *s);
+static void slice_frame(v90_analogue_phase4_t *s,
+                        const vpcm_cp_frame_t *mapping,
+                        uint8_t out[P4_FRAME_LEN]);
 
 /*
  * Is every codeword of the buffered six-symbol frame a member of the
@@ -742,16 +751,25 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
     data_mode = (s->stage == V90A4_RX_B1D || s->stage == V90A4_RX_DATA);
     mapping = data_mode ? &s->cfg.cp
                         : s->renegotiation_training ? &s->rr_training : &s->cfg.cpt;
-    /* §5.4.5: Sr = 0 disables spectral shaping, and the signs are then
-     * §5.4.5.1's differential chain rather than the shaper's output. */
-    if (mapping->shaping_redundancy == 0) {
-        n = v90_demap_mapped_frame(s->cfg.law, mapping, s->bits_per_frame,
-                                   &s->descramble_reg, &s->prev_sign,
-                                   s->frame, out);
-    } else {
-        n = v90_demap_shaped_frame(s->cfg.law, mapping, s->bits_per_frame,
-                                   &s->descramble_reg, &s->shaper, s->frame,
-                                   out);
+    {
+        uint8_t decided[P4_FRAME_LEN];
+
+        if (p4_level_tolerant(s))
+            slice_frame(s, mapping, decided);
+        else
+            memcpy(decided, s->frame, sizeof(decided));
+        /*endif*/
+        /* §5.4.5: Sr = 0 disables spectral shaping, and the signs are then
+         * §5.4.5.1's differential chain rather than the shaper's output. */
+        if (mapping->shaping_redundancy == 0) {
+            n = v90_demap_mapped_frame(s->cfg.law, mapping, s->bits_per_frame,
+                                       &s->descramble_reg, &s->prev_sign,
+                                       decided, out);
+        } else {
+            n = v90_demap_shaped_frame(s->cfg.law, mapping, s->bits_per_frame,
+                                       &s->descramble_reg, &s->shaper, decided,
+                                       out);
+        }
     }
     /*endif*/
     if (n <= 0) {
@@ -855,6 +873,68 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
         }
     }
     return events;
+}
+
+/*
+ * The receiver's decision: map each received codeword to the nearest point of
+ * the constellation the mapping names, in signed linear level.
+ *
+ * §5.4 specifies only the transmitter's mapping; deciding which point was
+ * sent is the receiver's business.  On the digital bearer every codeword IS
+ * the one sent, and the exact test is right (level_tolerance 0).  Behind a
+ * codec on a two-wire line -- the analogue role's normal place -- loop noise
+ * requantised by the far A/D moves a level by a step or two, and an exact
+ * test throws the whole six-symbol frame away: at -76 dBm0 of loop noise,
+ * 2,680 of 65,536 downstream bytes in 120 s at 52000.  The sign is part of
+ * the decision, so a small level the noise pushed across zero comes back.
+ * Ties keep the received sign.
+ */
+static void slice_frame(v90_analogue_phase4_t *s,
+                        const vpcm_cp_frame_t *mapping,
+                        uint8_t out[P4_FRAME_LEN])
+{
+    for (int i = 0; i < P4_FRAME_LEN; i++) {
+        int constellation = mapping->dfi[i];
+        uint8_t received = s->frame[i];
+        int level = (s->cfg.law == V90_LAW_ALAW) ? alaw_to_linear(received)
+                                                 : ulaw_to_linear(received);
+        int received_sign = (received & 0x80) ? 1 : 0;
+        int best_distance = -1;
+        uint8_t best = received;
+
+        out[i] = received;
+        if (constellation >= mapping->constellation_count)
+            continue;
+        /*endif*/
+        for (int ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+            if (!vpcm_cp_mask_get(mapping->masks[constellation], ucode))
+                continue;
+            /*endif*/
+            for (int k = 0; k < 2; k++) {
+                int sign = k ? !received_sign : received_sign;
+                uint8_t cw = v90_codeword_compose(s->cfg.law, ucode, sign);
+                int point = (s->cfg.law == V90_LAW_ALAW) ? alaw_to_linear(cw)
+                                                         : ulaw_to_linear(cw);
+                int distance = abs(point - level);
+
+                if (best_distance < 0 || distance < best_distance) {
+                    best_distance = distance;
+                    best = cw;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+        if (best_distance >= 0) {
+            out[i] = best;
+            if (best != received)
+                s->sliced_codewords++;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endfor*/
 }
 
 /*
@@ -1194,6 +1274,11 @@ int v90_analogue_phase4_demap_modulus_overflow(const v90_analogue_phase4_t *s)
     return s ? s->demap_modulus_overflow : 0;
 }
 
+int v90_analogue_phase4_sliced_codewords(const v90_analogue_phase4_t *s)
+{
+    return s ? s->sliced_codewords : 0;
+}
+
 int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s)
 {
     return s ? s->trn2d_ones : 0;
@@ -1350,9 +1435,16 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
      * before ever sending Ri (run 86).  The bounded CP is a low-level subset
      * of this set, so §8.5.2's "CP no more than 3 dB above CPt" stays
      * satisfied in the safe direction.
+     *
+     * The top rung is 4 sigma to each decision boundary, not 3.  At 3 sigma
+     * a noise-limited CP passes B1d and then loses LAPM frames: in the
+     * browser lab at -66 dBm0 of loop noise V.90 planned 48000 and moved
+     * 16,187 of 65,536 downstream bytes in 120 s; at 4 sigma it planned
+     * 46666 and moved 56,622.  On a line whose noise is below the G.711
+     * step the measured sigma is ~0 and both rungs give the same CP.
      */
     {
-        static const double ladder[] = { 3.0, 2.0, 1.5, 1.0, 0.5, 0.0 };
+        static const double ladder[] = { 4.0, 3.0, 2.0, 1.5, 1.0, 0.5, 0.0 };
         size_t li;
         bool got = false;
 

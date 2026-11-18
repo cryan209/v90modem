@@ -97,8 +97,8 @@ static v92a_t *init(const v92a_config_t *cfg, bool line)
         .dil_coverage = 1.0,
         /* V.90 §8.4.4: equalization leaves residuals in the zero slots;
          * acquisition tests their level, not an exact digital zero octet. */
-        .zero_slot_fraction = line ? 0.2 : 0,
-        .w_slot_tolerance = line ? 0.35 : 0,
+        .zero_slot_fraction = (line || cfg->tolerant_slots) ? 0.2 : 0,
+        .w_slot_tolerance = (line || cfg->tolerant_slots) ? 0.35 : 0,
         /* The line front end (v92_analogue_audio.c) receives Sd through the
          * v90a_sd_fit() taps, a minimum-norm fit constrained only at Sd's
          * harmonics (1333 Hz and 4000 Hz, V.90 §8.4.4).  Off those it is

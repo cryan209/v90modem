@@ -19295,6 +19295,14 @@ static void prepare_v90_analogue_phase3_locked(void)
             .lu = 6000, .digital_max_tx_dbm0 = -16,
             .dil = g_v90a_dil, .upstream_rate_mask = 0x7ffff
         };
+        /* The V.90 analogue role's default (ME_V90A_SLOT_LEVELS, above):
+         * a codec on a two-wire line moves Sd's levels by a step, and an
+         * exact test then never finds S̄d (§9.5.2.2.1 timeout at -76 dBm0
+         * of loop noise in the browser lab). */
+        {
+            const char *v = getenv("ME_V90A_SLOT_LEVELS");
+            pcm.tolerant_slots = !(v && *v == '0');
+        }
         if (g_v90a_peer.valid)
             pcm.digital_max_tx_dbm0 = vpcm_analogue_peer_max_power(&g_v90a_peer);
         g_v92a = v92a_init(&pcm);
@@ -19745,7 +19753,7 @@ static void me_v90_analogue_phase4_progress_locked(void)
         last = stage;
         ME_LOG("[ME] V.90 analogue Phase 4 RX: %s (Ri %dT, TRN2d %dT/%d ones, "
                "MP %d frames, B1d %d/48 frames with %d bit errors, "
-               "%d demap failures)\n",
+               "%d demap failures, %d sliced codewords)\n",
                v90_analogue_phase4_stage_name(stage),
                v90_analogue_phase4_r_symbols(p4),
                v90_analogue_phase4_trn2d_symbols(p4),
@@ -19753,7 +19761,8 @@ static void me_v90_analogue_phase4_progress_locked(void)
                v90_analogue_phase4_mp_frames(p4),
                v90_analogue_phase4_b1d_frames(p4),
                v90_analogue_phase4_b1d_bit_errors(p4),
-               v90_analogue_phase4_demap_failures(p4));
+               v90_analogue_phase4_demap_failures(p4),
+               v90_analogue_phase4_sliced_codewords(p4));
         trace_phase("V90a P4 RX %s", v90_analogue_phase4_stage_name(stage));
     }
     /*endif*/

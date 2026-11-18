@@ -1809,6 +1809,150 @@ static void test_phase4_receive(int sr)
     free(stream);
 }
 
+/*
+ * The receiver's decision behind a codec on a two-wire line.  A sparse CPt
+ * (every fourth Ucode, 20..124) is mapped through §5.4, then every mapped
+ * codeword is moved one Ucode step, as loop noise requantised by the far
+ * A/D does.  With level tolerance the nearest-point slicer must recover
+ * every frame: MP, Ed, and B1d's known plaintext with no bit errors.  The
+ * exact test (tolerance 0, right on a DS0) must lose those frames instead --
+ * which is what stalled V.90 downstream at -76 dBm0 of loop noise.
+ */
+static void run_phase4_one_step_noise(double tolerance, bool expect_recovery)
+{
+    v90_analogue_phase4_config_t cfg;
+    v90_analogue_phase4_t *rx;
+    v90_shaped_rx_state_t zero;
+    vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t cp;
+    uint8_t mp_bits[204];
+    uint8_t data_plain[49*64];
+    uint8_t *plain;
+    uint8_t *stream;
+    unsigned events = 0;
+    const int r_reps = 32;
+    const int r_bar_reps = 4;
+    const int trn2d_frames = 400;
+    int bits_per_frame;
+    int mp_nbits;
+    int frames;
+    int prefix;
+    int len;
+    int n;
+    int b1_n;
+
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 12;
+    cpt.shaping_redundancy = 0;
+    cpt.constellation_count = 1;
+    for (int u = 20; u <= 124; u += 4)
+        vpcm_cp_mask_set(cpt.masks[0], u, true);
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        cpt.dfi[i] = 0;
+    cp = cpt;
+    cp.v90_compatibility = true;
+    cp.drn = 1;
+
+    bits_per_frame = cpt.drn + 8;
+    mp_nbits = build_mp_type1(mp_bits, 14, true);
+    frames = trn2d_frames + (mp_nbits + bits_per_frame - 1)/bits_per_frame + 2;
+    prefix = (r_reps + r_bar_reps)*6;
+    len = prefix + (frames + 49)*6;
+    plain = calloc((size_t) frames*bits_per_frame, 1);
+    stream = calloc((size_t) len, 1);
+    if (plain == NULL  ||  stream == NULL) {
+        printf("  FAIL: out of memory\n");
+        failures++;
+        free(plain);
+        free(stream);
+        return;
+    }
+    memset(plain, 1, (size_t) trn2d_frames*bits_per_frame);
+    memcpy(plain + trn2d_frames*bits_per_frame, mp_bits, (size_t) mp_nbits);
+
+    put_r_pattern(stream, r_reps, V90_LAW_ULAW, 40, false);
+    put_r_pattern(stream + r_reps*6, r_bar_reps, V90_LAW_ULAW, 40, true);
+    memset(&zero, 0, sizeof(zero));
+    n = v90_generate_phase4_codewords(V90_LAW_ULAW, &cpt, &zero, plain, frames,
+                                      stream + prefix, len - prefix);
+    memset(data_plain, 1, 48*(cp.drn + 20));
+    for (int i = 0; i < cp.drn + 20; i++)
+        data_plain[48*(cp.drn + 20) + i] = (uint8_t)(i & 1);
+    memset(&zero, 0, sizeof(zero));
+    b1_n = v90_generate_phase4_codewords(V90_LAW_ULAW, &cp, &zero, data_plain,
+                                         49, stream + prefix + n,
+                                         len - prefix - n);
+    CHECK(n == frames*6  &&  b1_n == 49*6, "could not generate the downstream");
+    /* One Ucode step on every mapped symbol, alternating up and down; the
+     * nearest enabled point is still the one sent (spacing is four). */
+    for (int i = prefix; i < prefix + n + b1_n; i++) {
+        int ucode;
+        int sign;
+
+        v90_codeword_decompose(V90_LAW_ULAW, stream[i], &ucode, &sign);
+        ucode += (i & 1) ? 1 : -1;
+        stream[i] = v90_codeword_compose(V90_LAW_ULAW, ucode, sign);
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = 48;
+    cfg.cpt = cpt;
+    cfg.cp = cp;
+    cfg.level_tolerance = tolerance;
+    if ((rx = v90_analogue_phase4_init(&cfg)) == NULL) {
+        printf("  FAIL: Phase 4 receiver did not initialise\n");
+        failures++;
+        free(plain);
+        free(stream);
+        return;
+    }
+    for (int off = 0; off < prefix + n + b1_n; off += 160) {
+        int take = prefix + n + b1_n - off;
+
+        if (take > 160)
+            take = 160;
+        events |= v90_analogue_phase4_put(rx, stream + off, take);
+    }
+    if (expect_recovery) {
+        CHECK((events & V90A4_RX_EVENT_MP) != 0, "MP lost to one-step noise");
+        CHECK((events & V90A4_RX_EVENT_ED) != 0, "Ed lost to one-step noise");
+        CHECK((events & V90A4_RX_EVENT_DATA) != 0,
+              "B1d never released data under one-step noise");
+        CHECK(v90_analogue_phase4_b1d_bit_errors(rx) == 0,
+              "B1d had %d bit errors after slicing",
+              v90_analogue_phase4_b1d_bit_errors(rx));
+        CHECK(v90_analogue_phase4_demap_failures(rx) == 0,
+              "%d frames failed to demap after slicing",
+              v90_analogue_phase4_demap_failures(rx));
+        CHECK(v90_analogue_phase4_sliced_codewords(rx) > 0,
+              "the slicer moved no codewords");
+    } else {
+        CHECK(v90_analogue_phase4_demap_failures(rx) > 0,
+              "the exact test accepted out-of-constellation codewords");
+        CHECK(v90_analogue_phase4_sliced_codewords(rx) == 0,
+              "the exact test sliced %d codewords",
+              v90_analogue_phase4_sliced_codewords(rx));
+    }
+    printf("  tolerance %.2f: events=0x%X, %d demap failures, %d sliced, "
+           "B1d %d frames / %d bit errors\n",
+           tolerance, events, v90_analogue_phase4_demap_failures(rx),
+           v90_analogue_phase4_sliced_codewords(rx),
+           v90_analogue_phase4_b1d_frames(rx),
+           v90_analogue_phase4_b1d_bit_errors(rx));
+    v90_analogue_phase4_free(rx);
+    free(plain);
+    free(stream);
+}
+
+static void test_phase4_one_step_noise(void)
+{
+    printf("§5.4 receiver decision: one-Ucode-step noise on a sparse CPt\n");
+    run_phase4_one_step_noise(0.35, true);
+    run_phase4_one_step_noise(0.0, false);
+}
+
 /* V.90 9.3.2.8 / Table 15: an unmeasured fallback must leave useful
  * analogue spacing without relying on an equiprobable power estimate. */
 static void test_zero_dil_signal_headroom(void)
@@ -2486,6 +2630,7 @@ int main(int argc, char *argv[])
     for (int sr = 0; sr <= 3; sr++)
         test_phase4_receive(sr);
     test_phase4_foreign_downstream();
+    test_phase4_one_step_noise();
     test_phase4_cp_from_measurement();
     test_zero_dil_signal_headroom();
     test_tone_b_retrain_detector();
