@@ -1726,6 +1726,20 @@ the grid. It fails without the latch.
   11.6 completing both ways; before, the Courier fell back to an 11.5
   retrain on 4 of 5 (and 3 of 4) calls. Fast 747/747, slow 25/26 (the
   known x2 slow.list:67).
+- **The step-downs are our fall-forward probe (2026-11-18, later).** About
+  10 s into data the Courier opens an 11.6; our answer turns a 35-36 dB
+  data-mode reading into a probe and asks 31200 for our receive direction.
+  From the Courier, 31200 at 3429 decodes WHITE at once (0.66-0.68) every
+  time it has been negotiated (nr-2, lt-notrack-1/2, rn calls), not
+  marginally; the back-off 11.6 that follows ends in Courier retrains. The
+  same probe passes in an engine pair at 3429 (31200 confirmed at 37.2 dB,
+  with and without TRN), our 3429/31200 mapping matches the 1996 Table 10
+  (K=29, M=13/15), and 33600 at 3429 decodes from slmodemd -- so why the
+  Courier's 31200 is white is NOT known. With `ME_V34_FALL_FORWARD=0`: 3 of 3
+  Courier calls clean (40/40 lines, 0 Blers, 0.04-0.08 from the grid). The
+  Courier's own 9.9 dB SNR / 115 Blers call (nr-1) was the echo canceller's
+  one-round-trip jump instead (below); its "Recv level" bimodality
+  (-14.5/-17.7 dBm) is not ours: our TX tap reads -5.0 dBm0 in every call.
 - **Still open on the Courier:** (a) one call had four Courier-opened 11.6s
   about 3 s apart, every one completing, its receive rate stepping down to
   9600: its receiver dislikes our transmit after them. (b) Our responder's
