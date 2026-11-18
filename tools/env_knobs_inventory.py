@@ -2,6 +2,8 @@
 """Regenerate docs/env_knobs.md: every environment variable the code reads.
 
 Usage: tools/env_knobs_inventory.py > docs/env_knobs.md   (from the repo root)
+       tools/env_knobs_inventory.py --check   (fails if the committed doc differs;
+       in tests/fast.list, so hand edits and unregenerated knobs are caught)
 
 Finds names passed as string literals to getenv(), parse_env_int(), env_or(),
 V34_DIAG_GETENV() and v34_diag_flag().  A name read through any other path
@@ -13,6 +15,7 @@ is classified by name.
 """
 
 import glob
+import io
 import os
 import re
 import subprocess
@@ -167,7 +170,7 @@ def classify(name):
         return "diagnostic"
     if re.search(r"DUMP|_LOG|LOG_|TRACE|DEBUG|_TAP|TAP$|VERBOSE|CAPTURE|STATS|PRINT|_DIAG|DIAG_", name):
         return "diagnostic"
-    if re.search(r"AFTER_MS|FORCE|INJECT|DISRUPT|_HOLD|HOLD$|TEST|_PROBE$|SIMULAT", name):
+    if re.search(r"AFTER_MS|FORCE|INJECT|DISRUPT|_HOLD|HOLD$|TEST|_PROBE$|SIMULAT|_SIM_", name):
         return "test hook"
     return "switch"
 
@@ -209,9 +212,16 @@ def main():
     for text in read_all(files):
         setters.update(re.findall(r'\bsetenv\(\s*"([A-Z][A-Z0-9]*_[A-Z0-9_]+)"', text))
 
+    # \bNAME\b matches exactly when NAME is a whole \w+ run, so one word set
+    # per corpus gives the same answer as a regex per name, in a fraction
+    # of the time (it keeps --check inside the fast tier).
+    words = {}
+
     def used(name, texts):
-        rx = re.compile(r"\b%s\b" % re.escape(name))
-        return any(rx.search(t) for t in texts)
+        key = id(texts)
+        if key not in words:
+            words[key] = set(w for t in texts for w in re.findall(r"\w+", t))
+        return name in words[key]
 
     settings = dict(SETTINGS)
     rows = []
@@ -285,4 +295,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--check"]:
+        real, sys.stdout = sys.stdout, io.StringIO()
+        main()
+        generated, sys.stdout = sys.stdout.getvalue(), real
+        with open("docs/env_knobs.md") as f:
+            committed = f.read()
+        if generated != committed:
+            sys.stderr.write("docs/env_knobs.md is stale or hand-edited: run\n"
+                             "  python3 tools/env_knobs_inventory.py > docs/env_knobs.md\n"
+                             "and put any description in a comment at the read site.\n")
+            sys.exit(1)
+        print("env_knobs.md matches the source")
+    else:
+        main()

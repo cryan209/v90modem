@@ -8704,6 +8704,7 @@ static int v34_reneg_trn_bauds(const v34_state_t *s)
 
         if (init_ms < 0)
         {
+            /* 11.6 initiator: ms of TRN before MP (default 0; the Courier ignores MP after TRN) */
             const char *e = getenv("ME_V34_RENEG_INIT_TRN_MS");
 
             init_ms = (e  &&  e[0])  ?  atoi(e)  :  0;
@@ -9223,6 +9224,7 @@ static void v34_tx_get_mp_rates_measured(v34_state_t *s, int *bit_rate_a_to_c, i
            (11.4.1.1.3).  For A/Bs of whether a peer's projection is
            conservative; not a setting. */
         {
+            /* Diagnostic, default off: =1 offers our c2a ceiling, not the answerer's INFO1a projection */
             const char *e = getenv("ME_V34_MP_C2A_NO_PROJECTION");
 
             if (e  &&  e[0] == '1'  &&  !s->tx.v90_v34_fallback)

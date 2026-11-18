@@ -11996,6 +11996,7 @@ static float v34_p4_trn_coh_latch(void)
 
     if (cache < 0.0f)
     {
+        /* Phase 4 TRN coherence at which DD-LMS keeps its taps to the end of TRN (default 0.5) */
         const char *value = getenv("ME_V34_P4_TRN_COH_LATCH");
 
         cache = value  ?  strtof(value, NULL)  :  0.5f;
