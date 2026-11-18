@@ -617,8 +617,9 @@ whole 300 s**, where every call before died at ~21 s.  11 renegotiations each:
 (rf-bbs-7: 178 report windows, none above 0.3); the rest got no E and
 recovered through 11.5.  LAPM stayed connected throughout.
 
-**Still open:** the first renegotiation of a call is the one that fails (both
-calls).  Offline on `rf-bbs-7` (valid: before any divergence) the peer's MP
+**Still open (superseded 2026-10-17 and 2026-11-18, see "The first failed
+renegotiation is a callback stall" below):** the first renegotiation of a
+call is the one that fails (both calls).  Offline on `rf-bbs-7` (valid: before any divergence) the peer's MP
 there arrives with scattered bit errors under all four conditioning modes, and
 the TRN ones-lock fades 81% -> 53% where `rf-bbs-5`'s first holds 68%.  Not
 understood.  Why the RasFinder renegotiates every ~22 s at all is also not
@@ -914,6 +915,21 @@ after the -O2 move alone); `V34_MP_RX_DUMP` and the filtered log are
 byte-identical before and after; `make test-fast` 576/576.  Not live-verified:
 the next RasFinder call should show no `slow media callback` at the first
 reneg's MP entry and a first reneg that completes.
+
+**Live, 2026-11-18, against the Diva cards (the RasFinder was off).** Wired
+Mac mini, b4162243, plain V.34 dialling the cards on A-law account 2905
+(`ME_MODE=v34 ME_V34_RENEG_AFTER_MS=<n> RF_EXT=79x0 RF_USER=2905
+tools/soak/rasfinder_call.sh`). Three calls, each with one forced §11.6 as the
+first renegotiation of the call: 7930 at 15 s, 7920 at 15 s, 7930 at 8 s
+into data mode. All three completed, 2.44-2.46 s from our S to DATA
+(S, S-bar, TRN, MP, E), and stayed at 31200. Distance to grid was 0.105-0.125
+both before and after. No `slow media callback`. The worst media
+callback was 4.1 ms in any phase (it had been 105-132 ms). The card's PPP
+LCP frames reached the PTY byte-identical across each renegotiation (10-12
+frames, one distinct body). Not covered: here we opened the renegotiation
+and the card answered it. The RasFinder case is the peer opening it, with us
+on the `v34_answer_rate_renegotiation()` path. That still needs one
+RasFinder call.
 
 ## B1 guard had no tolerance against the TRN estimate (2026-10-17)
 
