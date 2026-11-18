@@ -99,6 +99,9 @@ def main() -> int:
         "--robbed-phase", type=int, default=None,
         help="simulate a robbed-bit trunk on both receive paths at this cadence phase (0-5)")
     parser.add_argument(
+        "--robbed-lsb", choices=("0", "1", "alt"), default="0",
+        help="value the simulated trunk writes into the robbed LSB: 0, 1, or alternating")
+    parser.add_argument(
         "--retrain", action="store_true",
         help="caller starts a retrain 1.5 s into data mode (8.4); payload must flow after it")
     parser.add_argument(
@@ -154,7 +157,9 @@ def main() -> int:
     label = "bidirectional PTY payload over SIP/RTP"
     if args.robbed_phase is not None:
         child_env["V91_SIM_ROBBED_RX"] = str(args.robbed_phase)
-        label += f", simulated robbed-bit trunk phase={args.robbed_phase}"
+        child_env["V91_SIM_ROBBED_LSB"] = {"0": "0", "1": "1", "alt": "2"}[args.robbed_lsb]
+        label += (f", simulated robbed-bit trunk phase={args.robbed_phase}"
+                  f" lsb={args.robbed_lsb}")
 
     answerer_env = dict(child_env)
     caller_env = dict(child_env)

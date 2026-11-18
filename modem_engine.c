@@ -2002,21 +2002,16 @@ static int g_v91_loop3_n;
 static int me_set_loop3(int on);
 static void v91_live_apply_loop3_locked(void);
 static bool g_v91_data_rx_synced;
-/* Robbed-cadence frame alignment.  A robbed-bit trunk steals the LSB of
- * every sixth codeword at a fixed cadence; the data mapper protects only
- * frame interval 5 (odd Ucodes), so each transmitter must align its data
- * framing to the cadence its receiver observed.  The receiver measures
- * the cadence during DIL reception, converts it to peer-stream
- * coordinates (the DIL always starts at position 760 of the peer's
- * startup script), and requests alignment through the low bits of the
- * CP upstream_rate_mask field (0 = none, 1..6 = phase + 1). */
-#define V91_LIVE_DIL_PEER_START 760
+/* Robbed-bit trunks.  A robbed-bit trunk overwrites the LSB of every sixth
+ * codeword.  The DIL receiver finds which intervals (v91_rx_dil_codewords);
+ * the CP we send restricts them to odd Ucodes (7.2, per-interval
+ * constellations), and g_v91_rx_robbed_phase -- that position in our
+ * absolute RX count -- is where the receive path clears the LSB before
+ * demapping (v91_live_receive_codewords_locked). */
 static long long g_v91_tx_abs_pos;
 static long long g_v91_rx_abs_pos;
 static long long g_v91_rx_dil_start_abs;
 static int g_v91_rx_robbed_phase;   /* robbed cadence on our RX path, -1 = none */
-static int g_v91_tx_align_phase;    /* peer-requested cadence for our TX, -1 = none */
-static bool g_v91_data_tx_aligned;
 static bool me_v91_control_channel(void);
 static bool g_v91_tx_data_live;           /* our transmitter is past B1 (8.2.1.11) */
 static bool g_v91_rx_data_live;           /* our receiver is past the peer's B1 (8.2.1.12) */
@@ -2044,6 +2039,10 @@ static long long g_v91_cleardown_done_abs = -1;
 static long long g_v91_tx_b1_end_abs;   /* TX position just after our B1, -1 = not yet */
 static long long g_v91_rx_b1_end_abs;   /* RX position just after the peer's B1 */
 static int g_v91_sim_robbed_phase;  /* env V91_SIM_ROBBED_RX, -1 = off */
+/* env V91_SIM_ROBBED_LSB: what the simulated trunk writes into the robbed
+ * LSB.  0 = clear it (the old behaviour), 1 = set it, 2 = alternate 1/0 on
+ * successive robbed frames, like A and B signalling bits that differ. */
+static int g_v91_sim_robbed_lsb;
 
 static int v91_live_append(uint8_t *dst, int cap, int pos,
                            const uint8_t *src, int len)
@@ -2258,8 +2257,6 @@ static void v91_live_reset(void)
     g_v91_rx_abs_pos = 0;
     g_v91_rx_dil_start_abs = 0;
     g_v91_rx_robbed_phase = -1;
-    g_v91_tx_align_phase = -1;
-    g_v91_data_tx_aligned = false;
     g_v91_tx_b1_end_abs = -1;
     g_v91_rx_b1_end_abs = -1;
     g_v91_peer_wants_cc = false;
@@ -2270,6 +2267,7 @@ static void v91_live_reset(void)
     g_v91_tx_data_live = false;
     g_v91_rx_data_live = false;
     g_v91_sim_robbed_phase = -1;
+    g_v91_sim_robbed_lsb = 0;
     g_v91_loop3 = false;
     g_v91_loop3_req = 0;
     g_v91_loop3_n = 0;
@@ -2305,8 +2303,9 @@ static bool v91_live_begin_startup_locked(bool keep_clock)
         g_v91_rx_abs_pos = rx_abs;
     }
     /* Test hook: simulate a robbed-bit trunk on our receive path by
-     * clearing the LSB of every sixth incoming codeword at the given
-     * cadence phase (0..5). */
+     * overwriting the LSB of every sixth incoming codeword at the given
+     * cadence phase (0..5) with V91_SIM_ROBBED_LSB (see its declaration). */
+    /* Test hook: simulated robbed-bit trunk on our RX, at cadence phase 0..5 */
     sim_env = getenv("V91_SIM_ROBBED_RX");
     if (sim_env && *sim_env) {
         int phase = atoi(sim_env);
@@ -2314,9 +2313,18 @@ static bool v91_live_begin_startup_locked(bool keep_clock)
         if (phase >= 0 && phase <= 5)
             g_v91_sim_robbed_phase = phase;
     }
+    /* Test hook: value written into that robbed LSB: 0 (default), 1, 2 = alternate */
+    sim_env = getenv("V91_SIM_ROBBED_LSB");
+    if (sim_env && *sim_env) {
+        int lsb = atoi(sim_env);
+
+        if (lsb >= 0 && lsb <= 2)
+            g_v91_sim_robbed_lsb = lsb;
+    }
     g_v91_test_escape_abs = 0;
     g_v91_test_retrain_abs = 0;
     if (!keep_clock) {
+        /* Test hooks: force an 8.3 escape to V.34 / an 8.4 retrain this many ms in */
         env = getenv("V91_TEST_ESCAPE_AFTER_MS");
         if (env && atoi(env) > 0)
             g_v91_test_escape_abs = (long long)atoi(env) * 8;
@@ -3346,7 +3354,27 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
         memcpy(buf, in, (size_t)chunk);
         if (g_v91_sim_robbed_phase >= 0) {
             for (i = 0; i < chunk; i++) {
-                if ((int)((base + i) % 6) == g_v91_sim_robbed_phase)
+                long long pos = base + i;
+                int bit;
+
+                if ((int)(pos % 6) != g_v91_sim_robbed_phase)
+                    continue;
+                bit = (g_v91_sim_robbed_lsb == 2) ? (int)((pos / 6) & 1)
+                                                  : g_v91_sim_robbed_lsb;
+                buf[i] = (uint8_t)((buf[i] & 0xFE) | bit);
+            }
+        }
+        /* Once the DIL has located the robbed position, its LSB carries the
+         * trunk's signalling bit, not ours.  The CP we sent restricts that
+         * interval to odd Ucodes, whose LSB is 0 in both laws, so clearing
+         * the received LSB recovers the transmitted codeword whatever the
+         * trunk wrote (an A or B bit of 1 would otherwise turn U into U-1
+         * and fail B1 and data).  Before that point the phase is -1; the
+         * codewords between the DIL and B1 are SCR/CP, which carry their
+         * bits in the sign (7.2, 7.11), so folding them is harmless. */
+        if (g_v91_rx_robbed_phase >= 0) {
+            for (i = 0; i < chunk; i++) {
+                if ((int)((base + i) % 6) == g_v91_rx_robbed_phase)
                     buf[i] &= 0xFE;
             }
         }

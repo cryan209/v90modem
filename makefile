@@ -346,6 +346,8 @@ v90-apple-line-test: v90_analogue_rx_test
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2 --robbed-lsb 1
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2 --robbed-lsb alt
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --retrain
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --escape
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --specify-dil caller

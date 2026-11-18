@@ -181,6 +181,20 @@ Closed in the code, with the loopback suite (`vpcm_loopback_test --all-tests`),
   constellations do the job.  Live robbed-trunk simulation passes at phases 1-5
   (phase 0 still fails occasionally at the DIL stage, receive code unchanged by
   this work).
+- **Robbed LSB written as 1 (2026-11-19, FIXED).**  Every simulation used to
+  *clear* the robbed LSB, but a trunk writes its A/B signalling bit there, often
+  1.  Odd Ucodes have LSB 0 in both laws (checked over all 64 in each), so a 1
+  turned U into U-1 on the robbed interval: `V91_SIM_ROBBED_LSB=1` failed every
+  attempt at B1 (the other side then escaping to V.34 showed up as a CP decode
+  failure).  The receiver now clears the LSB at the robbed position located by
+  the DIL before demapping (`v91_live_receive_codewords_locked`), which is exact
+  because that interval carries only odd Ucodes.  `make v91-serial-pair-test`
+  runs phase 2 with LSB 0, 1 and alternating (A/B bits that differ).  Over 4
+  runs each, no attempt failed in V.91 start-up; the harness's other failures
+  (control-channel cleardown not seen, CONNECT timeouts) hit all three arms,
+  the LSB=0 arm most (7 of 10 attempts).  Not covered: the offline
+  `vpcm_loopback_test` transforms still only clear the LSB, and no real
+  robbed-bit trunk has been tested.
 - The harness: `tools/v91_serial_pair_test.py` had silently stopped selecting
   V.91 (the V.8 offer no longer advertises it by default) and passed only about
   half the time at baseline because V.42 detection raced on loopback.  It now
