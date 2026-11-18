@@ -889,6 +889,16 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # only clears it.  Same cases with the bit set and alternating (~0.1 s each).
 V91_SIM_ROBBED_LSB=1 ./vpcm_loopback_test --robbed-tests
 V91_SIM_ROBBED_LSB=2 ./vpcm_loopback_test --robbed-tests
+# The same through the live engine (both engines, closed loop, ~0.4 s each):
+# a V.91 call over a robbed trunk at phase 2 with the robbed LSB cleared, set
+# and alternating, both laws, 16 KiB each way.  Without the v91.c odd-only
+# LSB fold the set and alternating rows fail.
+./engine_pair_test --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=0 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
+./engine_pair_test --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=1 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
+./engine_pair_test --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=2 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
+./engine_pair_test --alaw --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=0 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
+./engine_pair_test --alaw --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=1 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
+./engine_pair_test --alaw --both-env ME_MODE=v91 --both-env ME_V8_ADVERTISE_V91=1 --both-env V91_SIM_ROBBED_RX=2 --both-env V91_SIM_ROBBED_LSB=2 --both-at 'AT\N0' --expect V91 --payload-random-bytes 16384 --seconds 60
 # The coupled analogue<->digital Phase 2 harness.  It is the only in-tree
 # check that both halves of the §9.2.1.1/§9.2.2.1 tone choreography mesh,
 # and it costs ~0.1 s, so it runs by default rather than staying behind

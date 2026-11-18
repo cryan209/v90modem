@@ -199,7 +199,10 @@ Closed in the code, with the loopback suite (`vpcm_loopback_test --all-tests`),
   most (7 of 10 attempts).  Offline, every robbed-bit simulation goes through
   `vpcm_v91_rob_codewords`, and `vpcm_loopback_test --robbed-tests` (13 cases,
   both laws) runs in `tests/fast.list` with `V91_SIM_ROBBED_LSB=1` and `=2`;
-  `--all-tests` keeps the cleared case.  Before the decoder change those runs
+  `--all-tests` keeps the cleared case.  The same three bit values run through
+  the live engine in `tests/fast.list` as `engine_pair_test` V.91 calls over a
+  robbed trunk (phase 2, both laws, 16 KiB each way, ~0.4 s each); with the
+  fold disabled the set and alternating rows fail.  Before the decoder change those runs
   failed at B1/Es, and one test asserted that robbing changes no codeword at
   all, which holds only when the trunk clears the bit; it now checks that
   only the robbed slot's LSB changes and that the data still decodes.  Not
