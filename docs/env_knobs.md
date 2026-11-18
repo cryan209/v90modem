@@ -131,6 +131,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_LOSS_HANGUP_RENEG_MS` | modem_engine.c | 30000 | - | back within ME_V34_LOSS_HANGUP_RENEG_MS, hang up. |
 | `ME_V34_NO_INFO1C_RETRAIN` | modem_engine.c | 0 | d | round trip, and only when the peer is holding Tone A now. |
 | `ME_V34_P4_TRN_COH` | v34rx.c |  | tdh |  |
+| `ME_V34_P4_TRN_COH_LATCH` | v34rx.c | 0.5 | tdh | coherence at which Phase 4 TRN DD-LMS keeps the taps for the rest of the segment; 0.45 loses a duplex row, 0.6 loses the rf-bbs-2 retrain |
 | `ME_V34_PHASE3_S_TIMEOUT_MS` | modem_engine.c | 0 | sdh |  |
 | `ME_V34_PHASE3_TRAIN_TIMEOUT_MS` | modem_engine.c | me_k56c_call( | d | A K56flex server trains its PCM downstream while our |
 | `ME_V34_RETRAIN_TRAINING_MS` | modem_engine.c |  | d | happened allow 120 s in all.  ME_V34_RETRAIN_TRAINING_MS=0 restores 60 s. |

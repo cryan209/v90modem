@@ -2157,6 +2157,9 @@ typedef struct
         the decisions can be trusted to train on. */
     float phase4_trn_coh_re;
     float phase4_trn_coh_im;
+    /*! Decision-directed TRN training has run on coherent decisions in this
+        segment (v34_p4_trn_coh_latch()); it keeps the taps to the end. */
+    bool phase4_trn_dd_latched;
     int phase4_cma_bauds;
     int phase4_cma_settled;
     /* V.90 9.6.1.1.1: a rate renegotiation's CP conditioning starts from a

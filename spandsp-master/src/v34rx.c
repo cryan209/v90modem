@@ -551,6 +551,7 @@ static int phase3_rx_dump_count = 0;
 
 static int v34_pp_onset_trim_enabled(void);
 static float v34_p4_trn_coh_gate(void);
+static float v34_p4_trn_coh_latch(void);
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
 #define V34_AGC_POWER_MIN               100000
 #define V34_AGC_SCALING_MIN             0.00001f
@@ -2208,6 +2209,7 @@ void v34_rx_phase4_trn_hyp_reset(v34_rx_state_t *s)
     s->phase4_trn_current_tap = -1;
     s->phase4_trn_current_order = -1;
     s->phase4_trn_current_domain = -1;
+    s->phase4_trn_dd_latched = false;
     s->phase4_trn_recent_scramble = 0;
     s->phase4_trn_recent_window_bits = 0;
     s->phase4_trn_recent_window_ones = 0;
@@ -11708,9 +11710,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         s->phase4_trn_coh_im += 0.02f*(im4 - s->phase4_trn_coh_im);
                     }
                     /*endif*/
-                    p4_trn_trusted = sqrtf(s->phase4_trn_coh_re*s->phase4_trn_coh_re
-                                         + s->phase4_trn_coh_im*s->phase4_trn_coh_im)
-                                   >= v34_p4_trn_coh_gate();
+                    float coh = sqrtf(s->phase4_trn_coh_re*s->phase4_trn_coh_re
+                                    + s->phase4_trn_coh_im*s->phase4_trn_coh_im);
+
+                    p4_trn_trusted = s->phase4_trn_dd_latched
+                                  || coh >= v34_p4_trn_coh_gate();
+                    if (p4_trn_trusted
+                        &&  s->phase4_trn_after_j >= V34_P4_TRN_DD_START
+                        &&  coh >= v34_p4_trn_coh_latch())
+                    {
+                        s->phase4_trn_dd_latched = true;
+                    }
+                    /*endif*/
                     if (!p4_trn_trusted)
                         freeze_mp_cma = false;
                     /*endif*/
@@ -11918,6 +11929,20 @@ static float v34_p4_trn_coh_gate(void)
         const char *value = getenv("ME_V34_P4_TRN_COH");
 
         cache = value  ?  strtof(value, NULL)  :  0.35f;
+    }
+    /*endif*/
+    return cache;
+}
+
+static float v34_p4_trn_coh_latch(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_P4_TRN_COH_LATCH");
+
+        cache = value  ?  strtof(value, NULL)  :  0.5f;
     }
     /*endif*/
     return cache;

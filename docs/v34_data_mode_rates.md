@@ -1607,7 +1607,7 @@ there were no errors: 2743 asks 24000 from a 33.2 dB reading, and 2800 asks
 
 Regression row in `tests/slow.list`: 2743/21600 at 42 dB, delay 5.
 
-## rf-bbs-2 replay restored; the Phase 4 TRN coherence gate fails a retrain (2026-11-18)
+## rf-bbs-2 replay restored; the Phase 4 TRN coherence gate failed a retrain (2026-11-18)
 
 The replay had three problems. Two were in how it was run, one is in the receiver.
 
@@ -1648,13 +1648,31 @@ never both:
 The z^4 phase does turn (17 -> 141 degrees over 600 symbols), but even the
 rotation-invariant measure stays at 0.1-0.4 for most of that TRN. No
 coherence threshold separates "poor but DD recovers it" here from "unlocked"
-on the duplex rows. **Open:** a gate that tells those two apart, or a better
-Phase 3 solution after an 11.5 retrain. The retrain also carries a stale
+on the duplex rows -- but the coherence DD has reached does, below. The retrain also carries a stale
 PP-residual accumulator (`phase3_pp_resid_*`, diagnostic only: 464 bauds
 reported for a 232-baud PP).
 
-Regression row in `tests/fast.list` (1.7 s): the replay with the gate off,
-as above, must enter data at 24000 and hold the first 12 reports under 0.1
-from the grid. It fails on the default gate, so it checks the data-mode
-timing path on the RasFinder's 16.5 ppm clock, not the gate.
+**Fixed (same day): a coherence latch.** The two cases differ in how coherent
+the decisions are once DD-LMS is running. On `v34_duplex_test 3000 9600
+ulaw`, the row the plain latch broke, the caller opens the gate at 0.31-0.40.
+DD-LMS on those decisions diverges (to 0.05), while CMA, with the gate shut,
+reaches lock by TRN symbol 1300. rf-bbs-2's retrain is already at 0.58 when
+DD starts. So the gate still decides at 0.35, symbol by symbol, but once
+DD-LMS has run at coherence >= `ME_V34_P4_TRN_COH_LATCH` (0.5) it keeps the
+taps to the end of the segment (`phase4_trn_dd_latched`, reset per segment
+in `v34_rx_phase4_trn_hyp_reset()`). The usable range is narrow: 0.45 loses
+the 33 dB automatic-rate 3429 u-law row, and 0.6 loses the replay. 0.5 is
+its middle.
+- rf-bbs-2 retrain TRN 4.6 -> 33.4 dB; data mode at 24000, 0.033-0.042 from
+  the grid.
+- `make test-fast` 747/747.
+- 3000/28800 u-law at 20 dB echo, delays 0-29: 30/30, as before.
+- 256-run matrix (2743-3429 baud, two rates each, both laws, delays 0-15):
+  256/256 before and after.
+- Synthetic channels only; no live call has met an 11.5 retrain on this
+  build.
+
+Regression row in `tests/fast.list` (1.7 s), now on default settings: the
+replay must enter data at 24000 and hold the first 12 reports under 0.1 from
+the grid. It fails without the latch.
 
