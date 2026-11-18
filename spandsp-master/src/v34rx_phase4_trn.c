@@ -764,6 +764,10 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
         {
             if (s->reneg_trn_optional
                 && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
+                s->reneg_peer_no_trn = true;
+            /*endif*/
+            if (s->reneg_trn_optional
+                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%% on %.1f dB symbols "
                          "at baud %d); searching for MP\n",

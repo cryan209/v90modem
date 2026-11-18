@@ -1169,6 +1169,8 @@ typedef struct
         renegotiation rather than a startup, which matters at the TRN-to-MP
         seam: 11.4 waits for the far end's J', and 11.6 has no J at all. */
     bool reneg_active;
+    /* This modem started the 11.6 renegotiation (11.6.1.1), not answered it. */
+    bool reneg_initiator;
     /*! 11.7: this renegotiation is a cleardown -- our MP asks for zero rates. */
     bool cleardown;
     /* Let the Phase-4 TRN SNR cap the receive rate this modem asks for in
@@ -1975,6 +1977,8 @@ typedef struct
        ("may then transmit signal TRN"), so MP can follow S-bar directly and
        the startup TRN ones-lock gate must not hold the receiver. */
     bool reneg_trn_optional;
+    /* In this 11.6 the far end went from S-bar straight to MP. */
+    bool reneg_peer_no_trn;
     /*! \brief Phase 4 S/S-bar alternation tracker for a caller that entered
         Phase 4 too late to see the junction: the previous differential
         dibit, the current and longest runs of strict +90/-90 alternation,

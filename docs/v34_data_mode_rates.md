@@ -1708,8 +1708,29 @@ the grid. It fails without the latch.
   0, the engine-pair bundle-loss row (`fast.list` "one §11.6 before hanging
   up") renegotiates, decodes for about 2 s at 0.12 from the grid, then both
   directions go white (0.55-0.66) and it hangs up; with 1000 ms it holds.
-  So "no TRN when we initiate" fixes the Courier but breaks our own
-  recovery. Not changed yet.
+  So "no TRN when we initiate" fixed the Courier but broke our own recovery.
+  **Why, and fixed (same day):** two defects of ours, not the missing TRN.
+  (1) The Phase 4 TRN SNR ring was never emptied, so an 11.6 (or 11.5)
+  without fresh TRN built MP's receive rate from the FIRST training's
+  reading: the row re-asked 31200 from a 37.9 dB measured 10 s earlier, on a
+  line then good for 21600. Now emptied whenever a Phase 4 receiver is
+  conditioned. (2) The bundle-loss 11.6 called the receive-rate back-off
+  AFTER starting the renegotiation, which had already cleared the
+  negotiated rates it steps from, so the back-off never ran. Now before.
+  With both, the row passes with and without `V34_TEST_RENEG_NO_TRN=caller`.
+- **Shipped:** as initiator we send MP straight after S-bar
+  (`ME_V34_RENEG_INIT_TRN_MS`, default 0); as responder we keep 1000 ms of
+  TRN unless the initiator went from S-bar straight to MP, in which case our
+  TRN ends at the receiver's no-TRN verdict (512T, about 110 ms of TRN).
+  Courier, 5 calls: all at 3429, 3 clean (40/40 lines each way) with every
+  11.6 completing both ways; before, the Courier fell back to an 11.5
+  retrain on 4 of 5 (and 3 of 4) calls. Fast 747/747, slow 25/26 (the
+  known x2 slow.list:67).
+- **Still open on the Courier:** (a) one call had four Courier-opened 11.6s
+  about 3 s apart, every one completing, its receive rate stepping down to
+  9600: its receiver dislikes our transmit after them. (b) Our responder's
+  "fall-forward probe" asked 31200 on a 35.3 dB reading, went white, and the
+  Courier retrained.
 - **Separate suspect:** the line echo canceller's tracker moved its bulk delay
   by about one round trip (+137 to +147 ms, 974 -> ~2100 samples) in most
   Courier calls, and in two of them our distance to grid rose right after it

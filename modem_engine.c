@@ -18430,13 +18430,19 @@ skip_8k_codewords:
                         if (reneg_ms < 0)
                             reneg_ms = parse_env_int("ME_V34_LOSS_HANGUP_RENEG_MS", 30000);
                         v34_clear_data_carrier_lost(g_v34);
-                        if (reneg_ms > 0 && me_v34_reneg_enabled()
+                        bool bundle_reneg = reneg_ms > 0 && me_v34_reneg_enabled()
                             && !g_v34_peer_ignores_reneg
                             && (g_v34_bundle_reneg_ms == 0
-                                || now - g_v34_bundle_reneg_ms >= reneg_ms)
-                            && v34_start_rate_renegotiation(g_v34) == 0) {
-                            g_v34_bundle_reneg_ms = now;
+                                || now - g_v34_bundle_reneg_ms >= reneg_ms);
+
+                        /* Back off BEFORE starting: starting the 11.6 clears
+                         * the negotiated rates the back-off steps down from,
+                         * so afterwards it returned early and the 11.6
+                         * re-asked the rate that had just gone white. */
+                        if (bundle_reneg)
                             v34_rx_rate_backoff_locked();
+                        if (bundle_reneg && v34_start_rate_renegotiation(g_v34) == 0) {
+                            g_v34_bundle_reneg_ms = now;
                             g_data_loss_recovering = true;
                             ds_set_fallback_buffered(&g_data_stack, false);
                             ds_set_alternative(&g_data_stack, false);

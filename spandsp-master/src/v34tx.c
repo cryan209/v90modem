@@ -8688,6 +8688,38 @@ static int v34_reneg_trn_bauds(const v34_state_t *s)
             return 0;
         /*endif*/
     }
+    /* When WE open the renegotiation (11.6.1.1) the far end's receiver has
+       not lost us -- our B1 rate check or our own receiver asked -- so MP
+       goes straight after S-bar; 11.6.1.1.1 makes TRN optional ("may then
+       transmit").  The USR Courier (V.Everything 4.03d, 3429 baud, rig
+       2026-11-18) answers our S with S, S-bar and MP at once and never
+       acknowledged an MP of ours that followed 1000 ms or 520 ms of TRN
+       (2.3 s of its MP frames, bit 33 clear on every one) before an 11.5
+       retrain; with none it acknowledged and the call held 3429.  The
+       responder keeps the long TRN, for a peer that renegotiates to
+       resynchronise.  ME_V34_RENEG_INIT_TRN_MS sets the initiator's length. */
+    if (s->tx.reneg_initiator)
+    {
+        static int init_ms = -1;
+
+        if (init_ms < 0)
+        {
+            const char *e = getenv("ME_V34_RENEG_INIT_TRN_MS");
+
+            init_ms = (e  &&  e[0])  ?  atoi(e)  :  0;
+            if (init_ms < 0)
+                init_ms = 0;
+            else if (init_ms > 2000)
+                init_ms = 2000;
+            /*endif*/
+        }
+        /*endif*/
+        if (init_ms == 0  ||  s->tx.baud_rate < 0  ||  s->tx.baud_rate > 5)
+            return 0;
+        /*endif*/
+        return (baud_rate_parameters[s->tx.baud_rate].baud_rate*init_ms + 500)/1000;
+    }
+    /*endif*/
     bauds = PHASE4_TRN_BAUDS;
     if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
     {
@@ -8835,7 +8867,22 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                    event; in a renegotiation it cut our TRN to 512T as soon as
                    our receiver started its MP search (v34_duplex_test
                    2743/9600: 10/10 -> 7/10 over V34_DUPLEX_DELAY). */
-                if (s->tx.tone_duration >= v34_reneg_trn_bauds(s))
+                /* V.34 11.6.1.2.2: the responder's TRN is optional too.  A far
+                   end that went from S-bar straight to MP kept its receiver and
+                   wants our MP now: the USR Courier opens its own 11.6 about
+                   10 s into data that way and retrains when our MP comes
+                   after 1000 ms of TRN (rig 2026-11-18, 4 of 5 calls).  The
+                   verdict comes PHASE4_RENEG_MP_SEARCH_BAUD into the exchange;
+                   a peer that does send TRN gets the full length below. */
+                if (s->rx.reneg_peer_no_trn)
+                {
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - 11.6 rate renegotiation: peer sent no TRN; ending ours "
+                             "after %d bauds, starting MP\n",
+                             s->tx.tone_duration);
+                    mp_or_mph_baud_init(s);
+                }
+                else if (s->tx.tone_duration >= v34_reneg_trn_bauds(s))
                 {
                     /* V.34 11.6.1.1.1/11.6.1.2.2: "The modem may then transmit
                        signal TRN for a maximum of 2000 ms, followed by sequence
@@ -8949,6 +8996,15 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
     s->rx.phase4_reneg_wait_s = false;
     s->rx.reneg_frontend_retained = false;
     s->rx.reneg_trn_optional = false;
+    s->rx.reneg_peer_no_trn = false;
+    /* The TRN SNR ring measures THIS Phase 4's TRN.  Nothing emptied it, so
+       an 11.5 retrain or an 11.6 whose peer sent no TRN read the previous
+       training's SNR as its own and built MP's receive rate from it: the
+       engine-pair bundle-loss row re-asked 31200 (37.9 dB, measured 10 s
+       earlier) on a line that then carried 21600, and went white (10.1.3.9:
+       MP's rates are this exchange's). */
+    s->rx.phase4_trn_snr_fill = 0;
+    s->rx.phase4_trn_snr_pos = 0;
     s->rx.phase4_s_last_step = -1;
     s->rx.phase4_s_alt_prev = -1;
     s->rx.phase4_s_alt_run = 0;
@@ -11933,8 +11989,14 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
        already found retaining it the winner.  Reset, the equalizer started
        from zero taps 330 ms before the peer's S arrived and never locked its
        TRN (6.9 dB; rig/v90ras 2026-11-07, 7802). */
-    return start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, true,
-                                    "11.6 rate renegotiation: S, S-bar, TRN, MP");
+    int rc;
+
+    rc = start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, true,
+                                  "11.6 rate renegotiation: S, S-bar, TRN, MP");
+    if (rc == 0)
+        s->tx.reneg_initiator = true;
+    /*endif*/
+    return rc;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11978,6 +12040,7 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
              "(16T), TRN and MP\n");
 
     s->tx.reneg_active = true;
+    s->tx.reneg_initiator = false;
 
     /* 11.6.1.1.1: S goes out immediately.  Not V34_TX_STAGE_PHASE4_WAIT --
        that transmits 11.3.1.2.4's silence, which belongs to startup. */
@@ -12013,6 +12076,7 @@ static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_fr
        can follow its S-bar directly (the Win95 modems on rig/v90ras do).
        11.7 cleardown runs the same sequence, so it applies there too. */
     s->rx.reneg_trn_optional = true;
+    s->rx.reneg_peer_no_trn = false;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
