@@ -1070,3 +1070,21 @@ per arm): V.90 + LAPM/V.42bis on 12/12. Code 21: 52000/28800 6/6; code 23:
 Every B1 was accepted on its first window by the shape gate: distance
 0.344-0.427, 68.0-75.2% within 0.5 of the grid. Five of the twelve read above
 0.40, which the gate before 9ca245ef would have abandoned to a retrain.
+
+## Deployed ecb14c36 (2026-11-18)
+
+Phase 4 TRN coherence latch (`ME_V34_P4_TRN_COH_LATCH`, 0.5): once DD-LMS
+has run on coherent decisions it keeps the taps to the end of TRN, where
+a0f2450b's gate used to hand them back to blind CMA on a dip. On the
+RasFinder capture rf-bbs-2 an 11.5 retrain's TRN went from 4.6 to 33.4 dB
+(`docs/v34_data_mode_rates.md`). Built clean in the new worktree
+`/root/deploy-ecb14c36` (from `/root/v90modem`, main at ecb14c36), not in
+`/root/vpcm-fix6`. The rf-bbs-2 replay was re-run on CT 117 before install
+(copy in `/tmp/rf-bbs-2`). It matched the Mac: TRN 33.3/33.4 dB, data at
+24000, 0.034-0.042 from the grid. Binary md5 cd60dc75…, kept as
+`/opt/v90ras/sip_v90_modem.ecb14c36`; the previous binary (9ca245ef,
+6cf703d1…) is `sip_v90_modem.pre-ecb14c36`. Installed by rename, and only
+`v90ras` was restarted, with no call up; the lines registered. `v90isdn`
+shares the path but was not restarted, so it still runs 9ca245ef until its
+next restart. Not live-verified: no call has met an 11.5 retrain on this
+build.
