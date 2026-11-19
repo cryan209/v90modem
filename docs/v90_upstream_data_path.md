@@ -3563,3 +3563,33 @@ A/B saw the same (36000 at code 23). Not yet checked live: an FXS (78XX)
 caller still answering μ-law after the change. By construction it does,
 because the handler skips it and the Cisco offers PCMU first.
 
+**Why the card picks drn 9 on A-law (same day).** It is the card's own
+level model, not the line. Data-mode CP, interval 0 (μ-law call
+line0-269134 replayed with `V90_CP_ACCEPT_DUMP`; A-law from the live log;
+the same on all 5 A-law calls):
+
+| Call | Points | Linear levels sent | rms sent | Spacing (min) |
+|---|---|---|---|---|
+| μ-law | 20 | μ-law {95..17} | -11.2 dBm0 | 288 |
+| A-law, as sent | 16 | A-law tx {110..34} | -4.6 dBm0 | 832 |
+| A-law, card's codec masks | 16 | μ-law {94..22} | -10.8 dBm0 | 424 |
+
+(16-bit linear, all points equally likely, before shaping.) On A-law the
+card's CP sets the codec-constellations-differ flag. Each codec Ucode is the
+μ-law Ucode at the level of our A-law tx Ucode, minus 16: one segment,
+6.2 dB at the top. That is the offset of the 18 November A/B. So the card
+models a 6 dB pad between us and its codec. It applies our power limit
+(code 21, -11 dBm0) to the constellation in that model (-10.8) and asks us
+to send it 6 dB hotter (-4.6 dBm0 actual). There is no pad. The card's
+`SAMPLE[]` receive byte equals our transmit tap in 64110 of 64129 10-byte
+runs through data mode (call ar7-5). The card's first quarter of the call
+does not align, so DIL was not checked this way. Even inside its own model
+the card spaces points 424 apart against 288 on μ-law. The extra spacing
+goes to the inner levels (A-law codec 22, 40, 51, 59 against μ-law 17, 34,
+43, 50, 55, 60, ...). That is where A-law and μ-law Ucode n differ most:
+0.07 dB at Ucode 110, 2.2 dB at 34, 4.0 dB at 22. So a law/level misfit in
+the card's DIL analysis is the likely reason it rates the inner levels
+worse. Result: 16 points in place of 20, K 24 in place of 26 bits per
+frame, drn 9 in place of 11. Our only knob in reach is the INFO0d power code,
+which the card applies inside its model. It is untested on this path.
+
