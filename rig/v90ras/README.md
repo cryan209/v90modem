@@ -1215,3 +1215,17 @@ previous binary (96d7d278, f70d7543…) is `sip_v90_modem.pre-fa4c9779`.
 Installed by rename with no call or PPP interface up, then `v90ras` and
 `v90isdn` were restarted. Both are active and all ten v90ras lines
 re-registered.
+
+## Deployed d5788dae (2026-11-19 19:41)
+
+Analogue-initiated V.90 §9.6 rate renegotiation now completes. The digital
+modem's Rd answer is handled per §9.6.2.1.4 instead of restarting our
+transmitter (`docs/v90_analogue_role.md`, "Analogue-initiated §9.6 fixed").
+This only matters when this server is the analogue modem and has
+`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS` set; it is not set on v90ras.
+Offline-verified only. Built in `/root/deploy-5640b4d3` (checked out at
+d5788dae). The binary (md5 fb5d4393…) is kept as
+`/opt/v90ras/sip_v90_modem.d5788dae`, and the previous binary (fa4c9779,
+728f14dd…) is `sip_v90_modem.pre-d5788dae`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
+active and all ten v90ras lines re-registered.
