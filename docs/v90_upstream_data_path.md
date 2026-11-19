@@ -3495,3 +3495,43 @@ in a μ-law tap, and look at our received samples there for a discontinuity
 production, if Asterisk's transcoding is the cause, A-law callers could be
 answered in A-law.
 
+**Cause: double companding on the outer points (same day).** Our μ-law
+receive stream is a pure image of the A→μ table: no code outside it after
+media starts, so there is no PLC, gain or mixing. The live tap replays to
+exactly the live count (110 shell errors, `v90_upstream_replay`, handover
+21.0 s), so the impairment is in the samples. The errors are isolated, about
+1.4 a second spread evenly, not bursts. Here is the equalized-symbol error
+to the odd-integer lattice by radius (`ME_V90_UPSTREAM_SYM_DUMP`, 232k
+symbols per call):
+
+| Radius | μ-law rms / p99.9 | A-law rms / p99.9 |
+|---|---|---|
+| 0-8 | 0.271 / 0.835 | 0.266 / 0.938 |
+| 16-24 | 0.350 / 1.052 | 0.347 / 0.994 |
+| 32-40 | 0.469 / 1.289 | 0.447 / 1.093 |
+| 40+ | 0.630 / 1.347 | 0.478 / 1.131 |
+
+Both grow with radius: that is G.711's proportional quantization noise. The
+transcoded path requantizes on a grid of about the same step offset from
+the card's own, so the large samples carry two roundings. That fattens the
+tail on the outer points only, which is where decisions cross a boundary,
+while the mean SNR barely moves (36.6 against 36.8 dB). So our rate choice,
+from the 4-point SNR before MP and the data-mode SNR in fall-forward
+("needs 35.9 dB" for 31200), cannot see it.
+
+Upstream capped at 28800 (`ME_V90_UPSTREAM_MAX_BPS=28800`), μ-law, ctrl 7,
+three calls: shell errors 21/22/18 against 110/133/122 at 31200, our REJs
+5/8/4 against 19/24/19, pings 57/57, 50/56, 57/57. That is a fifth of the
+errors, not none. In these calls the card also started its downstream at
+drn 14 and fell back to 11 with its own §9.6 about 24 s in.
+
+**Why production always transcodes ISDN callers.** The v90ras accounts
+(2951-2960) use Asterisk's `endpoint-modem` template,
+`allow=!all,clearmode,ulaw`, which has been μ-law only on purpose since
+2026-08-13. The `toprouter-bri` trunk allows only A-law. A-law end to end
+exists only on 2906-2908 (`endpoint-modem-alaw`). The Diva card also needs
+INFO0d bit 39 = 0 (we declare μ-law while sending A-law) to train V.90 on
+A-law, as the 18 November A/B in `v90_analogue_role.md` found. So
+answering ISDN callers in A-law needs both an Asterisk change and that
+card workaround on the A-law path.
+
