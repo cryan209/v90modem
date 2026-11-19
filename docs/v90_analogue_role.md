@@ -1361,3 +1361,28 @@ and 20 of 20 pings returned on each card (RTT 405-433 ms on the 7920, 386-433 ms
 noise, so this only shows the codec-threshold planner costs no rate on a clean
 line. Neither §9.6 path ran: the card never asked for a renegotiation, and we
 did not set `ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS`.
+
+**Analogue-initiated §9.6 live on both Diva cards (2026-11-19).** All calls
+were A-law at 56000/31200, with the renegotiation started 12 s into data mode
+(`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS=12000`) and 40 pings over PPP. Each was
+one call, and each completed without a retrain:
+
+| card | variant | renegotiation | pings |
+|---|---|---|---|
+| 7920 | plain (S, S̄, CP) | Rd at +359 ms; B1d 48/48, 0 bit errors | 40/40 |
+| 7930 | plain | the same | 40/40 |
+| 7920 | CPs echo reconditioning (`..._SILENCE=1`) | Rd, CPs′, SCR, CP, Rt; B1d 48/48, 0 errors | 40/40 |
+| 7930 | CPs echo reconditioning | the same | 40/40 |
+
+The ping round trip reached 2.8 s during the renegotiation, against about
+400 ms otherwise.
+
+**Fall-forward (2c158288).** `ME_V90_ANALOGUE_STARTUP_DRN=<n>` is a diagnostic
+that caps the startup CP. Phase 3's full CP is kept as the one §9.6
+renegotiates from, so a clean line has a faster rate to move up to. On the
+7920 with n=10, data started at 40000/31200. At +12 s we renegotiated with the
+drn 22 CP (CP redesign `drn 22 -> 22`, 0 flips). The renegotiation's B1d
+decoded 48 of 48 frames with 0 bit errors with the drn 22 CP. B1d's frame
+layout depends on drn, so that decode shows the card had moved to 56000.
+There was no retrain, and 40 of 40 pings returned. The engine pair agrees:
+the digital side's data mapper goes from drn 10 to drn 22 (fast.list row).
