@@ -9998,6 +9998,29 @@ static void me_v92_rn_poll_locked(void)
         me_v92_data_slicer_locked();
 }
 
+/* §9.6 rate renegotiation, V.90: once the exchange is over, carry the
+   renegotiated rates up to the DTE side.  Called every data-mode block, so
+   it only acts on a change. */
+static void me_v90_track_reneg_rates_locked(void)
+{
+    int downstream = (v90_data_bits_per_frame(g_v90)*8000)/6;
+    int upstream = g_v34 ? v34_get_current_bit_rate(g_v34) : 0;
+
+    if (downstream > 0 && downstream != g_report_tx_rate) {
+        ME_LOG("[ME] V.90 9.6 rate renegotiation %d: downstream %d -> %d bps\n",
+               v90_rate_renegotiation_count(g_v90), g_report_tx_rate, downstream);
+        g_report_tx_rate = downstream;
+        g_data_connect_rate = downstream;
+        ds_set_line_bit_rate(&g_data_stack, downstream);
+    }
+    if (upstream > 0 && g_v34_upstream_data_started
+        && upstream != g_report_rx_rate) {
+        ME_LOG("[ME] V.90 9.6 rate renegotiation %d: upstream %d -> %d bps\n",
+               v90_rate_renegotiation_count(g_v90), g_report_rx_rate, upstream);
+        g_report_rx_rate = upstream;
+    }
+}
+
 /* The new B1u is found: the renegotiation is over on the upstream too. */
 static void me_v92_rn_rx_done_locked(void)
 {
@@ -20645,6 +20668,16 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                                              "after INFO1a");
             return false;
         }
+
+        /* §9.6: a rate renegotiation changes the data rates in data mode
+         * (new drn from the CPs exchanged in §9.6.1.1/§9.6.2, new upstream
+         * from MP), and nothing else tells the layers above.  V.92's §9.8
+         * path does this in me_v92_rn_rx_done_locked(); for V.90 the CONNECT
+         * rate, +MRR and LAPM's bit rate (its timers and [V42STAT]) kept
+         * the startup rate for the whole call. */
+        if (!g_v92_active && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_pending(g_v90))
+            me_v90_track_reneg_rates_locked();
 
         /* §9.4.2.5: B1 follows E, so an upstream receiver that has acquired
          * B1 has had its E, whichever detector did or did not report one.

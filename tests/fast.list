@@ -734,6 +734,9 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # 56000 CP into a -50 dB call, so the redesign must thin it (drn 22 -> 11) and
 # the renegotiation's B1d must come out clean.
 ./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --loop-noise-db 50 --hold-seconds 20 --call-log "9.6.2 CP redesign: codec-flip sigma" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"
+# §9.6 must carry the new downstream rate to LAPM/CONNECT/+MRR: start at drn 8
+# so the redesign has a faster rate (drn 11) to move to.
+./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --call-env ME_V90_ANALOGUE_STARTUP_DRN=8 --answer-env ME_V90_RENEG_AFTER_MS=6000 --answer-env V42_STATS=2 --loop-noise-db 50 --hold-seconds 20 --answer-log "9.6 rate renegotiation 1: downstream 37333 -> 41333" --answer-log "V42STAT] answerer rate=41333" --call-nolog "retrain 1"
 ./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --loop-noise-db 50 --hold-seconds 20 --call-log "9.6.2 CP redesign: codec-flip sigma" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"
 sh -c './engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --call-env V90A_CP_DUMP="$TMPDIR/cp.bin" --seconds 30 > /dev/null; test -s "$TMPDIR/cp.bin" && ./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --call-env V90A_CP_LOAD="$TMPDIR/cp.bin" --loop-noise-db 50 --hold-seconds 20 --call-log "drn 22 -> 11" --call-log "B1d 48/48 frames with 0 bit errors" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"'
 # V.90 §9.6.2.1: the analogue role initiates.  The digital modem's Rd is its

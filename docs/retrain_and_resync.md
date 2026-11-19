@@ -2151,5 +2151,16 @@ The likely reading is that after a renegotiation the digital side started
 echo-reconditioned §9.6 about 10.4 s later, from its startup plan. Not
 established: what the trace codes mean, and whether the card would still
 renegotiate if our Rd had left it at drn 11. Nothing on our side needs
-fixing for this. Cosmetic: `[V42STAT] rate=` keeps the startup 41333 across
-§9.6.
+fixing for this.
+
+`[V42STAT] rate=` used to keep the startup 41333 across §9.6, and so did the
+CONNECT rate (`g_data_connect_rate`), +MRR and the bit rate LAPM converts
+its timers with. V.92's §9.8 path refreshed them in
+`me_v92_rn_rx_done_locked()`, but the V.90 §9.6 path never did. The engine now
+reads drn and the V.34 upstream rate in every V.90 data block once the
+exchange is over (not pending, not active, E received). On a change it logs
+`[ME] V.90 9.6 rate renegotiation N: downstream A -> B bps` and calls
+`ds_set_line_bit_rate()`. Engine pair with
+`ME_V90_ANALOGUE_STARTUP_DRN=8`: drn 8 -> 11, and `[V42STAT] rate=` goes
+37333 -> 41333. The analogue role's V42STAT reports its own transmit
+(upstream) rate, which a downstream-only §9.6 leaves alone.

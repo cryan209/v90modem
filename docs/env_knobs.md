@@ -69,7 +69,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_G711_CAPTURE` | line_supervisor_test.c, modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 
-## Live-path switches (153, 18 with no test/script/doc reference)
+## Live-path switches (153, 17 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -145,7 +145,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_4POINT_FIXED_FIT` | v34rx.c |  | d | ME_V90_4POINT_FIXED_FIT=1 keeps the pre-MP measurement on the single fixed |
 | `ME_V90_B1_DEADLINE_MS` | modem_engine.c | 15000 | d | ME_V90_B1_DEADLINE_MS replaces the 15 s (0 disables the deadline). |
 | `ME_V90_B1_DEADLINE_RTD_MS` | modem_engine.c | 1000 | - |  |
-| `ME_V90_B1_MISMATCH_OFF` | v34rx.c |  | - | A template right everywhere but at a symbol or two -- a Diva card's B1 |
+| `ME_V90_B1_MISMATCH_OFF` | v34rx.c |  | d | A template right everywhere but at a symbol or two -- a Diva card's B1 |
 | `ME_V90_B1_VALIDATE_FIXED` | v34rx.c |  | - |  |
 | `ME_V90_DIL_AUTOTERMINATE_CYCLES` | v90.c |  | tsdh | is separate (v90_handle_rx_event). |
 | `ME_V90_DIL_HYP_PER_CALL` | modem_engine.c |  | d |  |
@@ -352,7 +352,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_TRACE` | v34rx.c | &cache | dh |  |
 | `V34_TRN_RX_DUMP` | v34rx.c |  | d | V34_TRN_RX_DUMP (diagnostic): one line per Phase 4 TRN symbol -- |
 | `V42_FRAME_LOG` | v42.c |  | d | V42_FRAME_LOG=1: one stderr line per received or transmitted U/S frame |
-| `V42_STATS` | v42.c |  | sdh |  |
+| `V42_STATS` | v42.c |  | tsdh |  |
 | `V90A_CP_DUMP` | v90_analogue_phase3.c |  | td | a replay of one call and wrong for a server taking many. |
 | `V90A_RX_CODEWORD_DUMP` | modem_engine.c |  | d | handed TRN1d and asked to hunt Sd". |
 | `V90A_RX_TRACE` | modem_engine.c |  | - | a period whether or not anything changed. |
