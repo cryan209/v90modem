@@ -1386,5 +1386,8 @@ decoded 48 of 48 frames with 0 bit errors with the drn 22 CP. B1d's frame
 layout depends on drn, so that decode shows the card had moved to 56000.
 There was no retrain, and 40 of 40 pings returned. The 7930 gave the same
 result in one call: 40000 at startup, then 56000 after the renegotiation,
-with B1d 48/48 and 0 bit errors, and 40 of 40 pings. The engine pair agrees:
+with B1d 48/48 and 0 bit errors, and 40 of 40 pings. With CPs echo
+reconditioning (`..._SILENCE=1`) the fall-forward also completed on both cards,
+one call each: 40000 to 56000, the card's Rt and R̄t received, B1d 48/48 with
+0 bit errors, no retrain, 40 of 40 pings. The engine pair agrees:
 the digital side's data mapper goes from drn 10 to drn 22 (fast.list row).
