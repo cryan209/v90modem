@@ -252,7 +252,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_ANALOGUE_INFO1D_WAIT_MS` | v34tx.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_JA_SD_BAR_MS` | v90_analogue_tx.c |  | d | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_LD` | modem_engine.c | 0 | d | V.90 analogue role: configuration and the open real-loop investigation |
-| `ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS` | modem_engine.c | 0 | d | V.90 analogue role: configuration and the open real-loop investigation |
+| `ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS` | modem_engine.c | 0 | td | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_SCR` | modem_engine.c | 0 | d | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_SD_LINE` | modem_engine.c | 1 | dh | V.90 analogue role: configuration and the open real-loop investigation |
 | `ME_V90_ANALOGUE_SD_LINE_MIN` | modem_engine.c |  | dh | V.90 analogue role: configuration and the open real-loop investigation |

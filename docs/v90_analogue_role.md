@@ -1329,10 +1329,24 @@ re-offered the Phase 3 CP unchanged. Now:
   nothing to remove, and the renegotiation completes without a retrain.
 - Clean: 0 flips, CP unchanged.
 
-**Open, found here.** The analogue-*initiated* §9.6
-(`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS`) fails against our own digital side
-even on a clean line, before and after this change. The digital answers with
-Rd, and the Rd→R̄d handler calls `v90_analogue_tx_rate_renegotiate()` while
-our transmitter is already in the renegotiation. That call fails, Phase 4 is
-marked failed, and the §9.4.2 deadline retrains the call. There is no
-fast.list row for that path.
+**Analogue-initiated §9.6 fixed (same day).** Started by us
+(`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS`), it had never completed against our
+digital side, even on a clean line. The digital modem answers our S/S̄/CP with
+Rd (§9.6.1.2.2). The Rd→R̄d handler took that as a digital-initiated
+renegotiation and called `v90_analogue_tx_rate_renegotiate()`, but our
+transmitter was mid-CP, not in data. The call failed, Phase 4 was marked
+failed, and the §9.4.2 deadline retrained the call 40 ms later.
+
+§9.6.2.1.4 says the initiator keeps sending CP and goes on as §9.4.2.3. So
+when we initiated, R̄d now changes nothing on the transmit side. The CP isn't
+redesigned again either: the one already on the wire is the one B1d uses.
+
+Engine pair, all completing with no retrain, a clean renegotiation B1d, and
+the digital side's "downstream data mode resumed after B1d":
+- u-law and A-law, clean and at −50 dB.
+- The CPs/Rt echo-reconditioning cycle (`..._SILENCE=1`), clean and at
+  −50 dB.
+- The dense-CP load at −50 dB, where the redesign at initiation went
+  drn 22 → 11.
+
+Three fast.list rows cover it.

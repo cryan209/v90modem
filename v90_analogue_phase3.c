@@ -253,7 +253,17 @@ static void redesign_rr_cp(v90_analogue_phase3_t *s)
  */
 static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
 {
-    if (events & V90A4_RX_EVENT_RD_BAR) {
+    if ((events & V90A4_RX_EVENT_RD_BAR) && s->rr_active) {
+        /*
+         * §9.6.2.1.4: we initiated, and Rd-to-R-bar-d is the digital modem's
+         * answer.  Keep sending the CP already going out and go on as §9.4.2.3
+         * (the receiver has already moved to TRN2d/MP).  Starting the
+         * transmitter's renegotiation again here failed -- it is mid-CP, not
+         * in data -- marked Phase 4 failed, and the §9.4.2 deadline retrained
+         * every analogue-initiated renegotiation, clean line or not.  Nor is
+         * the CP redesigned again: the one on the wire is the one B1d uses.
+         */
+    } else if (events & V90A4_RX_EVENT_RD_BAR) {
         /* V.90 §9.6.2.2.2: replace V.34 data at the preserved symbol seam
          * with S/S̄/CP.  The next B1 handoff will seed the newly received MP. */
         redesign_rr_cp(s);
