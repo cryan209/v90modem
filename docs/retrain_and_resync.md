@@ -2164,3 +2164,20 @@ exchange is over (not pending, not active, E received). On a change it logs
 `ME_V90_ANALOGUE_STARTUP_DRN=8`: drn 8 -> 11, and `[V42STAT] rate=` goes
 37333 -> 41333. The analogue role's V42STAT reports its own transmit
 (upstream) rate, which a downstream-only §9.6 leaves alone.
+
+Live, 2026-11-19, one-off 567ae54d server as 2902, with
+`ME_V90_RENEG_AFTER_MS=12000` and one 60 s call per controller:
+
+- **Ctrl 8:** `[V42STAT] rate=` went 41333 -> 45333 after our §9.6 (drn 14).
+  It went back to 41333 after the card's own §9.6 (drn 11). 0 retransmissions
+  in 75 reports, 45/56 pings.
+- **Ctrl 7:** the rate also went 41333 -> 45333 after our §9.6, with 0
+  retransmissions in 58 reports and 37/56 pings. The card's echo-reconditioned
+  §9.6 got through Ed, silence, Rt and MP, but its B1 never fitted (coarse
+  7.8%, fit 18.3-21.6%; the mismatch refit only runs below 20%). §9.6.1's
+  32000-symbol timer then forced a §9.5.1.1 retrain, which came back at
+  41333.
+
+This is the second card-initiated B1 on ctrl 7 since 95e15ee4, and the
+first one fitted. Tap: `artifacts/diva-rate-ctrl7` on CT 117, about
+44.8 s in.
