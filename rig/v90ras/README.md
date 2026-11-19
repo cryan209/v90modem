@@ -1184,3 +1184,21 @@ renegotiation needed. Built in `/root/deploy-5640b4d3` (checked out at
 5b506c84…) is `sip_v90_modem.pre-5a42a57a`. Installed by rename with no call
 or PPP interface up, then `v90ras` and `v90isdn` were restarted; both are
 active and all ten v90ras lines re-registered.
+
+## Deployed 96d7d278 (2026-11-19 15:48)
+
+Two analogue-role changes, both offline-verified only:
+- The V.92 9.6.2/9.8 CPu is designed on codeword flips (3bdbde9b).
+- The Phase 3 CP is planned on the codec's decision thresholds, with the
+  zero Ucode's RMS as the noise floor instead of its folded spread, which
+  read 0.60σ (96d7d278; `docs/v90_constellation_selection.md`, "Behind a
+  codec").
+
+This server is the digital side for its callers, so the analogue-role code
+only runs when it dials out as the analogue modem. The noise-floor fix is in
+the shared DIL planner. Built in `/root/deploy-5640b4d3` (checked out at
+96d7d278). The binary (md5 f70d7543…) is kept as
+`/opt/v90ras/sip_v90_modem.96d7d278`, and the previous binary (5a42a57a,
+33d5792b…) is `sip_v90_modem.pre-96d7d278`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
+active and all ten v90ras lines re-registered.
