@@ -2193,3 +2193,15 @@ engine replay of the first 52 s
 (`reference-data/artifacts/diva-v90d-peer-reneg-answer`, fast tier):
 without the mark it says "no answer within 32000 symbols"; with it, B1 is
 acquired and B1d resumes data.
+
+Live after 9d94ec3d (deployed), ctrl 7, two 60 s calls: the card opened a
+§9.6 in both, and both completed (B1 fit 100%, no timeout, rate tracked
+45333 -> 41333 and 44000 -> 41333). Pings were still poor (26/58, 22/58)
+because the card ran a full retrain of its own, which its trace logs as
+"Supervisor retrain start 20 0" rather than §9.6's "c1". In one call it
+came 10.1 s after our §9.6, in place of its usual echo-reconditioned
+renegotiation. In the other it came 12.4 s after its own renegotiation
+finished. Each retrain costs about 16 s with no data. Our side was healthy
+before both: upstream at 36 dB, and the card never REJected our downstream
+(`rej rx=0` in all 108 reports). Ctrl 8 has never shown a code-20 retrain in
+these tests. Its cause is not established, and it is not this timer.

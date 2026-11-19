@@ -1256,3 +1256,14 @@ at 567ae54d). The binary (md5 4ca0dc8d…) is kept as
 6dc3d644…) is `sip_v90_modem.pre-567ae54d`. Installed by rename with no call
 or PPP interface up (`/run/v90ras/busy` is a directory, so check that it is
 empty). Then `v90ras` and `v90isdn` were restarted, and both are active.
+
+## Deployed 9d94ec3d (2026-11-20)
+
+A §9.6 renegotiation that the peer opens now gets §9.6.1's full E window.
+Before this, the 4 s unanswered-attempt bound retrained a Diva's
+echo-reconditioned renegotiation 0.6 s before its B1 arrived. Built in
+`/root/deploy-5640b4d3` (checked out at 9d94ec3d). The binary (md5
+fddf7000…) is kept as `/opt/v90ras/sip_v90_modem.9d94ec3d`, and the previous
+binary (567ae54d, 4ca0dc8d…) is `sip_v90_modem.pre-9d94ec3d`. Installed by
+rename with `/run/v90ras/busy` empty and no PPP interface up. Then `v90ras`
+and `v90isdn` were restarted, and both are active.
