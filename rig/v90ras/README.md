@@ -1229,3 +1229,18 @@ d5788dae). The binary (md5 fb5d4393…) is kept as
 728f14dd…) is `sip_v90_modem.pre-d5788dae`. Installed by rename with no call
 or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
 active and all ten v90ras lines re-registered.
+
+## Deployed 95e15ee4 (2026-11-19 22:40)
+
+The V.90 upstream B1 fit now leaves out up to one mapping frame of symbols
+the wire disagrees with. A Diva card's B1 after a digital-initiated §9.6
+differs in its final 4D symbol, and that had bent the whole fit
+(`docs/retrain_and_resync.md`, "Cause and fix"). This runs on every V.90
+upstream acquisition, so it covers callers' own §9.6 too. Live-verified on
+Diva controllers 7 and 8 with a one-off server before the deploy: both
+renegotiations completed with no retrain. Built in `/root/deploy-5640b4d3`
+(checked out at 95e15ee4). The binary (md5 6dc3d644…) is kept as
+`/opt/v90ras/sip_v90_modem.95e15ee4`, and the previous binary (d5788dae,
+fb5d4393…) is `sip_v90_modem.pre-95e15ee4`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
+active and the lines re-registered.
