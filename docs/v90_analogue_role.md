@@ -1351,12 +1351,13 @@ the digital side's "downstream data mode resumed after B1d":
 
 Three fast.list rows cover it.
 
-**Live on the Diva 7920 (d5788dae, 2026-11-19, CT 117).** One call, A-law,
-`tools/eicon_ppp_direct.py --law alaw --mode v90 --role analogue --ext 7920
---pings 20`: first attempt, 56000/31200. The DIL planner saw the levels on the
+**Live on both Diva cards (d5788dae, 2026-11-19, CT 117).** One call to each
+card, A-law, `tools/eicon_ppp_direct.py --law alaw --mode v90 --role analogue
+--ext 7920|7930 --pings 20`. Both connected at 56000/31200 on the first
+attempt, and the two calls gave the same results below. The DIL planner saw the levels on the
 G.711 grid, used codec thresholds, and still kept drn 22 (§8.5.2). B1d was 48 of
 48 frames with 0 bit errors, with no retrain and no Tone B. PPP/PAP came up,
-and 20 of 20 pings returned (RTT 405-433 ms). The line has no measurable codec
+and 20 of 20 pings returned on each card (RTT 405-433 ms on the 7920, 386-433 ms on the 7930). The line has no measurable codec
 noise, so this only shows the codec-threshold planner costs no rate on a clean
 line. Neither §9.6 path ran: the card never asked for a renegotiation, and we
 did not set `ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS`.
