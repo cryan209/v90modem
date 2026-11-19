@@ -3591,5 +3591,21 @@ goes to the inner levels (A-law codec 22, 40, 51, 59 against μ-law 17, 34,
 the card's DIL analysis is the likely reason it rates the inner levels
 worse. Result: 16 points in place of 20, K 24 in place of 26 bits per
 frame, drn 9 in place of 11. Our only knob in reach is the INFO0d power code,
-which the card applies inside its model. It is untested on this path.
+which the card applies inside its model.
+
+**Power code does not lift it (same day).** Alternated A/B, Diva ctrl 7
+into a one-off A-law server on 2906 with v90ras's environment
+(`/root/dsrv_pwr.sh` on CT 117), two rounds, 45 s PPP holds:
+
+| `ME_V90_MAX_TX_DBM0_CODE` | Result | drn (K) | CP interval 0 tx Ucodes |
+|---|---|---|---|
+| 17 | 2/2 V.90, 38666 | 9 (24) | {114..36}, 16 points |
+| 19 | 2/2 V.90, 38666 | 9 (24) | {112..32}, 17 points |
+| 21 (production) | 2/2 V.90, 38666 (plus the smoke call) | 9 (24) | {110..34}, 16 points |
+| 23 | 2/2 V.90, 36000 | 7 (22) | {106..32}, 14 points |
+| 25 | 0/2 V.90: repeated training, 0/41 and 14/40 pings | - | - |
+
+Every arm reaching data had 0 upstream shell errors. Louder codes move the
+card's whole constellation up by a Ucode or two but leave K at 24. So drn 9
+is the card's ceiling on this path, and code 21 stays.
 
