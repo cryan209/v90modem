@@ -1457,6 +1457,9 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                 &&  plan.intervals_unprobed == 0
                 &&  training_plan.intervals_unprobed == 0) {
                 got = true;
+                fprintf(stderr, "[V90A] 8.5.2 CP planned from the DIL: drn %u at %.1f sigma%s\n",
+                        (unsigned) plan.drn, ladder[li],
+                        m->codec_grid ? ", codec thresholds (levels on the G.711 grid)" : "");
                 if (margin_out != NULL)
                     *margin_out = ladder[li];
                 break;

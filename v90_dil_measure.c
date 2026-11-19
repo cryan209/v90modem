@@ -24,6 +24,42 @@ static int dil_abs_level(v90_law_t law, uint8_t codeword)
     return v < 0 ? -v : v;
 }
 
+static double ucode_abs_level(v90_law_t law, int u)
+{
+    return (double) dil_abs_level(law, v90_codeword_compose(law, u, 1));
+}
+
+double v90_dil_codec_pair_margin(v90_law_t law, int p, int u)
+{
+    double lp, lu;
+    int first_u, last_p;
+
+    if (p < 0 || u > V90_DIL_UCODES - 1 || u <= p)
+        return 0.0;
+    lp = ucode_abs_level(law, p);
+    lu = ucode_abs_level(law, u);
+    first_u = u;
+    last_p = p;
+    for (int c = u - 1; c > p; c--) {
+        double l = ucode_abs_level(law, c);
+
+        if (lu - l < l - lp)
+            first_u = c;
+        else
+            break;
+    }
+    for (int c = p + 1; c < u; c++) {
+        double l = ucode_abs_level(law, c);
+
+        if (l - lp < lu - l)
+            last_p = c;
+        else
+            break;
+    }
+    return fmin(lu - 0.5*(ucode_abs_level(law, first_u - 1) + ucode_abs_level(law, first_u)),
+                0.5*(ucode_abs_level(law, last_p) + ucode_abs_level(law, last_p + 1)) - lp);
+}
+
 /*
  * Normalised correlation of |level| between the expected DIL and the received
  * stream at `at`.  Magnitudes rather than signed levels: a network that
@@ -201,6 +237,7 @@ bool v90_dil_measure_levels(const uint8_t *rx, const int16_t *levels,
     memset(out, 0, sizeof(*out));
     memset(slot_bad, 0, sizeof(slot_bad));
     memset(slot_n, 0, sizeof(slot_n));
+    out->codec_grid = true;
 
     for (i = 0; i < avail; i++) {
         int tx_u;
@@ -216,6 +253,8 @@ bool v90_dil_measure_levels(const uint8_t *rx, const int16_t *levels,
             continue;
         int rx_level = levels ? abs((int)levels[offset + i])
                               : dil_abs_level(law, rx[offset + i]);
+        if (rx_level != dil_abs_level(law, rx[offset + i]))
+            out->codec_grid = false;
         tally[tx_u][rx_u]++;
         rx_sum[tx_u] += rx_level;
         rx_n[tx_u]++;
@@ -273,7 +312,17 @@ bool v90_dil_measure_levels(const uint8_t *rx, const int16_t *levels,
             if (slot_cnt[u][r] > 1) {
                 double n2 = (double) slot_cnt[u][r];
                 double mean = (double) slot_sum[u][r] / n2;
-                double var = slot_sq[u][r] / n2 - mean * mean;
+                /*
+                 * Levels are folded to |level|.  Where the level sent is
+                 * zero (PCMU's Ucode 0, §8.4.1's background observations),
+                 * the spread of |noise| about its mean is only
+                 * sqrt(1 - 2/pi) = 0.60 of the noise: at -51 dB of loop
+                 * noise (rms 7.04) it read 5.2, so a "4 sigma" plan had 3.
+                 * The true level is known to be 0, so take the RMS about it.
+                 */
+                double var = out->u[u].tx_level == 0
+                    ? slot_sq[u][r] / n2
+                    : slot_sq[u][r] / n2 - mean * mean;
 
                 out->u[u].rx_sigma_slot[r] = var > 0.0 ? sqrt(var) : 0.0;
             }
@@ -531,6 +580,7 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
          * constellation points.
          */
         double prev_sigma = 0.0;
+        int prev_rx_ucode = -1;
 
         for (u = 0; u < V90_DIL_UCODES; u++) {
             int level;
@@ -573,6 +623,21 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
                 out->points_below_margin++;
                 continue;
             }
+            /*
+             * Behind a codec the received points are codec levels and the
+             * slicer loses a decision at the codec's threshold, not at the
+             * midpoint.  Two codewords apart that is half a step: at -50 dB
+             * of loop noise the V.92 CPu kept d9/db (Ucodes 38/36, 4 sigma
+             * by midpoints) and B1d decided da, the tie, as db
+             * (docs/v92_quick_connect.md).  Same sigma, codec margin.
+             */
+            if (prev_level >= 0 && m->codec_grid && noise_sigmas > 0.0
+                && v90_dil_codec_pair_margin(law, prev_rx_ucode,
+                                             m->u[u].rx_ucode_slot[i])
+                   < noise_sigmas * fmax(prev_sigma, sigma)) {
+                out->points_below_margin++;
+                continue;
+            }
             /* §§5.4.4, 5.4.6 assign an independent sign to the magnitude.
              * Both polarities must be distinguishable too. In particular,
              * PCMU's two zero codewords become the same analogue voltage. */
@@ -587,6 +652,7 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
             out->mi[i]++;
             prev_level = level;
             prev_sigma = sigma;
+            prev_rx_ucode = m->u[u].rx_ucode_slot[i];
         }
         /* Fewer than two distinguishable levels is no constellation at all,
          * and matches v90_dil_desc_validate()'s notion of a probed interval. */

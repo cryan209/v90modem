@@ -3,6 +3,7 @@
 #include "v92_trn2u.h"
 #include "v92_upstream_data.h"
 #include "v91.h"
+#include "v90_dil_measure.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,35 +250,14 @@ static double flip_sigma(const v92a4_t *s)
     return 0.5*(lo + hi);
 }
 
-/*
- * The distance from each of two neighbouring grid points p < u to where its
- * decision is lost.  On a linear input that is half their spacing.  Behind a
- * codec it is the codec's own decision threshold (midway between adjacent
- * codewords) below the first codeword that still slices to u, or above the
- * last that slices to p: points two codewords apart are then only half a step
- * from losing, because the codeword between them is a tie, and our slicer
- * gives a tie to the smaller magnitude (v90a_linear's slice_ucode()) -- d9
- * sent, da received, db decided.  Ties count against both sides.
- */
+/* The distance from each of two neighbouring grid points p < u to where its
+ * decision is lost: half their spacing on a linear input, the codec's own
+ * threshold behind one (v90_dil_codec_pair_margin()). */
 static double pair_margin(v91_law_t law, int p, int u, bool codec)
 {
-    double lp = ucode_level(law, p), lu = ucode_level(law, u);
-    int first_u = u, last_p = p;
-
     if (!codec)
-        return 0.5*(lu - lp);
-    for (int c = u-1; c > p; c--) {
-        double l = ucode_level(law, c);
-        if (lu - l < l - lp) first_u = c;
-        else break;
-    }
-    for (int c = p+1; c < u; c++) {
-        double l = ucode_level(law, c);
-        if (l - lp < lu - l) last_p = c;
-        else break;
-    }
-    return fmin(lu - 0.5*(ucode_level(law, first_u-1) + ucode_level(law, first_u)),
-                0.5*(ucode_level(law, last_p) + ucode_level(law, last_p+1)) - lp);
+        return 0.5*(ucode_level(law, u) - ucode_level(law, p));
+    return v90_dil_codec_pair_margin((v90_law_t)law, p, u);
 }
 
 static void design_cpu(v92a4_t *s)

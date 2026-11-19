@@ -219,6 +219,42 @@ DIL it just requested, so it knows when DIL starts.
 `v90_dil_measure_align()` takes `from`/`span` for that reason, and a wide
 search only breaks ties toward the earliest offset — honest, not correct.
 
+### Behind a codec, two traps in the noise margin (2026-11-19)
+
+When the analogue role's input is requantised G.711 (an ATA, or
+`engine_pair_test --loop-noise-db`), `v90_dil_measure_levels()` sees every
+level exactly on the codec grid, and it then sets `codec_grid`.
+`v90_dil_measure_plan_rate_sr()` had two errors there.
+
+- **The noise floor read 0.60σ.** It comes from the zero Ucode's received
+  spread, which was computed as the standard deviation of `|level|` about its
+  mean. For a level that is truly zero, that is a folded Gaussian:
+  sqrt(1 − 2/π) = 0.60 of the noise. At −51 dB of loop noise (rms 7.04) it
+  read 5.2, so a "4σ" plan had 3. Where the level sent is zero, the RMS about
+  zero is now taken: 7.5–8.1 there, which includes the codec's own
+  quantisation.
+- **Midpoints are the wrong boundary.** Behind a codec a decision is lost at
+  the codec's threshold, and two codewords apart the codeword between them is
+  a tie. `d9`/`db` (Ucodes 38/36) look 4σ safe by midpoints, but lose at
+  half a step. `v90_dil_codec_pair_margin()` gives the margin to the codec
+  threshold, and the plan requires `noise_sigmas` × σ of it for each pair.
+  Adjacent points, or points three apart, are unchanged. It is shared with
+  the V.92 CPu redesign (`v92_analogue_phase4.c`, docs/v92_quick_connect.md).
+
+**Measured** (engine pair; "old" is midpoints with the folded spread):
+
+| | old | new |
+|---|---|---|
+| V.90 over V.14 (no error correction), −45/−50/−55 dB, 60 s | downstream garbled at all three | byte-exact at all three |
+| V.90 u-law rate, −45/−50/−55 dB | 41333 / 46666 / 49333 | 38666 / 41333 / 48000 |
+| V.92 on defaults, −50 dB (both laws) and A-law −55 dB | 3 retrains each | no retrain |
+| V.92 rate, −47 to −50 dB | 56000 | 54666 |
+| clean loop | 56000 | 56000 |
+
+A linear input (an HSF codec, a real analogue line) never has every level on
+the grid, so `codec_grid` is false there and the midpoint rule still applies.
+The RMS fix does apply there: its noise floor was read low the same way.
+
 ## Still open
 
 - **The power reduction is greedy.** It drops the highest-magnitude point

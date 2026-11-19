@@ -77,7 +77,22 @@ typedef struct {
 
     bool   usable[V90_DIL_UCODES];  /* arrived distinguishable from neighbours */
     int    usable_count;
+
+    /* Every observed level was exactly a codec level: the noise was
+     * requantised before we saw it, so decisions are lost at the codec's
+     * thresholds (v90_dil_codec_pair_margin()), not at midpoints. */
+    bool   codec_grid;
 } v90_dil_measurement_t;
+
+/*
+ * Behind a G.711 codec, the distance from each of two grid points p < u
+ * (Ucodes) to where its decision is lost: the codec threshold (midway between
+ * adjacent codewords) below the first codeword that slices to u, or above
+ * the last that slices to p.  Two codewords apart that is half a step, because
+ * the codeword between them is a tie, and ties count against both points.
+ * Adjacent or three apart, it equals half the spacing, the linear answer.
+ */
+double v90_dil_codec_pair_margin(v90_law_t law, int p, int u);
 
 /*
  * Locate the requested DIL inside a received stream.

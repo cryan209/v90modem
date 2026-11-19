@@ -719,6 +719,12 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # took d9 as db at -50/-51 dB and the call retrained.
 ./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-at "AT+PQC=0" --both-env ME_MODE=v92 --both-env ME_V92_RN_RATIO=0.5 --call-env ME_V90_ROLE=analogue --loop-noise-db 50 --hold-seconds 18 --call-expect "CONNECT 48000" --call-log "V.92 analogue 9.8 rate renegotiation 2 complete" --call-log "; codec thresholds" --call-nolog "B1d validation failed"
 ./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-at "AT+PQC=0" --both-env ME_MODE=v92 --both-env ME_V92_RN_RATIO=0.5 --call-env ME_V90_ROLE=analogue --loop-noise-db 51 --hold-seconds 18 --call-expect "CONNECT 48000" --call-log "V.92 analogue 9.8 rate renegotiation 2 complete" --call-log "; codec thresholds" --call-nolog "B1d validation failed"
+# Phase 3's CP behind the same codec (v90_dil_measure_plan_rate_sr()): codec
+# thresholds and the zero level's RMS as the noise floor.  With midpoints and
+# the folded spread (0.60 sigma) V.90 over V.14 garbled the downstream at -50
+# dB and V.92 retrained three times on defaults.
+./engine_pair_test --payload-first --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --loop-noise-db 50 --payload-printable "line 6 " --payload-reps 400 --seconds 60 --call-log "codec thresholds (levels on the G.711 grid)"
+./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --loop-noise-db 50 --hold-seconds 20 --call-expect "CONNECT 48000" --call-nolog "B1d validation failed" --call-nolog "retrain attempt"
 ./engine_pair_test --expect V90 --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --call-expect "CONNECT 31200" --both-after ATI6 --both-expect "Modulation         V90"
 
 # V.92 9.4 short Phase 2: both INFO0s carry bits 26/27, the digital modem
