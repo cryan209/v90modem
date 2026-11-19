@@ -1,4 +1,6 @@
-/* V.92 9.6.2: analogue final training. Calibrated 8 kHz linear PCM.
+/* V.92 9.6.2: analogue final training, and 9.8.2.2's answer to the digital
+ * modem's rate renegotiation (Rd seen in data mode: Ru/R-bar-u, TRN2u from
+ * a reset scrambler, SUVu/CPu, E2u, B1u). Calibrated 8 kHz linear PCM.
  * lu is 3.8's LU: TRN2u's level and, per Table 30, the scale of the
  * data-mode signal, which goes out as LU x G x v.
  * The network codec is outside this endpoint. Supports the implemented
@@ -10,7 +12,8 @@
 typedef struct v92a4_s v92a4_t;
 typedef enum { V92A4_WAIT, V92A4_TRN, V92A4_SUV, V92A4_CP,
                V92A4_E, V92A4_B1, V92A4_DATA, V92A4_FAILED,
-               V92A4_CLEARDOWN /* 9.11: go on-hook */ } v92a4_stage_t;
+               V92A4_CLEARDOWN /* 9.11: go on-hook */,
+               V92A4_RU        /* 9.8.2.2.2: Ru, R-bar-u */ } v92a4_stage_t;
 v92a4_t *v92a4_init(const v90_analogue_phase4_config_t *cfg,
                      int points, double lu, uint32_t rate_mask, unsigned round_trip_symbols);
 void v92a4_free(v92a4_t *s);
@@ -32,6 +35,11 @@ const char *v92a4_failure(const v92a4_t *s);
  * RTD/2 later.  Configuring cfg->cp.drn = 0 makes this side the initiator:
  * V92A4_CLEARDOWN on an acknowledged CPd or 100 ms + RTD after its CPu. */
 bool v92a4_cleardown(const v92a4_t *s);
+/* V.92 9.8.2.2: rate renegotiations answered so far, and whether one is in
+ * progress (from R-bar-d to the new B1u).  Data stays V92A4_DATA's until Ru
+ * starts and again from the new B1u's end. */
+int v92a4_renegotiations(const v92a4_t *s);
+bool v92a4_renegotiating(const v92a4_t *s);
 double v92a4_rx_decision(const v92a4_t *s);
 double v92a4_rx_tolerance(const v92a4_t *s);
 #endif

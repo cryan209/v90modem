@@ -64,7 +64,9 @@ console.log('PASS: sustained 60-second V.92 full-startup transfer at 80-ms delay
   const mid=await runReliability({modes:[90,92],repeats:1,file:{file,name:'m.bin'},startup:{v92Startup,line:{loopNoiseDb:60}}});
   for(const c of mid.calls){assert.ok(c.passed,`${v92Startup} `+JSON.stringify(c));assert.equal(c.mismatchBytes,0);}
  }
- // -66 dBm0: V.92 Quick needs the 4-sigma precoded upstream CPd margin (v90.c).
+ // -66 dBm0: V.92 Quick.  The loop gives the feedback equaliser nothing, so the
+ // CPd carries no precoder and takes the 4-sigma margin; a null precoder at 3
+ // sigma lost this line (modem_engine.c, V92_PRECODER_MIN_GAIN).
  const v92mid=await runReliability({modes:[92],repeats:1,file:{file,name:'u.bin'},startup:{v92Startup:'quick',line:{loopNoiseDb:50}}});
  assert.ok(v92mid.calls[0].passed,JSON.stringify(v92mid.calls[0]));
  const loud=await runReliability({modes:[34,92],repeats:1,file:{file,name:'n.bin'},startup:{line:{loopNoiseDb:30}}});

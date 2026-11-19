@@ -800,6 +800,13 @@ struct v90_state_s {
     uint8_t          v92_trellis_select;
     uint16_t         v92_gain_q0_16;
     double           v92_upstream_sigma;        /* TRN2u noise, DS0 linear rms */
+    /* V.92 9.8: the noise data mode measured, carried into the CPd that a
+     * rate renegotiation designs; the CPd uses max(TRN2u sigma, this). */
+    double           v92_upstream_sigma_floor;
+    double           v92_upstream_design_sigma; /* what the last CPd used */
+    double           v92_upstream_design_margin; /* and its margin */
+    bool             v92_rn_await_sigma;        /* 9.8: CPd waits for the new TRN2u */
+    uint64_t         v92_rn_suvd_symbols;       /* SUVd sent while waiting */
     double           v92_upstream_lu_rx;        /* received TRN2u rms, DS0 linear */
     int              v92_precoder_lp1;          /* Table 30 LP1; 0 = no coefficients */
     int16_t          v92_precoder_p1[V92_CPD_MAX_TAPS];  /* p1(1..LP1), Q1.14 */
@@ -1185,17 +1192,19 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
  * in data.  4.0 on it designs 32000; forced against slmodemd (28 October,
  * 120 s each) 33333, 34666, 36000 and 37333 all rejected no frame.
  *
- * 4.0, not 3.0, since 2026-11-19.  TRN2u is 4-point PAM at high levels,
- * where G.711's steps are wide enough to absorb loop noise ahead of the
- * network A/D, so its sigma can be mostly equaliser residual while data's
- * small points take the whole noise.  Browser lab, -66 dBm0 analogue-loop
- * noise, V.92 Quick Connect: designed on TRN2u sigma 4.39 DS0, data measured
- * 6.7 DS0, and at 3.0 the 48000 upstream rejected 2,105 frames in 350 s
- * (64 KB file incomplete in 600 s); at 4.0 it kept 48000 and rejected none
- * (file in 20.4 s).  The cost, live against slmodemd (3 alternated pairs,
- * 2026-11-19): upstream 36000 -> 34666, both arms 0 frames rejected in
- * 120 s (docs/v92_quick_connect.md). */
-#define V92_UPSTREAM_MARGIN_PRECODED 4.0
+ * TRN2u is 4-point PAM at high levels, where G.711's steps are wide enough
+ * to absorb loop noise ahead of the network A/D, so its sigma can be mostly
+ * equaliser residual while data's small points take the whole noise
+ * (browser lab, -66 dBm0 loop noise: TRN2u 4.39 DS0, data 6.7).  That once
+ * cost 3.0 the line, and 4.0 cost slmodemd's 36000.  Since 2026-11-19 a V.92
+ * 9.8 rate renegotiation redesigns the CPd on the data-mode figure instead
+ * (modem_engine.c, me_v92_rn_check_locked()), and the precoder is sent only
+ * where the feedback equaliser gains (modem_engine.c), so 3.0 is back
+ * (docs/v92_quick_connect.md). */
+#define V92_UPSTREAM_MARGIN_PRECODED 3.0
+/* V.92 9.8: how long SUVd may hold the CPd for a fresh TRN2u sigma, in bits
+ * of SUVd sent (about 1 s at the TRN2d rate). */
+#define V92_RN_SIGMA_WAIT_SYMBOLS 16000
 
 /* V.92 Table 30: "the digital modem shall design the modulation parameters
  * assuming that, when the prefilter output multiplied by G has a
@@ -1235,10 +1244,37 @@ bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
         return false;
     s->v92_upstream_sigma = sigma_linear;
     s->v92_upstream_lu_rx = lu_rx;
+    s->v92_rn_await_sigma = false;
     /* Ask for the most the moduli carry; the back-off in
      * v90_build_v92_cpd_frame() takes drn down to what they allow. */
     s->v92_upstream_drn = 19;
     return true;
+}
+
+void v90_set_v92_upstream_sigma_floor(v90_state_t *s, double sigma_linear)
+{
+    if (s && sigma_linear >= 0.0 && !s->v92_cpd_designed)
+        s->v92_upstream_sigma_floor = sigma_linear;
+}
+
+bool v90_v92_cpd_designed(const v90_state_t *s)
+{
+    return s && s->v92_cpd_designed;
+}
+
+double v90_get_v92_upstream_design_sigma(const v90_state_t *s)
+{
+    return s ? s->v92_upstream_design_sigma : 0.0;
+}
+
+double v90_get_v92_upstream_design_margin(const v90_state_t *s)
+{
+    return s ? s->v92_upstream_design_margin : 0.0;
+}
+
+double v90_get_v92_upstream_min_margin(void)
+{
+    return V92_UPSTREAM_MARGIN_PRECODED;
 }
 
 bool v90_set_v92_upstream_precoder(v90_state_t *s, const double *p1, int lp1)
@@ -1412,10 +1448,16 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
     } else {
         scale = (4.0*65536.0) / out->gain_q0_16;
     }
-    if (s->v92_upstream_sigma > 0.0)
+    /* V.92 9.8: TRN2u's 4-point levels sit on wide G.711 steps, so its
+     * sigma cannot see noise that data's small points take whole; a rate
+     * renegotiation carries the data-mode figure in as a floor
+     * (v90_set_v92_upstream_sigma_floor()). */
+    double design_sigma = fmax(s->v92_upstream_sigma, s->v92_upstream_sigma_floor);
+
+    if (design_sigma > 0.0)
         spacing = 2.0*(s->v92_precoder_lp1 > 0 ? V92_UPSTREAM_MARGIN_PRECODED
                                                 : V92_UPSTREAM_MARGIN)
-                * s->v92_upstream_sigma;
+                * design_sigma;
     for (int attempt = 0; attempt < 32; attempt++) {
         int n = 0;
         int16_t prev = 0;
@@ -1538,6 +1580,9 @@ static bool v90_build_v92_cpd_native(v90_state_t *s)
     s->v92_tx_pos = 0;
     s->v92_cpd_retry = false;
     s->v92_cpd_designed = true;
+    s->v92_upstream_design_sigma = fmax(s->v92_upstream_sigma, s->v92_upstream_sigma_floor);
+    s->v92_upstream_design_margin = s->v92_precoder_lp1 > 0 ? V92_UPSTREAM_MARGIN_PRECODED
+                                                            : V92_UPSTREAM_MARGIN;
     return true;
 }
 
@@ -4716,6 +4761,13 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     && !s->v92_cleardown && !s->v92_peer_cleardown) {
                     s->tx_phase = V90_TX_ED;
                     s->sample_count = 0;
+                } else if (s->v92_rn_await_sigma
+                           && s->v92_rn_suvd_symbols < V92_RN_SIGMA_WAIT_SYMBOLS) {
+                    /* 9.8.1.1.2 answers SUVu with the CPd, and that CPd is
+                     * the point of the renegotiation: design it on the TRN2u
+                     * the analogue modem has just sent, not on the startup's. */
+                    s->v92_rn_suvd_symbols += (uint64_t)s->v92_tx_nbits;
+                    (void)v90_build_v92_suvd_mapped(s, false);
                 } else if ((!s->v92_cpd_sent || s->v92_cpd_retry || s->v92_cpd_repeat)
                            && (s->v92_suvu_received || s->v92_cpu_received)) {
                     /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
@@ -6500,6 +6552,35 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
     return true;
 }
 
+/* V.92 9.8/Table 24: CPus answers a rate renegotiation that leaves the
+ * downstream modulation as it is, so the data mapper stays configured. */
+bool v90_set_v92_cpus(v90_state_t *s, bool acknowledge)
+{
+    if (!s || !s->v92_mode || !s->v92_native_cpu_rx || !s->reneg_active
+        || !s->data_mapper_ready)
+        return false;
+    v92_check_cpd_retry(s, acknowledge);
+    if (!s->v92_cpu_received)
+        fprintf(stderr, "[V90] Rate renegotiation %d: CPus%s, downstream "
+                "modulation unchanged\n", s->reneg_count, acknowledge ? "'" : "");
+    s->v92_cpu_received = true;
+    if (acknowledge) {
+        s->v92_cpu_ack_received = true;
+        s->v92_remote_ack_received = true;
+    }
+    return true;
+}
+
+/* V.92 9.8: B1u found after the renegotiation's E2u -- the upstream side of
+ * the exchange is done (9.6.1's E, which nothing else reports for V.92). */
+void v90_v92_rate_renegotiation_upstream_done(v90_state_t *s)
+{
+    if (!s || !s->v92_mode || !s->reneg_wait_e)
+        return;
+    s->e_received = true;
+    s->reneg_wait_e = false;
+}
+
 bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out)
 {
     if (!s || !out || !s->v92_cpu_received)
@@ -6627,7 +6708,28 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
      * CPt's training mapper, but do not compare this exchange's first CP
      * against the preceding DATA CP as though it were a duplicate. Rd's
      * preceding-DATA magnitudes have already been snapshotted above. */
-    s->data_mapper_ready = false;
+    /* V.92 9.8.1.1.2 ends in 9.6.1.1.2's SUVd/CPd exchange, which must start
+     * from scratch: every flag below is latched from the startup's.  The
+     * downstream data mapper is kept -- a CPus (9.8, Table 24) leaves it as
+     * it is -- and a new CPu reconfigures it in v90_set_v92_cpu(). */
+    if (s->v92_mode) {
+        s->v92_suvu_received = false;
+        s->v92_cpu_received = false;
+        s->v92_cpu_ack_received = false;
+        s->v92_remote_ack_received = false;
+        s->v92_cpd_sent = false;
+        s->v92_cpd_designed = false;
+        s->v92_cpd_retry = false;
+        s->v92_cpd_repeat = false;
+        s->v92_cpd_end = 0;
+        s->v92_ack_sent = false;
+        s->v92_tx_nbits = 0;
+        s->v92_tx_pos = 0;
+        s->v92_rn_await_sigma = true;
+        s->v92_rn_suvd_symbols = 0;
+    } else {
+        s->data_mapper_ready = false;
+    }
     s->reneg_silence_req = false;
     s->reneg_rt_pending = false;
     s->reneg_rt = false;

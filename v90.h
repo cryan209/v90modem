@@ -501,6 +501,26 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx);
 
+/* V.92 9.8: a floor under the sigma the next CPd is designed on -- the noise
+ * data mode measured, which TRN2u cannot see (its levels sit on wide G.711
+ * steps).  The CPd uses max(TRN2u sigma, floor); the getter returns what the
+ * last CPd was designed on.  Ignored once that CPd is designed. */
+void v90_set_v92_upstream_sigma_floor(v90_state_t *s, double sigma_linear);
+double v90_get_v92_upstream_design_sigma(const v90_state_t *s);
+/* The margin (sigmas per half-spacing) that CPd was designed with, and the
+ * least any design uses (the precoded one). */
+double v90_get_v92_upstream_design_margin(const v90_state_t *s);
+double v90_get_v92_upstream_min_margin(void);
+/* A CPd has been queued since startup or the last renegotiation began. */
+bool v90_v92_cpd_designed(const v90_state_t *s);
+
+/* V.92 9.8 (Table 24): a CPus received during rate renegotiation (the
+ * downstream modulation is unchanged). */
+bool v90_set_v92_cpus(v90_state_t *s, bool acknowledge);
+
+/* V.92 9.8: the upstream B1u after the renegotiation's E2u was found. */
+void v90_v92_rate_renegotiation_upstream_done(v90_state_t *s);
+
 /* V.92 6.4.2 precoder feedback p1(1..lp1) for the CPd (Table 30, Q1.14 on
  * the wire), with an identity prefilter; lp1 = 0 sends no coefficients.
  * With x(n) = u(n) + sum p1(k) x(n-k), a channel whose equalised response is

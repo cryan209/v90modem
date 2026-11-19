@@ -695,6 +695,19 @@ bool v92_p3_eq_drop_feedback(v92_p3_eq_t *eq)
     return true;
 }
 
+/* V.92 9.8: a rate renegotiation's TRN2u is not precoded, so its refit
+ * solves the decision feedback again (the solve that v92_p3_eq_use_ff() or
+ * v92_p3_eq_drop_feedback() left off for data mode). */
+void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq)
+{
+    if (!eq)
+        return;
+    memset(eq->fb, 0, sizeof(eq->fb));
+    eq->have_ff = false;
+    eq->ff_only = false;
+    eq->refit_base = 0.0;
+    eq->refit_left = 0;
+}
 
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
 {

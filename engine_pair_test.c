@@ -70,6 +70,9 @@
  * longer (--delay-to-call / --delay-to-answer set one direction), as a SIP
  * path's packetisation and playout do; the bare pair has almost none.
  *
+ * --loop-noise-db X adds the browser lab's analogue-loop noise (-X dBm0
+ * Gaussian, requantised to G.711) to both directions of a byte-exact line.
+ *
  * --hold-seconds N keeps the call in data mode N seconds longer after the
  * payload, before any --X-after command.
  *
@@ -190,12 +193,41 @@ static int fdm_open(int alaw, int slot, int fs, int taps, int bank_slots,
    given the frame the other side transmitted.  A G.711 side sends and gets
    FRAME codewords; a linear side sends FRAME int16 samples and gets FRAME at
    8 kHz followed by 2*FRAME at 16 kHz.  Returns the payload size in bytes. */
+/* --loop-noise-db X: the browser lab's analogue-loop model
+   (web/modem-lab/dist/engine-pair.mjs loopLine): Gaussian noise of rms
+   2500 x 10^(-X/20) added to each direction's expanded G.711 and requantised,
+   as the codec at each end of an analogue loop does.  Same generator (an LCG,
+   twelve uniforms), seeded per direction. */
+static double g_loop_noise_rms;
+static uint32_t g_loop_state[2] = { 1234u ^ 0x1b873593u, 1234u ^ 0x5bd1e995u };
+
+static double loop_gaussian(int k)
+{
+    double sum = 0.0;
+
+    for (int i = 0; i < 12; i++) {
+        g_loop_state[k] = g_loop_state[k]*1664525u + 1013904223u;
+        sum += (double) (g_loop_state[k] >> 8)/16777216.0 - 0.5;
+    }
+    return sum;
+}
+
 static size_t bearer(int k, const uint8_t *from, uint8_t *to)
 {
     fdm_dir_t *d;
     float x[2*FRAME + 4];
     int nw, n;
 
+    if (!g_fdm.on && g_loop_noise_rms > 0.0) {
+        for (int i = 0; i < FRAME; i++) {
+            double v = (g_fdm.alaw ? alaw_to_linear(from[i]) : ulaw_to_linear(from[i]))
+                     + g_loop_noise_rms*loop_gaussian(k);
+            int16_t q = (int16_t) (v > 32767.0 ? 32767 : v < -32768.0 ? -32768 : lrint(v));
+
+            to[i] = g_fdm.alaw ? linear_to_alaw(q) : linear_to_ulaw(q);
+        }
+        return FRAME;
+    }
     if (!g_fdm.on) {
         memcpy(to, from, FRAME);
         return FRAME;
@@ -512,6 +544,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--alaw")) {
             alaw = 1;
+            g_fdm.alaw = 1;
         } else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
             seconds = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--payload-on-connect")) {
@@ -572,6 +605,8 @@ int main(int argc, char **argv)
             if (strcmp(argv[i], "--delay-to-call"))
                 g_delay_frames[1] = n;
             i++;
+        } else if (!strcmp(argv[i], "--loop-noise-db") && i + 1 < argc) {
+            g_loop_noise_rms = 2500.0*pow(10.0, -atof(argv[++i])/20.0);
         } else if (!strcmp(argv[i], "--payload-first")) {
             payload_first = 1;
         } else if (!strcmp(argv[i], "--gap-ms") && i + 1 < argc) {

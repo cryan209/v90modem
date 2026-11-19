@@ -40,6 +40,10 @@ struct v92a4_s {
     v91_law_t law;
     int (*get_bit)(void *);
     void *data_user;
+    /* V.92 9.8.2.2: answering the digital modem's rate renegotiation. */
+    bool rn_due;                      /* R-bar-d seen: Ru at the next frame boundary */
+    bool rn;                          /* from Ru to the new B1u */
+    int renegotiations;
 };
 
 static void fail(v92a4_t *s, const char *why)
@@ -72,7 +76,8 @@ static bool control(void *user, const uint8_t *bits, int n)
             if (have != v92_suvd_bit_length(s->alignment)
                 || !v92_suvd_decode_bits(b, have, &f, &d)) continue;
             if (f.silent_period_requested) {
-                fail(s, "SUVd silent-period request is unsupported");
+                fail(s, s->rn ? "SUVd silent-period request (9.8.1.1.3) is unsupported"
+                              : "SUVd silent-period request is unsupported");
                 return false;
             }
             s->suvd = true;
@@ -251,8 +256,38 @@ static int16_t sample(v92a4_t *s)
         return 0;
     }
     int bps = v92_trn2u_bits_per_symbol(s->tx.constellation_points);
+    if (s->stage == V92A4_DATA && s->rn_due && s->stage_symbols%12 == 0) {
+        /* 9.8.2.2.2: Ru begins on the boundary of a data frame. */
+        s->rn_due = false;
+        s->rn = true;
+        s->stage = V92A4_RU;
+        s->stage_symbols = 0;
+        fprintf(stderr, "[V92A] 9.8.2.2.2: Ru (384T) and R-bar-u (24T)\n");
+    }
+    if (s->stage == V92A4_RU) {
+        /* V.92 8.5.5: Ru repeats {+LU,+LU,+LU,-LU,-LU,-LU}; R-bar-u is its
+         * negation, for 24T. */
+        unsigned i = s->stage_symbols;
+        bool positive = (i%6) < 3;
+
+        if (i >= 384)
+            positive = !positive;
+        out = (int16_t)lround(positive ? s->lu : -s->lu);
+        if (++s->stage_symbols == 408) {
+            /* 9.8.2.2.3 / 8.7.6 (Amd.1 item 3): the first renegotiation
+             * TRN2u resets the scrambler and differential encoder. */
+            v92_trn2u_tx_start_context(&s->tx, V92_TRN2U_RENEG_FIRST, 0);
+            s->stage = V92A4_TRN;
+            s->stage_symbols = 0;
+        }
+        s->symbols++;
+        return out;
+    }
+    /* 9.8.2.2.3: TRN2u may end after 2400T once SUVd is in (9.6.2.1.1's
+     * startup TRN2u runs to 12000T without one). */
     if (s->stage == V92A4_TRN && s->stage_symbols%12 == 0
-        && (s->stage_symbols >= 12000 || s->suvd)) {
+        && (s->rn ? (s->stage_symbols >= 2400 && s->suvd)
+                  : (s->stage_symbols >= 12000 || s->suvd))) {
         if (!message(s, false)) fail(s, "cannot encode SUVu");
     }
     if (s->stage == V92A4_SUV || s->stage == V92A4_CP) {
@@ -298,7 +333,15 @@ static int16_t sample(v92a4_t *s)
         uint8_t zeros[3] = {0};
         v92_trn2u_tx_bits_linear(&s->tx, zeros, bps, &out, 1);
     } else if (s->stage == V92A4_B1 || s->stage == V92A4_DATA) {
-        if (s->stage_symbols == 48*12) s->stage = V92A4_DATA;
+        if (s->stage == V92A4_B1 && s->stage_symbols == 48*12) {
+            s->stage = V92A4_DATA;
+            if (s->rn) {
+                s->rn = false;
+                fprintf(stderr, "[V92A] 9.8 rate renegotiation %d: B1u sent, data at "
+                        "upstream drn %u\n", s->renegotiations,
+                        (unsigned)s->cpd.selected_upstream_drn);
+            }
+        }
         int pos = s->stage_symbols%12;
         if (!pos) {
             uint8_t ones[V92_UPSTREAM_MAX_FRAME_BITS];
@@ -348,6 +391,22 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
         if (e) fprintf(stderr, "P4RX event=%x\n", e);
         if (e & V90A4_RX_EVENT_ED)
             s->ed_seen = true;
+        if ((e & V90A4_RX_EVENT_RD_BAR) && s->stage == V92A4_DATA && !s->rn) {
+            /* 9.8.2.2.1-.2: Rd, then its transition.  Everything the 9.6
+             * exchange latched starts again; the receiver has already moved
+             * on to the renegotiation TRN2d. */
+            s->rn_due = true;
+            s->renegotiations++;
+            s->suvd = s->cpd_seen = s->remote_ack = s->ack_sent = false;
+            s->cpu_sent = s->cpu_retry = s->cpu_repeat = s->ed_seen = false;
+            s->cpd_ack_seen = s->cpu_designed = false;
+            s->trn2d_err2 = 0.0;
+            s->trn2d_errs = 0;
+            s->window_len = 0;
+            s->downstream = false;
+            fprintf(stderr, "[V92A] 9.8.2.2.1: Rd-to-R-bar-d transition (renegotiation %d)\n",
+                    s->renegotiations);
+        }
         if (e & V90A4_RX_EVENT_DATA) {
             if (v90_analogue_phase4_b1d_bit_errors(s->rx)) fail(s, "B1d validation failed");
             else s->downstream = true;
@@ -355,6 +414,8 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
     }
 }
 v92a4_stage_t v92a4_stage(const v92a4_t *s) { return s ? s->stage : V92A4_FAILED; }
+int v92a4_renegotiations(const v92a4_t *s) { return s ? s->renegotiations : 0; }
+bool v92a4_renegotiating(const v92a4_t *s) { return s && (s->rn || s->rn_due); }
 bool v92a4_downstream_ready(const v92a4_t *s) { return s && s->downstream; }
 const v92_cpd_frame_t *v92a4_cpd(const v92a4_t *s) { return s && s->cpd_seen ? &s->cpd : NULL; }
 bool v92a4_cleardown(const v92a4_t *s) { return s && s->stage == V92A4_CLEARDOWN; }

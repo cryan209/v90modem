@@ -1040,6 +1040,9 @@ host-driver processes were confirmed stopped after the final unforced control.
 
 ## Precoded upstream margin raised to 4σ (2026-11-19)
 
+*Superseded the same day by the section below: the precoder now has to earn
+its place, and `V92_UPSTREAM_MARGIN_PRECODED` is 3.0 again.*
+
 `V92_UPSTREAM_MARGIN_PRECODED` (v90.c) is now 4.0, up from 3.0, matching
 the unprecoded margin. The digital side designs the CPd from the TRN2u σ.
 TRN2u is 4-point PAM at high levels, where G.711's steps are wide enough
@@ -1084,3 +1087,85 @@ depends on the lab's flat, sample-aligned loop. The analogue modem's TRN2u
 codewords reach the network quantiser unchanged, so noise smaller than half
 a step disappears. A real loop smears TRN2u across the quantiser, so its σ
 there also carries quantisation error. The margin stays at 4.0.
+
+## V.92 9.8 rate renegotiation, and the precoder only where it gains (2026-11-19)
+
+**What is built.** The digital modem now starts V.92 9.8 rate
+renegotiation itself (`modem_engine.c`, `me_v92_rn_*`; `v90.c`), and our
+analogue role answers it (`v92_analogue_phase4.c`, 9.8.2.2).
+
+- **Trigger** (`me_v92_rn_check_locked()`). Data mode re-solves the upstream
+  equaliser every 2 s, and each solve's residual is the data-mode σ. After
+  B1u's two solves, the mean of six is compared with what the CPd's spacing
+  holds at the least margin any design uses:
+  2 × margin used × design σ = 2 × 3.0 × allowed σ. The trigger fires above
+  1.10 × allowed σ, or on 4 rejected frames, at most `ME_V92_RN_MAX` (2)
+  times a call.
+- **Digital side** (9.8.1.1).
+  - Rd starts on a data-frame boundary. V.92 data frames don't start on our
+    160-sample blocks, so the mapper runs up to the boundary mid-block first.
+  - The receiver re-arms for TRN2u: four-level decisions with the decision
+    feedback restored (`v92_p3_eq_restore_feedback()`).
+  - Ru/R̄u are found with `v92_rsig` (V.92 8.5.5). A least-squares refit over
+    4000 TRN2u symbols starts just after R̄u, and the SUVu/CPu decoder is
+    fresh.
+  - SUVd holds the CPd (up to `V92_RN_SIGMA_WAIT_SYMBOLS`) until the fresh
+    TRN2u σ is in. The CPd is then designed on max(TRN2u σ, data-mode σ),
+    since `v90_set_v92_upstream_sigma_floor()` carries the data-mode figure
+    across.
+  - A CPu or CPus (Table 24) arms B1u. B1u's lock ends the exchange.
+- **Analogue side** (9.8.2.2). On the Rd-to-R̄d transition in data mode it
+  sends Ru for 384T and R̄u for 24T on a frame boundary. TRN2u follows from a
+  reset scrambler and differential encoder (8.7.6 as amended); it may end
+  after 2400T once SUVd is in. Then SUVu/CPu, E2u and B1u.
+
+**The null precoder (finding).** The 2,105 frames the −66 dBm0 lab line
+rejected at margin 3.0 weren't the margin's fault. On that loop the feedback
+equaliser gains nothing: σ reads 4.32 DS0 with and without it. Even so,
+TRN2u's feedback taps came out at ±1 LSB, `lp1 = 8`, and the CPd took the
+*precoded* 3.0 margin on a σ that never earned it.
+
+After a renegotiation, the refit's taps were fitted to noise
+(|p1| ≤ 0.025). The analogue modem precoded with them, which moved x(n) off
+the codec grid that the CPd points sit on and added the network A/D's
+quantisation noise. B1u's feed-forward solve then left 0.0039 LU (23 DS0)
+against 0.0007 LU unprecoded. B1u never locked, and the §9.6.1 E timeout
+retrained the call.
+
+The precoder now goes into the CPd only where the feedback equaliser's σ is
+at most 0.9 × the feed-forward one (`V92_PRECODER_MIN_GAIN`). Below that the
+CPd carries no coefficients and the unprecoded 4.0 margin applies.
+`ME_V92_PRECODER=2` precodes whatever the gain; fast.list uses it to keep
+the precoded path covered on a clean loop. Against slmodemd the gate is
+nowhere near: σ is 23.66 DS0 with feedback against 104.63 without. So
+`V92_UPSTREAM_MARGIN_PRECODED` is back at 3.0.
+
+**Offline (engine_pair_test `--loop-noise-db`, the lab's loop, 40 s holds).**
+- On defaults:
+  - −66 dBm0 needs no renegotiation: 48000/56000, 0 upstream frames
+    rejected. The residual is 5.2 DS0 against an allowed 4.32 × 4/3 = 5.76.
+  - −76 dBm0 and clean are the same (residual 2.0 and 1.9).
+- Forced with `ME_V92_RN_RATIO=0.5`:
+  - At −65 and −69 dBm0, two renegotiations each completed both ways at
+    48000/56000, with 0 frames rejected afterwards (rms distance to the
+    nearest level 6.0 and 3.5 DS0).
+  - At −66 and −67 dBm0 the renegotiation completed on our side, but the
+    analogue role failed its strict B1d check and retrained (one adjacent
+    codeword, `d9` sent as `db`). That's a downstream issue of the analogue
+    role, not 9.8: the loop's noise reaches the analogue receiver only as
+    whole-codeword flips at small levels, so its TRN2d decision error reads
+    0.0 and CPu thinning never sees the noise.
+
+**Browser lab** (WASM rebuilt, `test-reliability.mjs` 7/7). −66 dBm0 V.92
+Quick passes with the 64 KB file, as do the −86/−76 dBm0 rows and the rest.
+
+**Live against slmodemd** (Proxmox rig, CT 100 slmodemd_map vs CT 117,
+`/root/margin_ab.sh rn98 3`: 3 alternated pairs, 150 s, PQC=0, payload both
+ways). A is this change and B is the 4.0 build. Every call connected V.92
+54666/54667 and rejected 0 upstream frames in 120 s of data (rms distance to
+the nearest level 23.1–23.3 DS0, last residual 22.7–23.3 against a design σ
+of 23.66). A chose 36000 on all three calls and B chose 34666 on all three.
+Lines carried were the same: A 28,250–28,600 and B 28,350–28,500 at the
+peer DTE. No call renegotiated or retrained. slmodemd's data residual sits on
+the design figure, so a live 9.8 exchange is still unexercised; it has only
+run in the engine pair.

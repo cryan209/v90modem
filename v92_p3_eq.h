@@ -224,6 +224,9 @@ bool v92_p3_eq_use_ff(v92_p3_eq_t *eq);
  * part alone already delivers the points, with the feedback equaliser's
  * noise.  Later refits solve feed-forward only. */
 bool v92_p3_eq_drop_feedback(v92_p3_eq_t *eq);
+/* Undo either of the above so the next refit solves feedback taps too
+ * (V.92 9.8: renegotiation TRN2u is not precoded). */
+void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq);
 
 /* Data-aided training on a known sequence (V.92 8.7.1 B1u, which starts from
  * zero scrambler, encoder, precoder and prefilter memories and so is fixed by
