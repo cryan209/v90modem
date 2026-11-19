@@ -726,19 +726,47 @@ void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s)
         enter_stage(s, V90A_TX_S_DIL_ENOUGH);
 }
 
+static bool encode_cp_group(v90_analogue_tx_t *s, const vpcm_cp_frame_t *cp);
+
 bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
                                   const vpcm_cp_frame_t *cpt,
                                   const vpcm_cp_frame_t *cp,
                                   bool scr_after_r)
 {
-    vpcm_cp_frame_t prime;
-    vpcm_cp_frame_t silence;
-    vpcm_cp_frame_t silence_prime;
-
     if (s == NULL  ||  cpt == NULL  ||  cp == NULL)
         return false;
     if (!vpcm_cp_encode_bits(cpt, s->cpt_bits, &s->cpt_len))
         return false;
+    if (!encode_cp_group(s, cp))
+        return false;
+    s->scr_after_r = scr_after_r;
+    s->rr_active = false;
+    s->phase4_armed = true;
+    return true;
+}
+
+bool v90_analogue_tx_set_cp(v90_analogue_tx_t *s, const vpcm_cp_frame_t *cp)
+{
+    v90_analogue_tx_t keep;
+
+    if (s == NULL || cp == NULL || !s->phase4_armed
+        || s->stage == V90A_TX_RR_CP || s->stage == V90A_TX_RR_CPS)
+        return false;
+    keep = *s;
+    if (!encode_cp_group(s, cp)) {
+        *s = keep;
+        return false;
+    }
+    return true;
+}
+
+/* CP, CP', CPs and CPs' from one CP frame, as §8.5.2 makes them. */
+static bool encode_cp_group(v90_analogue_tx_t *s, const vpcm_cp_frame_t *cp)
+{
+    vpcm_cp_frame_t prime;
+    vpcm_cp_frame_t silence;
+    vpcm_cp_frame_t silence_prime;
+
     if (!vpcm_cp_encode_bits(cp, s->cp_bits, &s->cp_len))
         return false;
     s->cp_frame = *cp;
@@ -764,9 +792,6 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
     if ((s->cpt_len & 3)  ||  (s->cp_len & 3)  ||  (s->cp_prime_len & 3)
         || (s->cps_len & 3) || (s->cps_prime_len & 3))
         return false;
-    s->scr_after_r = scr_after_r;
-    s->rr_active = false;
-    s->phase4_armed = true;
     return true;
 }
 

@@ -29,6 +29,39 @@ static double ucode_abs_level(v90_law_t law, int u)
     return (double) dil_abs_level(law, v90_codeword_compose(law, u, 1));
 }
 
+double v90_dil_codec_flip_sigma(v90_law_t law, const double up[V90_DIL_UCODES],
+                                const double down[V90_DIL_UCODES],
+                                double flips, double min_exposure)
+{
+    double exposure = 0.0, lo = 0.0, hi = 4096.0;
+
+    if (up == NULL || down == NULL)
+        return 0.0;
+    for (int u = 0; u < V90_DIL_UCODES; u++)
+        exposure += up[u] + down[u];
+    if (flips <= 0.0 || exposure < min_exposure)
+        return 0.0;
+    for (int it = 0; it < 60; it++) {
+        double sigma = 0.5*(lo + hi), expected = 0.0;
+
+        for (int u = 0; u < V90_DIL_UCODES; u++) {
+            if (up[u] > 0.0 && u < V90_DIL_UCODES - 1)
+                expected += up[u]*0.5*erfc(0.5*(ucode_abs_level(law, u + 1)
+                                                - ucode_abs_level(law, u))
+                                           /(sigma*sqrt(2.0)));
+            if (down[u] > 0.0 && u > 0)
+                expected += down[u]*0.5*erfc(0.5*(ucode_abs_level(law, u)
+                                                  - ucode_abs_level(law, u - 1))
+                                             /(sigma*sqrt(2.0)));
+        }
+        if (expected < flips)
+            lo = sigma;
+        else
+            hi = sigma;
+    }
+    return 0.5*(lo + hi);
+}
+
 double v90_dil_codec_pair_margin(v90_law_t law, int p, int u)
 {
     double lp, lu;

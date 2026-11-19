@@ -1291,3 +1291,48 @@ loss is LAPM frames at rates that pass B1d. V.92's PCM upstream at −66 dBm0
 CPd margin, now 4σ too (v92_quick_connect.md, "Precoded upstream margin
 raised to 4σ"). With it, V.92 Quick Connect passes at −66 dBm0
 (48000/56000, 20.4 s).
+
+## §9.6 renegotiation CP redesigned on codeword flips (2026-11-19)
+
+V.90 §8.5.2 makes the downstream constellation the analogue modem's choice,
+and §9.6.2 lets it choose again in each renegotiation. Until now the role
+re-offered the Phase 3 CP unchanged. Now:
+
+- **The measurement.** `v90_analogue_phase4_put()` counts codeword flips on
+  every grid it maps through: TRN2d, MP, B1d and data. For each decided
+  Ucode it counts the decisions that could show a flip (the neighbour is off
+  the grid) and the flips seen. `v90_analogue_phase4_codec_sigma()` solves for
+  the noise before the codec with the solver the V.92 CPu uses
+  (`v90_dil_codec_flip_sigma()`, docs/v92_quick_connect.md). On a linear input
+  the line slicer only hands this receiver grid points, so it reads 0 and
+  nothing changes.
+- **The redesign** (`redesign_rr_cp()` in `v90_analogue_phase3.c`). It runs on
+  the digital modem's Rd→R̄d (§9.6.2.2.2) and before our own S (§9.6.2.1). It
+  thins Phase 3's CP to Phase 3's margin (at least 3σ) using codec thresholds
+  (`v90_analogue_phase4_thin_cp()`, shared with the V.92 CPu). The result is a
+  subset of that CP, so §8.5.2's rules still hold. The transmitter
+  re-encodes CP/CP′/CPs from it (`v90_analogue_tx_set_cp()`). The receiver
+  demaps the renegotiation's B1d with it (`v90_analogue_phase4_set_rr_cp()`).
+- **A trap in that hand-over.** R̄d is 24T, so it usually ends inside the
+  block that reported the Rd→R̄d event. The renegotiation's TRN2d mapper was
+  therefore already running when the new CP arrived. A CP held "until the
+  data mapper stops" then waited for the next renegotiation. The digital
+  modem mapped B1d at drn 11 and we demapped it at drn 22 (278 bit errors).
+  The CP is now held only while the receiver is still in B1d or data.
+
+**Measured** (engine pair, digital side forced by `ME_V90_RENEG_AFTER_MS=6000`):
+- A clean line's 56000 CP was loaded into a −50 dB call (`V90A_CP_DUMP` /
+  `V90A_CP_LOAD`). Startup B1d took 256 bit errors. The redesign read σ 8.14
+  from 523 flips (the loop's rms is 7.91) and thinned drn 22 → 11. The digital
+  side decoded the CP at drn 11, and the renegotiation's B1d had 0 bit errors.
+- With Phase 3's own CP at −50 dB (u-law and A-law) the redesign has almost
+  nothing to remove, and the renegotiation completes without a retrain.
+- Clean: 0 flips, CP unchanged.
+
+**Open, found here.** The analogue-*initiated* §9.6
+(`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS`) fails against our own digital side
+even on a clean line, before and after this change. The digital answers with
+Rd, and the Rd→R̄d handler calls `v90_analogue_tx_rate_renegotiate()` while
+our transmitter is already in the renegotiation. That call fails, Phase 4 is
+marked failed, and the §9.4.2 deadline retrains the call. There is no
+fast.list row for that path.

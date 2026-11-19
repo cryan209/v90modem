@@ -21,6 +21,7 @@
 #include <spandsp.h>
 
 #include "v90_analogue_phase4.h"
+#include "v91.h"
 
 /* §8.6.4: R and R̄ are six-symbol sequences; R̄ is exactly four repetitions. */
 #define R_PERIOD            6
@@ -134,6 +135,14 @@ struct v90_analogue_phase4_s {
     int      mp_frames;
     v90_analogue_mp_t mp;
     bool     mp_valid;
+
+    /* Codeword flips off the mapping grid (v90_analogue_phase4_codec_sigma()),
+     * kept for the call so a §9.6 CP sees the data mode before it. */
+    double   flip_up[128];
+    double   flip_down[128];
+    unsigned flips;
+    bool     rr_cp_pending;
+    vpcm_cp_frame_t rr_cp;
 };
 
 int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
@@ -309,6 +318,8 @@ static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
 }
 
 static bool p4_level_tolerant(const v90_analogue_phase4_t *s);
+static double p4_ucode_level(const v90_analogue_phase4_t *s, int ucode);
+static void count_flips(v90_analogue_phase4_t *s, const vpcm_cp_frame_t *mapping);
 static void slice_frame(v90_analogue_phase4_t *s,
                         const vpcm_cp_frame_t *mapping,
                         uint8_t out[P4_FRAME_LEN]);
@@ -579,6 +590,12 @@ static void start_training_mapper(v90_analogue_phase4_t *s, bool renegotiation)
      * constellations, §8.6.5) but take the data mode's spectral shaping, so
      * D = K + S with S = 6 - Sr from CP. */
     s->renegotiation_training = renegotiation;
+    if (renegotiation && s->rr_cp_pending) {
+        /* §9.6: the data mapper has stopped; B1d is demapped with the CP
+         * this renegotiation offered. */
+        s->cfg.cp = s->rr_cp;
+        s->rr_cp_pending = false;
+    }
     s->bits_per_frame = s->cfg.cpt.drn + 8;
     if (renegotiation)
         s->bits_per_frame += s->cfg.cpt.shaping_redundancy
@@ -751,6 +768,7 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
     data_mode = (s->stage == V90A4_RX_B1D || s->stage == V90A4_RX_DATA);
     mapping = data_mode ? &s->cfg.cp
                         : s->renegotiation_training ? &s->rr_training : &s->cfg.cpt;
+    count_flips(s, mapping);
     {
         uint8_t decided[P4_FRAME_LEN];
 
@@ -889,6 +907,51 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
  * the decision, so a small level the noise pushed across zero comes back.
  * Ties keep the received sign.
  */
+/*
+ * Behind a codec the downstream noise arrives only as whole codewords moved
+ * off the grid, and TRN2d's CPt points are too far apart for that to happen
+ * (docs/v92_quick_connect.md, "The analogue role behind a codec").  So count,
+ * on every grid this receiver maps through, which decisions could have shown
+ * a flip and which did.
+ */
+static void count_flips(v90_analogue_phase4_t *s, const vpcm_cp_frame_t *mapping)
+{
+    for (int i = 0; i < P4_FRAME_LEN; i++) {
+        int c = mapping->dfi[i];
+        const uint8_t *mask;
+        int ur, sign, ud = -1;
+        double level, best = INFINITY;
+
+        if (c >= mapping->constellation_count)
+            continue;
+        mask = mapping->codec_constellations_differ ? mapping->codec_masks[c]
+                                                    : mapping->masks[c];
+        v90_codeword_decompose(s->cfg.law, s->frame[i], &ur, &sign);
+        if (ur < 0 || ur > 127)
+            continue;
+        level = p4_ucode_level(s, ur);
+        for (int u = 0; u < 128; u++) {
+            double d;
+
+            if (!vpcm_cp_mask_get(mask, u))
+                continue;
+            d = fabs(p4_ucode_level(s, u) - level);
+            if (d < best) {
+                best = d;
+                ud = u;
+            }
+        }
+        if (ud < 0)
+            continue;
+        if (ud < 127 && !vpcm_cp_mask_get(mask, ud + 1))
+            s->flip_up[ud] += 1.0;
+        if (ud > 0 && !vpcm_cp_mask_get(mask, ud - 1))
+            s->flip_down[ud] += 1.0;
+        if (ur != ud)
+            s->flips++;
+    }
+}
+
 static void slice_frame(v90_analogue_phase4_t *s,
                         const vpcm_cp_frame_t *mapping,
                         uint8_t out[P4_FRAME_LEN])
@@ -1320,6 +1383,85 @@ bool v90_analogue_phase4_set_cp(v90_analogue_phase4_t *s,
         return false;
     s->cfg.cp = *cp;
     return true;
+}
+
+bool v90_analogue_phase4_set_rr_cp(v90_analogue_phase4_t *s,
+                                   const vpcm_cp_frame_t *cp)
+{
+    if (s == NULL || cp == NULL || v90_analogue_phase4_cp_k(cp) < 0)
+        return false;
+    if (s->stage == V90A4_RX_DATA || s->stage == V90A4_RX_B1D) {
+        /* Still demapping data with the old CP: switch when it stops. */
+        s->rr_cp = *cp;
+        s->rr_cp_pending = true;
+    } else {
+        /* R-bar-d (24T) often ends inside the block that reported Rd-to-
+         * R-bar-d, so the renegotiation's TRN2d mapper may already be
+         * running; nothing is demapped with CP until B1d either way. */
+        s->cfg.cp = *cp;
+        s->rr_cp_pending = false;
+    }
+    return true;
+}
+
+double v90_analogue_phase4_codec_sigma(const v90_analogue_phase4_t *s,
+                                       unsigned *flips_out)
+{
+    if (flips_out != NULL)
+        *flips_out = s ? s->flips : 0;
+    if (s == NULL)
+        return 0.0;
+    return v90_dil_codec_flip_sigma(s->cfg.law, s->flip_up, s->flip_down,
+                                    (double) s->flips, 2000.0);
+}
+
+int v90_analogue_phase4_thin_cp(vpcm_cp_frame_t *cp, v90_law_t law,
+                                double sigma, double sigmas, bool codec)
+{
+    vpcm_cp_frame_t t;
+    int removed = 0, drn;
+
+    if (cp == NULL || !(sigma > 0.0) || !(sigmas > 0.0))
+        return cp == NULL ? -1 : 0;
+    t = *cp;
+    for (int c = 0; c < t.constellation_count; c++) {
+        int prev = -1;
+
+        for (int u = 1; u < 128; u++) {
+            double lp, lu, margin;
+
+            if (!vpcm_cp_mask_get(t.masks[c], u))
+                continue;
+            lu = fabs((double) v91_codeword_to_linear(
+                    law == V90_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    v90_codeword_compose(law, u, 1)));
+            if (prev < 0) {
+                margin = lu;            /* +level against -level */
+            } else if (codec) {
+                margin = v90_dil_codec_pair_margin(law, prev, u);
+            } else {
+                lp = fabs((double) v91_codeword_to_linear(
+                        law == V90_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                        v90_codeword_compose(law, prev, 1)));
+                margin = 0.5*(lu - lp);
+            }
+            if (margin < sigmas*sigma) {
+                vpcm_cp_mask_set(t.masks[c], u, false);
+                removed++;
+                continue;
+            }
+            prev = u;
+        }
+    }
+    for (drn = t.drn; drn > 0; drn--) {
+        t.drn = (uint8_t) drn;
+        if (v90_analogue_phase4_cp_k(&t) >= 0)
+            break;
+    }
+    if (drn < 1)
+        return -1;
+    *cp = t;
+    return removed;
 }
 
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,

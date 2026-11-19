@@ -95,6 +95,18 @@ typedef struct {
 double v90_dil_codec_pair_margin(v90_law_t law, int p, int u);
 
 /*
+ * The noise before a G.711 codec, from what survives it: codeword flips.
+ * up[u]/down[u] count the decisions on Ucode u whose neighbour u+1/u-1 was
+ * off the grid they were sliced on (only a flip onto such a neighbour can be
+ * seen), and `flips` the decisions whose received Ucode was not the decided
+ * one.  Solves sum count x Q(h/sigma) = flips, h the half-step to that
+ * neighbour.  0 with no flips or fewer than `min_exposure` opportunities.
+ */
+double v90_dil_codec_flip_sigma(v90_law_t law, const double up[V90_DIL_UCODES],
+                                const double down[V90_DIL_UCODES],
+                                double flips, double min_exposure);
+
+/*
  * Locate the requested DIL inside a received stream.
  *
  * Correlates on levels, not codewords, because a digital pad changes every

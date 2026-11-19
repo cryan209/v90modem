@@ -179,6 +179,31 @@ bool v90_analogue_phase4_set_cp(v90_analogue_phase4_t *s,
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,
                                       uint8_t *bits, int max_bits);
 
+/* V.90 §9.6: the CP a rate renegotiation offers, installed when the data
+ * mapper stops (the renegotiation's TRN2d/MP mapper starts), so data on the
+ * old CP is never demapped with the new one.  B1d then uses it. */
+bool v90_analogue_phase4_set_rr_cp(v90_analogue_phase4_t *s,
+                                   const vpcm_cp_frame_t *cp);
+
+/* The downstream noise behind a codec, from codeword flips off the
+ * TRN2d/MP/B1d/data grids so far (v90_dil_codec_flip_sigma()).  0 when no
+ * flip was seen, which is also the answer on a linear input whose slicer
+ * hands this receiver grid points only.  *flips_out may be NULL. */
+double v90_analogue_phase4_codec_sigma(const v90_analogue_phase4_t *s,
+                                       unsigned *flips_out);
+
+/*
+ * Thin `cp` so every neighbouring pair keeps `sigmas` x `sigma` to its
+ * decision boundary -- the codec's threshold when `codec`
+ * (v90_dil_codec_pair_margin()), half the spacing otherwise -- and the
+ * smallest point keeps it to its own negative.  Then lowers drn until
+ * §5.4.3's 2^K <= prod(Mi) holds.  Thinning only removes points, so the
+ * result stays a subset of whatever CP/CPt rules the input met (§8.5.2).
+ * Returns the points removed, or -1 (cp unchanged) if nothing usable is left.
+ */
+int v90_analogue_phase4_thin_cp(vpcm_cp_frame_t *cp, v90_law_t law,
+                                double sigma, double sigmas, bool codec);
+
 /*
  * §5.4.1's K for a CP frame — the bits that enter the modulus encoder, which
  * is the number both mappers have to agree on and the only one that can be

@@ -145,6 +145,10 @@ void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s);     /* §9.4.2.4 */
 bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
                                                bool silence_request);
 bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s);
+/* V.90 §9.6.2: replace the CP (and CP', CPs) a rate renegotiation sends --
+ * a CP redesigned on the data mode's noise.  Only before the renegotiation's
+ * CP has started; the frame's length must still be whole symbols. */
+bool v90_analogue_tx_set_cp(v90_analogue_tx_t *s, const vpcm_cp_frame_t *cp);
 /* §9.7: enter §9.6 with a CP rate sequence whose drn is zero. */
 bool v90_analogue_tx_start_cleardown(v90_analogue_tx_t *s);
 void v90_analogue_tx_rt_transition_seen(v90_analogue_tx_t *s);

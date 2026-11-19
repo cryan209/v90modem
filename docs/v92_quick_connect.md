@@ -1227,5 +1227,7 @@ the midpoint, the same pair looks 4σ safe. That is the spacing rule
   (docs/v90_constellation_selection.md, "Behind a codec"). With Phase 3
   planning the margin, the 9.8 CPu redesign now finds nothing to thin at
   −45 to −55 dB. On defaults, V.92 at −50 dB no longer retrains.
-- The V.90 analogue role has no CPu redesign: its §9.6 renegotiation
-  re-offers the Phase 3 CP, so it doesn't get this measurement.
+- ~~The V.90 analogue role's §9.6 renegotiation re-offers the Phase 3
+  CP.~~ It now redesigns the CP on the same measurement
+  (docs/v90_analogue_role.md, "§9.6 renegotiation CP redesigned on codeword
+  flips").

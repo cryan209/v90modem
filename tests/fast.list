@@ -725,6 +725,14 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # dB and V.92 retrained three times on defaults.
 ./engine_pair_test --payload-first --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --loop-noise-db 50 --payload-printable "line 6 " --payload-reps 400 --seconds 60 --call-log "codec thresholds (levels on the G.711 grid)"
 ./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --loop-noise-db 50 --hold-seconds 20 --call-expect "CONNECT 48000" --call-nolog "B1d validation failed" --call-nolog "retrain attempt"
+# V.90 §9.6.2: the analogue role's CP for a rate renegotiation is redesigned
+# on the codeword flips seen so far (TRN2d/MP/B1d/data).  The digital side's
+# ME_V90_RENEG_AFTER_MS probe sends Rd.  The last row loads a clean line's
+# 56000 CP into a -50 dB call, so the redesign must thin it (drn 22 -> 11) and
+# the renegotiation's B1d must come out clean.
+./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --loop-noise-db 50 --hold-seconds 20 --call-log "9.6.2 CP redesign: codec-flip sigma" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"
+./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --loop-noise-db 50 --hold-seconds 20 --call-log "9.6.2 CP redesign: codec-flip sigma" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"
+sh -c './engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --call-env V90A_CP_DUMP="$TMPDIR/cp.bin" --seconds 30 > /dev/null; test -s "$TMPDIR/cp.bin" && ./engine_pair_test --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_RENEG_AFTER_MS=6000 --call-env V90A_CP_LOAD="$TMPDIR/cp.bin" --loop-noise-db 50 --hold-seconds 20 --call-log "drn 22 -> 11" --call-log "B1d 48/48 frames with 0 bit errors" --answer-log "Rate renegotiation 1: downstream data mode resumed after B1d" --call-nolog "retrain 1"'
 ./engine_pair_test --expect V90 --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --call-expect "CONNECT 31200" --both-after ATI6 --both-expect "Modulation         V90"
 
 # V.92 9.4 short Phase 2: both INFO0s carry bits 26/27, the digital modem

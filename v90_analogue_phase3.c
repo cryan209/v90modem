@@ -21,6 +21,8 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
     double             cp_margin;   /* noise margin the CP was built at */
+    vpcm_cp_frame_t    cp_phase3;   /* Phase 3's CP, which §9.6 thins from */
+    bool               cp_phase3_set;
     double             level_tolerance;
     v90_analogue_rx_t *rx;
     v34_state_t       *v34;
@@ -199,6 +201,52 @@ unsigned v90_analogue_phase3_line_stage(v90_analogue_phase3_t *s, int stage)
 }
 
 /*
+ * V.90 §9.6.2: the analogue modem's CP is its choice of downstream
+ * constellation (§8.5.2), and a rate renegotiation is its chance to choose
+ * again.  Phase 3 planned from the DIL; by now the receiver has mapped
+ * TRN2d, MP, B1d and the data mode, and behind a codec what that shows of
+ * the noise is codeword flips (v90_analogue_phase4_codec_sigma()).  The new
+ * CP is Phase 3's, thinned to Phase 3's own margin on that figure with codec
+ * thresholds -- a subset, so §8.5.2's power and CPt rules still hold.  With
+ * no flips there is nothing to thin for and the CP goes out unchanged.  Ours
+ * to send, so both ends are told: the transmitter sends it, and the
+ * receiver demaps B1d with it once the data mapper stops.
+ */
+static void redesign_rr_cp(v90_analogue_phase3_t *s)
+{
+    vpcm_cp_frame_t cp;
+    unsigned flips = 0;
+    double sigma, margin;
+    int removed;
+
+    if (s->p4 == NULL)
+        return;
+    if (!s->cp_phase3_set) {
+        s->cp_phase3 = s->cp;
+        s->cp_phase3_set = true;
+    }
+    sigma = v90_analogue_phase4_codec_sigma(s->p4, &flips);
+    margin = s->cp_margin >= 3.0 ? s->cp_margin : 3.0;
+    cp = s->cp_phase3;
+    removed = sigma > 0.0
+        ? v90_analogue_phase4_thin_cp(&cp, s->law, sigma, margin, true) : 0;
+    fprintf(stderr, "[V90A] 9.6.2 CP redesign: codec-flip sigma %.2f (%u flips), "
+            "%d of Phase 3's points removed at %.1f sigma, drn %u -> %u\n",
+            sigma, flips, removed, margin, (unsigned) s->cp_phase3.drn,
+            removed >= 0 ? (unsigned) cp.drn : (unsigned) s->cp.drn);
+    if (removed < 0)
+        return;     /* nothing usable left: offer what we have */
+    cp.acknowledge = s->cp.acknowledge;
+    cp.silence_request = s->cp.silence_request;
+    if (!v90_analogue_tx_set_cp(s->tx, &cp)
+        || !v90_analogue_phase4_set_rr_cp(s->p4, &cp)) {
+        fprintf(stderr, "[V90A] 9.6.2 CP redesign not applied\n");
+        return;
+    }
+    s->cp = cp;
+}
+
+/*
  * §9.4.2's conditional moments.  Same rule as apply_events(): each entry point
  * is a no-op outside the stage it ends, so the digital modem repeating MP
  * until it sees CP cannot push the transmitter past CP'.
@@ -208,6 +256,7 @@ static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
     if (events & V90A4_RX_EVENT_RD_BAR) {
         /* V.90 §9.6.2.2.2: replace V.34 data at the preserved symbol seam
          * with S/S̄/CP.  The next B1 handoff will seed the newly received MP. */
+        redesign_rr_cp(s);
         if (v90_analogue_tx_rate_renegotiate(s->tx)
             && v34_v90_resume_external_symbols(s->v34,
                                                 v90_analogue_tx_get_symbol,
@@ -586,9 +635,13 @@ bool v90_analogue_phase3_start_rate_renegotiation(v90_analogue_phase3_t *s,
                                                    bool silence_request)
 {
     if (s == NULL || s->p4 == NULL || !s->upstream_data_started
-        || s->rr_active
-        || !v90_analogue_phase4_start_rate_renegotiation(s->p4,
-                                                          silence_request)
+        || s->rr_active)
+        return false;
+    /* §9.6.2.1: the CP that follows our S/S-bar is offered on what the data
+     * mode has shown of the noise. */
+    redesign_rr_cp(s);
+    if (!v90_analogue_phase4_start_rate_renegotiation(s->p4,
+                                                      silence_request)
         || !v90_analogue_tx_start_rate_renegotiation(s->tx, silence_request)
         || v34_v90_resume_external_symbols(s->v34,
                                             v90_analogue_tx_get_symbol,

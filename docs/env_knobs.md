@@ -221,7 +221,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_TONEA_RUN` | v34tx.c |  | d | Held for four blocks (160 ms), not seen in one: the answer modem sends |
 | `V34_TONEA_RUN1` | v34tx.c |  | d | Held for four blocks (160 ms), not seen in one: the answer modem sends |
 | `V34_V90_T3_DATA_DEROT` | v34rx_data.c |  | d |  |
-| `V90A_CP_LOAD` | v90_analogue_phase3.c |  | d | a replay of one call and wrong for a server taking many. |
+| `V90A_CP_LOAD` | v90_analogue_phase3.c |  | td | a replay of one call and wrong for a server taking many. |
 | `V90_RI_MIN_SYMBOLS` | v90.c |  | ctd |  |
 | `V92_CP_LAW_STRICT` | v92_cp_rx.c |  | ctd |  |
 | `VPCM_V90_PP_PHASE` | v34rx.c |  | c | vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. |
@@ -351,7 +351,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_TRN_RX_DUMP` | v34rx.c |  | d | V34_TRN_RX_DUMP (diagnostic): one line per Phase 4 TRN symbol -- |
 | `V42_FRAME_LOG` | v42.c |  | d | V42_FRAME_LOG=1: one stderr line per received or transmitted U/S frame |
 | `V42_STATS` | v42.c |  | sdh |  |
-| `V90A_CP_DUMP` | v90_analogue_phase3.c |  | d | a replay of one call and wrong for a server taking many. |
+| `V90A_CP_DUMP` | v90_analogue_phase3.c |  | td | a replay of one call and wrong for a server taking many. |
 | `V90A_RX_CODEWORD_DUMP` | modem_engine.c |  | d | handed TRN1d and asked to hunt Sd". |
 | `V90A_RX_TRACE` | modem_engine.c |  | - | a period whether or not anything changed. |
 | `V90A_SYM_DUMP` | modem_engine.c |  | d | [('sym','<f4'),('stage','u1')]. |
@@ -401,7 +401,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_ANALOGUE_HOLD` | modem_engine.c | 0 | dh | Phase 3 until the training timeout, so a lab run says what happened. |
 | `ME_V90_CP_POWER_ENFORCE` | v90.c |  | dh | Default off -- see v90_cp_power_within_limit()'s header. |
 | `ME_V90_PHASE_FORCE_OFFSET` | v34rx.c |  | dh | ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n |
-| `ME_V90_RENEG_AFTER_MS` | modem_engine.c | 0 | sdh |  |
+| `ME_V90_RENEG_AFTER_MS` | modem_engine.c | 0 | tsdh |  |
 | `ME_V90_RETRAIN_AFTER_MS` | modem_engine.c | 0 | td | Phase 2 -- which needs a retrain to check.  Zero, the default, means never. |
 | `ME_V90_SD_RTD_HOLD` | modem_engine.c | 1 | td | prepare_v90_phase3_locked() still apply; this only ever lengthens them. |
 | `ME_V90_UPSTREAM_TEST_FIRST_BPS` | modem_engine.c | 0 | td | ME_V90_UPSTREAM_MAX_BPS it is not a ceiling for the call. |

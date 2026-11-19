@@ -38,7 +38,7 @@ struct v92a4_s {
     unsigned trn2d_errs;
     /* Downstream noise as the codec leaves it: codeword flips off the
      * mapping grid, and how many decisions could have shown one in each
-     * direction (see flip_sigma()).  Kept across a 9.8 renegotiation, so
+     * direction (see v90_dil_codec_flip_sigma()).  Kept across a 9.8 renegotiation, so
      * the data mode before Rd counts towards the new CPu. */
     double flip_up[128], flip_down[128];
     unsigned flips;
@@ -187,24 +187,14 @@ void v92a4_start(v92a4_t *s, int sign)
  * apart at 3 sigma, and B1d then sliced 136 as 152.  Thin each constellation
  * to 3 sigma to each decision boundary (build_cp()'s second rung; the DIL
  * plan already took the first), then take drn down until 5.4.3's
- * 2^K <= prod(Mi) holds.  Behind a codec the noise comes from flip_sigma()
- * and the boundary from pair_margin().  Thinning keeps
+ * 2^K <= prod(Mi) holds.  Behind a codec the noise comes from v90_dil_codec_flip_sigma()
+ * and the boundary from v90_dil_codec_pair_margin() (v90_analogue_phase4_thin_cp()).  Thinning keeps
  * CP a subset of the Phase 3 CP, so its power and CPt rules still hold.
  */
 #define V92A4_CPU_SIGMAS     3.0
 #define V92A4_CPU_MIN_ERRS   500
-/* Decisions that could show a flip before flip_sigma() is believed. */
+/* Decisions that could show a flip before the flip sigma is believed. */
 #define V92A4_FLIP_MIN_EXPOSURE 2000.0
-
-static double ucode_level(v91_law_t law, int u)
-{
-    return fabs((double)v91_codeword_to_linear(law, v91_ucode_to_codeword(law, u, true)));
-}
-
-static double q_tail(double x)
-{
-    return 0.5*erfc(x/sqrt(2.0));
-}
 
 /*
  * The noise that reaches us through a G.711 codec.  When the analogue loop's
@@ -225,52 +215,18 @@ static double q_tail(double x)
  * sigma is the moment estimate of the noise before the codec.  No flips
  * means nothing to thin for, and gives 0.
  */
-static double flip_sigma(const v92a4_t *s)
-{
-    double exposure = 0.0, lo = 0.0, hi = 4096.0;
-
-    for (int u = 0; u < 128; u++)
-        exposure += s->flip_up[u] + s->flip_down[u];
-    if (!s->flips || exposure < V92A4_FLIP_MIN_EXPOSURE)
-        return 0.0;
-    for (int it = 0; it < 60; it++) {
-        double sigma = 0.5*(lo + hi), expected = 0.0;
-
-        for (int u = 0; u < 128; u++) {
-            if (s->flip_up[u] > 0.0)
-                expected += s->flip_up[u]
-                    *q_tail(0.5*(ucode_level(s->law, u+1) - ucode_level(s->law, u))/sigma);
-            if (s->flip_down[u] > 0.0)
-                expected += s->flip_down[u]
-                    *q_tail(0.5*(ucode_level(s->law, u) - ucode_level(s->law, u-1))/sigma);
-        }
-        if (expected < s->flips) lo = sigma;
-        else hi = sigma;
-    }
-    return 0.5*(lo + hi);
-}
-
-/* The distance from each of two neighbouring grid points p < u to where its
- * decision is lost: half their spacing on a linear input, the codec's own
- * threshold behind one (v90_dil_codec_pair_margin()). */
-static double pair_margin(v91_law_t law, int p, int u, bool codec)
-{
-    if (!codec)
-        return 0.5*(ucode_level(law, u) - ucode_level(law, p));
-    return v90_dil_codec_pair_margin((v90_law_t)law, p, u);
-}
-
 static void design_cpu(v92a4_t *s)
 {
     vpcm_cp_frame_t cp = s->cp;
     double sigma = 0.0, codec_sigma;
     bool codec;
-    int drn;
+    int removed;
 
     s->cpu_designed = true;
     if (s->trn2d_errs >= V92A4_CPU_MIN_ERRS)
         sigma = sqrt(s->trn2d_err2/s->trn2d_errs);
-    codec_sigma = flip_sigma(s);
+    codec_sigma = v90_dil_codec_flip_sigma((v90_law_t)s->law, s->flip_up, s->flip_down,
+                                           (double)s->flips, V92A4_FLIP_MIN_EXPOSURE);
     /* The codec figure governs only where it is the larger: on a linear
      * input the decision error already holds all of the noise. */
     codec = codec_sigma > sigma;
@@ -282,41 +238,15 @@ static void design_cpu(v92a4_t *s)
             codec_sigma, s->flips, codec ? "; codec thresholds" : "");
     if (sigma <= 0.0)
         return;
-    for (int c = 0; c < cp.constellation_count; c++) {
-        int prev = -1;
-
-        for (int u = 1; u < 128; u++) {
-            if (!vpcm_cp_mask_get(cp.masks[c], u))
-                continue;
-            /* +/-level against each other, then each against its neighbour. */
-            if (prev < 0 ? ucode_level(s->law, u) < V92A4_CPU_SIGMAS*sigma
-                         : pair_margin(s->law, prev, u, codec) < V92A4_CPU_SIGMAS*sigma) {
-                vpcm_cp_mask_set(cp.masks[c], u, false);
-                continue;
-            }
-            prev = u;
-        }
-    }
-    for (drn = cp.drn; drn > 0; drn--) {
-        cp.drn = (uint8_t)drn;
-        if (v90_analogue_phase4_cp_k(&cp) >= 0)
-            break;
-    }
+    removed = v90_analogue_phase4_thin_cp(&cp, (v90_law_t)s->law, sigma,
+                                          V92A4_CPU_SIGMAS, codec);
     /* Never offer less than the line can carry at all: keep the Phase 3 CP
      * if thinning leaves nothing usable. */
-    if (drn < 1 || !v90_analogue_phase4_set_cp(s->rx, &cp))
+    if (removed < 0 || !v90_analogue_phase4_set_cp(s->rx, &cp))
         return;
-    {
-        int before = 0, after = 0;
-        for (int c = 0; c < cp.constellation_count; c++)
-            for (int u = 0; u < 128; u++) {
-                before += vpcm_cp_mask_get(s->cp.masks[c], u);
-                after += vpcm_cp_mask_get(cp.masks[c], u);
-            }
-        fprintf(stderr, "[V92A] 9.6.2 CPu: %d of %d constellation points kept at %.1f sigma, "
-                "drn %u -> %u\n", after, before, V92A4_CPU_SIGMAS,
-                (unsigned)s->cp.drn, (unsigned)cp.drn);
-    }
+    fprintf(stderr, "[V92A] 9.6.2 CPu: %d constellation points removed at %.1f sigma, "
+            "drn %u -> %u\n", removed, V92A4_CPU_SIGMAS,
+            (unsigned)s->cp.drn, (unsigned)cp.drn);
     s->cp = cp;
     s->cpu.drn = cp.drn;
     memcpy(s->cpu.masks, cp.masks, sizeof(s->cpu.masks));
@@ -465,7 +395,7 @@ int v92a4_tx(v92a4_t *s, int16_t *samples, int count)
     for (int i = 0; i < count; i++) samples[i] = sample(s);
     return count;
 }
-/* One decision on the grid `set` towards flip_sigma(): the decided Ucode,
+/* One decision on the grid `set` towards the flip sigma: the decided Ucode,
  * the Ucode the full ladder puts the sample on, and which neighbours were
  * off the grid (only a flip onto one of those can be seen). */
 static void count_flip(v92a4_t *s, int16_t sample, const uint8_t *set, int n)
