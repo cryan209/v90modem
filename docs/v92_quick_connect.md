@@ -1061,6 +1061,26 @@ both arms rejected 0 upstream frames in 120 s of data (rms distance to the
 nearest level 23.0–23.6 DS0). Lines carried were the same: A 28,200–28,400,
 B 28,150–28,550 each way. The only difference was the PCM upstream rate: A
 (3.0) chose 36000 on all three calls and B (4.0) chose 34666 on all three,
-one step lower (−3.7%), not the 32000 the old comment predicted. A better
-fix would measure σ at the levels data uses, rather than at TRN2u's, and
-return the margin to 3.0.
+one step lower (−3.7%), not the 32000 the old comment predicted.
+
+**No pre-CPd upstream signal sees the data-level noise (measured
+2026-11-19).** The plan was to measure σ at the levels data uses and return
+to 3.0. It can't be done before the CPd. In the lab, the TRN2u σ read 4.39
+DS0 clean, 4.39 at −86, 4.38 at −76, 4.39 at −66 and 4.25 at −61 dBm0. The
+lab's TRN2u arrives at LU_rx 5959 DS0, so both levels (2665, 7995) sit in
+µ-law segments with 128- and 256-step widths. Counting the loop model's
+effect per second at −61 dBm0 (noise rms 14 DS0): during TRN2u it changed
+0.000 of the upstream codewords. In data it changed 27%, with a rms move
+of 12.7 DS0. Splitting TRN2u's within-level spread by level doesn't help:
+the inner level read 4.36 against 4.39 pooled, at every noise level.
+TRN1u (±LU) and SUVu/CPu sit at the same high levels. TRN2u is a 4- or
+8-point constellation (8.7.6, Tables 28/29), with no small levels to read.
+
+The noise first shows in data: the data-mode refit residual is 1.4 DS0 on a
+clean line and 5.8 DS0 at −66 dBm0. Designing on it would take a V.92
+rate renegotiation (9.8) that carries the data-mode σ into a new CPd, and
+the engine does not run V.92 renegotiation yet. The erasure itself
+depends on the lab's flat, sample-aligned loop. The analogue modem's TRN2u
+codewords reach the network quantiser unchanged, so noise smaller than half
+a step disappears. A real loop smears TRN2u across the quantiser, so its σ
+there also carries quantisation error. The margin stays at 4.0.
