@@ -2021,3 +2021,34 @@ peer has decoded one, and only then corrupts. The case under test still
 happens: "E after 108 bits on the MP frame grid with no peer MP' decoded".
 Result: 96/96 over all six symbol rates x {u,A}-law x 8 delays. The row runs
 at delay 0 again, and a 2743 row has been added.
+
+## Digital-initiated §9.6 against the Diva cards: upstream never re-acquired after E (2026-11-19)
+
+Setup: the Diva cards dialled a one-off digital server of ours as V.90
+analogue modems. `CTRL=7|8 DIAL=2902 /tmp/diva_batch.sh` ran on eicon420.
+Our side was 2c158288 on CT 117, account 2902, mu-law, with v90ras's Diva
+settings (`ME_V90_MAX_TX_DBM0_CODE=21`, `ME_V90_TRN2D_SYMBOLS=6000`) and
+`ME_V90_RENEG_AFTER_MS=12000`. One call per controller, and both failed the
+same way:
+
+- Startup was V.90 41333/31200 with LAPM up.
+- At +12 s we sent Rd 384T and then R̄d (§9.6.1.1). The card answered with a
+  CP at drn 14 instead of 11, a fall-forward to 45333. Our data mapper took it
+  (`D=34 K=29 drn=14`), and "downstream data mode resumed after B1d".
+- **Our upstream never acquired the card's B1 after E.** The log shows `T/3
+  B1 giving up after 7 windows (out-of-sample distance)`, then a §9.5.1.1
+  retrain.
+- After the retrain, the test hook fired a second renegotiation, because the
+  probe flag is cleared when the call re-enters data mode. On controller 7 the
+  card hung up during it. On controller 8 the card retrained, and the call
+  ended at 40000/28800.
+- PPP passed almost nothing: 1 of 51 pings on controller 7 and 0 of 56 on
+  controller 8, although IPCP and LCP echoes worked. The one-off pppd's
+  IPCP came up twice per call. Whether the pings died from the retrains or
+  from this ad hoc PPP setup has not been separated.
+
+So against the Diva, the downstream half of a digital-initiated §9.6 works,
+including a peer-chosen rate change. The upstream re-entry after E does not.
+On the same cards, the analogue-initiated direction (us as the analogue
+modem) completes 6 of 6 (`docs/v90_analogue_role.md`). Logs:
+`/root/deploy-5640b4d3/artifacts/diva-v90d-rr-ctrl{7,8}-2c158288` on CT 117.
