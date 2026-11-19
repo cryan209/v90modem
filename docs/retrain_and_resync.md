@@ -2121,3 +2121,35 @@ through `v90_upstream_replay`. It reads `acquired=1` with the fix and
 - **Lost pings.** These sit around the two renegotiations (RTT peaks
   9.9-10.1 s). This was not separated further.
 - **Still open.** Why the card falls back 12 s after taking drn 14.
+
+### Why the card falls back to drn 11 (2026-11-19)
+
+This is the card's own policy. Our downstream is not the cause. Three live
+calls (ctrl 8 twice, ctrl 7 once) show:
+
+- **A fixed timer.** The Diva's maintenance trace (`/tmp/mlog-<tag>-1.txt`
+  on eicon420) logs `Supervisor retrain start c1 0` for our §9.6. It logs the
+  same line for its own §9.6 10.43, 10.45 and 10.46 s later. On our side the
+  card's S arrives at +44.39, +44.40 and +44.52 s, about 8.3 s after its E.
+  Random data cannot hit an error threshold that repeatably, so this is a
+  timer.
+- **No downstream errors at drn 14.** With `V42_STATS=1`, our LAPM
+  retransmitted **0** I-frames over the whole call, including the 8 s at drn
+  14. Every downstream frame was acknowledged, and no ping was lost in that
+  window. Our upstream read 36.5 dB at 31200 throughout, and controller 7 had
+  no RTP fill either.
+- **The rate comes from the card's stored plan.** Its §9.6 is the
+  echo-reconditioning variant (§9.6.1.2.5-.6: Ed, silence until a CP with bit
+  30 clear, Rt, MP). Its first CP already asks for drn 11, its startup
+  DIL-planned rate, before any new downstream training from us. Inside that
+  exchange the trace shows `TRAINPROGRESS 0ac7`, `0bc7`, then `Supervisor
+  retrain fallback 2 c3 1 0 2`. The drn 14 in its answer to our Rd was planned
+  from our TRN2d (15996 symbols).
+
+The likely reading is that after a renegotiation the digital side started
+(which cannot recondition its echo canceller), the card schedules its own
+echo-reconditioned §9.6 about 10.4 s later, from its startup plan. Not
+established: what the trace codes mean, and whether the card would still
+renegotiate if our Rd had left it at drn 11. Nothing on our side needs
+fixing for this. Cosmetic: `[V42STAT] rate=` keeps the startup 41333 across
+§9.6.
