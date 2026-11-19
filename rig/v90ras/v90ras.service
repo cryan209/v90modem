@@ -60,6 +60,15 @@ Environment=ME_LEC_NO_TRACK=1
 # detects that S with no false detection in the 28 s before it.  Live A/B
 # from 2026-11-08 18:5x (CT 117 drop-in v90-reneg-respond.conf).
 Environment=ME_V90_RENEG_RESPOND=1
+# A-law callers (only ISDN: since 2026-11-20 Asterisk's [v90ras-law]
+# pre-dial handler offers BRI callers alaw) are Eicon Diva cards, which train V.90 only
+# when INFO0d bit 39 says mu-law while we send A-law codewords
+# (docs/v90_analogue_role.md, 18 November A/B: 0/3 as V.34.  Table 3 bit 39
+# = 1, 2/2 V.90 with 0).  Non-compliant on purpose: answering in A-law
+# removes Asterisk's A->mu requantization, which cost 61-133 upstream shell
+# errors per call (docs/v90_upstream_data_path.md).  mu-law calls already
+# send 0, so they are unchanged.
+Environment=V90_INFO0D_B39=0
 # G.711 taps per call: %L is the line, %P the worker's PID (one worker per
 # call under --recycle). Disposable; delete old calls/ entries by hand.
 Environment=VPCM_G711_TAP_DIR=/var/tmp/v90ras/calls/line%%L-%%P

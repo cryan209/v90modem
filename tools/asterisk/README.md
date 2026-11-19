@@ -39,6 +39,9 @@ PJSIP enabled on 2026-10-08 and reloaded successfully:
 
 - `[endpoint-modem](!)`: `allow=!all,clearmode,ulaw`
 - `[endpoint-modem-alaw](!)`: `allow=!all,clearmode,alaw`
+- `[endpoint-modem-dual](!,endpoint-modem)` (2026-11-20, v90ras 2951-2960):
+  both laws in the caller's order, `operation:intersect`; ISDN callers get
+  A-law from the `[v90ras-law]` pre-dial handler (`rig/v90ras/README.md`).
 - `[6501]` endpoint: CLEARMODE first, then the existing ulaw/alaw entries.
   Dialplan `_7XXX` uses this endpoint for 7900/7910.
 

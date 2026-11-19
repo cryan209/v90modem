@@ -16,12 +16,12 @@ binary built from 75caa292.
 | Number | What |
 |---|---|
 | 2950 | pilot: hunts 2951 upward for the first idle registered line (busy or unregistered lines are skipped), `Busy` when all ten are in use |
-| 2951-2960 | line 0-9 directly (SIP accounts, `endpoint-modem`, **u-law only**, `aor-single-reg`) |
+| 2951-2960 | line 0-9 directly (SIP accounts, `endpoint-modem-dual`: clearmode, u-law, A-law in the caller's order with `operation:intersect`; `aor-single-reg`) |
 
 Dialplan is in `[default]` after the 17940 route; backups
-`/etc/asterisk/{pjsip,extensions}.conf.before-20261107-v90ras`. The u-law-only
-template means an A-law caller (the Diva path through the Cisco) would be
-transcoded; add an A-law set if that is needed.
+`/etc/asterisk/{pjsip,extensions}.conf.before-20261107-v90ras`. Since
+2026-11-20 ISDN callers are answered in A-law (see "ISDN callers in A-law"
+below).
 
 ## Files on CT 117
 
@@ -1267,3 +1267,28 @@ fddf7000…) is kept as `/opt/v90ras/sip_v90_modem.9d94ec3d`, and the previous
 binary (567ae54d, 4ca0dc8d…) is `sip_v90_modem.pre-9d94ec3d`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. Then `v90ras`
 and `v90isdn` were restarted, and both are active.
+
+## ISDN callers in A-law (2026-11-20)
+
+ISDN calls reach Asterisk through the Cisco (endpoint 6501), whose SDP
+offers PCMU before PCMA, so v90ras answered them μ-law and the Cisco
+requantized the A-law B channel. That cost the Diva V.90 upstream 115-150
+shell errors a call. Three changes, none in the binary:
+
+- `pjsip.conf`: new template `[endpoint-modem-dual](!,endpoint-modem)`
+  (`allow=!all,clearmode,ulaw,alaw`, `codec_prefs_outgoing_offer=prefer:pending,operation:intersect,keep:all,transcode:allow`),
+  used by 2951-2960. Backup `pjsip.conf.before-v90ras-dual-law-20261120`.
+- `extensions.conf`: the three v90ras Dials carry
+  `b(v90ras-law^s^1(${CHANNEL(endpoint)},${CALLERID(num)}))`. `[v90ras-law]`
+  sets `PJSIP_MEDIA_OFFER(audio)=alaw` for 6501 callers numbered 79XX (BRI);
+  FXS 78XX callers are left alone. Backup
+  `extensions.conf.before-v90ras-alaw-20261120`.
+- CT 117 drop-in `/etc/systemd/system/v90ras.service.d/info0d-b39.conf`:
+  `V90_INFO0D_B39=0` (also in `v90ras.service`). The Diva trains V.90 on
+  A-law only when we declare μ-law. μ-law calls already send 0.
+
+Live result: 5/5 Diva calls (ctrl 7 and 8) at 38666/31200 with 0 shell
+errors, against 41333/31200 with 115-150 on μ-law. Details and the
+downstream cost: `docs/v90_upstream_data_path.md`. To revert, restore the
+two Asterisk backups (`module reload res_pjsip.so`, `dialplan reload`) and
+remove the drop-in.

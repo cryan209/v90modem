@@ -3464,7 +3464,7 @@ uses `--payload-first`, apart from these:
 - Rows where the check does not apply: synchronous V.110 delivers its idle
   `0xFF` fill as octets, and fax HDLC wraps the payload in frames.
 
-## μ-law Diva path: upstream frame loss (2026-11-20, open)
+## μ-law Diva path: upstream frame loss (2026-11-20, fixed in production the same day)
 
 Diva 4BRI calls into a μ-law server (2902, Asterisk transcodes to the
 `toprouter-bri` A-law trunk, as v90ras does: 733/733 recent v90ras call
@@ -3534,4 +3534,32 @@ INFO0d bit 39 = 0 (we declare μ-law while sending A-law) to train V.90 on
 A-law, as the 18 November A/B in `v90_analogue_role.md` found. So
 answering ISDN callers in A-law needs both an Asterisk change and that
 card workaround on the A-law path.
+
+**Where the requantization happens, and the production fix (same day).**
+The ISDN calls do not arrive on `toprouter-bri`: the CDRs show every Diva
+call to 2950 as `PJSIP/6501` (the Cisco), caller 7911. The Cisco's INVITE
+offers `RTP/AVP 0 8` (PCMU first), and the FXS ports (callers 7800-7803)
+use the same endpoint and the same offer. So giving the v90ras lines both
+laws in the caller's order changed nothing: 3 calls still answered μ-law,
+115-150 shell errors each. What works is a pre-dial handler on the v90ras
+Dials (`[v90ras-law]` in `extensions.conf`). For a caller on endpoint 6501
+whose number is 79XX (the TopRouter's BRI numbering), it sets
+`PJSIP_MEDIA_OFFER(audio)=alaw`. Asterisk then offers the line PCMA only and
+answers the Cisco in PCMA, so the B channel's A-law reaches us unconverted.
+v90ras declares μ-law in INFO0d bit 39 (`V90_INFO0D_B39=0`, see above) on
+those calls.
+
+Production v90ras (2950), Diva V90A, 60 s PPP holds:
+
+| Path | Calls | Connect (down/up) | Upstream shell errors per call | Pings |
+|---|---|---|---|---|
+| μ-law, before (ctrl 7) | 2 | 41333/31200 | 134, 136 | 57/57, 56/57 |
+| μ-law, dual-law template only (ctrl 7) | 3 | 41333/31200 | 120, 150, 115 | 54/55, 55/56, 54/55 |
+| A-law (ctrl 7 x3, ctrl 8 x2) | 5 | 38666/31200 | 0 on all 5 | 57/58, 57/57, 57/57, 57/58, 57/57 |
+
+The cost is downstream: the card picks drn 9 (38666) on A-law where it
+picks drn 11 (41333) on μ-law. It does so on every call. The 18 November
+A/B saw the same (36000 at code 23). Not yet checked live: an FXS (78XX)
+caller still answering μ-law after the change. By construction it does,
+because the handler skips it and the Cisco offers PCMU first.
 
