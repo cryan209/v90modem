@@ -1169,3 +1169,59 @@ Lines carried were the same: A 28,250–28,600 and B 28,350–28,500 at the
 peer DTE. No call renegotiated or retrained. slmodemd's data residual sits on
 the design figure, so a live 9.8 exchange is still unexercised; it has only
 run in the engine pair.
+
+## The analogue role behind a codec: noise as codeword flips (2026-11-19)
+
+**Symptom.** Forced 9.8 renegotiation (`ME_V92_RN_RATIO=0.5`) at
+`--loop-noise-db` 50 and 51: the digital side completed, but the analogue
+role's B1d frame 47 had 12 bit errors (`d9` sent, `db` decided) and the call
+retrained. 49 and 53 passed by luck of the draw.
+
+**Cause 1: TRN2d can't see this noise.** `engine_pair_test`'s `bearer()` adds
+the loop noise and requantises it to G.711, as an ATA's codec does. So every
+sample the analogue receiver gets is a codec level. A decision on a grid point
+reads e = 0 exactly, and the noise only shows when a whole codeword moves to
+its neighbour. V.90 §8.6.5 maps TRN2d through CPt, which uses loud points.
+Their codec step is many times the noise, so over 20,202 TRN2d symbols at
+noise 50 the decision error was 0.0 with zero off-grid samples.
+`design_cpu()` (V.92 9.6.2) therefore never thinned the CPu, and the
+renegotiation offered the Phase 3 CP unchanged.
+
+**Cause 2: the margin is to the codec's threshold, not the midpoint.**
+`d9`/`db` are Ucodes 38/36, 64 apart (step 32), with `da` between them and
+off the grid. A noise of more than half a step (16, ≈ 2σ) turns `d9` into
+`da`. That's a tie between the two grid points, and `slice_ucode()` gives ties
+to the smaller magnitude, so it comes out as `db`. Measured against
+the midpoint, the same pair looks 4σ safe. That is the spacing rule
+`build_cp()`'s DIL plan uses (§8.5.2).
+
+**Fix** (`v92_analogue_phase4.c`).
+- `count_flip()` runs on every symbol sliced on CPt or CP: TRN2d, MP, B1d and
+  data mode. It counts, per decided Ucode, the decisions that could show a
+  flip up or down (the neighbour is off the grid) and the flips seen.
+  `flip_sigma()` solves Σ count × Q(h/σ) = flips for σ, where h is the
+  half-step to that neighbour. The counts are kept across a 9.8 exchange, so
+  the data mode before Rd (9.8.2.2.1) feeds the new CPu.
+- It reads 7.86 at noise 50 (the loop's rms is 2500 × 10^(−50/20) = 7.91) and
+  6.93–7.04 at noise 51 (7.04). No flips gives 0, so a clean loop loses
+  nothing.
+- When the flip σ exceeds the TRN2d σ, `design_cpu()` uses it and measures
+  each pair of neighbours with `pair_margin()`: the distance to the codec
+  threshold, with ties counted as lost. On a linear input the TRN2d σ
+  governs and the margin stays half the spacing. The margin is still 3σ.
+
+**Result** (engine pair, forced renegotiation, 18 s hold, two renegotiations).
+- Noise 45, 47–53 and 55 all complete both renegotiations with no B1d failure
+  or retrain, and the payload is intact.
+- At noise 50 the CPu kept 466 of 479 points (drn stays 22, 56000). At 45 it
+  kept 359 of 383 (drn 21, 54666), and at 55 it kept 514 of 515.
+- The initial CPu is unchanged: TRN2d shows no flips, so σ is 0 there, as
+  before.
+- fast.list rows at noise 50 and 51 require "codec thresholds" and forbid
+  "B1d validation failed".
+
+**Open.**
+- `v90_analogue_phase4_build_cp()` plans the Phase 3 CP from the DIL with
+  midpoint margins, so it has the same tie blind spot behind a codec.
+- The V.90 analogue role has no CPu redesign: its §9.6 renegotiation
+  re-offers the Phase 3 CP, so it doesn't get this measurement.

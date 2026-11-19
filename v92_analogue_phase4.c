@@ -35,6 +35,12 @@ struct v92a4_s {
     /* TRN2d decision noise (G.711 linear), for the CPu design. */
     double trn2d_err2;
     unsigned trn2d_errs;
+    /* Downstream noise as the codec leaves it: codeword flips off the
+     * mapping grid, and how many decisions could have shown one in each
+     * direction (see flip_sigma()).  Kept across a 9.8 renegotiation, so
+     * the data mode before Rd counts towards the new CPu. */
+    double flip_up[128], flip_down[128];
+    unsigned flips;
     bool cpu_designed;
     vpcm_cp_frame_t cp;               /* the data-mode CP, as CPu offers it */
     v91_law_t law;
@@ -178,42 +184,137 @@ void v92a4_start(v92a4_t *s, int sign)
  * random mapped symbols, so its decision noise is the data-mode figure.
  * Measured in the reconstructed-audio pair: DIL planned A-law levels 16
  * apart at 3 sigma, and B1d then sliced 136 as 152.  Thin each constellation
- * to the same 3-sigma separation v90_analogue_phase4_build_cp() applies,
- * then take drn down until 5.4.3's 2^K <= prod(Mi) holds.  Thinning keeps
+ * to 3 sigma to each decision boundary (build_cp()'s second rung; the DIL
+ * plan already took the first), then take drn down until 5.4.3's
+ * 2^K <= prod(Mi) holds.  Behind a codec the noise comes from flip_sigma()
+ * and the boundary from pair_margin().  Thinning keeps
  * CP a subset of the Phase 3 CP, so its power and CPt rules still hold.
  */
 #define V92A4_CPU_SIGMAS     3.0
 #define V92A4_CPU_MIN_ERRS   500
+/* Decisions that could show a flip before flip_sigma() is believed. */
+#define V92A4_FLIP_MIN_EXPOSURE 2000.0
+
+static double ucode_level(v91_law_t law, int u)
+{
+    return fabs((double)v91_codeword_to_linear(law, v91_ucode_to_codeword(law, u, true)));
+}
+
+static double q_tail(double x)
+{
+    return 0.5*erfc(x/sqrt(2.0));
+}
+
+/*
+ * The noise that reaches us through a G.711 codec.  When the analogue loop's
+ * noise is requantised before we see it (an ATA, or engine_pair_test's
+ * --loop-noise-db), every received sample IS a codec level: a decision on a
+ * grid point reads e = 0 exactly, and the noise shows only as a whole
+ * codeword moved to its neighbour.  TRN2d cannot show that.  §8.6.5 maps it
+ * through CPt, which sits on loud points whose codec step is many times the
+ * noise; measured at -50 dB of loop noise, 20,202 TRN2d symbols gave zero
+ * flips and e = 0.0, while B1d's d9 came back as db.  What does show it is
+ * every decision on a quiet point -- the data mode before a 9.8 Rd most of
+ * all.
+ *
+ * A decision on Ucode u can show a flip upwards only if u+1 is off the grid
+ * it was sliced on (a flip onto a grid point is decided as that point), and
+ * then with probability Q(h/sigma), h the half-step to u+1.  Counting those
+ * opportunities per Ucode and solving sum count x Q(h/sigma) = flips for
+ * sigma is the moment estimate of the noise before the codec.  No flips
+ * means nothing to thin for, and gives 0.
+ */
+static double flip_sigma(const v92a4_t *s)
+{
+    double exposure = 0.0, lo = 0.0, hi = 4096.0;
+
+    for (int u = 0; u < 128; u++)
+        exposure += s->flip_up[u] + s->flip_down[u];
+    if (!s->flips || exposure < V92A4_FLIP_MIN_EXPOSURE)
+        return 0.0;
+    for (int it = 0; it < 60; it++) {
+        double sigma = 0.5*(lo + hi), expected = 0.0;
+
+        for (int u = 0; u < 128; u++) {
+            if (s->flip_up[u] > 0.0)
+                expected += s->flip_up[u]
+                    *q_tail(0.5*(ucode_level(s->law, u+1) - ucode_level(s->law, u))/sigma);
+            if (s->flip_down[u] > 0.0)
+                expected += s->flip_down[u]
+                    *q_tail(0.5*(ucode_level(s->law, u) - ucode_level(s->law, u-1))/sigma);
+        }
+        if (expected < s->flips) lo = sigma;
+        else hi = sigma;
+    }
+    return 0.5*(lo + hi);
+}
+
+/*
+ * The distance from each of two neighbouring grid points p < u to where its
+ * decision is lost.  On a linear input that is half their spacing.  Behind a
+ * codec it is the codec's own decision threshold (midway between adjacent
+ * codewords) below the first codeword that still slices to u, or above the
+ * last that slices to p: points two codewords apart are then only half a step
+ * from losing, because the codeword between them is a tie, and our slicer
+ * gives a tie to the smaller magnitude (v90a_linear's slice_ucode()) -- d9
+ * sent, da received, db decided.  Ties count against both sides.
+ */
+static double pair_margin(v91_law_t law, int p, int u, bool codec)
+{
+    double lp = ucode_level(law, p), lu = ucode_level(law, u);
+    int first_u = u, last_p = p;
+
+    if (!codec)
+        return 0.5*(lu - lp);
+    for (int c = u-1; c > p; c--) {
+        double l = ucode_level(law, c);
+        if (lu - l < l - lp) first_u = c;
+        else break;
+    }
+    for (int c = p+1; c < u; c++) {
+        double l = ucode_level(law, c);
+        if (l - lp < lu - l) last_p = c;
+        else break;
+    }
+    return fmin(lu - 0.5*(ucode_level(law, first_u-1) + ucode_level(law, first_u)),
+                0.5*(ucode_level(law, last_p) + ucode_level(law, last_p+1)) - lp);
+}
 
 static void design_cpu(v92a4_t *s)
 {
     vpcm_cp_frame_t cp = s->cp;
-    double sigma;
+    double sigma = 0.0, codec_sigma;
+    bool codec;
     int drn;
 
     s->cpu_designed = true;
-    if (s->trn2d_errs < V92A4_CPU_MIN_ERRS)
+    if (s->trn2d_errs >= V92A4_CPU_MIN_ERRS)
+        sigma = sqrt(s->trn2d_err2/s->trn2d_errs);
+    codec_sigma = flip_sigma(s);
+    /* The codec figure governs only where it is the larger: on a linear
+     * input the decision error already holds all of the noise. */
+    codec = codec_sigma > sigma;
+    if (codec)
+        sigma = codec_sigma;
+    fprintf(stderr, "[V92A] 9.6.2 CPu design: TRN2d sigma %.2f over %u symbols, "
+            "codec-flip sigma %.2f (%u flips)%s\n",
+            s->trn2d_errs ? sqrt(s->trn2d_err2/s->trn2d_errs) : 0.0, s->trn2d_errs,
+            codec_sigma, s->flips, codec ? "; codec thresholds" : "");
+    if (sigma <= 0.0)
         return;
-    sigma = sqrt(s->trn2d_err2/s->trn2d_errs);
     for (int c = 0; c < cp.constellation_count; c++) {
-        double prev = 0.0;
-        bool first = true;
+        int prev = -1;
 
         for (int u = 1; u < 128; u++) {
-            double level;
-
             if (!vpcm_cp_mask_get(cp.masks[c], u))
                 continue;
-            level = fabs(v91_codeword_to_linear(s->law,
-                                                v91_ucode_to_codeword(s->law, u, true)));
             /* +/-level against each other, then each against its neighbour. */
-            if (first ? level < V92A4_CPU_SIGMAS*sigma
-                      : level - prev < 2.0*V92A4_CPU_SIGMAS*sigma) {
+            if (prev < 0 ? ucode_level(s->law, u) < V92A4_CPU_SIGMAS*sigma
+                         : pair_margin(s->law, prev, u, codec) < V92A4_CPU_SIGMAS*sigma) {
                 vpcm_cp_mask_set(cp.masks[c], u, false);
                 continue;
             }
-            prev = level;
-            first = false;
+            prev = u;
         }
     }
     for (drn = cp.drn; drn > 0; drn--) {
@@ -225,6 +326,17 @@ static void design_cpu(v92a4_t *s)
      * if thinning leaves nothing usable. */
     if (drn < 1 || !v90_analogue_phase4_set_cp(s->rx, &cp))
         return;
+    {
+        int before = 0, after = 0;
+        for (int c = 0; c < cp.constellation_count; c++)
+            for (int u = 0; u < 128; u++) {
+                before += vpcm_cp_mask_get(s->cp.masks[c], u);
+                after += vpcm_cp_mask_get(cp.masks[c], u);
+            }
+        fprintf(stderr, "[V92A] 9.6.2 CPu: %d of %d constellation points kept at %.1f sigma, "
+                "drn %u -> %u\n", after, before, V92A4_CPU_SIGMAS,
+                (unsigned)s->cp.drn, (unsigned)cp.drn);
+    }
     s->cp = cp;
     s->cpu.drn = cp.drn;
     memcpy(s->cpu.masks, cp.masks, sizeof(s->cpu.masks));
@@ -373,6 +485,36 @@ int v92a4_tx(v92a4_t *s, int16_t *samples, int count)
     for (int i = 0; i < count; i++) samples[i] = sample(s);
     return count;
 }
+/* One decision on the grid `set` towards flip_sigma(): the decided Ucode,
+ * the Ucode the full ladder puts the sample on, and which neighbours were
+ * off the grid (only a flip onto one of those can be seen). */
+static void count_flip(v92a4_t *s, int16_t sample, const uint8_t *set, int n)
+{
+    bool on[128] = {false};
+    double mag = fabs((double)sample), dec = fabs(v90a_linear_last_decision(s->linear));
+    double best = INFINITY;
+    int ud = -1, ur = 0;
+
+    for (int i = 0; i < n; i++) {
+        double d = fabs(v90a_linear_ucode_level(s->linear, set[i]) - dec);
+
+        on[set[i] & 0x7F] = true;
+        if (d < best) { best = d; ud = set[i] & 0x7F; }
+    }
+    if (ud < 0)
+        return;
+    best = INFINITY;
+    for (int u = 0; u < 128; u++) {
+        double d = fabs(v90a_linear_ucode_level(s->linear, u) - mag);
+
+        if (d < best) { best = d; ur = u; }
+    }
+    if (ud < 127 && !on[ud+1]) s->flip_up[ud] += 1.0;
+    if (ud > 0 && !on[ud-1]) s->flip_down[ud] += 1.0;
+    if (ur != ud)
+        s->flips++;
+}
+
 void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
 {
     if (!s || !samples || count <= 0) return;
@@ -387,6 +529,8 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
             s->trn2d_err2 += e*e;
             s->trn2d_errs++;
         }
+        if (n > 0 && v90a_linear_locked(s->linear))
+            count_flip(s, samples[i], ucodes, n);
         unsigned e = v90_analogue_phase4_put(s->rx, &cw, 1);
         if (e) fprintf(stderr, "P4RX event=%x\n", e);
         if (e & V90A4_RX_EVENT_ED)
