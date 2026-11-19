@@ -380,6 +380,33 @@ static void start_phase4(v90_analogue_phase3_t *s)
             fflush(dump);
         }
     }
+    /* This attempt's CP is the one §9.6 renegotiates from (see
+     * redesign_rr_cp), so a retrain's new plan replaces the last one. */
+    s->cp_phase3 = s->cp;
+    s->cp_phase3_set = true;
+    /*
+     * ME_V90_ANALOGUE_STARTUP_DRN=<n>: a diagnostic.  Start data mode at a
+     * lower downstream rate than the plan allows, so a §9.6 renegotiation
+     * has a faster rate to fall forward to (cp_phase3 keeps the full plan).
+     * Lowering drn on the same Mi only shrinks K, so 2^K <= prod(Mi)
+     * (§5.4.3) still holds; the CP is ours to choose (§8.5.2).
+     */
+    {
+        const char *e = getenv("ME_V90_ANALOGUE_STARTUP_DRN");
+        int n = (e && *e) ? atoi(e) : 0;
+
+        if (n > 0 && n < (int) s->cp.drn) {
+            vpcm_cp_frame_t cp = s->cp;
+
+            cp.drn = (uint8_t) n;
+            if (v90_analogue_phase4_cp_k(&cp) >= 0) {
+                fprintf(stderr, "[V90A] startup CP capped: drn %u -> %d "
+                        "(ME_V90_ANALOGUE_STARTUP_DRN)\n",
+                        (unsigned) s->cp.drn, n);
+                s->cp = cp;
+            }
+        }
+    }
     /* §9.4.2.4 has both modems take the highest rate enabled in both, so a
      * local cap only holds if CP stops advertising the rates above it. */
     if (s->upstream_max_n >= 2) {

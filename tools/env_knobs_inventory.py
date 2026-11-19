@@ -115,6 +115,7 @@ KEPT = {
     "ME_V90_ANALOGUE_SCR": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_SD_LINE": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_SD_LINE_MIN": "V.90 analogue role: configuration and the open real-loop investigation",
+    "ME_V90_ANALOGUE_STARTUP_DRN": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_SR": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_UINFO": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_UPSTREAM_MAX_N": "V.90 analogue role: configuration and the open real-loop investigation",
