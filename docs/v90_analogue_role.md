@@ -1384,5 +1384,7 @@ renegotiates from, so a clean line has a faster rate to move up to. On the
 drn 22 CP (CP redesign `drn 22 -> 22`, 0 flips). The renegotiation's B1d
 decoded 48 of 48 frames with 0 bit errors with the drn 22 CP. B1d's frame
 layout depends on drn, so that decode shows the card had moved to 56000.
-There was no retrain, and 40 of 40 pings returned. The engine pair agrees:
+There was no retrain, and 40 of 40 pings returned. The 7930 gave the same
+result in one call: 40000 at startup, then 56000 after the renegotiation,
+with B1d 48/48 and 0 bit errors, and 40 of 40 pings. The engine pair agrees:
 the digital side's data mapper goes from drn 10 to drn 22 (fast.list row).
