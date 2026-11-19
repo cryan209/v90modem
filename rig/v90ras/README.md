@@ -1244,3 +1244,15 @@ renegotiations completed with no retrain. Built in `/root/deploy-5640b4d3`
 fb5d4393…) is `sip_v90_modem.pre-95e15ee4`. Installed by rename with no call
 or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
 active and the lines re-registered.
+
+## Deployed 567ae54d (2026-11-19)
+
+After a V.90 §9.6 rate renegotiation the engine now passes the new downstream
+(and upstream) rate to LAPM (`ds_set_line_bit_rate()`, `[V42STAT] rate=`),
+the CONNECT rate and +MRR. Before this they kept the startup rate
+(`docs/retrain_and_resync.md`). Built in `/root/deploy-5640b4d3` (checked out
+at 567ae54d). The binary (md5 4ca0dc8d…) is kept as
+`/opt/v90ras/sip_v90_modem.567ae54d`, and the previous binary (95e15ee4,
+6dc3d644…) is `sip_v90_modem.pre-567ae54d`. Installed by rename with no call
+or PPP interface up (`/run/v90ras/busy` is a directory, so check that it is
+empty). Then `v90ras` and `v90isdn` were restarted, and both are active.
