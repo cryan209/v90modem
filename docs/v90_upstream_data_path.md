@@ -3463,3 +3463,35 @@ uses `--payload-first`, apart from these:
 - The V.14-only answerer that rightly receives the caller's V.42 ODP first.
 - Rows where the check does not apply: synchronous V.110 delivers its idle
   `0xFF` fill as octets, and fax HDLC wraps the payload in frames.
+
+## μ-law Diva path: upstream frame loss (2026-11-20, open)
+
+Diva 4BRI calls into a μ-law server (2902, Asterisk transcodes to the
+`toprouter-bri` A-law trunk, as v90ras does: 733/733 recent v90ras call
+traces are `law=ULAW`) lose upstream frames. Ctrl 7 and ctrl 8 both show it,
+with or without §9.6. A-law end to end (2906, `SIP_FORCE_PCMA=1
+V90_INFO0D_B39=0`) does not:
+
+| Path | Calls | Upstream shell errors per call (§9.6.3.3 index over k bits) | Our REJs per call | Pings |
+|---|---|---|---|---|
+| μ-law (ctrl 7, 8) | 7 | 61-133 | 9-24 | 22-55 of 56-58 |
+| A-law (ctrl 7) | 2 | 0, 1 | 0, 0 | 56/56, 57/57 |
+
+`badfcs` stays 0 on both paths. The two paths do not differ in upstream
+decision error (0.152-0.159), receive SNR (36.6-36.8 dB), frame parameters
+(b=78 j=7 k=26, trellis 16), RTP (no loss, every seq/ts step 1/160, no gap
+over 40 ms) or peak level (no full-scale codes). So the errors are
+impulsive, not a raised noise floor.
+
+Not the conversion noise: `v90_upstream_replay` of an A-law tap
+(`diva-alaw7b-1`, handover 21.2 s) and of the same tap converted A→μ in
+software gives 1192 against 1226 bad shells and SNR 36.9 against 36.7 dB.
+The replay's absolute count does not match live (live counted 1), so only
+the difference means anything. The card's `SAMPLE[]` low byte (its
+transmit) differs from our received bytes by one code systematically on
+both laws, so it cannot locate the impulses. Next: find the bad shells' times
+in a μ-law tap, and look at our received samples there for a discontinuity
+(Asterisk's translator) against the same call's neighbouring symbols. In
+production, if Asterisk's transcoding is the cause, A-law callers could be
+answered in A-law.
+

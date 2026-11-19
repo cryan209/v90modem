@@ -2205,3 +2205,23 @@ finished. Each retrain costs about 16 s with no data. Our side was healthy
 before both: upstream at 36 dB, and the card never REJected our downstream
 (`rej rx=0` in all 108 reports). Ctrl 8 has never shown a code-20 retrain in
 these tests. Its cause is not established, and it is not this timer.
+
+**What triggers the code-20 retrains (2026-11-20).** Three production-like
+μ-law calls on ctrl 7 (2902, no `ME_V90_RENEG_AFTER_MS`) had no retrain and
+no card renegotiation: 0 of 3, all three steady at drn 11 for 60 s. All
+three code-20 retrains we have seen followed our forced probe, in which the
+card answers our Rd with a CP at drn 14. About 10 s later the card either
+falls back by its own §9.6 ("c1", then "fallback 2 c3") or does a full
+retrain (code 20). So this is the card judging drn 14 on the transcoded
+path and backing off, sometimes the expensive way.
+
+Ruled out, using the card's mlog `SAMPLE[]` high byte against our TX tap
+converted μ→A (`/root/slip2.py`, `/root/bytecmp.py` on CT 117): no
+one-sample slips on any of the four calls, and the card received our
+downstream byte-exact. In ans7b that is 31 blocks a second with 0 bad bytes
+from 20 s to 59 s, right up to the retrain. The card never REJected our
+downstream. On A-law end to end (2906, `SIP_FORCE_PCMA=1`,
+`V90_INFO0D_B39=0`), ctrl 7 starts at drn 9 (38666) and keeps it through
+both renegotiations, with no retrain and 56/56 and 57/57 pings. The
+μ-law path's real problem is the upstream (see
+`v90_upstream_data_path.md`, "μ-law Diva path: upstream frame loss").
