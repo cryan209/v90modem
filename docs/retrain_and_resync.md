@@ -2178,6 +2178,18 @@ Live, 2026-11-19, one-off 567ae54d server as 2902, with
   32000-symbol timer then forced a §9.5.1.1 retrain, which came back at
   41333.
 
-This is the second card-initiated B1 on ctrl 7 since 95e15ee4, and the
-first one fitted. Tap: `artifacts/diva-rate-ctrl7` on CT 117, about
-44.8 s in.
+**Cause, and the fix:** the B1 was not the problem. Offline
+(`v90_upstream_replay`, handover 48.4 s) it fits at 100% on the second search
+window, about 49.5 s in. Our side retrained at 48.93 s, which is 4.0 s after
+our R̄d (44.93 s). That is `V90_RENEG_ANSWER_TIMEOUT_SYMBOLS`, the bound for
+an attempt the peer never answers at all. It only stops once
+`reneg_answer_seen` is set, and on the responder path nothing set it: we see
+the peer's S before `v90_rate_renegotiation_start()`, start() clears the
+flag, and none of the S or CP-sync hooks run there. With echo reconditioning
+(Ed, silence until bit 30 clear, Rt, MP) the card's B1 lands 4.6 s after
+R̄d, so the bound always cut it off. The responder branch now marks the
+renegotiation as answered, which gives it §9.6.1's full E window. The
+engine replay of the first 52 s
+(`reference-data/artifacts/diva-v90d-peer-reneg-answer`, fast tier):
+without the mark it says "no answer within 32000 symbols"; with it, B1 is
+acquired and B1d resumes data.

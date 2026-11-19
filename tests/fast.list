@@ -192,6 +192,10 @@ sh -c './v90_upstream_replay reference-data/artifacts/apple-direct-v90-b1/late-e
 # Diva 4BRI after OUR digital-initiated V.90 9.6: its B1's final 4D symbol is
 # not 10.1.3.1's; the fit leaves those two symbols out (126 127) and acquires.
 sh -c './v90_upstream_replay reference-data/artifacts/diva-v90d-reneg-b1/reneg-rx.ulaw ulaw 3200 31200 4.6 4.6 > "$TMPDIR/diva-reneg-b1.log" 2>&1; grep -q "^replay: acquired=1$" "$TMPDIR/diva-reneg-b1.log" && grep -q "^replay: carrier_lost=0$" "$TMPDIR/diva-reneg-b1.log" && grep -q "template at 2 of 128 symbols (126 127)" "$TMPDIR/diva-reneg-b1.log"'
+# Diva 4BRI's OWN V.90 9.6 with echo reconditioning (9.6.1.2.5-.6): its B1 is
+# 4.6 s after our R-bar-d, so the 4 s unanswered-attempt bound must not apply
+# to a renegotiation the peer opened.
+sh -c 'ME_V90_MAX_TX_DBM0_CODE=21 ME_V90_TRN2D_SYMBOLS=6000 ME_V90_RENEG_AFTER_MS=12000 ./v90_engine_replay reference-data/artifacts/diva-v90d-peer-reneg-answer/live-rx.g711 ulaw --fast --sync --echo-ref > "$TMPDIR/peer-reneg.log" 2>&1; grep -q "Rate renegotiation 2: downstream data mode resumed after B1d" "$TMPDIR/peer-reneg.log" && ! grep -q "Rate renegotiation 2: no answer" "$TMPDIR/peer-reneg.log"'
 ./at_test_test
 ./clear_channel_test
 # The 9600 symbol-rate matrix: all twelve rows (six rates, both laws) train

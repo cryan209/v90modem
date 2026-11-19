@@ -20939,6 +20939,16 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                     ME_LOG("[ME] V.90 §9.6.1.2.2: responding; receiver "
                            "conditioned for CP\n");
                     v90_reneg_capture_upstream_locked();
+                    /* The peer opened this renegotiation, so its S is the
+                     * answer and the attempt gets §9.6.1's full E window.
+                     * v90_rate_renegotiation_start() clears the flag, and
+                     * no S or CP-sync hook runs on this path, so the
+                     * unanswered-attempt bound (4 s from R-bar-d) used to
+                     * cut it short: a Diva 4BRI's echo-reconditioned reply
+                     * (§9.6.1.2.5-.6: Ed, silence, Rt, MP) put its B1 on
+                     * the wire 4.6 s after our R-bar-d (2026-11-19, ctrl 7),
+                     * and we retrained 0.6 s before it arrived. */
+                    v90_rate_renegotiation_note_answer(g_v90);
                 } else if (!g_v92_active) {
                     /* Leave the receiver in DATA and watch for S spectrally.
                      * The constellation detector in V34_RX_STAGE_PHASE4_S
