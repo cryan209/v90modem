@@ -422,6 +422,18 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
 /*! Symbols after B1 used to check that an acquisition generalises. */
 #define V34_V90_T3_VALIDATE_SYMBOLS         256
 
+/*! B1 template positions the wire may disagree with before the template is
+    simply the wrong one: one mapping frame.  A Diva card's B1 after a
+    digital-initiated V.90 9.6 renegotiation differs from 10.1.3.1/V.34's in
+    its final 4D symbol only (2026-11-19), and least squares lets those two
+    symbols -- 58 grid units out -- bend the whole fit. */
+#define V34_V90_T3_B1_MISMATCH_MAX          8
+/*! A position is a mismatch when its fit residual is this many times the
+    median residual and at least V34_V90_T3_B1_MISMATCH_MIN (squared grid
+    units: 4 is one lattice step, i.e. a different constellation point). */
+#define V34_V90_T3_B1_MISMATCH_RATIO        25.0
+#define V34_V90_T3_B1_MISMATCH_MIN          4.0
+
 /*! The out-of-sample symbols have to land at least this close to the
     lattice, and carry no more than this multiple of the B1 template's own
     power, for the fit to be believed.  A good acquisition measured 0.002 at
@@ -2078,6 +2090,11 @@ typedef struct
     bool v90_t3_suppress_output;
     int v90_t3_b1_symbols;
     complexf_t v90_t3_b1[V34_V90_T3_B1_MAX_SYMBOLS];
+    /*! Positions of the acquired B1 the wire disagreed with
+        (v90_t3_b1_mismatch()); the frame-end test and the carrier estimates
+        leave them out. */
+    bool v90_t3_b1_skip[V34_V90_T3_B1_MAX_SYMBOLS];
+    int v90_t3_b1_skipped;
     float v90_t3_training_match;
 
     /*! Known-sequence B1 acquisition for ordinary V.34 (10.1.3.1). */

@@ -12896,13 +12896,19 @@ static void v90_t3_coarse_scores(v34_rx_state_t *s, int64_t first,
                        /(input_power*target_power));
 }
 
-static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
-                        complexf_t coeff[V34_V90_T3_FSE_TAPS])
+/* Least squares from the T/3 samples at `first` onto the loaded B1
+   template, leaving out the positions in `skip` (NULL: none).  resid[] gets
+   every position's squared error under the solution, skipped ones included;
+   error and power are summed over the positions used. */
+static bool v90_t3_fit_solve(v34_rx_state_t *s, int64_t first, bool conjugate,
+                             const bool *skip,
+                             double solution[2*V34_V90_T3_FSE_TAPS],
+                             double resid[V34_V90_T3_B1_MAX_SYMBOLS],
+                             double *error_out, double *power_out)
 {
     enum { N = 2*V34_V90_T3_FSE_TAPS };
     double matrix[N*N];
     double rhs[N];
-    double solution[N];
     int train = s->v90_t3_b1_symbols;
     int pre = V34_V90_T3_FSE_TAPS/2;
     double trace = 0.0;
@@ -12918,6 +12924,10 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     {
         double fr[N];
         double fi[N];
+
+        if (skip  &&  skip[n])
+            continue;
+        /*endif*/
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
         {
             complexf_t x = v90_t3_raw_get(s, first + 3*n - pre + tap);
@@ -12948,11 +12958,12 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     for (row = 0;  row < N;  row++)
         matrix[row*N + row] += trace*1e-6;
     if (!v90_t3_solve(matrix, rhs, solution, N))
-        return 0.0f;
+        return false;
     for (n = 0;  n < s->v90_t3_b1_symbols;  n++)
     {
         double yr = 0.0;
         double yi = 0.0;
+        double e;
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
         {
             complexf_t x = v90_t3_raw_get(s, first + 3*n - pre + tap);
@@ -12963,11 +12974,180 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
             yr += ar*x.re - ai*x.im;
             yi += ar*x.im + ai*x.re;
         }
-        error += (yr - s->v90_t3_b1[n].re)*(yr - s->v90_t3_b1[n].re)
-               + (yi - s->v90_t3_b1[n].im)*(yi - s->v90_t3_b1[n].im);
+        e = (yr - s->v90_t3_b1[n].re)*(yr - s->v90_t3_b1[n].re)
+          + (yi - s->v90_t3_b1[n].im)*(yi - s->v90_t3_b1[n].im);
+        resid[n] = e;
+        if (skip  &&  skip[n])
+            continue;
+        /*endif*/
+        error += e;
         power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
                + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
     }
+    *error_out = error;
+    *power_out = power;
+    return true;
+}
+
+static int v90_t3_cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *) a;
+    double y = *(const double *) b;
+
+    return (x > y) - (x < y);
+}
+
+/* Mark the B1 positions where the wire carried a different point from the
+   template: a residual V34_V90_T3_B1_MISMATCH_RATIO times the median and at
+   least one lattice step.  Returns how many, or 0 with nothing marked when
+   none are or more than V34_V90_T3_B1_MISMATCH_MAX are -- then the template
+   is not "right but for a symbol", and the fit stands or falls whole. */
+static int v90_t3_b1_mismatch(const double *resid, int n, bool skip[])
+{
+    double sorted[V34_V90_T3_B1_MAX_SYMBOLS];
+    double limit;
+    int count = 0;
+
+    memset(skip, 0, n*sizeof(skip[0]));
+    if (n < 4*V34_V90_T3_B1_MISMATCH_MAX)
+        return 0;
+    /*endif*/
+    memcpy(sorted, resid, n*sizeof(sorted[0]));
+    qsort(sorted, n, sizeof(sorted[0]), v90_t3_cmp_double);
+    limit = V34_V90_T3_B1_MISMATCH_RATIO*sorted[n/2];
+    if (limit < V34_V90_T3_B1_MISMATCH_MIN)
+        limit = V34_V90_T3_B1_MISMATCH_MIN;
+    /*endif*/
+    for (int i = 0;  i < n;  i++)
+    {
+        if (resid[i] > limit)
+        {
+            skip[i] = true;
+            count++;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    if (count > V34_V90_T3_B1_MISMATCH_MAX)
+    {
+        memset(skip, 0, n*sizeof(skip[0]));
+        count = 0;
+    }
+    /*endif*/
+    return count;
+}
+
+/* The winner's mismatched positions under its final filter, kept for the
+   frame-end test and the carrier estimates (v90_t3_b1_skip). */
+static void v90_t3_b1_mark_mismatch(v34_rx_state_t *s,
+                                    const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                    int64_t first,
+                                    bool conjugate)
+{
+    double resid[V34_V90_T3_B1_MAX_SYMBOLS];
+    int pre = V34_V90_T3_FSE_TAPS/2;
+
+    for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+    {
+        complexf_t y = {0.0f, 0.0f};
+        double dr;
+        double di;
+
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get(s, first + 3*n - pre + tap);
+            complexf_t z;
+
+            if (conjugate)
+                x.im = -x.im;
+            /*endif*/
+            z = complex_mulf(&w[tap], &x);
+            y = complex_addf(&y, &z);
+        }
+        /*endfor*/
+        dr = y.re - s->v90_t3_b1[n].re;
+        di = y.im - s->v90_t3_b1[n].im;
+        resid[n] = dr*dr + di*di;
+    }
+    /*endfor*/
+    s->v90_t3_b1_skipped = V34_DIAG_GETENV("ME_V90_B1_MISMATCH_OFF")
+                         ? 0
+                         : v90_t3_b1_mismatch(resid, s->v90_t3_b1_symbols,
+                                              s->v90_t3_b1_skip);
+    if (s->v90_t3_b1_skipped > 0)
+    {
+        char list[128];
+        int len = 0;
+
+        list[0] = '\0';
+        for (int n = 0;  n < s->v90_t3_b1_symbols  &&  len < (int) sizeof(list) - 8;  n++)
+        {
+            if (s->v90_t3_b1_skip[n])
+                len += snprintf(list + len, sizeof(list) - len, " %d", n);
+            /*endif*/
+        }
+        /*endfor*/
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 B1: the wire carried a different point from "
+                 "the 10.1.3.1 template at %d of %d symbols (%s); left out of "
+                 "the fit, the carrier estimates and the frame-end test\n",
+                 s->v90_t3_b1_skipped, s->v90_t3_b1_symbols, list + 1);
+    }
+    /*endif*/
+}
+
+static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
+                        complexf_t coeff[V34_V90_T3_FSE_TAPS])
+{
+    double solution[2*V34_V90_T3_FSE_TAPS];
+    double resid[V34_V90_T3_B1_MAX_SYMBOLS];
+    bool skip[V34_V90_T3_B1_MAX_SYMBOLS];
+    double error;
+    double power;
+
+    if (!v90_t3_fit_solve(s, first, conjugate, NULL, solution, resid,
+                          &error, &power))
+        return 0.0f;
+    /*endif*/
+    /* A template right everywhere but at a symbol or two -- a Diva card's B1
+       after a digital-initiated V.90 9.6 renegotiation differs from
+       10.1.3.1/V.34's in its final 4D symbol, 58 grid units out -- loses
+       the fit to those few: least squares bends every tap towards them (fit
+       96%, every other symbol 0.65 from the lattice).  Refit without them.
+       Only for a fit already close (80%), and at most one mapping frame
+       (V34_V90_T3_B1_MISMATCH_MAX), so a wrong template still fails whole;
+       the out-of-sample check judges the result like any other. */
+    if (power > 0.0  &&  error < 0.2*power
+        &&  !V34_DIAG_GETENV("ME_V90_B1_MISMATCH_OFF"))
+    {
+        bool prev[V34_V90_T3_B1_MAX_SYMBOLS];
+
+        memset(prev, 0, sizeof(prev));
+        for (int pass = 0;  pass < 3;  pass++)
+        {
+            double sol2[2*V34_V90_T3_FSE_TAPS];
+            double resid2[V34_V90_T3_B1_MAX_SYMBOLS];
+            double e2;
+            double p2;
+
+            if (v90_t3_b1_mismatch(resid, s->v90_t3_b1_symbols, skip) == 0
+                ||  memcmp(skip, prev, s->v90_t3_b1_symbols*sizeof(skip[0])) == 0)
+                break;
+            /*endif*/
+            if (!v90_t3_fit_solve(s, first, conjugate, skip, sol2, resid2,
+                                  &e2, &p2)
+                ||  p2 <= 0.0)
+                break;
+            /*endif*/
+            memcpy(prev, skip, sizeof(prev));
+            memcpy(solution, sol2, sizeof(solution));
+            memcpy(resid, resid2, sizeof(resid));
+            error = e2;
+            power = p2;
+        }
+        /*endfor*/
+    }
+    /*endif*/
     if (power <= 0.0 || error >= power)
         return 0.0f;
     for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
@@ -13563,10 +13743,15 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             float d_re = y.re - s->v90_t3_b1[pos].re;
             float d_im = y.im - s->v90_t3_b1[pos].im;
 
-            s->v90_t3_b1_frame_err += d_re*d_re + d_im*d_im;
+            /* Positions the acquisition found the wire disagreeing with
+               (v90_t3_b1_mark_mismatch()) say nothing about B1 ending. */
+            if (!s->v90_t3_b1_skip[pos])
+                s->v90_t3_b1_frame_err += d_re*d_re + d_im*d_im;
+            /*endif*/
             if (pos == s->v90_t3_b1_symbols - 1)
             {
-                float mean = s->v90_t3_b1_frame_err/s->v90_t3_b1_symbols;
+                int used = s->v90_t3_b1_symbols - s->v90_t3_b1_skipped;
+                float mean = s->v90_t3_b1_frame_err/((used > 0) ? used : 1);
 
                 s->v90_t3_b1_frame_err = 0.0f;
                 if (s->x2_mode)
@@ -15044,6 +15229,9 @@ static float v90_t3_b1_carrier_rate(const v34_rx_state_t *s,
         if (at - pre + V34_V90_T3_FSE_TAPS > s->v90_t3_raw_count)
             return 0.0f;
         /*endif*/
+        if (s->v90_t3_b1_skip[m])
+            continue;
+        /*endif*/
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
         {
             complexf_t x = v90_t3_raw_get(s, at - pre + tap);
@@ -15691,8 +15879,11 @@ search:
            the turn out first.  The rate is measured on B1 itself against the
            template, between its two halves, as the carrier loop's seed is
            after the commit; the fit leaves zero phase at B1's middle. */
-        float val_dphi = v90_t3_b1_carrier_rate(s, best_coeff, best_first,
-                                                best_conjugate);
+        float val_dphi;
+
+        v90_t3_b1_mark_mismatch(s, best_coeff, best_first, best_conjugate);
+        val_dphi = v90_t3_b1_carrier_rate(s, best_coeff, best_first,
+                                          best_conjugate);
 
         for (int k = 0;  k < V34_V90_T3_VALIDATE_SYMBOLS;  k++)
         {
@@ -15926,6 +16117,13 @@ search:
         /*endif*/
     }
 commit:
+    if (blind)
+    {
+        /* 4-point placement: the template was not what the wire carried. */
+        memset(s->v90_t3_b1_skip, 0, sizeof(s->v90_t3_b1_skip));
+        s->v90_t3_b1_skipped = 0;
+    }
+    /*endif*/
     /* V.34 10.1.3.1: only a validated B1 selects the receive hypothesis.
        A failed window's strongest noise fit must not replace the prepared
        trellis or the measured scrambler used by subsequent attempts. */
@@ -16234,6 +16432,9 @@ commit:
                 complexf_t *acc = (n < half) ? &c0 : &c1;
                 complexf_t e = s->v90_t3_b1[n];
 
+                if (s->v90_t3_b1_skip[n])
+                    continue;
+                /*endif*/
                 for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
                 {
                     complexf_t x = v90_t3_raw_get(s, best_first + 3*n - pre + tap);

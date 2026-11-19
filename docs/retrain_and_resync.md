@@ -2022,7 +2022,7 @@ happens: "E after 108 bits on the MP frame grid with no peer MP' decoded".
 Result: 96/96 over all six symbol rates x {u,A}-law x 8 delays. The row runs
 at delay 0 again, and a 2743 row has been added.
 
-## Digital-initiated §9.6 against the Diva cards: upstream never re-acquired after E (2026-11-19)
+## Digital-initiated §9.6 against the Diva cards: upstream never re-acquired after E (2026-11-19; fixed, see below)
 
 Setup: the Diva cards dialled a one-off digital server of ours as V.90
 analogue modems. `CTRL=7|8 DIAL=2902 /tmp/diva_batch.sh` ran on eicon420.
@@ -2052,3 +2052,72 @@ including a peer-chosen rate change. The upstream re-entry after E does not.
 On the same cards, the analogue-initiated direction (us as the analogue
 modem) completes 6 of 6 (`docs/v90_analogue_role.md`). Logs:
 `/root/deploy-5640b4d3/artifacts/diva-v90d-rr-ctrl{7,8}-2c158288` on CT 117.
+
+### Cause and fix: B1's final 4D symbol, and a least-squares fit that let it steer
+
+The card does send B1 after E. It is 10.1.3.1/V.34's B1 at 31200 bit/s,
+with one exception: positions 126 and 127, the final 4D symbol of the frame,
+carry a different point. On controller 8 the error was 9.6 and 58.6 grid
+units, and controller 7 shows the same two positions. The startup B1 on the
+same calls matches all 128 symbols. Superframe epoch is not the cause: a
+template built at any of the j=7 frame indices has the same final 4D symbol.
+
+Least squares lets those two symbols bend all 21 taps:
+
+- **In-sample fit:** 96%, i.e. a residual of 30.6 against a template power
+  of 765, versus 0.14 at startup.
+- **Lattice distance:** every other B1 symbol landed 0.6-0.7 from the
+  lattice.
+- **Turn estimates:** the out-of-sample check's turn correction
+  (`v90_t3_b1_carrier_rate()`) and the carrier-loop seed compare B1's two
+  halves, and both were biased.
+
+The data after B1 was never white. Equalised with a fit that leaves out
+those two symbols, it sits 0.10-0.20 from the lattice in every 32-symbol
+block. The 0.629 refused seven times was the biased turn correction applied
+to clean symbols. Left in, the biased seed (0.0159°/symbol against
+−0.0008 at startup) also shut the eye 0.4 s into DATA (sym err
+0.15 → 0.77).
+
+The fix is in `v90_t3_fit()`:
+
+- **Refit without mismatches.** When the first solve is already 80%, the
+  fit refits without the positions whose residual is ≥25× the median and
+  ≥4 (one lattice step). It iterates up to 3 times and drops at most one
+  mapping frame (`V34_V90_T3_B1_MISMATCH_MAX` = 8), so a wrong template still
+  fails whole.
+- **Mask reused downstream.** The winner's mask
+  (`v90_t3_b1_mark_mismatch()`) also drops those positions from the
+  validation turn, the carrier seed and the B1 frame-end test.
+- **Negative control.** `ME_V90_B1_MISMATCH_OFF=1` restores the old fit.
+
+Replayed, both calls acquire after §9.6:
+
+| | fit | out-of-sample | carrier seed | sym err |
+|---|---|---|---|---|
+| ctrl 8 | 100% | 0.169 | −0.0008°/symbol | 0.15-0.17 through to the live divergence |
+| ctrl 7 | 100% | 0.174 | — | — |
+
+On both calls the frame phase then locks onto HDLC flags. Regression:
+`reference-data/artifacts/diva-v90d-reneg-b1` (10 s of the ctrl 8 call)
+through `v90_upstream_replay`. It reads `acquired=1` with the fix and
+`acquired=0` with the knob.
+
+**Live, same test, fixed binary (2026-11-19):**
+
+| | Pings | Retrains |
+|---|---|---|
+| ctrl 8 | 47 of 57 | none |
+| ctrl 7 | 45 of 58 | none |
+
+- **First renegotiation (ours, at +12 s).** On both cards it went drn 11 → 14,
+  and our upstream re-acquired B1 after E.
+- **Second renegotiation (the card's, ~12 s later).** The card then opened
+  its own §9.6 back down to drn 11. Our responder answered it (Ed, silence,
+  CP with bit 30 clear, Rt) and re-acquired again. On the excluded positions:
+  - That B1 again needed 126/127 excluded.
+  - Position 76 was excluded once on ctrl 7 and once on ctrl 8: an isolated
+    noisy symbol.
+- **Lost pings.** These sit around the two renegotiations (RTT peaks
+  9.9-10.1 s). This was not separated further.
+- **Still open.** Why the card falls back 12 s after taking drn 14.
