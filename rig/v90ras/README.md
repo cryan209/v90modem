@@ -1169,3 +1169,18 @@ out at 83abe5a4). The binary (md5 5b506c84…) is kept as
 or PPP interface up, then `v90ras` and `v90isdn` were restarted; both are
 active and the lines re-registered. The A/B build trees `/root/margin-a` and
 `/root/margin-b` and the script `/root/margin_ab.sh` (on vmhost) remain.
+
+## Deployed 5a42a57a (2026-11-19 15:00)
+
+V.92 9.8 rate renegotiation started by the digital side, precoder
+coefficients only where the feedback equaliser gains, and the precoded
+PCM-upstream margin back at 3σ (`docs/v92_quick_connect.md`, "V.92 9.8 rate
+renegotiation, and the precoder only where it gains"). For V.92 callers this
+server answers: against slmodemd on the rig (3 alternated pairs) the upstream
+went 34666 → 36000, with 0 frames rejected on both arms and no
+renegotiation needed. Built in `/root/deploy-5640b4d3` (checked out at
+5a42a57a). The binary (md5 33d5792b…) is kept as
+`/opt/v90ras/sip_v90_modem.5a42a57a`; the previous binary (83abe5a4,
+5b506c84…) is `sip_v90_modem.pre-5a42a57a`. Installed by rename with no call
+or PPP interface up, then `v90ras` and `v90isdn` were restarted; both are
+active and all ten v90ras lines re-registered.
