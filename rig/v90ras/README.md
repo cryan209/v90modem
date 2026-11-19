@@ -1202,3 +1202,16 @@ the shared DIL planner. Built in `/root/deploy-5640b4d3` (checked out at
 33d5792b…) is `sip_v90_modem.pre-96d7d278`. Installed by rename with no call
 or PPP interface up, then `v90ras` and `v90isdn` were restarted. Both are
 active and all ten v90ras lines re-registered.
+
+## Deployed fa4c9779 (2026-11-19 19:27)
+
+The V.90 analogue role now redesigns its §9.6 renegotiation CP on codeword
+flips (`docs/v90_analogue_role.md`, "§9.6 renegotiation CP redesigned on
+codeword flips"). This server only runs that code when it is the analogue
+modem; answering callers as the digital side is unchanged. Offline-verified
+only. Built in `/root/deploy-5640b4d3` (checked out at fa4c9779). The binary
+(md5 728f14dd…) is kept as `/opt/v90ras/sip_v90_modem.fa4c9779`, and the
+previous binary (96d7d278, f70d7543…) is `sip_v90_modem.pre-fa4c9779`.
+Installed by rename with no call or PPP interface up, then `v90ras` and
+`v90isdn` were restarted. Both are active and all ten v90ras lines
+re-registered.
