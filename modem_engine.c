@@ -422,6 +422,135 @@ void me_set_verbose(int v) { g_me_verbose = v ? 1 : 0; }
 #define ME_LOG(fmt, ...) \
     do { if (me_verbose_enabled()) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 
+/*
+ * Receive linearization for a μ-law leg that carries a transcoded A-law
+ * source.
+ *
+ * An A-law peer behind an A-law to μ-law gateway (an ISDN caller through the
+ * Cisco and Asterisk, answered in PCMU) arrives as G.711 Table 1a codes
+ * re-encoded by Table 2a: only 240 of the 256 μ-law codes ever occur.  Decoding
+ * them as μ-law adds a second rounding to the peer's own, and on the outer
+ * points of a V.34/V.90 upstream signal that second rounding crosses decision
+ * boundaries (docs/v90_upstream_data_path.md, "double companding": Diva V.90
+ * upstream 115-150 shell errors a call against 0 on A-law end to end).  The
+ * map is one-to-one above 8448 and at all but 16 codes below it, so mapping a
+ * received code back to the A-law code it came from removes the second
+ * rounding exactly; the 16 shared codes take the midpoint of their two A-law
+ * values.
+ *
+ * Only the receiver's linear copy changes.  The codewords, the RX tap and
+ * everything decoded from codewords directly stay byte-exact (CLAUDE.md
+ * constraint 1).  The inverse applies only while the received stream has
+ * stayed inside the image: RX_ALAW_IMAGE_RUN codes in a row, with at least
+ * RX_ALAW_IMAGE_DISTINCT different codes among them and RX_ALAW_IMAGE_SMALL
+ * near zero (μ-law magnitude codes 0x70-0x7f, |x| < 32).  The 16 codes the
+ * image lacks are exactly the odd ones of that range, so a loud tone that
+ * never passes near zero stays "inside" whatever its source (2.6-8.4% of a
+ * native μ-law call's codes are outside, yet slmodemd's V.8 held a run of
+ * 7429); a native stream that keeps passing zero leaves the image within a
+ * few dozen samples.  One code outside drops it.  ME_RX_ALAW_IMAGE=0
+ * disables it.
+ */
+#define RX_ALAW_IMAGE_RUN      16000
+#define RX_ALAW_IMAGE_DISTINCT 48
+#define RX_ALAW_IMAGE_SMALL    256
+
+static int16_t g_rx_alaw_image_lin[256];   /* μ-law code -> A-law linear */
+static bool    g_rx_alaw_image_member[256];
+static bool    g_rx_alaw_image_tables;
+static int     g_rx_alaw_image_enabled = -1;
+/* Per call (me_init): */
+static bool     g_rx_alaw_image_latched;
+static int      g_rx_alaw_image_run;
+static int      g_rx_alaw_image_distinct;
+static int      g_rx_alaw_image_small;
+static uint8_t  g_rx_alaw_image_seen[32];
+static uint64_t g_rx_alaw_image_drops;
+
+static void rx_alaw_image_build_tables(void)
+{
+    int sum[256] = {0};
+    int n[256] = {0};
+
+    for (int a = 0; a < 256; a++) {
+        int16_t lin = alaw_to_linear((uint8_t)a);
+        uint8_t u = linear_to_ulaw(lin);
+
+        sum[u] += lin;
+        n[u]++;
+    }
+    for (int u = 0; u < 256; u++) {
+        g_rx_alaw_image_member[u] = n[u] > 0;
+        g_rx_alaw_image_lin[u] = n[u] > 0
+            ? (int16_t)(sum[u] / n[u])
+            : ulaw_to_linear((uint8_t)u);
+    }
+    g_rx_alaw_image_tables = true;
+}
+
+static void rx_alaw_image_reset(void)
+{
+    g_rx_alaw_image_latched = false;
+    g_rx_alaw_image_run = 0;
+    g_rx_alaw_image_distinct = 0;
+    g_rx_alaw_image_small = 0;
+    g_rx_alaw_image_drops = 0;
+    memset(g_rx_alaw_image_seen, 0, sizeof(g_rx_alaw_image_seen));
+}
+
+/* Track the received codes; true while the inverse applies. */
+static bool rx_alaw_image_update(const uint8_t *codewords, int count)
+{
+    if (g_rx_alaw_image_enabled < 0) {
+        /* ME_RX_ALAW_IMAGE=0: decode a transcoded A-law source as plain μ-law (default 1). */
+        const char *v = getenv("ME_RX_ALAW_IMAGE");
+
+        g_rx_alaw_image_enabled = !(v && v[0] == '0');
+    }
+    if (!g_rx_alaw_image_enabled || g_law != ME_LAW_ULAW || g_x2_mu_control)
+        return false;
+    if (!g_rx_alaw_image_tables)
+        rx_alaw_image_build_tables();
+    for (int i = 0; i < count; i++) {
+        uint8_t c = codewords[i];
+
+        if (!g_rx_alaw_image_member[c]) {
+            if (g_rx_alaw_image_latched)
+                ME_LOG("[ME] RX A-law image: code 0x%02x outside it after "
+                       "%d codes; decoding as plain μ-law again\n",
+                       c, g_rx_alaw_image_run);
+            g_rx_alaw_image_drops++;
+            g_rx_alaw_image_latched = false;
+            g_rx_alaw_image_run = 0;
+            g_rx_alaw_image_distinct = 0;
+            g_rx_alaw_image_small = 0;
+            memset(g_rx_alaw_image_seen, 0, sizeof(g_rx_alaw_image_seen));
+            continue;
+        }
+        if (g_rx_alaw_image_run < INT32_MAX)
+            g_rx_alaw_image_run++;
+        if ((c & 0x7f) >= 0x70 && g_rx_alaw_image_small < INT32_MAX)
+            g_rx_alaw_image_small++;
+        if (!(g_rx_alaw_image_seen[c >> 3] & (1u << (c & 7)))) {
+            g_rx_alaw_image_seen[c >> 3] |= (uint8_t)(1u << (c & 7));
+            g_rx_alaw_image_distinct++;
+        }
+        if (!g_rx_alaw_image_latched
+            && g_rx_alaw_image_run >= RX_ALAW_IMAGE_RUN
+            && g_rx_alaw_image_distinct >= RX_ALAW_IMAGE_DISTINCT
+            && g_rx_alaw_image_small >= RX_ALAW_IMAGE_SMALL) {
+            g_rx_alaw_image_latched = true;
+            ME_LOG("[ME] RX A-law image: %d codes in a row (%d distinct, %d "
+                   "near zero) are all A-law codes re-encoded as μ-law; the "
+                   "receiver now decodes them as the A-law values (%llu "
+                   "earlier codes outside)\n", g_rx_alaw_image_run,
+                   g_rx_alaw_image_distinct, g_rx_alaw_image_small,
+                   (unsigned long long)g_rx_alaw_image_drops);
+        }
+    }
+    return g_rx_alaw_image_latched;
+}
+
 static int me_span_flow_level(void);
 
 /* In-place Sd retries already used on the current Phase-3 attempt. */
@@ -15550,6 +15679,7 @@ void me_init(void)
     }
     cr_init(&g_cr, 8000);
     g_g711_rx_octets = 0;
+    rx_alaw_image_reset();
     g_v34_rx_samples = 0;
     g_v90_t3_arm_logged = false;
     g_v34_rx_started_at = 0;
@@ -23215,6 +23345,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     /* The codeword work above has already been done for these samples; say so,
      * or me_rx_audio() slices them a second time (v90_analogue_linear.h). */
     g_rx_from_g711 = true;
+    bool alaw_image = rx_alaw_image_update(codewords, count);
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
         int chunk = count - offset;
@@ -23222,7 +23353,8 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
             chunk = (int)(sizeof(linear) / sizeof(linear[0]));
         for (int i = 0; i < chunk; i++)
-            linear[i] = pcm_to_linear(codewords[offset + i]);
+            linear[i] = alaw_image ? g_rx_alaw_image_lin[codewords[offset + i]]
+                                   : pcm_to_linear(codewords[offset + i]);
 #if defined(__EMSCRIPTEN__)
         /* Browser-only analogue line experiment, after the network D/A.
            V.90 §5: the DS0 codewords above remain byte-exact. The adapter
