@@ -1292,7 +1292,9 @@ shell errors a call. Three changes, none in the binary:
   `docs/v90_analogue_role.md`.) Since 2026-11-23 Asterisk endpoint `6501-bri` answers
   79XX callers in A-law, so the path is transparent. On it a truthful bit 39
   gets 56000 (3/3) and this drop-in gets 37333. The drop-in is now the thing
-  holding the Diva back; it has not been removed yet.
+  holding the Diva back. Removed the same day (kept as
+  `/root/info0d-b39.conf.removed-20261123` on CT 117). Production 2950 as
+  7911 then gave CONNECT 56000, PCMA, 0 shell errors of 19981.
 
 Live result: 5/5 Diva calls (ctrl 7 and 8) at 38666/31200 with 0 shell
 errors, against 41333/31200 with 115-150 on μ-law. Details and the
