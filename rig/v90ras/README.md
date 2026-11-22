@@ -1292,3 +1292,15 @@ errors, against 41333/31200 with 115-150 on μ-law. Details and the
 downstream cost: `docs/v90_upstream_data_path.md`. To revert, restore the
 two Asterisk backups (`module reload res_pjsip.so`, `dialplan reload`) and
 remove the drop-in.
+
+## Deployed 284585ab (2026-11-23)
+
+The receiver decodes a μ-law leg that carries a transcoded A-law source by
+the A-law values (`docs/v90_upstream_data_path.md`, "Undoing the double
+companding in the receiver"). Built in `/root/deploy-5640b4d3` (checked out
+at 284585ab). The binary (md5 b64e2960…) is kept as
+`/opt/v90ras/sip_v90_modem.284585ab`, and the previous binary (9d94ec3d,
+fddf7000…) is `sip_v90_modem.pre-284585ab`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. Then `v90ras` and
+`v90isdn` were restarted, and both are active. Smoke call: the Diva as 7811
+(μ-law) gets 41333/31200 with 0 upstream shell errors (136-141 before).

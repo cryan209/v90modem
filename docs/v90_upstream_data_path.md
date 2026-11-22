@@ -3622,3 +3622,47 @@ Every arm reaching data had 0 upstream shell errors. Louder codes move the
 card's whole constellation up by a Ucode or two but leave K at 24. So drn 9
 is the card's ceiling on this path, and code 21 stays.
 
+
+## Undoing the double companding in the receiver (2026-11-23, 284585ab)
+
+The A-law to μ-law conversion (G.711 Table 1a decode, Table 2a encode) is
+almost one-to-one. 240 of the 256 μ-law codes are reachable. The 16 that are
+not are the odd codes nearest zero (0x71-0x7f and 0xf1-0xff, odd). Eight
+code pairs per sign below 8448 share a μ-law code, and above 8448 every code
+is distinct. So a receiver that knows its μ-law leg carries an A-law source
+can take, for each code, the A-law value it came from (the midpoint for the
+shared ones). That removes the second rounding exactly where the outer
+points need it. `me_rx_g711_impl()` now does this for the linear copy that
+feeds the V.34/V.90 receivers. The codewords, the RX tap and the codeword
+decoders are untouched.
+
+It latches per call after 16000 codes in a row inside the image, with 48
+distinct codes and 256 near zero (μ-law magnitude 0x70-0x7f), and drops at
+the first code outside. The near-zero condition is needed. Native μ-law
+calls have 2.5-8.4% of their codes outside (slmodemd 8.4%, the FXS Courier
+2.5%), yet slmodemd's V.8 held a run of 7429 in-image codes with 123
+distinct: a loud tone never passes near zero. The 7811 taps latch 2.0 s
+into media, on 160 distinct codes. `ME_RX_ALAW_IMAGE=0` turns it off.
+
+Engine replay (v90ras environment, `--sync --echo-ref`) reproduces both
+live 7811 calls exactly with it off and clears them with it on: 136 -> 0 and
+141 -> 0 bad shells over 31981 frames. slmodemd's call (native μ-law) never
+latches and is unchanged, 0 of 29539. Fast-tier fixture
+`diva-v90d-ulaw-alaw-image` (first 45 s): 37 -> 0.
+
+Live A/B, Diva ctrl 7 as 7911 into a one-off μ-law server on 2902
+(`/root/dsrv_mu.sh` on CT 117, v90ras environment, 284585ab), arms
+alternated, 60 s PPP holds:
+
+| `ME_RX_ALAW_IMAGE` | Calls | Connect | Upstream shell errors | Pings lost |
+|---|---|---|---|---|
+| 1 | 3 | 41333/31200 | 0 of 32166, 0 of 32104, 0 of 32043 | 1/58, 0/58, 0/57 |
+| 0 | 2 | 41333/31200 | 124 of 32351, 137 of 32043 | 1/57, 2/56 |
+
+(One more arm-0 call got NO ANSWER: the server registered but no INVITE
+reached it. It is not counted.) Deployed to v90ras the same day. On
+production a Diva call as 7811 (μ-law, rule skipped) then gave 0 of 31981.
+
+So on this path μ-law plus the inverse is as clean upstream as A-law end to
+end, and it keeps the card's drn 11 (41333) instead of A-law's drn 9
+(38666). The `[v90ras-law]` A-law rule for 79XX callers is still in place.
