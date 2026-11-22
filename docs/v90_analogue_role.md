@@ -1217,6 +1217,38 @@ no CONNECT in 120 s. Open.
     without the factor of 2. Halving a level moves it down exactly one
     segment, so in the Ucode domain it shows as a 16-Ucode step rather than
     the nearest-level fit tested above.
+  - **The route, not our transmitter: the card fails against itself through
+    Asterisk (2026-11-23).** Every Asterisk route from the BRI runs an
+    A-law -> mu-law -> A-law round trip. The Cisco's leg to Asterisk
+    (endpoint 6501) is PCMU, and the line's leg is PCMA. tcpdump on the
+    Asterisk host shows payload type 0 on the Cisco leg and 8 on ours, both
+    for 2906 and for 2960 behind the `[v90ras-law]` handler (4160 packets
+    each way). G.711 Table 3 note 2: A-mu-A changes A-law decoder values 26,
+    28, 30, 32, 45, 47, 63 and 80 by one LSB. A hairpin capture shows exactly
+    those 16 codes (8 per sign) leaving Asterisk on mu-law codes whose
+    nearest A-law is the neighbour. The card itself, controller 7 as 7911,
+    alternated:
+
+    | Route | Calls | Result |
+    |---|---|---|
+    | 7920 direct (Cisco BRI to BRI, A-law throughout) | 3 | CONNECT 54666, progress `00b0 00c0 00c1 00c3 00ca` |
+    | 17920 (`from-cisco` strips the 1 and dials 7920 back through Asterisk) | 3 | CONNECT 31200 (V.34), stops at `00c3` and retrains |
+
+    So the card's own digital role fails exactly as we do with a truthful
+    bit 39 once the A-mu-A hop is in the path. Everything we checked on
+    our side was already identical to the card: DIL (9570 codes), TRN1d
+    (Ucode 78), Table 1, Phase 2 L1/L2 levels (L1 6 dB over L2 for both, ours
+    2 dB hotter), and the INFO0d fields bar bit 13 and the maximum baud
+    difference. On our calls the card's CPt reports the pad as exactly
+    2.0000 in Table 14 bits 52:67 (now in the `codec-Ucodes` log line), and
+    it retrains 600 ms into our MP. Also re-tested with a truthful bit 39,
+    with no change: TRN1d 30072T (2 calls), the card's INFO0d nominal and
+    maximum power codes (2), and the 2960 route (2). Declaring mu-law
+    (`V90_INFO0D_B39=0`) is what lets the card train V.90 across the hop;
+    it is a workaround for the route, not for our A-law. What would remove
+    it is a path with no A-mu-A, i.e. the 6501 leg in PCMA. Captures:
+    `/tmp/d2d.pcap`, `/tmp/p2960.pcap` on the Asterisk host;
+    `/var/tmp/b39/p1T`, `p3T`, `hop1` on CT 117.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the

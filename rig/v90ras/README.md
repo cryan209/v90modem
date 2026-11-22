@@ -1285,7 +1285,11 @@ shell errors a call. Three changes, none in the binary:
   `extensions.conf.before-v90ras-alaw-20261120`.
 - CT 117 drop-in `/etc/systemd/system/v90ras.service.d/info0d-b39.conf`:
   `V90_INFO0D_B39=0` (also in `v90ras.service`). The Diva trains V.90 on
-  A-law only when we declare μ-law. μ-law calls already send 0.
+  A-law only when we declare μ-law. μ-law calls already send 0. (2026-11-23:
+  the Cisco leg stays PCMU even with the handler, so the call crosses an
+  A-μ-A round trip. The card fails V.90 against itself across that same hop,
+  so the drop-in works around the route, not our A-law. See
+  `docs/v90_analogue_role.md`.)
 
 Live result: 5/5 Diva calls (ctrl 7 and 8) at 38666/31200 with 0 shell
 errors, against 41333/31200 with 115-150 on μ-law. Details and the

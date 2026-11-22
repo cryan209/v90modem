@@ -3544,8 +3544,13 @@ laws in the caller's order changed nothing: 3 calls still answered μ-law,
 115-150 shell errors each. What works is a pre-dial handler on the v90ras
 Dials (`[v90ras-law]` in `extensions.conf`). For a caller on endpoint 6501
 whose number is 79XX (the TopRouter's BRI numbering), it sets
-`PJSIP_MEDIA_OFFER(audio)=alaw`. Asterisk then offers the line PCMA only and
-answers the Cisco in PCMA, so the B channel's A-law reaches us unconverted.
+`PJSIP_MEDIA_OFFER(audio)=alaw`. Asterisk then offers the line PCMA only.
+(Correction, 2026-11-23: it still answers the Cisco in PCMU. tcpdump on the
+Asterisk host shows payload type 0 on the 6501 leg behind this handler, so
+the B channel reaches us through an A-law -> mu-law -> A-law round trip. That
+round trip is transparent to bits 1-7 (G.711 Table 3 note 2), which is why
+the upstream shows no shell errors. It is not byte-exact, though. See
+`docs/v90_analogue_role.md`, "The route, not our transmitter".)
 v90ras declares μ-law in INFO0d bit 39 (`V90_INFO0D_B39=0`, see above) on
 those calls.
 
