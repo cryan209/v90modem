@@ -3559,9 +3559,22 @@ Production v90ras (2950), Diva V90A, 60 s PPP holds:
 
 The cost is downstream: the card picks drn 9 (38666) on A-law where it
 picks drn 11 (41333) on μ-law. It does so on every call. The 18 November
-A/B saw the same (36000 at code 23). Not yet checked live: an FXS (78XX)
-caller still answering μ-law after the change. By construction it does,
-because the handler skips it and the Cisco offers PCMU first.
+A/B saw the same (36000 at code 23).
+
+**Callers the handler skips still get μ-law (2026-11-23).** No FXS modem
+was attached, so the Diva stood in for one: with `AT+iO7811` its calls
+reach Asterisk as `PJSIP/6501`, caller 7811 (CDR), exactly as an FXS caller
+does. Ctrl 7, V90A, 60 s PPP holds, alternated with the card's usual 7911:
+
+| Caller | Calls | Codec answered | Connect | Upstream shell errors | Pings lost |
+|---|---|---|---|---|---|
+| 7911 (BRI rule) | 2 | PCMA, Phase 3 A-law | 38666 | 0 of 32104, 0 of 32104 | 0/57, 0/57 |
+| 7811 (6501, not 79XX) | 2 | PCMU, Phase 3 μ-law | 41333 | 136 of 31981, 141 of 31981 | 1/58, 1/58 |
+
+slmodemd (CT 100, 6003, `SIP_FORCE_PCMU=1`, `AT+MS=90`) dialling 2950:
+PCMU, CONNECT 52000, 0 shell errors of 29539. So the rule changes only
+79XX callers on 6501. An FXS caller still gets μ-law, which on the Diva
+path brings back the double-companding errors, as on 20 November.
 
 **Why the card picks drn 9 on A-law (same day).** It is the card's own
 level model, not the line. Data-mode CP, interval 0 (μ-law call
