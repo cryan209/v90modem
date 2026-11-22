@@ -1289,7 +1289,10 @@ shell errors a call. Three changes, none in the binary:
   the Cisco leg stays PCMU even with the handler, so the call crosses an
   A-μ-A round trip. The card fails V.90 against itself across that same hop,
   so the drop-in works around the route, not our A-law. See
-  `docs/v90_analogue_role.md`.)
+  `docs/v90_analogue_role.md`.) Since 2026-11-23 Asterisk endpoint `6501-bri` answers
+  79XX callers in A-law, so the path is transparent. On it a truthful bit 39
+  gets 56000 (3/3) and this drop-in gets 37333. The drop-in is now the thing
+  holding the Diva back; it has not been removed yet.
 
 Live result: 5/5 Diva calls (ctrl 7 and 8) at 38666/31200 with 0 shell
 errors, against 41333/31200 with 115-150 on μ-law. Details and the

@@ -1249,6 +1249,29 @@ no CONNECT in 120 s. Open.
     it is a path with no A-mu-A, i.e. the 6501 leg in PCMA. Captures:
     `/tmp/d2d.pcap`, `/tmp/p2960.pcap` on the Asterisk host;
     `/var/tmp/b39/p1T`, `p3T`, `hop1` on CT 117.
+  - **Fixed in Asterisk the same day: BRI callers answered in A-law.** New
+    endpoint `6501-bri` (`allow=clearmode,alaw,ulaw`,
+    `codec_prefs_incoming_offer=prefer:configured`) is identified by
+    `match_header=From: /<sip:79[0-9][0-9]@192\.168\.88\.62>/`. A new
+    `[global]` sets `endpoint_identifier_order=header,ip,username,anonymous`.
+    `[v90ras-law]` also accepts `6501-bri`. FXS callers (78XX) still match
+    `6501` by IP. The identifier order only takes effect on an Asterisk
+    restart, so reloading res_pjsip is not enough. Do not try to unload
+    `res_pjsip_endpoint_identifier_ip.so`: it will not load again without a
+    restart. After the change (tcpdump: PT 8 on all four legs, CDR
+    `PJSIP/6501-bri`):
+
+    | Call | Result |
+    |---|---|
+    | Card to itself via Asterisk (17920) | CONNECT 54666 (was V.34 31200, 3/3) |
+    | Us on 2906, truthful bit 39 (A-law) | 3/3 CONNECT 56000: CPt has one constellation, no bit 128, drn 22, 0 upstream shell errors |
+    | Diva as 7811 (FXS stand-in) to 2950 | `PJSIP/6501`, μ-law, CONNECT 41333, as before |
+    | Production 2950 as 7911, still declaring μ-law (`V90_INFO0D_B39=0`) | CONNECT 37333 |
+
+    So the 6 dB pad the card modelled was the A-mu-A hop. With a transparent
+    path a truthful A-law declaration gets 56000. Backups:
+    `pjsip.conf.before-6501-bri-alaw-20261123`,
+    `extensions.conf.before-6501-bri-alaw-20261123`.
 
 V.21 first failed PPP at pppd's defaults: a 45-byte LCP
   frame takes 1.5 s at 300 bps, so the 3 s restart timer fires before the
