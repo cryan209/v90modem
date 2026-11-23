@@ -756,6 +756,13 @@ static void two_nearest_points(const v92_cpd_frame_t *cpd,
     }
 }
 
+bool v92_upstream_viterbi_supported(const v92_cpd_frame_t *cpd)
+{
+    return cpd  &&  (!cpd->coeffs_present
+                     ||  (cpd->lz1 == 0  &&  cpd->lp2 == 0  &&  cpd->lz2 >= 1
+                          &&  cpd->prefilter_ff[0] != 0));
+}
+
 bool v92_upstream_wave_decode_viterbi_frame(
     v92_upstream_wave_rx_t *state,
     const v92_cpd_frame_t *cpd,
@@ -775,15 +782,36 @@ bool v92_upstream_wave_decode_viterbi_frame(
     uint8_t best_bits[V92_UPSTREAM_MAX_FRAME_BITS];
     v92_upstream_rx_state_t best_data;
 
-    if (!state || !samples || !bits_out || cpd->coeffs_present
+    double x_hist[V92_CPD_MAX_TAPS];
+    double v_hist[V92_CPD_MAX_TAPS];
+
+    if (!state || !samples || !bits_out || !v92_upstream_viterbi_supported(cpd)
         || !v92_upstream_wave_profile_validate(cpd)
         || !wave_data_profile(cpd, &profile)
         || bits_max < v92_upstream_bits_per_frame(profile.drn))
         return false;
     gain = cpd_gain(cpd);
-    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
-        two_nearest_points(cpd, i, samples[i]/gain,
-                           candidates[i], errors[i]);
+    memcpy(x_hist, state->x_history, sizeof(x_hist));
+    memcpy(v_hist, state->v_history, sizeof(v_hist));
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+        double v = samples[i]/gain;
+        double u = v;
+
+        if (cpd->coeffs_present) {
+            /* 6.4.2 inverted on observations, as recover_symbol() does:
+               the prefilter (LP2 = 0) gives x(n), then u(n) = x(n) - sum
+               p1(k) x(n-k) (LZ1 = 0). */
+            double x = v;
+
+            for (int k = 1; k < cpd->lz2; k++)
+                x -= x_hist[k - 1]*q0_15(cpd->prefilter_ff[k]);
+            x /= q0_15(cpd->prefilter_ff[0]);
+            u = x - precoder_fixed(cpd, state->u_history, x_hist);
+            push_history(x_hist, x);
+            push_history(v_hist, v);
+        }
+        two_nearest_points(cpd, i, u, candidates[i], errors[i]);
+    }
 
     memset(paths, 0, sizeof(paths));
     initial_state = state->convolutional_state;
@@ -903,9 +931,15 @@ bool v92_upstream_wave_decode_viterbi_frame(
             state->slicing_errors++;
         state->decided[i] = u;
         push_history(state->u_history, u);
-        push_history(state->x_history, u);
-        push_history(state->v_history, u);
+        if (!cpd->coeffs_present) {
+            push_history(state->x_history, u);
+            push_history(state->v_history, u);
+        }
         state->symbols++;
+    }
+    if (cpd->coeffs_present) {
+        memcpy(state->x_history, x_hist, sizeof(x_hist));
+        memcpy(state->v_history, v_hist, sizeof(v_hist));
     }
     state->data = best_data;
     state->convolutional_state = (uint8_t)best_state;
@@ -918,12 +952,14 @@ bool v92_upstream_trellis_init(v92_upstream_trellis_t *state,
                                const v92_cpd_frame_t *cpd,
                                const v92_upstream_wave_rx_t *initial)
 {
-    if (!state || !initial || !cpd || cpd->coeffs_present
+    if (!state || !initial || !cpd || !v92_upstream_viterbi_supported(cpd)
         || !v92_upstream_wave_profile_validate(cpd)
         || initial->convolutional_state >= 16)
         return false;
     memset(state, 0, sizeof(*state));
     state->cpd = *cpd;
+    memcpy(state->x_history, initial->x_history, sizeof(state->x_history));
+    memcpy(state->v_history, initial->v_history, sizeof(state->v_history));
     wave_data_profile(cpd, &state->profile);
     state->data = initial->data;
     state->convolutional_state = initial->convolutional_state;
@@ -973,6 +1009,7 @@ int v92_upstream_trellis_feed(v92_upstream_trellis_t *state,
     uint8_t ki[V92_UPSTREAM_INTERVALS];
     int eta_frame[V92_UPSTREAM_INTERVALS];
     int previous_frame[3], end_state, emitted_end = 0;
+    double stripped[V92_UPSTREAM_INTERVALS];
 
     if (!state || !state->initialized || !samples || !bits_out
         || bits_max < v92_upstream_bits_per_frame(state->profile.drn))
@@ -982,6 +1019,24 @@ int v92_upstream_trellis_feed(v92_upstream_trellis_t *state,
         if (!isfinite(samples[i]) || !isfinite(samples[i]/gain)
             || fabs(samples[i]/gain) > sqrt(DBL_MAX)/8.0)
             return -2;
+    if (state->cpd.coeffs_present) {
+        /* 6.4.2 inverted on observations (LZ1 = LP2 = 0): u(n) in the
+           sample's units, so the trellis below runs unchanged. */
+        static const double no_u[V92_CPD_MAX_TAPS];
+
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+            double v = samples[i]/gain;
+            double x = v;
+
+            for (int k = 1; k < state->cpd.lz2; k++)
+                x -= state->x_history[k - 1]*q0_15(state->cpd.prefilter_ff[k]);
+            x /= q0_15(state->cpd.prefilter_ff[0]);
+            stripped[i] = gain*(x - precoder_fixed(&state->cpd, no_u, state->x_history));
+            push_history(state->x_history, x);
+            push_history(state->v_history, v);
+        }
+        samples = stripped;
+    }
     for (int group = 0; group < 3; group++) {
         int candidates[4][2];
         double errors[4][2], next[16], minimum = HUGE_VAL;

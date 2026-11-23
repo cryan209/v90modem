@@ -157,9 +157,14 @@ bool v92_upstream_rm_ki(const v92_cpd_frame_t *cpd, bool primed,
 v92_rm_class_t v92_upstream_rm_classify(const v92_cpd_frame_t *cpd,
                                         const uint8_t ki[V92_UPSTREAM_INTERVALS]);
 
-/* Three-transition, 16-state Viterbi decoder for the initial unfiltered CPd
- * profile.  It keeps the two nearest points per symbol and uses §6.4.4's Y0
- * parity/trellis constraint to correct hard-slicer errors. */
+/* Three-transition, 16-state Viterbi decoder.  It keeps the two nearest
+ * points per symbol and uses §6.4.4's Y0 parity/trellis constraint to correct
+ * hard-slicer errors.  With precoder coefficients (any CPd for which
+ * v92_upstream_viterbi_supported() holds) it first removes the §6.4.2
+ * feedback from the observed samples: with LZ1 = 0 and LP2 = 0 the feedback
+ * and the prefilter's feed-forward taps depend only on past x(n), which the
+ * receiver has observed, so u(n) is known before any decision. */
+bool v92_upstream_viterbi_supported(const v92_cpd_frame_t *cpd);
 bool v92_upstream_wave_decode_viterbi_frame(
     v92_upstream_wave_rx_t *state,
     const v92_cpd_frame_t *cpd,
@@ -193,6 +198,10 @@ typedef struct {
     uint64_t groups;
     double decided[V92_UPSTREAM_INTERVALS];
     uint8_t convolutional_state; /* end of the last emitted frame */
+    /* Observed x(n) and v(n), for stripping 6.4.2's feedback from a
+     * precoded CPd (see v92_upstream_wave_decode_viterbi_frame()). */
+    double x_history[V92_CPD_MAX_TAPS];
+    double v_history[V92_CPD_MAX_TAPS];
 } v92_upstream_trellis_t;
 
 /* init copies the profile and the acquired B1u state; all state is per call.

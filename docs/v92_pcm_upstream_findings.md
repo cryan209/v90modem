@@ -206,3 +206,21 @@ peer. With p1 = (0.10, -0.05) and no channel ISI nothing locks at all,
 because x(n) is then off the codec's levels (the reason the engine sends
 coefficients only where the feedback pays, `modem_engine.c` near
 `V92_PRECODER_MIN_GAIN`).
+
+**Viterbi for precoded CPds (2026-11-24).** Every CPd we send has LZ1 = 0
+and LP2 = 0, so the 6.4.2 feedback and the prefilter's feed-forward taps
+depend only on past x(n), which the receiver has already observed: it
+strips them before any decision (x = (v - sum z2(k) x(n-k)) / z2(0),
+u = x - sum p1(k) x(n-k)) and runs the same 16-state trellis on u.
+`v92_upstream_viterbi_supported()` names the CPds this covers; one with z1
+or p2 taps still slices symbol by symbol. Same harness, same seeds:
+
+| | sigma 6 | 8 | 10 | 12 |
+|---|---|---|---|---|
+| p1 = (0.0002, -0.0001), spec peer | 0 | 0 | 8.0e-4 | 6.0e-3 |
+| p1 = (0.0002, -0.0001), feedback rounded down | 0 | 1.6e-4 | 3.0e-3 | 2.8e-2 |
+
+The precoded spec-peer row now equals the unprecoded one, and the ESS
+rounding costs the same 2 DS0 as the other quirk. `v92_b1u_lock_test`
+covers it with p1 = (0.10, -0.05) at two phases and two B1u lengths; the
+old decoder got 686 bits wrong or never locked on those cases.

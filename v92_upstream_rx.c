@@ -253,7 +253,7 @@ static bool try_b1u_lock(v92_upstream_rx_t *rx)
             for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
                 normalized[i] =
                     (observed[frame*V92_UPSTREAM_INTERVALS + i] - offset)/gain;
-            bool decoded = rx->cpd.coeffs_present
+            bool decoded = !v92_upstream_viterbi_supported(&rx->cpd)
                 ? v92_upstream_wave_decode_frame(&trial, &rx->cpd, normalized,
                                                  bits, (int)sizeof(bits))
                 : v92_upstream_wave_decode_viterbi_frame(
@@ -301,7 +301,7 @@ static int deliver_frame(v92_upstream_rx_t *rx)
     int k = v92_upstream_bits_per_frame(rx->cpd.selected_upstream_drn);
     bool ok;
 
-    if (rx->cpd.coeffs_present) {
+    if (!v92_upstream_viterbi_supported(&rx->cpd)) {
         ok = v92_upstream_wave_decode_frame(&rx->wave_rx, &rx->cpd,
                                             rx->frame, bits,
                                             (int)sizeof(bits));
@@ -423,9 +423,10 @@ static bool decode_frame_with(v92_upstream_rx_t *rx,
                               const double frame[V92_UPSTREAM_INTERVALS],
                               uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS])
 {
-    /* The Viterbi decoder serves the unfiltered profile; with precoder or
-     * prefilter coefficients only the symbol-by-symbol path exists. */
-    return rx->cpd.coeffs_present
+    /* The per-frame Viterbi decoder serves every CPd we send (precoder
+     * feedback is stripped from observations first); only a CPd with z1 or
+     * p2 taps falls back to symbol-by-symbol slicing. */
+    return !v92_upstream_viterbi_supported(&rx->cpd)
         ? v92_upstream_wave_decode_frame(state, &rx->cpd, frame, bits,
                                          V92_UPSTREAM_MAX_FRAME_BITS)
         : v92_upstream_wave_decode_viterbi_frame(state, &rx->cpd, frame, bits,
@@ -626,9 +627,8 @@ int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
                     - (double)rx->candidates[i].zero_bits
                       /((double)V92_B1U_LOCK_FRAMES*k);
                 rx->ncandidates = 0;
-                if (!rx->cpd.coeffs_present)
-                    (void)v92_upstream_trellis_init(&rx->trellis, &rx->cpd,
-                                                   &rx->wave_rx);
+                (void)v92_upstream_trellis_init(&rx->trellis, &rx->cpd,
+                                               &rx->wave_rx);
                 break;
             }
             if (!alive)

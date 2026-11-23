@@ -35,6 +35,10 @@ static double gauss(void)
 
 /* A Table 30 profile like the one the engine designs from TRN2u: G.711
  * levels kept apart, drn from the moduli. */
+/* Precoder feedback p1 for make_cpd(), as the engine sends (LZ1 = 0, LP2 =
+ * 0, identity z2); zero for none. */
+static double precode_p1[2];
+
 static void make_cpd(v92_cpd_frame_t *cpd, int drn, bool k3_half)
 {
     static const int levels[] = { 276, 812, 1372, 1884, 2620, 3132, 3644,
@@ -54,6 +58,14 @@ static void make_cpd(v92_cpd_frame_t *cpd, int drn, bool k3_half)
     cpd->set_sizes[0] = (uint8_t)n;
     for (int i = 0; i < 12; i++)
         cpd->moduli[i] = (uint8_t)((k3_half && i%4 == 3) ? n/2 : n);
+    if (precode_p1[0] != 0.0  ||  precode_p1[1] != 0.0) {
+        cpd->coeffs_present = true;
+        cpd->lp1 = 4;
+        cpd->precoder_fb[0] = (int16_t)lrint(precode_p1[0]*16384.0);
+        cpd->precoder_fb[1] = (int16_t)lrint(precode_p1[1]*16384.0);
+        cpd->lz2 = 4;
+        cpd->prefilter_ff[0] = 32767;
+    }
     /* Back drn off until product(Mi) >= 2^K, as the CPd builder does. */
     {
         double bits = 0.0;
@@ -487,6 +499,17 @@ int main(void)
     skip_b1u_frames = 0;
     run_case(V92_UPSTREAM_MEMBER_MIN_X, 200, 30.0, false, 6, false, true);
     run_case(V92_UPSTREAM_MEMBER_MOST_NEGATIVE, 200, 30.0, false, 6, true, true);
+    /* With precoder coefficients the receiver strips 6.4.2's feedback from
+     * the observed x(n) and decodes u(n) with the same trellis.  It used to
+     * slice symbol by symbol: at the noise the unprecoded cases above pass,
+     * B1u did not lock or the data carried errors. */
+    precode_p1[0] = 0.10;
+    precode_p1[1] = -0.05;
+    for (int h = 0; h < 2; h++) {
+        run_case(V92_UPSTREAM_MEMBER_MIN_X, 503, 60.0, true, 6, h, true);
+        run_case(V92_UPSTREAM_MEMBER_MIN_X, 77, 90.0, true, 6, h, true);
+    }
+    precode_p1[0] = precode_p1[1] = 0.0;
     test_stream_rates();
     test_stream_erasure();
     test_erasure_bit_clock();
