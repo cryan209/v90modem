@@ -12,8 +12,10 @@ run. Where the 29 October list below disagrees, this wins:
 - **V.90 digital upstream** (P1) has moved: the `v90ras` server now carries
   live data from Win95/Cisco, Diva, Courier, MT5634 and RasFinder peers.
   Open: Courier-class noisy upstream B1 (shape gate 9ca245ef, watch for false
-  accepts), Diva over an A-law route failing Phase 4, the Intel serial modem
-  stalling after our Jd.
+  accepts), the Intel serial modem stalling after our Jd. (Diva over an A-law
+  route failing Phase 4 is closed as of 2026-11-23. It was an A-mu-A hop in the
+  Cisco/Asterisk route, fixed by endpoint `6501-bri`. A truthful bit 39 now
+  gets 56000 and holds through 600 s soaks; see `docs/v90_analogue_role.md`.)
 - **Deployed but never live-verified:** post-§9.6 B1 re-acquisition
   (60ecf54c); the Sd round-trip hold (49a33091) on the AudioCodes path; the
   rate A/B for DIL repeat-until-S (809636b2) on peers other than the Diva.
