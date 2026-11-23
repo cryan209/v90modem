@@ -87,7 +87,7 @@ def parse_info(syms):
     problems = []
     if any(u != 66 for u, _ in syms):
         problems.append("not all Ucode 66")
-    if bits[0:4] != [1, 1, 1, 1] or field(bits, 4, 8) != 0x72:
+    if bits[:12] != [1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0]:
         problems.append("fill/frame sync")
     if bits[58:62] != [1, 1, 1, 1]:
         problems.append("trailing fill")

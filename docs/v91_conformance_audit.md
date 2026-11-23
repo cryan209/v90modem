@@ -251,7 +251,7 @@ constellation under robbing (it is real scrambled ones now and does not).
   been received, then INFO', Eu and the DIL follow (the old script was a fixed
   Ez/INFO/INFO'/Eu/DIL burst, which only works when both ends start together).
   The receiver also finds INFO by its onset (sliding 62-symbol window gated on
-  the `1111` + `0x72` opening and checked by CRC), so a peer that started first
+  the `1111 01110010` opening in time order and checked by CRC), so a peer that started first
   or is retraining under us (8.4.2) is picked up without seeing its Ez.
 - **Escape (8.3).**  On the TX clock from the start of INFO sending: no INFO'
   within 1.5 s, or no B1 within 10 s, or any start-up receive failure, calls
@@ -480,3 +480,22 @@ pair included transmit-tap spec decoding and control-channel cleardown. These
 pairs validate integration and successful recovery, but the escape pair still
 uses the existing forced hook: natural expiry with a stalled peer and
 foreign-peer/hardware interoperability remain untested end to end.
+
+## D-Modem SIP interop, 23 November 2026
+
+D-Modem `84d3a3c` dialled our answerer over local SIP with PCMU. Three
+startup differences surfaced in order:
+
+- INFO sync was sent as `01001110`. Table 6/V.91 specifies `01110010`
+  in time order. D-Modem accepted INFO and sent INFO' after the correction.
+- D-Modem's DIL replaced the six negative µ-law zeros at the start of the
+  Ucode 0 segment with positive zeros. Both codes have zero voltage
+  (Table 1/V.90). The receiver now records this sign change, excludes
+  Ucode 0 from the CP it sends and declines transparent mode (§8.7/V.91).
+- D-Modem started B1 with zero scrambler and differential state. The
+  receiver accepts that encoding only if both B1 frames decode entirely to
+  ones (§7.1/V.91) and carries the resulting state into data reception.
+
+The call negotiated 52000 bit/s from D-Modem to us and 62666 bit/s in the
+other direction. V.42 LAPM established with V.42bis and both ends received
+1900 bytes exactly.

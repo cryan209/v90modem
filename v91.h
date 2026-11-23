@@ -37,6 +37,9 @@ typedef enum {
 #define V91_B1_SYMBOLS 12
 #define V91_EZ_SYMBOLS 24
 #define V91_INFO_SYMBOLS 62
+/* V.91 Table 6: 1111 fill, then 01110010 sync, low bit first in time. */
+#define V91_INFO_PREAMBLE_BITS 0x4EFU
+#define V91_INFO_PREAMBLE_LEN 12
 #define V91_DEFAULT_DIL_SEGMENTS 125
 #define V91_DEFAULT_DIL_SEGMENT_SYMBOLS 12
 #define V91_DEFAULT_DIL_SYMBOLS (V91_DEFAULT_DIL_SEGMENTS * V91_DEFAULT_DIL_SEGMENT_SYMBOLS)
@@ -117,6 +120,7 @@ typedef struct {
     int rx_prev_sign;
     bool frame_aligned;
     bool rx_robbed_bit_detected;
+    bool rx_dil_ulaw_zero_sign_changed;
     uint8_t rx_robbed_slot_mask;
     bool retrain_requested;
     bool retrain_timer_active;
@@ -262,7 +266,8 @@ int v91_tx_default_dil_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max
  * descriptor says it transmitted. Codewords that differ only in the LSB are
  * tolerated and counted per frame-interval slot: a slot accumulating
  * V91_ROBBED_BIT_DETECT_MIN_FLIPS or more LSB flips marks the path as
- * robbed-bit (rx_robbed_bit_detected / rx_robbed_slot_mask). Any other
+ * robbed-bit (rx_robbed_bit_detected / rx_robbed_slot_mask). A sign change
+ * between the two mu-law zero codewords is recorded separately. Any other
  * corruption fails the reception. On success the descriptor is recorded and
  * analysed as with v91_note_received_dil().
  */

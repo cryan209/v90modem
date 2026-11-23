@@ -33,8 +33,7 @@ static const uint8_t v91_ucode_to_alaw[128] = {
     0xAD, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB, 0xAA,
 };
 
-#define V91_INFO_FILL_AND_SYNC_BITS 0x72F
-#define V91_INFO_PAYLOAD_START_BIT 12
+#define V91_INFO_PAYLOAD_START_BIT V91_INFO_PREAMBLE_LEN
 #define V91_INFO_CRC_START_BIT 42
 #define V91_INFO_TOTAL_BITS 62
 
@@ -423,13 +422,8 @@ static void v91_info_to_bits(uint8_t bits[V91_INFO_TOTAL_BITS], const v91_info_f
     int i;
 
     memset(bits, 0, V91_INFO_TOTAL_BITS);
-    bits[0] = 1;
-    bits[1] = 1;
-    bits[2] = 1;
-    bits[3] = 1;
-
-    for (i = 0; i < 8; i++)
-        bits[4 + i] = (uint8_t) ((0x72U >> i) & 1U);
+    for (i = 0; i < V91_INFO_PREAMBLE_LEN; i++)
+        bits[i] = (uint8_t) ((V91_INFO_PREAMBLE_BITS >> i) & 1U);
 
     for (i = 0; i < 14; i++)
         bits[12 + i] = (uint8_t) ((info->reserved_12_25 >> i) & 1U);
@@ -466,7 +460,7 @@ static bool v91_info_from_bits(const uint8_t bits[V91_INFO_TOTAL_BITS], v91_info
     if (!(bits[0] && bits[1] && bits[2] && bits[3]))
         return false;
     for (i = 0; i < 8; i++) {
-        if (bits[4 + i] != ((0x72U >> i) & 1U))
+        if (bits[4 + i] != ((V91_INFO_PREAMBLE_BITS >> (4 + i)) & 1U))
             return false;
     }
     if (!(bits[58] && bits[59] && bits[60] && bits[61]))
@@ -1016,33 +1010,16 @@ static const uint8_t *v91_rx_unrob_frame(uint8_t odd_only, const uint8_t *in,
     return out;
 }
 
-bool v91_rx_b1_codewords(v91_state_t *s,
-                         const uint8_t *g711_in,
-                         int g711_len,
-                         const vpcm_cp_frame_t *cp)
+static bool v91_rx_mapped_b1(v91_state_t *s, const uint8_t *g711_in,
+                             const vpcm_cp_frame_t *cp, bool reset_at_b1)
 {
-    uint8_t odd_only;
+    uint8_t odd_only = vpcm_cp_odd_only_intervals(cp);
     uint8_t unrobbed[VPCM_CP_FRAME_INTERVALS];
-    uint32_t reg;
-    int prev_sign;
-    int d;
-    int frame;
+    uint32_t reg = reset_at_b1 ? 0 : s->rx_scramble_reg;
+    int prev_sign = reset_at_b1 ? 0 : s->rx_prev_sign;
+    int d = (int) cp->drn + 20;
 
-    if (!s || !g711_in || !cp || g711_len != V91_B1_SYMBOLS)
-        return false;
-    if (cp->transparent_mode_granted && cp->drn == 28) {
-        for (frame = 0; frame < V91_B1_SYMBOLS; frame++)
-            if (g711_in[frame] != 0xFF)
-                return false;
-        return true;
-    }
-    if (cp->drn == 0 || cp->drn > 28)
-        return false;
-    d = (int) cp->drn + 20;
-    reg = s->rx_scramble_reg;
-    prev_sign = s->rx_prev_sign;
-    odd_only = vpcm_cp_odd_only_intervals(cp);
-    for (frame = 0; frame < V91_B1_SYMBOLS / VPCM_CP_FRAME_INTERVALS; frame++) {
+    for (int frame = 0; frame < V91_B1_SYMBOLS / VPCM_CP_FRAME_INTERVALS; frame++) {
         uint8_t bits[64];
 
         if (v90_demap_mapped_frame((v90_law_t) s->law, cp, d, &reg, &prev_sign,
@@ -1055,7 +1032,7 @@ bool v91_rx_b1_codewords(v91_state_t *s,
             /* The descrambler is self-synchronising: a receiver that did not
                watch the preceding Es has wrong history for the first 23 bits
                only, so those are not judged. */
-            if (frame == 0 && i < 23)
+            if (!reset_at_b1 && frame == 0 && i < 23)
                 continue;
             if (bits[i] != 1)
                 return false;
@@ -1064,6 +1041,28 @@ bool v91_rx_b1_codewords(v91_state_t *s,
     s->rx_scramble_reg = reg;
     s->rx_prev_sign = prev_sign;
     return true;
+}
+
+bool v91_rx_b1_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         const vpcm_cp_frame_t *cp)
+{
+    if (!s || !g711_in || !cp || g711_len != V91_B1_SYMBOLS)
+        return false;
+    if (cp->transparent_mode_granted && cp->drn == 28) {
+        for (int i = 0; i < V91_B1_SYMBOLS; i++)
+            if (g711_in[i] != 0xFF)
+                return false;
+        return true;
+    }
+    if (cp->drn == 0 || cp->drn > 28)
+        return false;
+    /* V.91 7.1: B1 maps binary ones in the selected data mode. Some
+     * peers initialise that encoder at B1 instead of continuing from Es.
+     * Accept the reset state only if every bit of both B1 frames matches. */
+    return v91_rx_mapped_b1(s, g711_in, cp, false)
+           || v91_rx_mapped_b1(s, g711_in, cp, true);
 }
 
 int v91_tx_info_codewords(v91_state_t *s,
@@ -1143,7 +1142,7 @@ bool v91_info_build_diag(v91_state_t *s, const v91_info_frame_t *info, v91_info_
                      && diag->bits[58] && diag->bits[59] && diag->bits[60] && diag->bits[61]);
     diag->sync_ok = true;
     for (i = 0; i < 8; i++) {
-        if (diag->bits[4 + i] != ((0x72U >> i) & 1U)) {
+        if (diag->bits[4 + i] != ((V91_INFO_PREAMBLE_BITS >> (4 + i)) & 1U)) {
             diag->sync_ok = false;
             break;
         }
@@ -1181,7 +1180,7 @@ bool v91_info_decode_diag(v91_state_t *s,
                      && diag->bits[58] && diag->bits[59] && diag->bits[60] && diag->bits[61]);
     diag->sync_ok = true;
     for (i = 0; i < 8; i++) {
-        if (diag->bits[4 + i] != ((0x72U >> i) & 1U)) {
+        if (diag->bits[4 + i] != ((V91_INFO_PREAMBLE_BITS >> (4 + i)) & 1U)) {
             diag->sync_ok = false;
             break;
         }
@@ -1315,6 +1314,7 @@ bool v91_rx_dil_codewords(v91_state_t *s,
     int seg_idx;
     int slot;
     uint8_t slot_mask;
+    bool ulaw_zero_sign_changed = false;
 
     if (!s || !g711_in || !desc || g711_len <= 0)
         return false;
@@ -1347,11 +1347,14 @@ bool v91_rx_dil_codewords(v91_state_t *s,
             tp_bit = desc->tp[pos % ltp] ? 1 : 0;
             ucode = tp_bit ? training_ucode : (desc->ref[uchord_idx] & 0x7F);
             expected = v91_ucode_to_codeword(s->law, ucode, sp_bit != 0);
-            if (g711_in[in_pos] != expected) {
-                if ((uint8_t) (g711_in[in_pos] ^ expected) != 0x01)
-                    return false;
+            uint8_t diff = g711_in[in_pos] ^ expected;
+            if (diff == 0x01)
                 flips[in_pos % VPCM_CP_FRAME_INTERVALS]++;
-            }
+            /* V.90 Table 1: mu-law Ucode 0 has two signs at zero voltage. */
+            else if (diff == 0x80 && s->law == V91_LAW_ULAW && ucode == 0)
+                ulaw_zero_sign_changed = true;
+            else if (diff != 0)
+                return false;
             in_pos++;
         }
     }
@@ -1364,6 +1367,7 @@ bool v91_rx_dil_codewords(v91_state_t *s,
     s->rx_robbed_slot_mask |= slot_mask;
     if (slot_mask != 0)
         s->rx_robbed_bit_detected = true;
+    s->rx_dil_ulaw_zero_sign_changed = ulaw_zero_sign_changed;
     return v91_note_received_dil(s, desc, NULL);
 }
 

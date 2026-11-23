@@ -6614,6 +6614,13 @@ static bool run_v91_info_roundtrip_case(v91_state_t *tx,
         fprintf(stderr, "V.91 INFO decode failed for %s\n", label);
         return false;
     }
+    /* Table 6/V.91 lists the sync bits in time order. A round trip alone
+     * would also pass with a transmitter and receiver that reverse them. */
+    static const uint8_t preamble[] = {1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0};
+    if (memcmp(rx_diag.bits, preamble, sizeof(preamble)) != 0) {
+        fprintf(stderr, "V.91 INFO preamble differs from Table 6 for %s\n", label);
+        return false;
+    }
     info_rx = rx_diag.frame;
     if (!rx->last_rx_info_valid || !vpcm_info_frames_equal(expected_info, &rx->last_rx_info)) {
         vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
@@ -6788,6 +6795,15 @@ static bool test_v91_default_dil(v91_law_t law)
             fprintf(stderr, "V.91 default DIL last segment positive half mismatch at %d\n", i);
             return false;
         }
+    }
+
+    for (i = 0; i < 6; i++)
+        codewords[second_seg_start + i] ^= 0x80;
+    if (v91_rx_dil_codewords(&tx, codewords, count, &dil) != (law == V91_LAW_ULAW)
+        || tx.rx_dil_ulaw_zero_sign_changed != (law == V91_LAW_ULAW)
+        || tx.rx_robbed_bit_detected) {
+        fprintf(stderr, "V.91 DIL signed-zero detection mismatch\n");
+        return false;
     }
 
     vpcm_log("PASS: V.91 default DIL over raw-G.711 (%s), segments=%u symbols=%d",
@@ -7693,6 +7709,19 @@ static bool test_v91_startup_to_b1_multirate(v91_law_t law)
             || !v91_rx_es_codewords(&caller, es_buf, V91_ES_SYMBOLS, true)) {
             fprintf(stderr, "V.91 Es answerer->caller failed for drn=%u\n", drn);
             return false;
+        }
+        {
+            v91_state_t reset_tx;
+            v91_state_t reset_rx = caller;
+
+            v91_init(&reset_tx, law, V91_MODE_TRANSPARENT);
+            if (v91_tx_b1_codewords(&reset_tx, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS
+                || !v91_rx_b1_codewords(&reset_rx, b1_buf, V91_B1_SYMBOLS, &cp_ack)
+                || (reset_rx.rx_scramble_reg & 0x7FFFFFU) != reset_tx.scramble_reg
+                || reset_rx.rx_prev_sign != reset_tx.diff_sign) {
+                fprintf(stderr, "V.91 reset-state B1 failed for drn=%u\n", drn);
+                return false;
+            }
         }
         if (v91_tx_b1_codewords(&answerer, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS
             || !v91_rx_b1_codewords(&caller, b1_buf, V91_B1_SYMBOLS, &cp_ack)) {

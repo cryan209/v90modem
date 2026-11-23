@@ -3098,16 +3098,14 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
             g_v91_rx_win[V91_INFO_SYMBOLS - 1] = cw;
         }
         if (g_v91_rx_win_n == V91_INFO_SYMBOLS) {
-            /* Cheap gate: INFO opens 1111 then frame sync 0x72 (Table 6, bits 4:11),
-             * differentially coded on the sign bit. */
-            static const uint8_t pre[12] = {1,1,1,1,0,1,0,0,1,1,1,0};   /* 0x72 sent LSB first */
+            /* Gate on the Table 6 preamble, differentially coded on the sign bit. */
             int prev = 0;
             bool ok = true;
 
-            for (int i = 0; i < 12 && ok; i++) {
+            for (int i = 0; i < V91_INFO_PREAMBLE_LEN && ok; i++) {
                 int sign = (g_v91_rx_win[i] & 0x80) ? 1 : 0;
 
-                ok = ((sign ^ prev) == pre[i]);
+                ok = ((sign ^ prev) == (int)((V91_INFO_PREAMBLE_BITS >> i) & 1U));
                 prev = sign;
             }
             if (ok) {
@@ -3253,12 +3251,14 @@ static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
          * intervals seen here are restricted to odd Ucodes in it (LSB
          * robbing then cannot move a codeword). */
         g_v91_cp_local = g_v91_cp_template;
-        /* 8.7: grant only on an unrestricted 64 kbit/s channel.  The DIL
-         * arrived codeword-exact (polarity or any other change would have
-         * failed it) with no robbed LSBs. */
+        /* 8.7: grant only on an unrestricted 64 kbit/s channel. When the
+         * bearer collapses signed mu-law zero, omit Ucode 0 from its CP. */
         g_v91_local_grant = (g_v91_want_transparent || g_v91_peer_req_transparent)
-                            && !g_v91_rx.rx_robbed_bit_detected;
+                            && !g_v91_rx.rx_robbed_bit_detected
+                            && !g_v91_rx.rx_dil_ulaw_zero_sign_changed;
         g_v91_cp_local.transparent_mode_granted = g_v91_local_grant;
+        if (g_v91_rx.rx_dil_ulaw_zero_sign_changed)
+            vpcm_cp_mask_set(g_v91_cp_local.masks[0], 0, false);
         if (g_v91_rx.rx_robbed_bit_detected && g_v91_rx.rx_robbed_slot_mask != 0
             && !vpcm_cp_apply_robbed_bit_safe_slots(&g_v91_cp_local,
                                                     g_v91_rx.rx_robbed_slot_mask)) {
