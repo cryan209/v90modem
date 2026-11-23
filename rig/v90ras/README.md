@@ -1294,7 +1294,11 @@ shell errors a call. Three changes, none in the binary:
   gets 56000 (3/3) and this drop-in gets 37333. The drop-in is now the thing
   holding the Diva back. Removed the same day (kept as
   `/root/info0d-b39.conf.removed-20261123` on CT 117). Production 2950 as
-  7911 then gave CONNECT 56000, PCMA, 0 shell errors of 19981.
+  7911 then gave CONNECT 56000, PCMA, 0 shell errors of 19981. 10-minute PPP
+  soaks into 2950 (ctrl 7, then ctrl 8, 600 s holds): both held 56000 for the
+  whole 600 s, with 0 retrains or renegotiations, 0 upstream shell errors of
+  247981 each, 581/582 and 578/578 pings intact, 0 corrupt, 0 bad FCS, and
+  RTT median 0.34 s.
 
 Live result: 5/5 Diva calls (ctrl 7 and 8) at 38666/31200 with 0 shell
 errors, against 41333/31200 with 115-150 on μ-law. Details and the
