@@ -2304,6 +2304,13 @@ transferred 16384 deterministic pseudorandom bytes in each direction.
 The final patch repeated 56000/28800 with 65536 exact bytes per direction
 and held data mode for 35.5 s. The peer sent no scheduled rate change.
 
+A six-call repeat at 56000/28800 used fresh processes at both ends of each
+local SIP/PCMU call and a different deterministic payload for every call.
+All six established V.42 LAPM and received all 16384 bytes in each direction.
+Time from ATD to CONNECT at both PTYs ranged from 16.386 to 16.417 s
+(median 16.402 s). Our RTP taps logged zero sequence gaps in either
+direction across the batch.
+
 ### Open D-Modem analogue caller
 
 In the opposite direction, D-Modem's 9600 Hz analogue caller entered x2
