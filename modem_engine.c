@@ -8592,6 +8592,49 @@ static bool v90_b1_deadline_expired_locked(void)
     return true;
 }
 
+/* V.92 PCM upstream (8.7.1): B1u follows E2u right after the analogue modem
+ * acknowledges our CPd, so a B1u receiver that has not locked a few seconds
+ * later never will on this training -- its taps came from this B1u, and the
+ * peer sends nothing else to train on.  Left alone, the downstream ran on
+ * for 25 s into an error-control link with no upstream until V.42's T401
+ * took the call (slmodemd retrain, 2026-11-23).  §9.5.1.1 lets either modem
+ * retrain at any time; the §9.4.1 deadline above cannot cover this (V.92's
+ * INFO1a-to-B1u is ~16 s, past its 15 s), so this one counts from the CPd
+ * acknowledgement.  ME_V92_B1U_DEADLINE_MS (diagnostic): 0 disables. */
+static uint64_t g_v92_b1u_wait_from_samples = 0;
+
+static bool v92_b1u_deadline_expired_locked(void)
+{
+    static int deadline_ms = -1;
+    uint64_t limit;
+    int rtd;
+
+    if (deadline_ms < 0)
+        deadline_ms = parse_env_int("ME_V92_B1U_DEADLINE_MS", 5000);
+    if (g_v92_b1u_wait_from_samples == 0 || deadline_ms <= 0)
+        return false;
+    if (!g_v92_upstream_rx_active || g_v92_upstream_rx.locked) {
+        g_v92_b1u_wait_from_samples = 0;
+        return false;
+    }
+    rtd = g_v34 ? v34_get_round_trip_delay_samples(g_v34) : 0;
+    limit = (uint64_t)deadline_ms*8 + 5*(uint64_t)(rtd > 0 ? rtd : 0);
+    if (g_rx_audio_samples - g_v92_b1u_wait_from_samples < limit)
+        return false;
+    g_v92_b1u_wait_from_samples = 0;
+    if (g_v90_abandon_retrains >= ME_V90_MAX_ABANDON_RETRAINS) {
+        ME_LOG("[ME] V.92 B1u not locked %d ms after the CPd acknowledgement; "
+               "retrain cap (%d) reached\n", deadline_ms, ME_V90_MAX_ABANDON_RETRAINS);
+        return false;
+    }
+    g_v90_abandon_retrains++;
+    ME_LOG("[ME] V.92 B1u not locked %d ms after the CPd acknowledgement (+5 x %d ms "
+           "round trip); initiating a §9.5.1.1 retrain (%d of %d)\n",
+           deadline_ms, rtd/8, g_v90_abandon_retrains, ME_V90_MAX_ABANDON_RETRAINS);
+    trace_phase("V92 B1u deadline -> retrain");
+    return true;
+}
+
 /* ME_V90_RETRAIN_AFTER_MS=<n> initiates a 9.5.1.1 retrain n ms after the call
  * reaches V.90/V.92 data mode, once.  A TEST HOOK, the sibling of
  * ME_V34_RETRAIN_AFTER_MS and ME_V90_RENEG_AFTER_MS: a healthy call never
@@ -9699,6 +9742,7 @@ static void me_v92_data_slicer_locked(void)
     g_v92_data_nerr = 0;
     g_v92_data_sdd = g_v92_data_syd = g_v92_data_sd = g_v92_data_sy = 0.0;
     g_v92_upstream_slicer_set = true;
+    g_v92_b1u_wait_from_samples = g_rx_audio_samples ? g_rx_audio_samples : 1;
     ME_LOG("[ME] V.92 PCM upstream: CPd acknowledged; equaliser re-solved every 2 s, slicing "
            "on %d data levels (%.3f..%.3f LU), B1u search on its output\n",
            n, n ? positive[0] : 0.0, n ? positive[n - 1] : 0.0);
@@ -9762,9 +9806,10 @@ static void me_v92_b1u_train_locked(v92_p3_eq_t *eq, double scale)
                peak, nt, e > 0.0 ? 100.0*lo/e : 0.0, e > 0.0 ? 100.0*hi/e : 0.0);
     }
     ME_LOG("[ME] V.92 B1u training: found at captured symbol %d (correlation %.4f); "
-           "feed-forward taps solved on %d B1u symbols, residual %.4f LU; "
-           "%d symbols re-equalised, B1u %s\n",
-           at, corr, V92_B1U_TRAIN_SYMBOLS - 2*V92_UPSTREAM_INTERVALS, resid, n,
+           "feed-forward taps solved on %d B1u symbols (%d off-model targets left out), "
+           "residual %.4f LU; %d symbols re-equalised, B1u %s\n",
+           at, corr, V92_B1U_TRAIN_SYMBOLS - 2*V92_UPSTREAM_INTERVALS - v92_p3_eq_ref_outliers(eq),
+           v92_p3_eq_ref_outliers(eq), resid, n,
            g_v92_upstream_rx.locked ? "locked" : "not yet locked");
 }
 
@@ -10349,6 +10394,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reneg_respond_pending = false;
     g_v90_reneg_responding = false;
     g_v90_b1_wait_from_samples = 0;
+    g_v92_b1u_wait_from_samples = 0;
     v34_ff_reset_locked();
     v90_upstream_adapt_reset_locked();
     g_v90_reneg_cp_rx_marked = false;
@@ -10789,6 +10835,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_reneg_respond_pending = false;
     g_v90_reneg_responding = false;
     g_v90_b1_wait_from_samples = 0;
+    g_v92_b1u_wait_from_samples = 0;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_reject_info1a_logged = false;
@@ -20711,6 +20758,11 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                                              "after INFO1a");
             return false;
         }
+        if (v92_b1u_deadline_expired_locked()) {
+            (void) restart_v90_phase2_locked("no B1u lock after the CPd "
+                                             "acknowledgement");
+            return false;
+        }
 
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
@@ -20814,6 +20866,11 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (v90_b1_deadline_expired_locked()) {
             (void) restart_v90_phase2_locked("no B1 within the 9.4.1 deadline "
                                              "after INFO1a");
+            return false;
+        }
+        if (v92_b1u_deadline_expired_locked()) {
+            (void) restart_v90_phase2_locked("no B1u lock after the CPd "
+                                             "acknowledgement");
             return false;
         }
 

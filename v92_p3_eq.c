@@ -607,6 +607,7 @@ double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref
 
     if (at) *at = -1;
     if (corr) *corr = 0.0;
+    if (eq) eq->ref_outliers = 0;
     if (!eq || !eq->cap || !ref || nref <= skip + n || eq->cap_count < nref)
         return -1.0;
     for (int j = 0; j < nref; j++)
@@ -629,22 +630,78 @@ double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref
     if (corr) *corr = best;
     if (best_at < 0 || best < min_corr)
         return -1.0;
-    memset(m, 0, sizeof(m));
-    for (int j = skip; j < nref; j++) {
-        const double *u = eq->cap + (size_t)(best_at + j)*(size_t)stride;
-
-        accumulate(m, n, u, ref[j]);
-        dd += ref[j]*ref[j];
-    }
+    /* The reference is our model of the analogue modem's precoder (V.92
+     * 6.4.2): where two members of an equivalence class sit almost equally
+     * close to zero, the peer's arithmetic can pick the other one, and that
+     * symbol's target is then a whole class spacing off (slmodemd after a
+     * retrain, 2026-11-23: symbols 41 and 47 of B1u 3.1 LU off, the rest
+     * within noise, and those two alone left the solve at 0.289 LU instead
+     * of 0.015 and B1u unlockable).  The decoder works modulo Mi and does not
+     * care which member was sent, so leave such targets out: solve, drop any
+     * symbol more than OUTLIER_SIGMAS rms residuals off, solve again. */
     {
-        double atd[LS_MAX];
+        enum { OUTLIER_PASSES = 3 };
+        static const double OUTLIER_SIGMAS = 6.0;
+        static bool keep[V92_P3_EQ_MAX_REF];
+        int kept = 0;
 
-        for (int i = 0; i < n; i++)
-            atd[i] = m[i][n];
-        if (!solve_normal(m, n, w))
+        if (nref > V92_P3_EQ_MAX_REF)
             return -1.0;
-        for (int i = 0; i < n; i++)
-            fit += w[i]*atd[i];
+        for (int j = 0; j < nref; j++)
+            keep[j] = j >= skip;
+        for (int pass = 0; pass < OUTLIER_PASSES; pass++) {
+            double atd[LS_MAX];
+            int dropped = 0;
+
+            memset(m, 0, sizeof(m));
+            dd = 0.0;
+            fit = 0.0;
+            kept = 0;
+            for (int j = skip; j < nref; j++) {
+                if (!keep[j])
+                    continue;
+                accumulate(m, n, eq->cap + (size_t)(best_at + j)*(size_t)stride, ref[j]);
+                dd += ref[j]*ref[j];
+                kept++;
+            }
+            if (kept <= n)
+                return -1.0;
+            for (int i = 0; i < n; i++)
+                atd[i] = m[i][n];
+            if (!solve_normal(m, n, w))
+                return -1.0;
+            for (int i = 0; i < n; i++)
+                fit += w[i]*atd[i];
+            double limit = OUTLIER_SIGMAS*sqrt(fmax(dd - fit, 0.0)/kept);
+            for (int j = skip; j < nref; j++) {
+                const double *u = eq->cap + (size_t)(best_at + j)*(size_t)stride;
+                double y = 0.0;
+
+                if (!keep[j])
+                    continue;
+                for (int i = 0; i < n; i++)
+                    y += w[i]*u[i];
+                if (fabs(y - ref[j]) > limit)
+                    dropped++;
+            }
+            /* Nothing off, or so much that it is the solve and not a few
+             * targets that is wrong (at most 1 in 16 rows go): these taps
+             * stand. */
+            if (!dropped || (nref - skip) - (kept - dropped) > (nref - skip)/16)
+                break;
+            for (int j = skip; j < nref; j++) {
+                const double *u = eq->cap + (size_t)(best_at + j)*(size_t)stride;
+                double y = 0.0;
+
+                if (!keep[j])
+                    continue;
+                for (int i = 0; i < n; i++)
+                    y += w[i]*u[i];
+                if (fabs(y - ref[j]) > limit)
+                    keep[j] = false;
+            }
+        }
+        eq->ref_outliers = (nref - skip) - kept;
     }
     memcpy(eq->taps, w, (size_t)n*sizeof(double));
     memcpy(eq->taps_ff, w, (size_t)n*sizeof(double));
@@ -652,7 +709,12 @@ double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref
     eq->have_ff = true;
     eq->ff_only = true;
     eq->refit_base = 0.0;
-    return sqrt(fmax(dd - fit, 0.0)/(nref - skip));
+    return sqrt(fmax(dd - fit, 0.0)/(nref - skip - eq->ref_outliers));
+}
+
+int v92_p3_eq_ref_outliers(const v92_p3_eq_t *eq)
+{
+    return eq ? eq->ref_outliers : 0;
 }
 
 int v92_p3_eq_replay_capture(const v92_p3_eq_t *eq, int from, double *out, int max)

@@ -748,14 +748,32 @@ V.42 give-up. As with the startup states, this is slmodemd's preference
 only. 9.3 requires only that a retrain use V.92 Phase 2; the Sd delay is
 inside §9.3.1.3's 0-500 ms.
 
-**Open, ours (1 of 7 retrains): B1u can fail to lock after a retrain, and
-nothing recovers it.** In `combo2` slmodemd trained (ratio 1.196). Our
-TRN2u timing came out at -0.340 samples against the startup's +0.660, the
-same fractional phase rounded to the other whole sample. The B1u solve
-reached a residual of only 0.289 LU (0.014-0.015 on every other attempt),
-B1u never locked, and the upstream equaliser solved once and never again.
-We then sat in data with no upstream for 40 s until V.42's T401 ran out.
-Two things to fix: the whole-sample rounding at about +/-0.34 (B1u should
-try both neighbours), and a B1u that has not locked within a few seconds
-should retrain rather than wait for the link to die.
+**B1u failed to lock after one retrain in 7 (ours, fixed 2026-11-23).** In
+`combo2` slmodemd trained (ratio 1.196). Our B1u solve then reached only
+0.289 LU (0.014-0.015 on every other attempt), B1u never locked, and the
+call sat in data with no upstream for 40 s until V.42's T401 ran out.
 
+The timing was not the cause. TRN2u timing was -0.340 samples, and
+`combo1`'s retrain had -0.339 too and locked at 0.0149. The cause was the
+target. `v90_engine_replay --sync --echo-ref` reproduces the call exactly.
+Comparing the equalised B1u with our reference symbol by symbol, 550 of
+552 targets fit within noise. Symbols 41 and 47 were 3.18 and 3.04 LU off,
+one class spacing. Our model of slmodemd's 6.4.2 precoder had picked the
+other member of a near-tied equivalence class, and those two targets alone
+pulled the least-squares taps off. That retrain's p1 was unusually large
+(p1(5) = +0.277). The decoder works modulo Mi and accepts either member, so
+`v92_p3_eq_train_on_reference()` now leaves out any target more than six
+rms residuals off and solves again: at most three passes and at most 1 in
+16 rows. On the replay the retrain leaves 4 out, solves to 0.0159 LU and
+locks B1u, with 0 frames rejected over the next 20 s. The startup attempt
+is unchanged (0 left out, 0.0142). Live, 6/6 forced retrains locked B1u and
+resumed V.92, with 0 upstream frames rejected over 60 s and no T401. One of
+them repeated the failure case exactly (ratios 1.381/1.196, 4 targets left
+out, 0.0159 LU). The other five left 0 out (0.0149).
+
+A backstop covers whatever else stops a lock. If B1u has not locked
+`ME_V92_B1U_DEADLINE_MS` (5000 ms, plus 5 round trips) after the CPd
+acknowledgement, the engine starts a §9.5.1.1 retrain, sharing the
+two-per-call cap of the "no upstream after E" retrain. A normal lock comes
+about 120 ms after the acknowledgement. The §9.4.1 B1 deadline cannot cover
+V.92, because INFO1a to B1u lock takes about 16 s, longer than its 15 s.

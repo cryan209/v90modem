@@ -20,8 +20,8 @@ run. Where the 29 October list below disagrees, this wins:
   (60ecf54c); the Sd round-trip hold (49a33091) on the AudioCodes path; the
   rate A/B for DIL repeat-until-S (809636b2) on peers other than the Diva.
 - **V.92:** slmodemd's retrained V.92 startup now trains (2026-11-23: 250 ms
-  Sd + Jp 38969c on retrains; open: a B1u lock miss after a retrain is not
-  recovered); our analogue role does not answer V.92 retrains; no hardware V.92
+  Sd + Jp 38969c on retrains; the B1u solve now drops off-model precoder
+  targets and an unlocked B1u retrains after 5 s); our analogue role does not answer V.92 retrains; no hardware V.92
   peer yet (CX93001 is the candidate).
 - **V.91:** upstream mask and data-mode renegotiation still missing.
 

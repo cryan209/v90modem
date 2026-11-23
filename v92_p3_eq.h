@@ -54,6 +54,8 @@
 #include <stdint.h>
 
 #define V92_P3_EQ_MAX_TAPS     63
+/* Longest known sequence v92_p3_eq_train_on_reference() takes (B1u: 576). */
+#define V92_P3_EQ_MAX_REF      1024
 #define V92_P3_EQ_MAX_FB       32     /* decision-feedback taps */
 #define V92_P3_EQ_MAX_SEED     512
 #define V92_P3_EQ_HISTORY      2048   /* input samples kept (power of two) */
@@ -180,6 +182,7 @@ typedef struct {
     double *cap;
     int cap_capacity;              /* symbols */
     int cap_count;
+    int ref_outliers;              /* targets the last reference solve left out */
 
     /* Data-aided refits (v92_p3_eq_set_ring(), v92_p3_eq_aided_row()): the
      * input windows of the last ring_capacity symbols, by symbol index. */
@@ -258,13 +261,17 @@ int v92_p3_eq_captured(const v92_p3_eq_t *eq);
  * over ref[skip..nref) and switch to them (feedback off, as
  * v92_p3_eq_use_ff()).  Returns the solve's rms residual, or a negative value
  * if the reference was not found (*corr below min_corr) or the solve failed;
- * *at is ref[0]'s index in the capture. */
+ * *at is ref[0]'s index in the capture.  Targets more than six rms residuals
+ * off (a precoder class member the peer chose differently) are left out and
+ * the solve repeated, at most 1 in 16 of them; v92_p3_eq_ref_outliers() says
+ * how many. */
 double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref,
                                     int skip, double min_corr,
                                     int *at, double *corr);
 
 /* Re-equalise captured symbols [from, cap_count) with the current taps into
  * out (at most max); returns the number written. */
+int v92_p3_eq_ref_outliers(const v92_p3_eq_t *eq);
 int v92_p3_eq_replay_capture(const v92_p3_eq_t *eq, int from, double *out, int max);
 /* Decision-directed on 4-point PAM from here on (Phase 4): decisions,
  * decision feedback, tap and timing adaptation all use the 4-level slicer.
