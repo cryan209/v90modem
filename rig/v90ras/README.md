@@ -1352,3 +1352,19 @@ e5e9e73b…) is kept as `/opt/v90ras/sip_v90_modem.36a574cd`, and the previous
 one (3be20424, 11d94652…) as `sip_v90_modem.pre-36a574cd`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 `v90isdn` were restarted, and all ten lines re-registered (2951-2960).
+
+## Deployed a6737e79 (2026-11-24 09:26)
+
+On top of 36a574cd, this deploy adds a6737e79: V.92 PCM upstream now runs
+the §6.4.4 Viterbi decoder (per-frame and streaming) for precoded CPds,
+stripping the §6.4.2 feedback from the observed x(n) first, where it used
+to slice symbol by symbol. It changes live decoding only on V.92 calls
+whose CPd carries precoder coefficients (`ME_V92_PRECODER`, sent when the
+feedback pays). Offline, the precoded spec-peer BER at sigma 8 DS0 went from
+3.8e-1 to 0 (`docs/v92_pcm_upstream_findings.md`). No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at a6737e79. The binary (md5
+b34fbfff…) is kept as `/opt/v90ras/sip_v90_modem.a6737e79`, and the previous
+one (36a574cd, e5e9e73b…) as `sip_v90_modem.pre-a6737e79`. Installed by
+rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
+`v90isdn` were restarted, and all ten lines re-registered (2951-2960).
