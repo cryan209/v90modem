@@ -2285,3 +2285,43 @@ both used 32000 downstream and 28800 upstream. V.42 LAPM connected and
 both sides received 1900 bytes exactly. The cap selects a matching bank
 for the initial rate. The unrestricted rate mismatch remains open.
 
+The capped SIP call repeated at the same rates, with V.42 LAPM and 1900
+exact bytes each way.
+
+### Open D-Modem analogue caller
+
+In the opposite direction, D-Modem's 9600 Hz analogue caller entered x2
+over the simulated PCMU line described in [the rig notes](../rig/README.md).
+Our server accepted marker `4d` and MP `0344/03fe/0000/0500` at
+32000 downstream and 24000 upstream. D-Modem rejected the startup
+sequence before it saw the record. An independent decode of our raw DS0
+tap recovered 99 CRC-valid copies of `d284/7fff/0000` from a 400-frame
+record window. The startup alignment option did not advance the call.
+
+The server sent 912 PCM samples of J and J', versus the 1200 samples
+D-Modem's receiver expects. Stock D-Modem counted 75 good J words and
+24 bad ones. A diagnostic server build held J for at least 99 words
+before J' (1200 samples total in the measured call). D-Modem counted
+99 good words, accepted J' and the record, and entered data at
+32000/24000. Our upstream receiver could not acquire B1. A control that
+made the D-Modem caller respect the server record's linear-encoder
+selection (word 1 bit 13) also reached that B1 failure.
+
+With the long J and the linear selection control, the diagnostic peer
+also reset its scrambler at B1 and reserved one full frame of ones
+(V.34 §10.1.3.1). Our receiver then acquired the 128-symbol B1 at 100%
+fit (tap 4, 64-state trellis). V.42 LAPM connected at 32000/24000 and
+each end received 16384 deterministic pseudorandom bytes exactly.
+Restoring the peer's original nonlinear encoder with the full reset-state
+B1 still yielded a 99.9% fit, LAPM and 1900 exact bytes per direction.
+The linear-encoder change was therefore unnecessary for this pairing.
+
+A peer with only the B1 scrambler reset also acquired B1 at 99.9% fit and
+established LAPM. The 16 KiB downlink passed. D-Modem requested 56000
+downstream 12.7 s after its DSP connect, during the return transfer. It
+reported its upstream change to 28800, but our receiver stayed in
+`RECORD_TX` without a new MP or E, and timed out. Only 1036 bytes of the
+return transfer arrived. With `DSP_X2C_RENEG=0` as the only change from
+that call, 16384 bytes passed each way at 32000/24000 with LAPM. These
+controls used temporary diagnostic builds.
+

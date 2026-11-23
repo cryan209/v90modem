@@ -1454,6 +1454,13 @@ D-Modem decoded INFO1a as V.90, 3200 baud upstream and U_INFO 78. Our
 analogue side began Phase 3 and sent S and PP. Its receive tap then held
 a 1200 Hz tone for more than 100 ms. Our §9.5.2 Tone B detector initiated
 a retrain 119 ms after our Phase 3 handoff, before we detected Sd.
-D-Modem responded to our Tone A, stalled in the subsequent Phase 2
-probe and ended with NO CARRIER. The captured tone is real. Its cause
-at the peer's Phase 2-to-3 boundary remains to be established.
+D-Modem's transmit tap independently shows the 1200 Hz burst. Its own
+receiver logged Tone A and opened a retrain 120 ms after accepting
+INFO1a, while the repeated INFO1a burst was still on the captured line.
+The subsequent Phase 2 probe stalled and the call ended with NO CARRIER.
+
+With `ME_V90_ANALOGUE_INFO1A_REPEATS=1` as the only startup change, two
+calls reached V.42 LAPM at 56000 downstream and 31200 upstream. The first
+transferred 1900 exact bytes each way and the second transferred 16384
+deterministic pseudorandom bytes each way. The default four-copy burst
+was retained for existing peers.

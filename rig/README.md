@@ -50,6 +50,23 @@ socket path FD_SETs a closed descriptor); the driver starts a fresh one per
 call.  What this found in V.32bis is in `docs/v32bis_compliance_plan.md`,
 "Against slmodemd".
 
+## Open D-Modem analogue peer over a simulated G.711 line
+
+Open D-Modem `84d3a3c` also has an analogue caller in its `half_open`
+test DSP. The Mac bench built the open target natively by bypassing the
+i386-only interop gate and linking `dmodem_t30` for its macOS linker.
+The peer's linear pipe was bridged to `audio_sock_modem` in 30 ms blocks.
+The simulated codec used an 8-to-9.6 kHz raised-cosine filter towards the
+peer and a band-limited 9.6-to-8 kHz converter towards the DS0. The engine
+socket carried G.711 at 8000 codewords/s. The 8 kHz peer control used the
+same sample clock with `MODEM_ANALOG=1 DSP_V90A=1` and no rate conversion.
+
+At 9600 Hz, V.90 connected with V.42 LAPM at 56000/31200. A PCMU smoke
+call transferred 1900 bytes each way and a separate PCMU call transferred
+16384 deterministic pseudorandom bytes each way. A PCMA call also
+transferred 16384 bytes each way. The independent 8000 Hz PCMU control
+transferred 1900 bytes each way at the same modem rates.
+
 ## `d-modem/d-modem.c`
 
 Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in the `d-modem` container. Key changes over upstream:
