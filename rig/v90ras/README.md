@@ -1317,3 +1317,24 @@ fddf7000…) is `sip_v90_modem.pre-284585ab`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. Then `v90ras` and
 `v90isdn` were restarted, and both are active. Smoke call: the Diva as 7811
 (μ-law) gets 41333/31200 with 0 upstream shell errors (136-141 before).
+
+## Deployed 3be20424 (2026-11-23 20:57)
+
+On top of 284585ab, this deploy adds the V.92 retrain fixes:
+- 308c99ab: Sd delay 250 ms and Jp 38969c on retrained V.92 attempts.
+- 3be20424: the B1u solve leaves out off-model precoder targets, and a B1u
+  that has not locked 5 s after the CPd acknowledgement starts a retrain.
+
+Both were verified against slmodemd on the Proxmox rig, not on v90ras
+callers. See `docs/v92_full_startup.md`.
+
+The deploy also carries the D-Modem interop fixes, which have no v90ras
+coverage yet:
+- 58f71d3b (V.91 startup) and 03801c48 (V.34).
+- The opt-in x2 startup (25bf4378), which stays off by default.
+
+Built in `/root/deploy-5640b4d3`, checked out at 3be20424. The binary (md5
+11d94652…) is kept as `/opt/v90ras/sip_v90_modem.3be20424`, and the previous
+one (284585ab) as `sip_v90_modem.pre-3be20424`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960 Avail).
