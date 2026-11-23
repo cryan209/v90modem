@@ -2311,6 +2311,15 @@ Time from ATD to CONNECT at both PTYs ranged from 16.386 to 16.417 s
 (median 16.402 s). Our RTP taps logged zero sequence gaps in either
 direction across the batch.
 
+A five-minute simultaneous payload run used the same patched peer and
+negotiated 56000/28800 with V.42 LAPM. With offered DTE loads of 4500 B/s
+down and 2200 B/s up, the first 300 s delivered 1011065 exact bytes down
+and 659469 exact bytes up, or 26.96 and 17.59 kbit/s of verified payload.
+There were zero sequence gaps in either RTP tap and no logged retrain
+or rate change. The harness hit its 25 s drain deadline with the call
+still in data mode. By then 1095366 of the 1350000 planned downstream
+bytes and all 660000 planned upstream bytes had arrived byte-for-byte.
+
 ### Open D-Modem analogue caller
 
 In the opposite direction, D-Modem's 9600 Hz analogue caller entered x2
