@@ -108,6 +108,8 @@
 /* V.90 9.2.2.2.1 gives the analogue modem no limit on repeating INFO0a
    against repeated INFO0d; this bounds it at the digital side's own cap. */
 #define V90_ANALOGUE_INFO0_RETRY_CAP    16
+/* V.90 9.2.2.2.2: 2000 ms at 600 baud. */
+#define V90_ANALOGUE_TONE_B_REV_TIMEOUT_BAUDS 1200
 
 #include "v22bis_tx_rrc.h"
 
@@ -3880,6 +3882,26 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->rx.tone_b_ended = false;
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+        }
+        else if (s->tx.v90_mode
+                 &&  s->tx.calling_party
+                 &&  ++s->tx.tone_duration >= V90_ANALOGUE_TONE_B_REV_TIMEOUT_BAUDS)
+        {
+            /* V.90 9.2.2.2.2: "If, in 9.2.2.1.4, the analogue modem does not
+               detect the Tone B phase reversal within 2000 ms, the analogue
+               modem shall condition its receiver to detect Tone B and then
+               proceed according to 9.2.2.1.3", i.e. send Tone A's reversal
+               again.  Without this we held !A for good: when the digital
+               modem missed or set aside our reversal (ours does, for one that
+               follows an INFO0a frame by under 120 ms, 9.2.1.2.1 recovery)
+               both sides waited for each other until the call timed out. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_NOT_A: no Tone B reversal in 2000 ms, "
+                     "reversing Tone A again (9.2.2.2.2)\n");
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.tone_b_ended = false;
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 1;
         }
         /*endif*/
         break;

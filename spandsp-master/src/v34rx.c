@@ -5954,6 +5954,37 @@ static int info0_target_bits(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V90_TEST_DROP_INFO0D=N: the V.90 analogue receiver discards its first N
+   CRC-clean INFO0d frames, as if the line had corrupted them (D-Modem saw a
+   PCTel HSP56 miss INFO0d about once in six calls).  The frame then takes the
+   CRC-failure path.  V.90 9.2.2.2.1: the analogue modem, having seen Tone B
+   before a correct INFO0d, repeats INFO0a; 9.2.1.2.1: the digital modem
+   answers by repeating INFO0d with bit 28 set.  Test only. */
+static bool v90_test_drop_info0d(v34_rx_state_t *s)
+{
+    const char *env;
+    int limit;
+
+    if (!s->v90_mode  ||  !s->calling_party  ||  s->info0_received
+        ||  s->stage != V34_RX_STAGE_INFO0)
+        return false;
+    /*endif*/
+    /* Test hook: the analogue receiver discards its first N CRC-clean INFO0d. */
+    env = getenv("V90_TEST_DROP_INFO0D");
+    limit = (env  &&  env[0])  ?  atoi(env)  :  0;
+    if (s->v90_test_info0d_dropped >= limit)
+        return false;
+    /*endif*/
+    s->v90_test_info0d_dropped++;
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 test: discarding CRC-clean INFO0d %d of %d (V90_TEST_DROP_INFO0D)\n",
+             s->v90_test_info0d_dropped, limit);
+    s->crc = 0xFFFF;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     int info_search_enabled;
@@ -6426,7 +6457,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     hoff += snprintf(hexbuf + hoff, sizeof(hexbuf) - hoff, " %02x", s->info_buf[hh]);
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info raw bytes:%s\n", hexbuf);
             }
-            if (s->crc == 0)
+            if (s->crc == 0  &&  !v90_test_drop_info0d(s))
             {
                 int v90_info1a_search;
 
@@ -21397,6 +21428,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.info0d_reserved_41 = 0;
     s->rx.info0d_extensions_valid = false;
     s->rx.v90_repeated_info0a_pending = false;
+    s->rx.v90_test_info0d_dropped = 0;
     s->rx.v90_info1d_sent = false;
     /* Not pinned until the V.90 Phase 4 CP receiver arms it.  Hypothesis 0 is
        a legal index, so this must not be left at the zero-initialised value. */

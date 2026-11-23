@@ -1464,3 +1464,30 @@ calls reached V.42 LAPM at 56000 downstream and 31200 upstream. The first
 transferred 1900 exact bytes each way and the second transferred 16384
 deterministic pseudorandom bytes each way. The default four-copy burst
 was retained for existing peers.
+
+## Lost INFO0d and the §9.2.2.2.2 re-reversal, 24 November 2026
+
+D-Modem's interop notes report a PCTel HSP56 missing INFO0d about one call
+in six until the digital side resent it. Our digital side already does
+(§9.2.1.2.1), but nothing tested it. `V90_TEST_DROP_INFO0D=N` makes our
+analogue receiver discard its first N CRC-clean INFO0d frames, and the
+engine pair then measures this:
+
+| INFO0d dropped | before | after |
+|---|---|---|
+| 0 | CONNECT at 15.60 s | same |
+| 1-3 | CONNECT at 16.16 s (one acknowledged INFO0d resend) | same |
+| 4, 5, 6, 8 | no CONNECT in 40 s | CONNECT at 18.22, 19.36, 20.50, 22.80 s |
+
+From four drops on, the digital side's resend guard (4 acknowledged INFO0d
+with no acknowledgement back, `get_info0_baud()`) goes to Tone B while the
+analogue side is still repeating INFO0a. The analogue side then reverses
+Tone A 80 ms after its last INFO0a frame. The digital side sets that
+reversal aside as one of a Courier's INFO0a phase changes (the 120 ms check
+in `FIRST_NOT_B_WAIT`). Our analogue side then held !A for good, because it
+had no §9.2.2.2.2 handling: after 2000 ms with no Tone B reversal, the
+analogue modem conditions its receiver for Tone B and proceeds per
+§9.2.2.1.3, that is, reverses again. `FIRST_NOT_A` now does that, and the
+repeated reversal is accepted. A real analogue modem that follows
+§9.2.2.2.2 recovers the same way; the digital side's 120 ms check still
+costs it those 2 s. `tests/fast.list` covers 1 and 4 drops.

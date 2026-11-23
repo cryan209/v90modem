@@ -2398,6 +2398,10 @@ typedef struct
                V.90 9.2.2.2.1 makes that the digital modem saying it never
                received INFO0a. */
     bool v90_repeated_info0d_pending;
+    /*! \brief Test only (V90_TEST_DROP_INFO0D=N): how many CRC-clean INFO0d
+               this analogue receiver has discarded, to exercise the
+               9.2.2.2.1 / 9.2.1.2.1 lost-INFO0d recovery. */
+    int v90_test_info0d_dropped;
     /*! \brief Set by TX after INFO1d has been sent; tells RX to prioritise
                INFO1a decoding over the INFO0a prefix check. */
     bool v90_info1d_sent;
