@@ -2272,3 +2272,16 @@ how the "TRN, never MP" reading above was made. On the clean capture
 every MP. **No hardware MP has been through it**, because the Courier has
 not sent one yet; the emulated Courier still reaches DATA with it in.
 
+## Open D-Modem as the x2 server, 23 November 2026
+
+Our analogue caller dialled stock D-Modem `84d3a3c` over local SIP/PCMU.
+With the default x2 rate mask, D-Modem sent `f33c/7fff/0000`. The caller
+used index 15 (56000 bit/s downstream) from that record, while the server
+transmitted at index 1 (32000 bit/s). Both selected 28800 bit/s upstream.
+The DSPs entered data mode but V.42 failed and there was no usable payload.
+
+With `AT+MS=X2,0,0,0,0,32000` on our caller and `AT+MS=X2,0` on D-Modem,
+both used 32000 downstream and 28800 upstream. V.42 LAPM connected and
+both sides received 1900 bytes exactly. The cap selects a matching bank
+for the initial rate. The unrestricted rate mismatch remains open.
+

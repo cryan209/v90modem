@@ -1446,3 +1446,14 @@ reconditioning (`..._SILENCE=1`) the fall-forward also completed on both cards,
 one call each: 40000 to 56000, the card's Rt and R̄t received, B1d 48/48 with
 0 bit errors, no retrain, 40 of 40 pings. The engine pair agrees:
 the digital side's data mapper goes from drn 10 to drn 22 (fast.list row).
+
+## Open D-Modem as the digital answerer, 23 November 2026
+
+Our analogue caller dialled stock D-Modem `84d3a3c` over local SIP/PCMU.
+D-Modem decoded INFO1a as V.90, 3200 baud upstream and U_INFO 78. Our
+analogue side began Phase 3 and sent S and PP. Its receive tap then held
+a 1200 Hz tone for more than 100 ms. Our §9.5.2 Tone B detector initiated
+a retrain 119 ms after our Phase 3 handoff, before we detected Sd.
+D-Modem responded to our Tone A, stalled in the subsequent Phase 2
+probe and ended with NO CARRIER. The captured tone is real. Its cause
+at the peer's Phase 2-to-3 boundary remains to be established.
