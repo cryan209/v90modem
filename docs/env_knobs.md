@@ -110,7 +110,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_MEDIA_CLOCK` | modem_engine.c |  | cts | the two clocks agree; leave it unset there. |
 | `ME_PCMU_ALAW_BEARER` | sip_modem.c |  | d | numbers whose PCMU leg is transcoded to an A-law codec. |
 | `ME_PTY_RELEASE_SLAVE` | data_interface.c |  | - | default: it changes who owns the tty. |
-| `ME_RX_ALAW_IMAGE` | modem_engine.c |  | t | ME_RX_ALAW_IMAGE=0: decode a transcoded A-law source as plain μ-law (default 1). |
+| `ME_RX_ALAW_IMAGE` | modem_engine.c |  | td | ME_RX_ALAW_IMAGE=0: decode a transcoded A-law source as plain μ-law (default 1). |
 | `ME_RX_CLOCK_SLIP` | modem_engine.c |  | sdh | the connection and closes no loop, so it is off unless asked for. |
 | `ME_SLOW_CALLBACK_US` | modem_engine.c |  | sd | path. It does not change the sample-derived deadline counter. |
 | `ME_TX_CLOCK_SEED_FILE` | sip_modem.c |  | d | `--recycle` runs each call in a fresh process, so the seeds live in a |

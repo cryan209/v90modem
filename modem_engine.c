@@ -9349,9 +9349,11 @@ static void *v90_cp_live_worker(void *user_data)
                                 break;
                         }
                         fprintf(stderr,
-                                "[ME] V.90 recovered %s constellation[0] codec-Ucodes={%s}\n",
+                                "[ME] V.90 recovered %s constellation[0] codec-Ucodes={%s} "
+                                "TRN1d tx/codec RMS=%.4f (Table 14 bits 52:67)\n",
                                 diag.frame.v90_compatibility ? "CP" : "CPt",
-                                codec_set);
+                                codec_set,
+                                diag.frame.trn1d_gain_q3_13 / 8192.0);
                     }
                 }
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
