@@ -1,0 +1,28 @@
+diff --git a/dsp/v34_x2.h b/dsp/v34_x2.h
+index 7ff60e3..c1ddd51 100644
+--- a/dsp/v34_x2.h
++++ b/dsp/v34_x2.h
+@@ -356,8 +356,21 @@ s16 V34X2<P>::x2_step(s32 c)
+ 				DSP_DBG("v34: x2: no common rate\n");
+ 				return self.fallback("no common data rate");
+ 			}
+-			/* the start-up's data levels (B) across its pad */
+-			x2t.data_rate = x2_cur = x2_rate_for(1, x2_mode);
++			/* Opt in to the client's MP rate at startup. The startup
++			   record and the first data allocation must agree. */
++			if (env_int("DSP_X2_START_AT_MP", 0)) {
++				x2t.rec_w[0] = static_cast<u16>((x2t.rec_w[0] & ~0x3c) |
++							       (x2_down << 2));
++				x2t.data_rate = x2_cur = x2_rate_for(x2_down, x2_mode);
++				self.rate_tx = (x2_cur->B + x2_cur->MD) * 8000 / X2_FRAME;
++				/* Keep this rate until requested to renegotiate. */
++				if (!env("DSP_X2_MARK_AT"))
++					x2_mark_fr = x2_switch_fr = X2_NEVER;
++				DSP_DBG("v34: x2 startup allocation: %" PRId32 " bit/s\n",
++					self.rate_tx);
++			} else {
++				x2t.data_rate = x2_cur = x2_rate_for(1, x2_mode);
++			}
+ 			x2_next = x2_rate_for(14, x2_mode);
+ 		}
+ 		/* frames of ones (X2_SYNC_MIN codes at least) until its MP; then our

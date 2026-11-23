@@ -2288,6 +2288,22 @@ for the initial rate. The unrestricted rate mismatch remains open.
 The capped SIP call repeated at the same rates, with V.42 LAPM and 1900
 exact bytes each way.
 
+### Faster startup with the patched D-Modem server
+
+The [D-Modem startup-rate patch](../rig/d-modem/dmodem-x2-start-rate.patch)
+adds the opt-in `DSP_X2_START_AT_MP=1` to D-Modem `84d3a3c`. It takes the
+initial downstream allocation from the caller's MP ceiling (x2 Draft
+0.33 §20), writes the same index into the startup record, and uses that
+bank for data. It suppresses D-Modem's scheduled test rate change when
+`DSP_X2_MARK_AT` is unset.
+
+With the patch enabled over local SIP/PCMU, the uncapped caller negotiated
+index 15 at 56000 bit/s down and 28800 bit/s up. The caller capped at 48000
+negotiated index 9 at 48000/28800. Both calls established V.42 LAPM and
+transferred 16384 deterministic pseudorandom bytes in each direction.
+The final patch repeated 56000/28800 with 65536 exact bytes per direction
+and held data mode for 35.5 s. The peer sent no scheduled rate change.
+
 ### Open D-Modem analogue caller
 
 In the opposite direction, D-Modem's 9600 Hz analogue caller entered x2
