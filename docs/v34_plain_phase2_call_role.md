@@ -509,3 +509,22 @@ first ask is still 31200 and costs a retrain every call; the Phase-4 TRN
 measurement should be taken after convergence.  (c) V.32bis fallback (V.8
 offers V.32 and it is the RasFinder's next step) does not exist in the engine:
 SpanDSP's `v32bis.c` has a burst-mode startup and loopback data path only.
+
+## Open D-Modem B1 over SIP, 23 November 2026
+
+D-Modem `84d3a3c` called our V.34 answerer over local SIP/PCMU. Both DSPs
+negotiated 33600 bit/s. Our B1 search scored 0.230 on the first call and
+reported -12.6 dB at 3429 baud. The wire capture shows our modem opened
+the first retrain. With the local retrain suppressed, D-Modem received
+1900 exact bytes and our receiver still failed the reverse payload.
+
+The peer carried the Phase 4 scrambler through E into B1 and took the
+first mapping frames from its live link rather than reserving the all-ones
+data frame required by §10.1.3.1/V.34. Resetting its scrambler alone raised
+the observed B1 correlation to 0.547 and still led to a retrain. Resetting
+the scrambler and supplying the full B1 frame of ones established V.42 LAPM
+at 33600 bit/s on two consecutive calls. Each received 1900 exact bytes per
+direction. The receiver measured B1 at 36.3 dB at 3429 baud on both calls.
+
+Apply [the peer patch](../rig/d-modem/dmodem-v34-b1.patch) with
+`git apply` in the D-Modem `84d3a3c` checkout and rebuild `dmodemd`.

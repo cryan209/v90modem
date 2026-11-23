@@ -1,0 +1,77 @@
+diff --git a/dsp/dp_v34.cpp b/dsp/dp_v34.cpp
+index 4d521e1..e660781 100644
+--- a/dsp/dp_v34.cpp
++++ b/dsp/dp_v34.cpp
+@@ -4229,6 +4229,7 @@ s16 V34Pump::data_setup()
+ 	p.states = 16 << r->trellis;
+ 	p.set_precoder(r->h);
+ 	ptx.start_data(&p, CoreBits{ modem }, ax);
++	ptx.dtx.b1_left = p.P; /* B1 is a full data frame (10.1.3.1/V.34). */
+ 	rate_tx = p.rate;
+ 	stat_coding(false, p.states, r->nonlinear, p.precode, r->expanded);
+ 	if (p.init(prx.baud, nrx, l->expanded, aux))
+diff --git a/dsp/v34.h b/dsp/v34.h
+index abb1245..3e49066 100644
+--- a/dsp/v34.h
++++ b/dsp/v34.h
+@@ -211,6 +211,7 @@ struct V34DataTx {
+ 	V34Aux aux;             /* the auxiliary channel's (p.aux) */
+ 	s16 sbc;                /* high/low frame switching */
+ 	s16 abc;                /* auxiliary channel multiplexing */
++	s16 b1_left;            /* remaining B1 mapping frames */
+ 	s16 z, state, v0;       /* differential, trellis and sync state */
+ 	s16 half, pat;          /* 4D symbols in the half data frame, sync
+ 				   pattern position */
+diff --git a/dsp/v34_data.cpp b/dsp/v34_data.cpp
+index bcb0071..667ce0b 100644
+--- a/dsp/v34_data.cpp
++++ b/dsp/v34_data.cpp
+@@ -476,6 +476,9 @@ void V34DataTx::encode_frame(u32 *scr, s16 tap)
+ 	unsigned char bits[V34_MAX_B];
+ 	s16 bb = p_->b, kk = p_->K, n = 0, i, j, m[8], ib[4], qb[8];
+ 	u32 r0 = 0;
++	const bool b1 = b1_left > 0;
++	if (b1)
++		--b1_left;
+ 
+ 	sbc += p_->r;
+ 	if (sbc >= p_->P)
+@@ -488,15 +491,21 @@ void V34DataTx::encode_frame(u32 *scr, s16 tap)
+ 	   one primary channel bit less, the aux bit unscrambled */
+ 	if (p_->aux && (abc += p_->W) >= p_->P) {
+ 		abc -= p_->P;
+-		link.get(bits, bb - 1);
++		if (b1)
++			std::fill_n(bits, bb - 1, 1);
++		else
++			link.get(bits, bb - 1);
+ 		for (i = 0; i < bb - 1; i++)
+ 			bits[i] = static_cast<unsigned char>(
+ 				scramble(scr, tap, bits[i]));
+ 		memmove(bits + kk + 1, bits + kk, bb - 1 - kk);
+ 		bits[kk] = static_cast<unsigned char>(
+-			aux.get ? aux.get(aux.ctx) & 1 : 1);
++			!b1 && aux.get ? aux.get(aux.ctx) & 1 : 1);
+ 	} else {
+-		link.get(bits, bb);
++		if (b1)
++			std::fill_n(bits, bb, 1);
++		else
++			link.get(bits, bb);
+ 		for (i = 0; i < bb; i++)
+ 			bits[i] = static_cast<unsigned char>(
+ 				scramble(scr, tap, bits[i]));
+diff --git a/dsp/v34_modem.cpp b/dsp/v34_modem.cpp
+index fde34f0..63da9be 100644
+--- a/dsp/v34_modem.cpp
++++ b/dsp/v34_modem.cpp
+@@ -317,6 +317,9 @@ void V34Tx::segment(enum v34_txseg seg_)
+ 	   a copy of it */
+ 	if (seg_ == V34_TX_TRN)
+ 		scr = 0;
++	/* B1 starts with a zero scrambler register (10.1.3.1/V.34). */
++	if (seg_ == V34_TX_DATA && dtx.b1_left > 0)
++		scr = 0;
+ }
+ 
+ /* the data mode parameters, before the end of E: the symbols after E
