@@ -1338,3 +1338,17 @@ Built in `/root/deploy-5640b4d3`, checked out at 3be20424. The binary (md5
 one (284585ab) as `sip_v90_modem.pre-3be20424`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and all ten lines re-registered (2951-2960 Avail).
+
+## Deployed 36a574cd (2026-11-24 08:39)
+
+On top of 3be20424, this deploy adds 36a574cd: the V.90 §9.2.2.2.2 Tone A
+re-reversal in the analogue role, and the `V90_TEST_DROP_INFO0D` test
+hook (off unless set). The v90ras and v90isdn servers run the digital role,
+so their calls take the same path as before; the deploy keeps CT 117 on
+`main`. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 36a574cd. The binary (md5
+e5e9e73b…) is kept as `/opt/v90ras/sip_v90_modem.36a574cd`, and the previous
+one (3be20424, 11d94652…) as `sip_v90_modem.pre-36a574cd`. Installed by
+rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
+`v90isdn` were restarted, and all ten lines re-registered (2951-2960).
