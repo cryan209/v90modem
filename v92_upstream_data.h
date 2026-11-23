@@ -51,6 +51,17 @@ typedef struct {
  * profiles against that peer. */
 #define V92_UPSTREAM_MEMBER_SLMODEMD     3
 
+/* Peer deviations from 6.4.2, for testing our receiver against them; set
+ * after v92_upstream_wave_tx_init(), which zeroes them.  Both are an ESS
+ * ES56H-PI as D-Modem's interop notes describe it (d-modem.github.io/
+ * D-Modem/interop-details/), in CPd point units, where its grid step is 16:
+ * FB_FLOOR: the precoder feedback is rounded down to the grid,
+ *   x(n) = u(n) + 16 floor(fb/16) in place of u(n) + fb.
+ * NEG_STEP: with no precoder coefficients, a negative point is sent one
+ *   grid step farther out, u(n) - 16. */
+#define V92_UPSTREAM_QUIRK_FB_FLOOR      1
+#define V92_UPSTREAM_QUIRK_NEG_STEP      2
+
 typedef struct {
     v92_upstream_tx_state_t data;
     uint8_t convolutional_state;
@@ -58,6 +69,7 @@ typedef struct {
     double x_history[V92_CPD_MAX_TAPS];
     double v_history[V92_CPD_MAX_TAPS];
     int class_member;                  /* V92_UPSTREAM_MEMBER_* */
+    int quirks;                        /* V92_UPSTREAM_QUIRK_*, test only */
 } v92_upstream_wave_tx_t;
 
 typedef struct {

@@ -348,6 +348,17 @@ static int16_t sample(v92a4_t *s)
     } else if (s->stage == V92A4_E) {
         if (s->stage_symbols == 12u + s->cpd.extend_e2u) {
             v92_upstream_wave_tx_init(&s->data); /* 8.7.1: reset all memories */
+            /* Test hook: send B1u and data like a peer that departs from
+             * 6.4.2 (V92_UPSTREAM_QUIRK_* bits). */
+            {
+                /* Test hook: transmit like a peer departing from 6.4.2 (ESS). */
+                const char *q = getenv("V92_TEST_UPSTREAM_QUIRKS");
+
+                s->data.quirks = (q  &&  *q)  ?  atoi(q)  :  0;
+                if (s->data.quirks)
+                    fprintf(stderr, "[V92A] test: upstream quirks %d (V92_TEST_UPSTREAM_QUIRKS)\n",
+                            s->data.quirks);
+            }
             s->stage = V92A4_B1;
             s->stage_symbols = 0;
             return sample(s);

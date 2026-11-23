@@ -165,3 +165,44 @@ The offline Agere/Motorola/USR QC sweeps (`docs/v92_phase4_implementation.md`)
 cannot discriminate the polynomial yet — they fail at symbol recovery upstream
 of the descrambler — and live V.92 Phase 3 validation remains blocked by the
 peer's V.90-form INFO1a, so a live all-ones TRN1u confirmation is still pending.
+
+## A peer that rounds its precoder feedback or offsets its negative points (2026-11-24)
+
+D-Modem's interop notes (d-modem.github.io/D-Modem/interop-details/, ESS
+ES56H-PI) report two departures from §6.4.2 in that analogue modem, in CPd
+point units where its grid step is 16: its precoder rounds the feedback down
+to the grid, x(n) = u(n) + 16 floor(fb/16); and with no precoder
+coefficients each negative point is sent one step (16) farther out. Before
+they corrected for it, B1u had about 5% of its bits wrong. Our receiver has
+no correction for either. `V92_UPSTREAM_QUIRK_FB_FLOOR` and
+`V92_UPSTREAM_QUIRK_NEG_STEP` (`v92_upstream_data.h`; on our analogue
+transmitter with `V92_TEST_UPSTREAM_QUIRKS=1/2/3`) reproduce them.
+
+**Engine pair, no added noise:** all eight arms (quirks 0-3, precoder default
+or forced with `ME_V92_PRECODER=2`) connect at 48000 up, lock B1u by
+decoding, and pass a V.14 payload byte-exact. 16 point units are about 8 DS0
+on that line; the CPd's closest spacing is 80 units (about 40 DS0) against
+4.4 DS0 of noise. The engine pair's `--loop-noise-db` cannot test further:
+it adds noise both ways and the V.14 start-up junk fails the payload check
+without any quirk.
+
+**Upstream alone:** the equalised B1u receiver, fed the engine's 96-point
+CPd (4G = 22, drn 19, 48000) through mu-law with added Gaussian noise
+(sigma in DS0), 400 data frames, six paired seeds per cell, gives these bit
+error rates:
+
+| | sigma 6 | 8 | 10 | 12 |
+|---|---|---|---|---|
+| no precoder, spec peer | 0 | 0 | 8.0e-4 | 6.2e-3 (2/6 no lock) |
+| no precoder, negative points one step out | 0 | 7.2e-4 | 2.2e-3 | 4.2e-2 (2/6 no lock) |
+| p1 = (0.0002, -0.0001), spec peer | 3.5e-2 | 3.8e-1 | no lock | no lock |
+| p1 = (0.0002, -0.0001), feedback rounded down | 4.7e-1 | no lock | no lock | no lock |
+
+Either departure costs about 2 DS0 of noise tolerance; the rounding also
+starts errors at sigma 4 (1.2e-1) where the spec peer has none. The precoded
+rows show something independent of ESS: with coefficients the receiver
+decodes symbol by symbol (no Viterbi), and loses 4 DS0 against the same
+peer. With p1 = (0.10, -0.05) and no channel ISI nothing locks at all,
+because x(n) is then off the codec's levels (the reason the engine sends
+coefficients only where the feedback pays, `modem_engine.c` near
+`V92_PRECODER_MIN_GAIN`).

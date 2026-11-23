@@ -507,6 +507,14 @@ bool v92_upstream_wave_encode_ki(v92_upstream_wave_tx_t *state,
                                       trial.class_member, &eta, &u, &x))
             return false;
         eta_frame[k] = eta;
+        if (trial.quirks) {
+            bool precoded = cpd->coeffs_present  &&  (cpd->lz1 > 0  ||  cpd->lp1 > 0);
+
+            if ((trial.quirks & V92_UPSTREAM_QUIRK_FB_FLOOR)  &&  precoded)
+                x = u + 16.0*floor((x - u)/16.0);
+            if ((trial.quirks & V92_UPSTREAM_QUIRK_NEG_STEP)  &&  !precoded  &&  u < 0.0)
+                x = u - 16.0;
+        }
         v = prefilter_output(cpd, x, trial.x_history, trial.v_history);
         samples[i] = gain*v;
         push_history(trial.u_history, u);
