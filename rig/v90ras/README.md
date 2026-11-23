@@ -1353,6 +1353,21 @@ one (3be20424, 11d94652…) as `sip_v90_modem.pre-36a574cd`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 `v90isdn` were restarted, and all ten lines re-registered (2951-2960).
 
+## Deployed 04daa5a2 (2026-11-24 10:59)
+
+On top of a6737e79, this deploy adds 04daa5a2: in V.92 Phase 4 a CPd' now
+counts as an acknowledged sequence for §9.6.1.1.4. An analogue modem that
+acks after the §9.6.1.1.3 window, so that we are repeating CPd', now gets Ed;
+before, CPd' repeated until the B1u deadline. That was found against
+D-Modem's ESS peer; SmartLink-class peers ack inside the window and are
+unaffected (D-Modem matrix verdicts unchanged). No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 04daa5a2. The binary (md5
+4c2c9ae5…) is kept as `/opt/v90ras/sip_v90_modem.04daa5a2`, and the previous
+one (a6737e79, b34fbfff…) as `sip_v90_modem.pre-04daa5a2`. Installed by
+rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
+`v90isdn` were restarted, and all ten lines re-registered (2951-2960).
+
 ## Deployed a6737e79 (2026-11-24 09:26)
 
 On top of 36a574cd, this deploy adds a6737e79: V.92 PCM upstream now runs
