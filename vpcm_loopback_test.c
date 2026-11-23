@@ -4420,6 +4420,94 @@ static bool v92_test_upstream_send(v92_trn2u_tx_t *utx,
     return v92_trn2u_demod_feed(udemod, codewords, nsym) == 1;
 }
 
+/* 9.6.1.1.3 then 9.6.1.1.4: the analogue modem acknowledges late.  Its
+ * first SUVu after our CPd comes more than 100 ms + RTD after the CPd, still
+ * without the ack, so CPd repeats instead of SUVd; then CPu (CPd' from there
+ * on) and SUVu'.  Ed must follow the CPd' in flight.  Ed used to wait for an
+ * SUVd' that the repeat never sends, so CPd' repeated until the B1u
+ * deadline (D-Modem's ESS peer, 2026-11-24). */
+static bool test_v92_late_ack_reaches_ed(void)
+{
+    enum { MAX_SYMBOLS = 60000 };
+    v90_state_t *tx = v90_init_data_pump(V90_LAW_ULAW);
+    v92_cp_frame_t cpt, cpu;
+    vpcm_cp_frame_t vp;
+    uint8_t codeword = 0;
+    int symbols, cpd_symbols = 0;
+    bool ok = false;
+
+    vpcm_log("Test: V.92 9.6.1.1.4 Ed after a late acknowledgement (CPd' repeat)");
+    if (!tx)
+        return false;
+    v90_enable_v92_mode(tx);
+    v90_enable_v92_native_cpu_rx(tx);
+    if (!v90_set_v92_cpd_profile(tx, 10, 1, 0x8000))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    v90_start_phase3(tx, 66);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_JD && symbols < MAX_SYMBOLS; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_S))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_RI && symbols < MAX_SYMBOLS; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    for (int i = 0; i < 192; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    memset(&cpt, 0, sizeof(cpt));
+    cpt.type = V92_CP_TYPE_CPT;
+    cpt.drn = 9;
+    cpt.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    if (!v92_cp_frame_to_vpcm(&cpt, &vp) || !v90_set_phase4_cp(tx, &vp)
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_SUVD && symbols < MAX_SYMBOLS; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    /* SUVu: the single CPd, then SUVd. */
+    if (v90_get_tx_phase(tx) != V90_TX_SUVD || !v90_set_v92_suvu(tx, false))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_CP && symbols < 400; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    for (symbols = 0; v90_get_tx_phase(tx) == V90_TX_CP && symbols < MAX_SYMBOLS; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    cpd_symbols = symbols;
+    /* 100 ms + RTD (here 0) later, an SUVu still without the ack. */
+    for (symbols = 0; symbols < 900; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (!v90_set_v92_suvu(tx, false))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    v92_test_build_cpu(&cpu, false, false);
+    if (!v92_cp_frame_to_vpcm(&cpu, &vp) || !v90_set_v92_cpu(tx, &vp))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    /* The repeat is a CPd' now: wait for one to start and finish. */
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_CP && symbols < 2*cpd_symbols + 400; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    for (symbols = 0; v90_get_tx_phase(tx) == V90_TX_CP && symbols < MAX_SYMBOLS; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_CP && v90_get_tx_phase(tx) != V90_TX_SUVD) {
+        fprintf(stderr, "V.92 late ack: no CPd' repeat (phase %d)\n",
+                (int)v90_get_tx_phase(tx));
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    }
+    /* SUVu': Ed after at most the CPd' in flight. */
+    if (!v90_set_v92_suvu(tx, true))
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    for (symbols = 0; v90_get_tx_phase(tx) != V90_TX_ED && symbols < 2*cpd_symbols + 400; symbols++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_ED) {
+        fprintf(stderr, "V.92 late ack: no Ed %d symbols after SUVu' (phase %d)\n",
+                symbols, (int)v90_get_tx_phase(tx));
+        { fprintf(stderr, "V.92 late ack: step failed at line %d (phase %d)\n", __LINE__, (int)v90_get_tx_phase(tx)); goto done; }
+    }
+    ok = true;
+    vpcm_log("PASS: V.92 Ed %d symbols after a late SUVu' (CPd %d symbols)",
+             symbols, cpd_symbols);
+done:
+    v90_free(tx);
+    return ok;
+}
+
 static bool test_v92_native_cpu_phase4(v91_law_t law)
 {
     enum { MAX_SYMBOLS = 60000, TRN2D_MAX = 16000, RI_POST_CP = 24 };
@@ -11519,6 +11607,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_trn2u_loopback()
         && test_v92_native_cpu_phase4(V91_LAW_ULAW)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)
+        && test_v92_late_ack_reaches_ed()
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_training_deadlines()

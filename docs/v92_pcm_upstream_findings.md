@@ -233,3 +233,56 @@ side, alternated): identical precoded CPd, B1u locked by decoding, about
 38000 lines each way on both builds. `v92_b1u_lock_test`
 covers it with p1 = (0.10, -0.05) at two phases and two B1u lengths; the
 old decoder got 686 bits wrong or never locked on those cases.
+
+## The ESS modem itself, on D-Modem's offline rig (2026-11-24)
+
+`half_v90modem` against D-Modem's `half_ess` (ESS's own driver,
+`docs/dmodem_interop.md`) is the first time the receiver has met the real
+peer rather than the quirks above. The B1u failure there began with two
+separate problems.
+
+**Ours: no Ed after a late acknowledgement (§9.6.1.1.4).** ESS's SUVu' came
+more than 100 ms after our CPd, so §9.6.1.1.3 had us repeating CPd, and once
+its CPu arrived every repeat was a CPd'. §9.6.1.1.4 sends Ed once we have
+sent "a CPd or SUVd sequence with the acknowledgement bit set" and received
+the peer's ack, but `v92_ack_sent` was only set by an SUVd', which the repeat
+never sends. So the peer's SUVu' changed nothing: 275 CPd's went out until the
+B1u deadline, and ESS sat in SUVu' waiting for Ed. Everything measured on
+the upstream before this fix was ESS's SUVu', not B1u. A CPd' now counts
+too (`v90_build_v92_cpd_native()`). `vpcm_loopback_test`'s "Ed after a late
+acknowledgement" covers the timeout path: Ed now follows 60 symbols after
+the SUVu', where before it stayed in CPd' past 1720 symbols. SmartLink acks
+inside the window, so it never hit this.
+
+**Then: ESS's precoder.** With Ed out, ESS sends E2u and B1u, but B1u still
+never locks. The TRN2u equaliser is clean right up to that point (0.025-0.034
+from the four levels with feedback, 0.12-0.17 feed-forward only, in ±1/±3
+units). From B1u on, its output has no structure at all: rms 1.32, 0.075 from
+the nearest of the CPd's levels where white is 0.090. Undoing the live p1,
+either sign, does not help. Three CPd changes, all taken from D-Modem's own
+ESS code (`dsp/v92.cpp`), did not lock it either:
+- Moduli M with LC >= 2M and LC >= M(1 + sum |p1|) + 2 (`pf_rate()`), so the
+  precoder has room inside the set (drn 2, 25333).
+- Points on a uniform grid (2j + 1) x step, as D-Modem's precoder-only
+  `design()` uses.
+- Both together.
+
+D-Modem's own modem fails the same way:
+- **Precoder only** (`DSP_V92_PREFILTER=0`): its CPd at 41333, M 36,
+  sum |b| 0.27, gave "B1u does not come through", with 1071 zeros in
+  2976 bits at mse 0.0004. The signal lands on the grid but the bits are
+  wrong. It then drops PCM upstream.
+- **Prefilter** (64 taps, the default): 40000-41333, as its notes say.
+- **No precoder** (`DSP_V92_PRECODE=0`): 29333, M 13, 52 points; B1u is
+  clean after 2-3 frames, on three runs.
+
+So against ESS, a precoded CPd without a real prefilter does not work for
+either modem. An unprecoded one does, but ours cannot design one on this
+line: our data mode keeps only the feed-forward taps (see
+`me_v92_data_slicer_locked()` for why feedback on data decisions was taken
+out against slmodemd), and those leave sigma 490 DS0 where the feedback
+solve reads 98. The CPd design then gives up ("cannot arm B1u receiver").
+The fix is one of two receiver features, neither of which we have:
+- decision feedback in data mode for an unprecoded CPd;
+- a prefilter design (z2 taps with the points on G.711 levels), D-Modem's
+  route to 41333.

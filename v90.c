@@ -1594,6 +1594,12 @@ static bool v90_build_v92_cpd_native(v90_state_t *s)
                         &s->v92_tx_nbits))
         return false;
     s->v92_tx_pos = 0;
+    /* 9.6.1.1.4: a CPd' counts as much as an SUVd'.  After the 9.6.1.1.3
+     * timeout only CPd's go out, so without this Ed never followed the
+     * analogue modem's SUVu'/CPu' (ESS: CPd' repeated until the B1u
+     * deadline). */
+    if (cpd.acknowledge)
+        s->v92_ack_sent = true;
     s->v92_cpd_retry = false;
     s->v92_cpd_designed = true;
     s->v92_upstream_design_sigma = fmax(s->v92_upstream_sigma, s->v92_upstream_sigma_floor);

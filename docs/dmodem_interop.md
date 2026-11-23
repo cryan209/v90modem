@@ -80,7 +80,7 @@ STREAM=10, one call per row:
 | SM56 | V.90 | Pass. 50666 / 31200, LAPM + V.42bis |
 | Intel 537EP | V.92 offer | Pass. It has no CPu, so V.90 at 52000 / 31200 (as D-Modem says) |
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
-| ESS | V.92 PCM up, μ-law and A-law | Fail. Phase 3 completes and our CPd goes out precoded, but B1u is not locked 5 s after the CPd acknowledgement. We report CONNECT, ESS answers ATD with OK, and the data is garbage |
+| ESS | V.92 PCM up, μ-law and A-law | Fail. Phase 3 completes and our CPd goes out precoded. Until a §9.6.1.1.4 fix (after 0b77eb79) we never sent Ed, because ESS acked late. Now Ed goes out and ESS sends B1u, but its precoder works behind a real prefilter only, so B1u still does not lock (`docs/v92_pcm_upstream_findings.md`, ESS section). We report CONNECT and ESS gives NO CARRIER |
 | ESS | V.90 | Fail. We CONNECT at 28800, ESS answers OK, garbage |
 | HSF | V.90, V.92 (both laws) | Fail. Reaches Phase 3 (our first S), then the peer gives NO CARRIER |
 | Agere | V.90, V.92 | Fail. Same as HSF |
@@ -93,6 +93,7 @@ D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 ours to explain. Every failing row is a `NET_LOOP=0.45 NET=8000:8000` line,
 except the Courier, which has the same line. PCTel and SM56 pass on that line,
 so the line alone does not explain it. None of the failures has been
-investigated yet. The ESS V.92 row is the one to start with: its precoder
-departs from §6.4.2 (`docs/v92_pcm_upstream_findings.md`, ESS quirk section)
-and this is the first time our receiver has met it.
+investigated yet, apart from ESS V.92 (`docs/v92_pcm_upstream_findings.md`,
+"The ESS modem itself"). There, D-Modem's own modem also fails with a
+precoder and no prefilter. Unprecoded, it gets 29333. Ours cannot design an
+unprecoded CPd, because data mode has no decision feedback.

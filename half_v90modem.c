@@ -161,6 +161,7 @@ static int read_block(int16_t *in)
     return (int) (r/2);
 }
 
+/* V90MODEM_LAW=ulaw|alaw: the line's law, else NET's third field (ulaw). */
 static const char *law_setting(void)
 {
     const char *law = getenv("V90MODEM_LAW");
@@ -194,6 +195,7 @@ int main(int argc, char *argv[])
     signal(SIGTERM, on_signal);
 
     g_alaw = strcmp(law_setting(), "alaw") == 0;
+    /* V90MODEM_PTY=<path>: where the DTE's pty link goes (default under TMPDIR). */
     if ((e = getenv("V90MODEM_PTY")) && e[0]) {
         snprintf(pty_link, sizeof(pty_link), "%s", e);
     } else {
@@ -203,6 +205,7 @@ int main(int argc, char *argv[])
                  tmp && tmp[0] ? tmp : "/tmp", (int) getpid());
     }
 
+    /* V90MODEM_VERBOSE=1: the engine's [ME] log on stderr. */
     me_set_verbose((e = getenv("V90MODEM_VERBOSE")) && atoi(e));
     me_init();
     di_set_callbacks(on_dial, on_answer, on_hangup, NULL);
