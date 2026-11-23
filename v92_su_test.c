@@ -188,6 +188,40 @@ static int synth(uint8_t *cw, bool alaw, double phase0, bool reverse)
     return n;
 }
 
+/* The 8.5.6 sequence itself, {+1,0,+1,-1,0,-1} x level, with nothing taken
+ * off it: two thirds of its power is at 4000 Hz.  su_len symbols of Su, 24 of
+ * Su-bar, then Su (held as a pure 1333 1/3 Hz sine when held_sine).  f1333
+ * scales the 1333 1/3 Hz part of Su and Su-bar, the 4000 Hz part kept.
+ * Peers measured by D-Modem's interop notes (d-modem.github.io/D-Modem/
+ * interop-details/): Broadcom sends 96T of Su, not 144T; Conexant HSF sends
+ * Su with most of its energy at 4000 Hz, 24T of Su-bar, and then holds a sine.
+ * The detector needs the 1333 Hz part at about 30% of the spec Su's at this
+ * level: at 10% it misses the burst and acquires the held Su instead. */
+static int synth_86(uint8_t *cw, bool alaw, int su_len, double f1333, double level, bool held_sine)
+{
+    static const double base[6] = {1, 0, 1, -1, 0, -1};
+    int n = 0;
+
+    for (int k = 0;  k < 24;  k++)
+        cw[n++] = alaw ? linear_to_alaw(0) : linear_to_ulaw(0);
+    for (int k = 0;  k < su_len + 24 + 150;  k++) {
+        int m = k % 6;
+        double x4 = (m & 1)  ?  -2.0/3.0  :  2.0/3.0;   /* the 4000 Hz part */
+        double x1 = base[m] - x4;                        /* the rest: 1333 Hz */
+        double v;
+
+        if (k >= su_len + 24  &&  held_sine)
+            v = x1;
+        else
+            v = f1333*x1 + x4;
+        if (k >= su_len  &&  k < su_len + 24)
+            v = -v;                                      /* Su-bar */
+        cw[n++] = alaw ? linear_to_alaw((int16_t) lrint(level*v))
+                       : linear_to_ulaw((int16_t) lrint(level*v));
+    }
+    return n;
+}
+
 /* Su-bar must be reported inside [lo, hi] (codeword index), or never when lo < 0. */
 static int check(const char *name, const uint8_t *cw, int n, bool alaw, int lo, int hi)
 {
@@ -225,6 +259,20 @@ int main(void)
         snprintf(name, sizeof(name), "no reversal %3d deg", p*30);
         n = synth(cw, false, p*M_PI/6.0, false);
         fails += check(name, cw, n, false, -1, -1);
+    }
+    /* Su-bar starts at codeword 24 + su_len and lasts 24. */
+    for (int law = 0;  law < 2;  law++) {
+        bool alaw = law;
+        int n;
+
+        n = synth_86(cw, alaw, 144, 1.0, 6000.0, false);
+        fails += check(alaw ? "8.5.6 144T alaw" : "8.5.6 144T ulaw", cw, n, alaw, 168, 192);
+        n = synth_86(cw, alaw, 144, 1.0, 1500.0, false);
+        fails += check(alaw ? "8.5.6 144T -12dB alaw" : "8.5.6 144T -12dB ulaw", cw, n, alaw, 168, 192);
+        n = synth_86(cw, alaw, 96, 1.0, 6000.0, false);
+        fails += check(alaw ? "Broadcom 96T alaw" : "Broadcom 96T ulaw", cw, n, alaw, 120, 144);
+        n = synth_86(cw, alaw, 144, 0.3, 6000.0, true);
+        fails += check(alaw ? "HSF-like 4kHz alaw" : "HSF-like 4kHz ulaw", cw, n, alaw, 168, 192);
     }
     printf(fails ? "FAIL: %d missed Su-bar\n" : "PASS\n", fails);
     return fails ? 1 : 0;
