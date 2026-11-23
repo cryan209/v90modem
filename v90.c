@@ -502,14 +502,23 @@ static int v92_jd_extra_reps(void)
  * descrambler self-synchronises) but costs the analogue modem Jp's framing
  * for 23 bits, and our own analogue receiver, which frames Jp once, then
  * never decodes it.  ME_V92_JP_STATES=<hex,...> replaces the list, =none
- * turns the hold off. */
+ * turns the hold off.  ME_V92_JP_STATES_RETRAIN=<hex,...> (diagnostic)
+ * replaces it on §9.5-retrained attempts only. */
 #define V92_JD_HOLD_MAX_REPS 8
-static int v92_jp_states(uint32_t *states, int max)
+static int v92_jp_states(bool retrained, uint32_t *states, int max)
 {
     const char *value = getenv("ME_V92_JP_STATES");
+    const char *retrain_value = getenv("ME_V92_JP_STATES_RETRAIN");
     const char *p;
     int n = 0;
 
+    /* A §9.5-retrained V.92 attempt: slmodemd's verdict there takes a
+     * different state (38969c, with the 250 ms retrain Sd delay in the
+     * engine; 547923 gave ratio 2.19 on every retrain). */
+    if (retrained && (!value || !*value))
+        value = (retrain_value && *retrain_value) ? retrain_value : "38969c";
+    else if (retrained && retrain_value && *retrain_value)
+        value = retrain_value;
     if (!value || !*value)
         value = "547923,38969c";
     if (strcmp(value, "none") == 0)
@@ -659,6 +668,7 @@ struct v90_state_s {
     bool             jd_terminated_by_su;
     int              jd_extra_reps_left; /* ME_V92_JD_EXTRA_REPS diagnostic */
     int              jd_hold_reps;       /* V.92 Jd held for Jp's state (v92_jp_states) */
+    bool             retrained_attempt;  /* a §9.5 retrain created this state */
     /* Set when WAIT_JA was entered from the Jd no-S resync rather than at the
      * start of Phase 3, so the fallback back to Sd can use a deadline that
      * fits inside the peer's WaitForSd patience. */
@@ -862,6 +872,12 @@ void v90_set_tx_frame_phase(v90_state_t *s, int phase)
 static bool v90_sd_may_start_next(const v90_state_t *s)
 {
     return s->tx_align_phase < 0 || s->tx_align_phase == 5;
+}
+
+void v90_set_retrained_attempt(v90_state_t *s, bool retrained)
+{
+    if (s)
+        s->retrained_attempt = retrained;
 }
 
 void v90_set_sd_delay_ms(v90_state_t *s, int ms)
@@ -4208,7 +4224,7 @@ static void v90_reneg_clock_advance(v90_state_t *s, int symbols)
 static bool v92_jd_hold_for_jp(v90_state_t *s)
 {
     uint32_t states[8];
-    int n = v92_jp_states(states, 8);
+    int n = v92_jp_states(s->retrained_attempt, states, 8);
     v90_scrambler_t ahead = s->scrambler;
 
     for (int k = s->jd_hold_reps; k <= V92_JD_HOLD_MAX_REPS && n > 0; k++) {

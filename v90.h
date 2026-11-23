@@ -396,6 +396,8 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp);
  * arming, and an early Sd leaves its equalizer training unanchored.
  */
 void v90_set_sd_delay_ms(v90_state_t *s, int ms);
+/* Mark this state as a §9.5-retrained attempt (ME_V92_JP_STATES_RETRAIN). */
+void v90_set_retrained_attempt(v90_state_t *s, bool retrained);
 void v90_raise_sd_delay_ms(v90_state_t *s, int ms);
 int v90_sd_round_trip_hold_ms(int ja_age_ms, int rtd_ms, int margin_ms);
 

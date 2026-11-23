@@ -20352,12 +20352,28 @@ static void prepare_v90_phase3_locked(void)
                                          % (sizeof(legal_delays_ms)/sizeof(legal_delays_ms[0]));
 
                     retrain_delay = legal_delays_ms[index];
+                    /* A V.92 retrain against slmodemd: its equaliser comes
+                     * out of a retrained Phase 3 with a gain/offset error
+                     * that our identical Sd..Ri cannot explain (its own
+                     * state).  Measured 2026-11-23, its Phase 4 ratio
+                     * against its 1.5 limit: Sd 0 ms 1.56-3.43 over seven
+                     * Jp states, 250 ms with Jp 38969c 1.20-1.26 (4/4
+                     * trained, PCM upstream kept), 250 ms alone 1.81, 500 ms
+                     * 1.78-1.98.  So V.92 retrains wait 250 ms (and
+                     * v92_jp_states() takes 38969c). */
+                    if (g_v92_active)
+                        retrain_delay = 250;
+                    /* ME_V90_RETRAIN_SD_DELAY_MS (diagnostic): one delay
+                     * for every retrained attempt. */
+                    retrain_delay = parse_env_int("ME_V90_RETRAIN_SD_DELAY_MS",
+                                                  retrain_delay);
                     ME_LOG("[ME] V.90: retrained attempt %u; adaptive §9.3.1.3 Sd delay %d ms\n",
                            g_v90_phase2_restarts, retrain_delay);
                 }
                 /* Set explicitly: an unset override used to inherit the
                  * initial attempt's delay. */
                 v90_set_sd_delay_ms(g_v90, retrain_delay);
+                v90_set_retrained_attempt(g_v90, true);
             }
         }
         if (g_v90) {

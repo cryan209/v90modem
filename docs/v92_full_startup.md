@@ -605,7 +605,8 @@ Live (`v92rt2`, 3/3 calls): V.92 32000 -> forced retrain -> one failed
 PCM attempt -> V.92 54667/31200, LAPM retained, payload gapless.
 
 Open: why slmodemd's retrained V.92 Phase 3/4 fails where its startup one
-succeeds on the same signals.
+succeeds on the same signals. (Answered 2026-11-23; see "Retrained V.92
+attempts" below.)
 
 ### 2026-11-12: a retrained PCM-upstream attempt has to prove itself
 
@@ -697,3 +698,64 @@ Bisecting on CT 117: extract only `*.c`, `*.h` and `makefile` from the
 archive with `tar -x -m` (touching `Makefile.am` sends spandsp to automake,
 which the container does not have, and the old binary is silently kept), and
 check that the link succeeded before making the call.
+
+### Retrained V.92 attempts: 250 ms Sd and Jp 38969c (2026-11-23)
+
+The 12 November Jd hold fixed slmodemd's first attempt, but a forced retrain
+(`ME_V90_RETRAIN_AFTER_MS=40000`, Proxmox rig, `+PQC=0`,
+`+MS=92,0,300,56000`, PCM upstream offered) still failed 3/3. Every call
+ran identically: startup ratio 1.445 (trained), retrained attempt 2.187
+against slmodemd's 1.5 limit, offer withdrawn, V.92 Phase 2 with a V.34
+upstream.
+
+It is not our transmission. Our transmit tap is byte-identical in the two
+attempts from Sd through Jd (4896 symbols, 2 held, Jp at 547923), Jp, DIL
+and Ri: 9 s, 0 differing bytes. TRN2d then differs only because slmodemd
+designed a different TRN2 constellation, {96,92,87,83,78,69,58,36} against
+{95,91,...,77,...}, and we sent exactly that. Its own linearMapping shows
+why: on the retrain every level carries a call-wide gain and offset error
+(87: 5883 -> 5906, 83: 4856 -> 4878, 36: 536 -> 544). That is the symptom
+the Jp state controlled at startup. Its Phase 2 also differs on the
+retrain (probe gain 2152 against 2427; Tone A held 1.2 s against 0.42 s
+before its INFO1a).
+
+The levers are the Sd delay and the Jp state. Retrained-attempt ratio, one
+call each (`ME_V92_JP_STATES_RETRAIN`, `ME_V90_RETRAIN_SD_DELAY_MS`,
+diagnostics):
+
+| Retrain Sd | Retrain Jp state (reps held) | Ratio |
+|---|---|---|
+| 0 ms | 547923 (2, the old default) | 2.187 (3/3) |
+| 0 ms | 38969c (3) | 1.564 |
+| 0 ms | 0caa85 (6) | 1.734 |
+| 0 ms | 79fcae (1) | 2.054 |
+| 0 ms | 4da0f8 (0) | 2.820 |
+| 0 ms | 4368bf (7) | 2.877 |
+| 0 ms | 382005 | 3.425 |
+| 250 ms | 547923 | 1.809 |
+| 500 ms | 547923 | 1.984 |
+| 500 ms | 38969c | 1.781 |
+| **250 ms** | **38969c** | **1.258, 1.196, 1.258, 1.258** |
+
+Neither lever is enough alone; together they bring every retrain in under
+the limit. Both are now the default for V.92 retrained attempts. The engine
+sets a 250 ms §9.3.1.3 Sd delay when V.92 is active, and V.90 retrains keep
+their 0/250/500 rotation. `v92_jp_states()` takes 38969c on a retrained
+attempt (`v90_set_retrained_attempt()`), and startup keeps 547923/38969c.
+Live with no knobs: 3/3 retrains trained (ratio 1.258), PCM upstream kept,
+V.92 54667/36000 afterwards, 0 upstream frames rejected over 60 s and no
+V.42 give-up. As with the startup states, this is slmodemd's preference
+only. 9.3 requires only that a retrain use V.92 Phase 2; the Sd delay is
+inside §9.3.1.3's 0-500 ms.
+
+**Open, ours (1 of 7 retrains): B1u can fail to lock after a retrain, and
+nothing recovers it.** In `combo2` slmodemd trained (ratio 1.196). Our
+TRN2u timing came out at -0.340 samples against the startup's +0.660, the
+same fractional phase rounded to the other whole sample. The B1u solve
+reached a residual of only 0.289 LU (0.014-0.015 on every other attempt),
+B1u never locked, and the upstream equaliser solved once and never again.
+We then sat in data with no upstream for 40 s until V.42's T401 ran out.
+Two things to fix: the whole-sample rounding at about +/-0.34 (B1u should
+try both neighbours), and a B1u that has not locked within a few seconds
+should retrain rather than wait for the link to die.
+
