@@ -1358,9 +1358,10 @@ rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 On top of 36a574cd, this deploy adds a6737e79: V.92 PCM upstream now runs
 the §6.4.4 Viterbi decoder (per-frame and streaming) for precoded CPds,
 stripping the §6.4.2 feedback from the observed x(n) first, where it used
-to slice symbol by symbol. It changes live decoding only on V.92 calls
-whose CPd carries precoder coefficients (`ME_V92_PRECODER`, sent when the
-feedback pays). Offline, the precoded spec-peer BER at sigma 8 DS0 went from
+to slice symbol by symbol. Correction: it does not change live decoding.
+Live precoded calls arm the receiver with the coefficients stripped (the
+channel removes the feedback ahead of the equaliser), and a slmodemd A/B
+(3 calls a side) was identical. Offline, the precoded spec-peer BER at sigma 8 DS0 went from
 3.8e-1 to 0 (`docs/v92_pcm_upstream_findings.md`). No smoke call was made.
 
 Built in `/root/deploy-5640b4d3`, checked out at a6737e79. The binary (md5

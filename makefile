@@ -223,7 +223,7 @@ V90_JA_MATCH_TEST_OBJS = v90_ja_match_test.o
 TEST_TARGETS += v90_ja_match_test
 TEST_TARGETS += k56flex_client_tx_test
 # The whole engine on a socket; tests/fast.list pairs it with native HSF.
-TEST_TARGETS += audio_sock_modem
+TEST_TARGETS += audio_sock_modem half_v90modem
 V90_ANALOGUE_PR4_TEST_OBJS = v90_analogue_pr4_test.o v90_analogue_pr4.o
 LINE_MONITOR_TEST_OBJS = line_monitor_test.o line_monitor.o
 LINE_SUPERVISOR_TEST_OBJS = line_supervisor_test.o
@@ -1209,7 +1209,7 @@ clean:
 	rm -f mt5634mu_bridge
 	rm -f modem_gui_native
 	rm -rf "Modem GUI.app"
-	rm -f $(MT5634MU_BULK_WRITE_TEST_OBJS) $(K56FLEX_STARTUP_TEST_OBJS) $(K56FLEX_UPSTREAM_PCM_TEST_OBJS) $(K56FLEX_UPSTREAM_TEST_OBJS) audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_7910_p1_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o mica_qam_test.o mica_qam.o x2_test.o x2_sym_test.o v42bis_test.o mnp5_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_STRESS_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(AT_TEST_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	rm -f half_v90modem.o $(MT5634MU_BULK_WRITE_TEST_OBJS) $(K56FLEX_STARTUP_TEST_OBJS) $(K56FLEX_UPSTREAM_PCM_TEST_OBJS) $(K56FLEX_UPSTREAM_TEST_OBJS) audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_7910_p1_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o mica_qam_test.o mica_qam.o x2_test.o x2_sym_test.o v42bis_test.o mnp5_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_STRESS_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(AT_TEST_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 	rm -f $(V8BIS_TEST_OBJS) $(V8BIS_FSM_TEST_OBJS) $(V8BIS_MODEM_TEST_OBJS) $(V70_STACK_OBJS) per.o h245_schema.o v76_test.o v75_test.o v70_test.o v70_v34_test.o
 
@@ -1331,6 +1331,10 @@ engine_pair_test: engine_pair_test.o fdm_bank.o v90_engine_peer
 # socket (rig/slm_bridge/slm_bridge.c; tools/slm_local_pair.sh drives both).
 audio_sock_modem: audio_sock_modem.o $(filter-out sip_modem.o,$(OBJS)) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) audio_sock_modem.o $(filter-out sip_modem.o,$(OBJS)) -o $@ $(LDFLAGS)
+# The engine as a D-Modem interop peer (half_v90modem.c): line samples on
+# fds 3/4, the DTE on a pty, for D-Modem's interop_call and netsim.
+half_v90modem: half_v90modem.o $(filter-out sip_modem.o,$(OBJS)) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) half_v90modem.o $(filter-out sip_modem.o,$(OBJS)) -o $@ $(LDFLAGS)
 slm_bridge: rig/slm_bridge/slm_bridge.c spandsp
 	$(CC) $(CFLAGS) rig/slm_bridge/slm_bridge.c -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 

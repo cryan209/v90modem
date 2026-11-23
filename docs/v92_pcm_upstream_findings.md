@@ -221,6 +221,15 @@ or p2 taps still slices symbol by symbol. Same harness, same seeds:
 | p1 = (0.0002, -0.0001), feedback rounded down | 0 | 1.6e-4 | 3.0e-3 | 2.8e-2 |
 
 The precoded spec-peer row now equals the unprecoded one, and the ESS
-rounding costs the same 2 DS0 as the other quirk. `v92_b1u_lock_test`
+rounding costs the same 2 DS0 as the other quirk. **What this does not change:
+live calls.** With the Phase 3 equaliser carried into data mode (every live
+precoded call), the engine arms the receiver with the coefficients stripped
+(`modem_engine.c`, `me_v92_arm_b1u_locked_locked()`): the channel's own
+postcursor ISI, which the precoder was designed against, takes the feedback
+back out before the equaliser's output, so that receiver already ran the
+trellis. The harness above has no ISI, so it exercises the receiver only
+on the raw path that skips the equaliser. Live slmodemd A/B the same day (3 calls a
+side, alternated): identical precoded CPd, B1u locked by decoding, about
+38000 lines each way on both builds. `v92_b1u_lock_test`
 covers it with p1 = (0.10, -0.05) at two phases and two B1u lengths; the
 old decoder got 686 bits wrong or never locked on those cases.

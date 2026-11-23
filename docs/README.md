@@ -138,6 +138,7 @@ Where to start:
 | [eicon_soak_ppp.md](eicon_soak_ppp.md) | Eicon Diva sustained transfers, PPP and HTTP |
 | [eicon_mlppp_20261107.md](eicon_mlppp_20261107.md) | Multilink PPP over ISDN digital B channels and V.90 to the Eicon; HDLC 400-octet cap and analogue-retrain LAPM fixes; open retrain issues |
 | [v90_hardware_interop.md](v90_hardware_interop.md) | Physical-modem procedure, CX93001 interop and USB serial mode checks |
+| [dmodem_interop.md](dmodem_interop.md) | D-Modem's emulated vendor modems (SmartLink, HSF, ESS, Agere, SM56, PCTel, Broadcom, Intel, Courier) against `half_v90modem`: recipe and results |
 | [eicon_downstream_comparison.md](eicon_downstream_comparison.md) | Our downstream against a working digital modem |
 | [eicon_v90_upstream_power.md](eicon_v90_upstream_power.md) | Upstream power probe |
 | `eicon_*_20261008.md`, `eicon_*_20261009.md` | Eicon session records (calls, ISDN, other modes, RTP causality, spec causality, V.34 fax, V90A) |
