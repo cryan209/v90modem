@@ -489,3 +489,12 @@ and the retrain locked 37333 both times. On the same build SmartLink V.92
 (both laws, 34666 up, as before), SmartLink V.90, PCTel, SM56 and
 both Intel rows pass, 9 of 9, twice. `v92_su_test` checks the measurement
 over 120 delay, alignment, polarity and law cases.
+
+**Live slmodemd check (Proxmox rig, aa6fcd24, 2026-11-24).** Eight 85 s V.92
+calls, slmodemd dialling us (`vg_qc.sh`, PQC=0):
+- Alternating the default against `ME_V92_JP_PHASE=off`, 3 calls each, all 6
+  were identical: 36000 up, B1u locked on the first attempt, and Jd held 2
+  repetitions for Jp's state 547923. slmodemd's Su measures 0.854T here, so
+  the rounded extension is 0 and Jp is the same as before.
+- Forced to T/2 (`ME_V92_JP_PHASE=0.5`), 2 of 2 calls trained the same way,
+  at 36000. A nonzero Jp fraction does not upset slmodemd's Jp handling.
