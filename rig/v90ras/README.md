@@ -1509,3 +1509,21 @@ d4ef351e…) as `sip_v90_modem.pre-6b368e4e`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and the lines re-registered (registration success, both services
 active).
+
+## Deployed cb6b73e6 (2026-11-25)
+
+On top of 6b368e4e, this deploy adds cb6b73e6, which affects V.90/V.92 Phase 2
+(§9.2.1.1.7) on the digital side only. L2 used to stop after a fixed 300 ms
+and wait for Tone A in silence; it now runs on until Tone A, up to 550 ms plus
+a round trip, and then falls back to that wait. Offline, the Agere soft modem
+measured our L2 as silence and declared the line RBS; Broadcom V.92 now
+connects first time. Peers that raise Tone A within 300 ms see no change.
+`ME_V90_L2_UNTIL_TONE_A=0` restores the old L2. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at cb6b73e6
+(`/root/deploy-cb6b73e6.build.log`). The binary (md5 0b6cd297…) is kept as
+`/opt/v90ras/sip_v90_modem.cb6b73e6`, and the previous one (6b368e4e,
+8c1cd594…) as `sip_v90_modem.pre-cb6b73e6`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and the lines re-registered (registration success, both services
+active).
