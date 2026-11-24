@@ -9806,6 +9806,10 @@ static void me_v92_data_slicer_locked(void)
      * every 2 s on the same decisions held the residual at 26-44 for the
      * whole call, offline on its tap. */
     v92_p3_eq_hold(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
+    /* ...but corrected on the frequency at every solve, through the 9.8
+     * renegotiations too: ESS's frequency froze up to 1.7 ppm off at data
+     * start and the walk took a renegotiation's TRN2u from 58 to 153 DS0. */
+    v92_p3_eq_track_frequency(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
     v92_p3_eq_set_levels(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], positive, n);
     /* The decision feedback was trained on four-level TRN2u, where every
      * decision is right.  On the dense data levels its wrong decisions go

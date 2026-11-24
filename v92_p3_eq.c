@@ -337,6 +337,73 @@ static void record(v92_p3_eq_t *eq, double y, int d, int ref)
     (void)d;
 }
 
+/* The held loop's timing detector (the GRADIENT one: e dy/dtau over the
+ * slope power, an estimate of the offset in samples) against the symbol
+ * index, for v92_p3_eq_track_frequency(). */
+static void track_held_timing(v92_p3_eq_t *eq, double e, const double *du)
+{
+    double dy = 0.0, x = (double)eq->tf_n, err;
+
+    for (int j = 0; j < eq->cfg.ntaps; j++)
+        dy += eq->taps[j]*du[j];
+    if (eq->dy2_avg == 0.0)
+        eq->dy2_avg = dy*dy;
+    eq->dy2_avg += (dy*dy - eq->dy2_avg)/64.0;
+    err = e*dy/(eq->dy2_avg + 1e-9);
+    eq->tf_sx += x;
+    eq->tf_sxx += x*x;
+    eq->tf_se += err;
+    eq->tf_sxe += x*err;
+    eq->tf_n++;
+}
+
+static void track_reset(v92_p3_eq_t *eq)
+{
+    eq->tf_sx = eq->tf_sxx = eq->tf_se = eq->tf_sxe = 0.0;
+    eq->tf_n = 0;
+}
+
+/* The slope is measured over the refit window itself: the taps are fixed
+ * there (they change only when a solve lands) and its decisions are the
+ * ones the solve trusts, TRN2u's four levels in a renegotiation and the
+ * data levels after B1u has locked.  Data mode's windows are 4000 symbols,
+ * back to back. */
+#define TRACK_MIN_SYMBOLS 2048
+
+/* The offset the detector sees grows by the frequency error each symbol, so
+ * the slope is the correction.  Live against ESS, a frequency frozen at
+ * -1.54 ppm: the detector rose 0.0008 per 512 symbols, the interpolator's
+ * 1.54 ppm.  The solve that lands now fits the window's mean instant, which
+ * is half a window behind the interpolator, so tau moves by that too. */
+static void track_held_frequency(v92_p3_eq_t *eq)
+{
+    if (eq->track_freq && eq->hold && eq->tf_n >= TRACK_MIN_SYMBOLS) {
+        double n = (double)eq->tf_n;
+        double den = n*eq->tf_sxx - eq->tf_sx*eq->tf_sx;
+        double bound = eq->cfg.max_ppm*1e-6;
+
+        if (den > 0.0) {
+            double slope = (n*eq->tf_sxe - eq->tf_sx*eq->tf_se)/den;
+
+            if (slope > bound)
+                slope = bound;
+            if (slope < -bound)
+                slope = -bound;
+            /* The whole of the first (it removes the frozen error), half
+             * of each later one: a window's slope scatters about 0.35 ppm,
+             * and at full gain the loop chased that (alternate windows
+             * +0.6, -0.6 ppm). */
+            eq->freq += eq->tf_updates++ ? 0.5*slope : slope;
+            if (eq->freq > bound)
+                eq->freq = bound;
+            if (eq->freq < -bound)
+                eq->freq = -bound;
+            eq->tau += 0.5*n*slope;
+        }
+    }
+    track_reset(eq);
+}
+
 /* A refit window is complete: solve its normal equations (with and without
  * the decision feedback) and take the result unless its residual is more than
  * twice the first accepted one's. */
@@ -348,6 +415,7 @@ static void refit_finish(v92_p3_eq_t *eq)
     double atd[LS_MAX];
 
     eq->retime_hold = false;   /* the taps are solved for the instant */
+    track_held_frequency(eq);
 
     static double mff[LS_MAX][LS_MAX + 1];
     double wff[LS_MAX];
@@ -508,8 +576,11 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
         memcpy(slot, u, (size_t)n*sizeof(double));
     }
-    if (eq->k >= eq->cfg.seed_symbols && eq->hold)
+    if (eq->k >= eq->cfg.seed_symbols && eq->hold) {
         eq->tau += eq->freq;
+        if (eq->track_freq)
+            track_held_timing(eq, d - y, du);
+    }
     else if (eq->k >= eq->cfg.seed_symbols) {
         double energy = 1e-9;
         double e = d - y;
@@ -584,6 +655,7 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
 void v92_p3_eq_refit(v92_p3_eq_t *eq, int n)
 {
+    track_reset(eq);   /* track_held_frequency() measures this window */
     memset(eq->refit_m, 0, sizeof(eq->refit_m));
     eq->refit_left = n > 0 ? n : 0;
     eq->refit_dd = 0.0;
@@ -608,6 +680,15 @@ double v92_p3_eq_refit_residual(const v92_p3_eq_t *eq)
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 {
     eq->hold = hold;
+}
+
+void v92_p3_eq_track_frequency(v92_p3_eq_t *eq, bool on)
+{
+    if (!eq)
+        return;
+    eq->track_freq = on;
+    eq->tf_updates = 0;
+    track_reset(eq);
 }
 
 void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity)
@@ -856,6 +937,7 @@ void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq)
     eq->refit_base = 0.0;
     eq->refit_left = 0;
     eq->retime_hold = false;
+    track_reset(eq);   /* the output changed under the detector */
 }
 
 void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
@@ -867,6 +949,7 @@ void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
     eq->refit_base = 0.0;
     eq->refit_left = 0;
     eq->retime_hold = false;
+    track_reset(eq);   /* the output changed under the detector */
 }
 
 int64_t v92_p3_eq_last_index(const v92_p3_eq_t *eq)

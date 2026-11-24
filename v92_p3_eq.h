@@ -176,6 +176,13 @@ typedef struct {
                                       peak gain at or below it */
     bool retime_hold;              /* v92_p3_eq_retime(): timing loop open
                                       until the next refit finishes */
+    /* v92_p3_eq_track_frequency(): while held, the timing detector's
+     * output is regressed on the symbol index over each refit window, and
+     * the refit corrects the frequency by its slope. */
+    bool track_freq;
+    double tf_sx, tf_sxx, tf_se, tf_sxe;
+    int tf_n;
+    int tf_updates;                /* corrections since tracking began */
 
     /* Feed-forward-only least-squares taps from the same window as the last
      * accepted refit (the top-left block of its normal equations), for data
@@ -221,6 +228,16 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq);
  * of something the equaliser must not train on (V.92 Phase 3's silences
  * and three-level Su) costs only the frequency error times its length. */
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
+
+/* Held, but not on the frequency: the interpolator still advances at the
+ * learned frequency, and every refit (v92_p3_eq_refit()) that finishes
+ * corrects it by the drift the timing detector saw across its window.  For
+ * V.92 data mode and the 9.8 renegotiations, where the equaliser is held for
+ * good and refits are its only adaptation: a frequency frozen 1.5 ppm off
+ * (ESS, whose clock slews through Phase 3) walks the sampling instant 0.02
+ * samples between solves, and that walk is most of the TRN2u error a
+ * renegotiation prices its CPd on. */
+void v92_p3_eq_track_frequency(v92_p3_eq_t *eq, bool on);
 
 /* Switch to the feed-forward-only solution of the last accepted refit and
  * drop the decision feedback for good (later refits solve feed-forward only,

@@ -583,4 +583,65 @@ transmit, and the receiver already copes with it. Of the 8 off-frequency calls
 on the current receiver, 7 passed, and every one locked the first B1u at
 57-64 DS0. The 8th (reg7) lost its upstream after ESS's third renegotiation.
 Renegotiation TRN2u at 104-152 DS0 also occurs in calls without the slew, so
-that problem belongs to ESS's renegotiations, not to this.
+that problem belongs to ESS's renegotiations, not to this. It turned out to be
+ours: see the next section.
+
+### A renegotiation's TRN2u was our held frequency walking (2026-11-24)
+
+ESS renegotiates (§9.8) one to four times a call. Each renegotiation's
+TRN2u priced its CPd at 57-153 DS0, against 57-59 at startup, and the bad
+ones cost the call rate (37333 → 28000-29333 upstream) and sometimes the
+upstream itself. The raw channel was not the cause: the TRN2u channel fit
+(`ME_V92_PF_LOG=1`) and D-Modem's `half_open8` both measure the
+renegotiation's TRN2u the same as startup's (open8: 38.6 dB).
+
+The sigma followed the magnitude of the equaliser's frozen frequency,
+measured over 37 renegotiations:
+- At |freq| ≤ 0.32 ppm the sigma was 57-65 DS0.
+- At 0.54-1.69 ppm it was 73-153 DS0.
+
+The frequency barely moves tau, so that alone didn't explain it. Logging the
+gradient timing detector, which the held loop computes nothing with, showed
+the mechanism:
+- After the renegotiation's least-squares solve (v92_p3_eq_refit, §9.8.2.2.3),
+  the equaliser's error started at 0.00015 LU² and rose ninefold over the
+  next 13000 symbols.
+- Over the same stretch the detector rose linearly, 0.0008 per 512 symbols
+  at a frozen −1.54 ppm.
+- ESS's real frequency against ours was about 0 ppm. Our frequency had frozen
+  wrong at data start, after ESS's Phase 3 slew (previous section).
+- Data mode holds the timing loop for good. NLMS and the loop on the dense
+  data levels made the residual worse against slmodemd, and least-squares
+  solves replace them.
+- So nothing corrects the frequency, and the sampling instant walks about
+  0.02 samples away from where the solve put it.
+- A renegotiation measures its sigma over the 10000-14000 TRN2u symbols after
+  its one solve, so it integrated that walk. Data mode's back-to-back 4000
+  symbol solves keep re-fitting the taps over it.
+
+Fix: `v92_p3_eq_track_frequency()`, switched on with the data slicer.
+- **What it measures.** While held, the detector's output is regressed on
+  the symbol index over each refit window. The taps are fixed there, and the
+  decisions are the ones the solve trusts: TRN2u's four levels, or the data
+  levels after B1u has locked.
+- **The correction.** Each solve that lands corrects the frequency by the
+  slope. It also moves tau by half a window's drift, because the solve fits
+  the window's mean instant.
+- **The gain.** It is 1 for the first correction, which removes the frozen
+  error (for example −1.69 → +0.04 ppm), and 0.5 after that. A window's slope
+  scatters about 0.35 ppm, and at full gain alternate windows went
+  +0.6/−0.6 ppm.
+
+ESS on D-Modem's rig, same build otherwise:
+
+| | Calls | Renegotiations | TRN2u sigma (DS0) |
+|---|---|---|---|
+| Before | 8 | 13 | 57.6-153 (5 above 90) |
+| After | 10 (all pass) | 15 | 57.0-60.8 |
+
+The regression rows (SmartLink V.92 precoded in both laws, SmartLink, PCTel,
+SM56 and Intel V.90, Intel V.92 offer) are unchanged, 9 of 9.
+
+One ESS μ-law call on the old build reached data only after a 90 s retrain
+at 31200 bps (rt2), and the data was garbage. It is unexplained, and it hasn't
+recurred in the 25 calls since.
