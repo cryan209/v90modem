@@ -1440,3 +1440,20 @@ Built in `/root/deploy-5640b4d3`, checked out at aa6fcd24
 42693b52…) as `sip_v90_modem.pre-aa6fcd24`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and all ten lines re-registered (2951-2960).
+
+## Deployed 602d76f9 (2026-11-24)
+
+On top of aa6fcd24, this deploy adds 602d76f9, which affects V.92 Phase 3
+only. When the equaliser's taps are a split-pulse inverse at the second
+TRN1u, it moves the sampling instant to that TRN1u's measured pulse. It then
+solves the taps there by least squares, with the timing loop held open until
+that refit finishes. Offline this ended ESS μ-law's first-B1u miss (B1u locked
+first time in 16 of 16 ESS calls). Calls whose taps aren't split (largest
+neighbour < 0.35 of the main tap) are unchanged. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 602d76f9
+(`/root/deploy-602d76f9.build.log`). The binary (md5 0eeaee69…) is kept as
+`/opt/v90ras/sip_v90_modem.602d76f9`, and the previous one (aa6fcd24,
+26f8d330…) as `sip_v90_modem.pre-602d76f9`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960).
