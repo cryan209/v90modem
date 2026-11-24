@@ -1457,3 +1457,20 @@ Built in `/root/deploy-5640b4d3`, checked out at 602d76f9
 26f8d330…) as `sip_v90_modem.pre-602d76f9`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and all ten lines re-registered (2951-2960).
+
+## Deployed 87a4827d (2026-11-24)
+
+On top of 602d76f9, this deploy adds 87a4827d, which affects V.92 PCM upstream
+data mode and the §9.8 renegotiations only. The held equaliser now corrects
+its frequency each time a least-squares solve lands, by the drift the timing
+detector measured across that solve's window. Offline against ESS, a
+renegotiation's TRN2u had been up to 153 DS0 because the frequency froze up to
+1.7 ppm off at data start; it is now 57-61 DS0 (15 renegotiations, 10 of 10
+calls). V.90 and V.34 calls are unchanged. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 87a4827d
+(`/root/deploy-87a4827d.build.log`). The binary (md5 8df61775…) is kept as
+`/opt/v90ras/sip_v90_modem.87a4827d`, and the previous one (602d76f9,
+0eeaee69…) as `sip_v90_modem.pre-87a4827d`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960).
