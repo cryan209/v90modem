@@ -1422,3 +1422,21 @@ b34fbfff…) is kept as `/opt/v90ras/sip_v90_modem.a6737e79`, and the previous
 one (36a574cd, e5e9e73b…) as `sip_v90_modem.pre-a6737e79`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 `v90isdn` were restarted, and all ten lines re-registered (2951-2960).
+
+## Deployed aa6fcd24 (2026-11-24)
+
+On top of a580829a, this deploy adds aa6fcd24. In V.92 Phase 3, Jp now asks
+for a Su extension (Table 22 bits 18:33), measured on Su and rounded to 0 or
+T/2, where it always asked for none. The network A/D then samples the
+analogue modem's pulse near its peak. Offline, ESS's channel became one tap
+and its upstream went from about 30000 to 37333. Calls whose channel leaves
+the precoder nothing to do now get an explicit identity coefficient section,
+and keep decision feedback in data mode. Every V.92 PCM-upstream caller sees
+the new Jp. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at aa6fcd24
+(`/root/deploy-aa6fcd24.build.log`). The binary (md5 26f8d330…) is kept as
+`/opt/v90ras/sip_v90_modem.aa6fcd24`, and the previous one (a580829a,
+42693b52…) as `sip_v90_modem.pre-aa6fcd24`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960).
