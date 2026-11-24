@@ -4912,6 +4912,59 @@ static bool test_v90_cp_short_fill_back_to_back(void)
     return true;
 }
 
+/* Agere's CPt as it reached us on the D-Modem rig (CT 128, 2026-11-25),
+ * decoded independently from the receive tap at 33 dB: one fill bit, and
+ * b2 = 0xbf = -65/64, one LSB past V.90 5.4.5.6's |b2| <= 1 (its zeros sit
+ * just beyond its poles a1 = +1, a2 = -1).  The CRC is intact.  We rejected
+ * every copy on the coefficient, so Ri ran until Agere retrained (9.4.2.2).
+ * b1/b2 are the zeros of the shaping metric filter and stay finite at any
+ * value; only the poles a1/a2 are held to unity. */
+static bool test_v90_cp_agere_shaping_zero(void)
+{
+    static const char frame[] =
+        "11111111111111111000010010000001000011111111111111000000000000000100"
+        "00000001000000011011111100111111010000000000000000000000000000000000"
+        "00000000000000000000000000000000000100000000000000000000100000000000"
+        "01000000100000010000100010010001000101010000000000000000000000000000"
+        "010111101110010010";
+    v90_cp_rx_t rx;
+    v90_cp_test_capture_t capture;
+    enum { COPIES = 3 };
+
+    vpcm_log("Test: V.90 CPt with a spectral-shaping zero past unity (Agere)");
+    if (sizeof(frame) - 1 != 290) {
+        fprintf(stderr, "Agere CPt fixture is %d bits, not 290\n",
+                (int) (sizeof(frame) - 1));
+        return false;
+    }
+    memset(&capture, 0, sizeof(capture));
+    v90_cp_rx_init(&rx, 4, false, v90_cp_test_frame_handler, &capture);
+    for (int copy = 0;  copy < COPIES;  copy++)
+    {
+        for (int i = 0;  i < 290;  i++)
+            v90_cp_rx_put_bit(&rx, frame[i] == '1');
+    }
+    v90_cp_rx_put_bit(&rx, 1);
+    v90_cp_rx_put_bit(&rx, 1);
+    if (capture.count != COPIES
+        || capture.frame.v90_compatibility
+        || capture.frame.drn != 18
+        || capture.frame.shaping_redundancy != 1
+        || capture.frame.shaping_lookahead != 1
+        || capture.frame.shaping_a1_q1_6 != 0x40
+        || capture.frame.shaping_a2_q1_6 != 0xc0
+        || capture.frame.shaping_b1_q1_6 != 0x3f
+        || capture.frame.shaping_b2_q1_6 != 0xbf) {
+        fprintf(stderr, "Agere CPt: %d of %d frames accepted (semantic "
+                "rejects %u, crc rejects %u)\n", capture.count, COPIES,
+                (unsigned) rx.semantic_rejected_frames,
+                (unsigned) rx.crc_rejected_frames);
+        return false;
+    }
+    vpcm_log("  PASS: %d Agere CPt copies accepted, b2 = -65/64", COPIES);
+    return true;
+}
+
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
 {
     const bool alaw = (law == V91_LAW_ALAW);
@@ -11593,6 +11646,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v90_cp_short_fill_back_to_back()
+        && test_v90_cp_agere_shaping_zero()
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)
         && test_v90_negotiated_data_rates(V91_LAW_ALAW)
         && test_v90_spectral_shaping(V91_LAW_ULAW)

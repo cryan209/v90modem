@@ -84,9 +84,9 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
 | HSF | V.90, V.92 (both laws) | Fail. Since the INFO1d re-send fix (below), V.90 gets a V.90 INFO1a (3200 up), our Jd is answered with S, and HSF retrains in the second DIL cycle without sending the §9.3.2.10 S. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
-| Agere | V.90, V.92 | Connects, but as plain V.34 at 31200 after about 6 retrains (data correct both ways). Agere chooses V.90 with a 3200-baud upstream. Since the L2 hold (below), a retrain attempt gets through PCM Phase 3 (Agere logs `Jd detected`) and Phase 4 fails instead: Agere sends CPt, sees our R, and retrains 5 s later because we never decode its CPt. Its first Phase 2 still reads our L2 as silence |
+| Agere | V.90, V.92 | Mostly passes since the CPt fix (below): V.90 53333 down / 28800 up in 5 of 6 runs, V.92 (V.90 Phase 4, no PCM upstream) 53333 in 2 of 4. The other runs connect as plain V.34 at 31200 after 4 attempts that each fail after our MP (below). Data correct both ways in every run. Its first Phase 2 still reads our L2 as silence |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
-| Broadcom | V.90 | Connects as plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
+| Broadcom | V.90 | 49333 PCM in 1 of 4 runs since the CPt fix (below); the others connect as plain V.34 at 31200 after 4 attempts that fail after our MP. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
 | Courier | V.8 default | Fail. V.8 selects V.90, Phase 3, then NO CARRIER |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
@@ -172,13 +172,56 @@ Still open:
   540 ms; the attempts after a retrain do not. Our Tone B reversal comes
   41.5-42.1 ms after Agere's Tone A reversal in every attempt (§9.2.1.1.6 asks
   40 ± 1), good and bad alike, so that is not the difference.
-- Phase 4 against Agere: we never decode its CPt. Our 3200-baud upstream
-  receiver struggles with Agere's signal from Phase 3 on: its TRN came out at
-  a mean distance of 0.638 from the 4-point grid (white is 0.667), and Ja
-  decoded only through the hypothesis-8 recovery. Broadcom V.90 has the same
-  3200-baud upstream and the same retrain pattern.
+- Phase 4 against Agere: we never decoded its CPt. Solved since; see
+  "Phase 4: Agere's CPt has a shaping zero past unity" below.
 - After a retrain our INFO1d probe can read the peer's L2 as unusable
   (SNR −8.9 dB) and offer no rates at all; the next INFO1a is then invalid.
+
+### Phase 4: Agere's CPt has a shaping zero past unity (2026-11-25)
+
+Agere logged `CPt sent`, then `R detected`, and retrained 5 s later; our
+strict CP receiver logged nothing. Its CPt is clean. An independent
+4-point demodulator on our receive tap (1920 Hz, 3200 baud, blind equalizer)
+reads it at 33 dB SNR, and the frame is CRC-valid (remainder 0). Its fields:
+CPt, drn 18, rate mask 0x1fff, Sr 1, ld 1, TRN1d gain 0x2000, one
+constellation, and spectral shaping a1 = 0x40 (+1), a2 = 0xc0 (−1),
+b1 = 0x3f (63/64), b2 = 0xbf (−65/64). These match Agere's own log line
+`CPt sent 2048 7ffe 2000 c040 bf3f`.
+
+Our receiver demodulated it correctly and then rejected every copy in
+`vpcm_cp_validate()`. §5.4.5.6 says each coefficient has |·| ≤ 1, and b2 is
+one LSB past that. Agere puts each zero of the shaping filter one LSB beyond
+its pole. The digital modem uses these four values only in the sign-selection
+metric F(z) = (1 − b1z⁻¹)(1 − b2z⁻¹) / ((1 − a1z⁻¹)(1 − a2z⁻¹)). There b1 and
+b2 are feed-forward zeros, so any Q1.6 value keeps w[n] finite; only a1 and
+a2 (feedback) diverge past unity. The validator now bounds only a1 and a2.
+With the strict check relaxed, the unchanged live receiver
+(`v90_cp_live_probe` on the tap cut 1.5 s after the Phase 4 hint) recovers the
+same frame. `vpcm_loopback_test` carries Agere's 290 received bits as a
+fixture.
+
+Agere also ends each frame after one fill bit (290 bits, not Table 14's 292),
+as the CX93001 does. Fill already gates nothing (c2377f6d). The batch
+receiver's repeat-voting still assumes a 292-bit period. It found these
+frames anyway through its single-frame path.
+
+Result on CT 128: the CPt is accepted in every attempt.
+- Agere V.90: 53333 down / 28800 up in 5 of 6 runs (`Rx Data Mode Active`,
+  LAPM, first attempt, 33 s to CONNECT).
+- Agere V.92: 53333 in 2 of 4 runs.
+- Broadcom V.90: 49333 in 1 of 4 runs.
+- Broadcom V.92: unchanged, 50666 with a PCM upstream.
+
+The other runs fail one step later. We accept the CPt, send TRN2d and about
+750 MPs, and the peer retrains (tx_phase 15) without sending CP. One
+Broadcom attempt did send CP and retrained later (tx_phase 22). Not yet
+investigated; `half_agdbg` will show whether Agere saw our TRN2d and MP.
+
+An earlier note here read Agere's Phase 3 TRN as "white" (0.638 from the
+grid) and its Ja as decoded "only through the hypothesis-8 recovery".
+Hypothesis 8 is the ordinary differential map (`v34_rx_map_phase4_raw_bits`),
+and Agere's upstream at 3200 baud is a 33 dB signal that we demodulate
+correctly. That reading was wrong.
 
 ### Agere's own status log
 

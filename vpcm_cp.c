@@ -127,14 +127,17 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
     } else if ((int8_t)cp->shaping_a1_q1_6 < -64
                || (int8_t)cp->shaping_a1_q1_6 > 64
                || (int8_t)cp->shaping_a2_q1_6 < -64
-               || (int8_t)cp->shaping_a2_q1_6 > 64
-               || (int8_t)cp->shaping_b1_q1_6 < -64
-               || (int8_t)cp->shaping_b1_q1_6 > 64
-               || (int8_t)cp->shaping_b2_q1_6 < -64
-               || (int8_t)cp->shaping_b2_q1_6 > 64) {
+               || (int8_t)cp->shaping_a2_q1_6 > 64) {
         /* V.90 5.4.5.6 limits every signed-Q1.6 spectral-shape
-         * coefficient to an absolute value no greater than one. */
-        msg = "spectral shaping coefficient exceeds unity";
+         * coefficient to an absolute value no greater than one.  Only a1 and
+         * a2 are held to it: they are the feedback terms of the metric filter
+         * F(z) = (1 - b1 z^-1)(1 - b2 z^-1) / ((1 - a1 z^-1)(1 - a2 z^-1)),
+         * and beyond unity its running sum w[n] diverges.  b1 and b2 are its
+         * zeros, so any Q1.6 value keeps the metric finite.  Agere's CPt puts
+         * each zero one LSB past its pole -- a1 = +1, b1 = 63/64;
+         * a2 = -1, b2 = 0xbf = -65/64 -- in a CRC-valid frame, and rejecting
+         * it left Ri running until Agere retrained (9.4.2). */
+        msg = "spectral shaping pole exceeds unity";
     } else if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS) {
         msg = "constellation_count out of range";
     } else {
