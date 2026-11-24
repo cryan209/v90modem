@@ -174,6 +174,8 @@ typedef struct {
     bool have_joint;
     double fb_gain_max;            /* > 0: joint solves keep the feedback's
                                       peak gain at or below it */
+    bool retime_hold;              /* v92_p3_eq_retime(): timing loop open
+                                      until the next refit finishes */
 
     /* Feed-forward-only least-squares taps from the same window as the last
      * accepted refit (the top-left block of its normal equations), for data
@@ -276,6 +278,14 @@ void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity);
  * while the 16-tap interpolator at a fractional offset cannot reproduce a
  * signal with energy near Nyquist.  Leaves the taps alone. */
 void v92_p3_eq_integer_timing(v92_p3_eq_t *eq);
+/* Move the sampling instant to tau and solve the taps for it: a refit of n
+ * symbols starts here, and the timing loop runs open (tau advances by the
+ * measured frequency only) until it, or any refit, has finished.  The
+ * gradient detector steers tau to suit the taps it has: moved alone under
+ * taps trained for another instant, tau went back within a few hundred
+ * symbols; held while NLMS alone adapted the taps, the loop ran to +324 ppm
+ * once released, or TRN1u's agreement gate refused the equaliser. */
+void v92_p3_eq_retime(v92_p3_eq_t *eq, double tau, int n);
 
 /* Data-aided refits: keep the input windows of the last `capacity` symbols
  * in buf (capacity*ntaps doubles); with refit_aided set, v92_p3_eq_refit()

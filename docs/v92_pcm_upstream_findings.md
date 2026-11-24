@@ -498,3 +498,58 @@ calls, slmodemd dialling us (`vg_qc.sh`, PQC=0):
   the rounded extension is 0 and Jp is the same as before.
 - Forced to T/2 (`ME_V92_JP_PHASE=0.5`), 2 of 2 calls trained the same way,
   at 36000. A nonzero Jp fraction does not upset slmodemd's Jp handling.
+
+### ESS μ-law's first B1u miss was the Phase 3 equaliser's timing basin (2026-11-24)
+
+The first B1u missed in 2 of 3 μ-law calls (A-law sometimes too), and it was
+decided before the CPd. The first TRN1u reaches us before Jp's extension, so
+ESS's pulse is split across two samples there (0.524T), and the seed picks
+main tap 30 or 31 more or less at random. Each case behaves the same way
+every time it comes up:
+
+| First TRN1u seed | Phase 3 equaliser at the CPd | Feed-forward sigma | CPd | B1u |
+|---|---|---|---|---|
+| main tap 31 | tau ≈ 0.05, one tap −1.01 | ≈ 58 DS0 | unprecoded | locks |
+| main tap 30 | tau ≈ 0.52, taps −0.732 −0.540 (a split-pulse inverse, null at 4000 Hz) | 339-437 DS0 | precoded | misses, always |
+
+The second TRN1u comes after Jp, so its pulse is on one sample (+0.044 to
++0.058 samples from its start, 88% of the power in one tap). But the gradient
+timing detector (`e·dy/dy²`) minimises the error for the taps the equaliser
+already has. Taps and tau have two joint minima, and the split-pulse taps hold
+tau at the half sample. What we tried:
+- **Snapping tau alone to the measured pulse.** The loop took it straight back
+  (+83 ppm of wind-up by TRN2u).
+- **Holding the loop until the TRN2u refit, with NLMS adapting the taps.** The
+  second TRN1u's agreement gate refused the equaliser (86.3%).
+- **Releasing the hold after a fixed 1536 symbols.** The loop ran to +324 ppm.
+
+What works is moving both together. `v92_p3_eq_retime()` puts tau's fraction
+on the measured pulse, starts a 1536-symbol least-squares refit inside the
+second TRN1u's 2040T, and holds the timing loop open until that refit has
+solved the taps (`v92_p3_rx.c`, `trn1u2_search`).
+
+The pulse measure is good to the basin, not to the sample. On the clean
+loopback (`engine_pair_test`) it reads 0.025 off the true instant. Moving
+there left TRN2u at 13.5 DS0 instead of 4.3, so the CPd was designed on noise
+that wasn't there, and the noise-forced §9.8 tests stopped renegotiating. So
+the retime acts only when the taps are a split-pulse inverse: the larger
+neighbour of the largest tap is ≥ 0.35 of it. Measured values: ESS main tap 30
+0.48-0.49, main tap 31 0.14-0.21, the loopback 0.00.
+
+Results, 16 ESS calls (8 per law) on D-Modem's rig: 16 of 16 pass, and every
+B1u armed locked first time, 37333 up. Five calls were retimed. All five
+trained the second TRN1u (97-98% agreement) and reached the CPd at
+57.4-58.6 DS0, where main-tap-30 calls had reached it at 339-437 DS0. On the
+same build the 9 regression rows pass (SmartLink V.92 both laws, SmartLink
+V.90, ESS both laws, PCTel, SM56, both Intel rows).
+
+Two ESS behaviours remain, and neither comes from this change:
+- **Tone A about 21.4 s into the call (rx octet 171392-171904).** It comes
+  after our first CPd and before ESS acknowledges it, and no B1u is armed.
+  It hit 2 of 8 μ-law calls in this set; earlier it showed in f3, t6f, t8d and
+  t8f, on builds without the retime and in calls the retime left alone. The
+  retrain recovers it.
+- **A-law first TRN1u locked about ±55 ppm off at about 26 dB** (others are
+  30-34 dB, ±2 ppm). Tau has then wandered about 13 samples by the second
+  TRN1u. Later renegotiations come in at 131-147 DS0 against 57-93, and the
+  call can lose its upstream: 8 of the 15 such calls failed.

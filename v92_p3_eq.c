@@ -347,6 +347,8 @@ static void refit_finish(v92_p3_eq_t *eq)
     double w[LS_MAX];
     double atd[LS_MAX];
 
+    eq->retime_hold = false;   /* the taps are solved for the instant */
+
     static double mff[LS_MAX][LS_MAX + 1];
     double wff[LS_MAX];
     bool ff_ok;
@@ -524,7 +526,9 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
         /* Second-order timing loop on a slow average of the detector (for
          * M&M only the slow mean is clock error; see v92_trn2u.c). */
-        if (eq->cfg.timing && eq->have_prev) {
+        if (eq->retime_hold)
+            eq->tau += eq->freq;
+        else if (eq->cfg.timing && eq->have_prev) {
             /* Positive when the input has moved later than the taps were
              * seeded for: the taps index later samples as j grows. */
             double err;
@@ -613,6 +617,16 @@ void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity)
     eq->cap = (buf && capacity > 0) ? buf : NULL;
     eq->cap_capacity = eq->cap ? capacity : 0;
     eq->cap_count = 0;
+}
+
+void v92_p3_eq_retime(v92_p3_eq_t *eq, double tau, int n)
+{
+    if (!eq)
+        return;
+    eq->tau = tau;
+    eq->mm_avg = 0.0;
+    v92_p3_eq_refit(eq, n);
+    eq->retime_hold = n > 0;
 }
 
 void v92_p3_eq_integer_timing(v92_p3_eq_t *eq)
@@ -841,6 +855,7 @@ void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq)
     eq->ff_only = false;
     eq->refit_base = 0.0;
     eq->refit_left = 0;
+    eq->retime_hold = false;
 }
 
 void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
@@ -851,6 +866,7 @@ void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
     eq->ff_only = false;
     eq->refit_base = 0.0;
     eq->refit_left = 0;
+    eq->retime_hold = false;
 }
 
 int64_t v92_p3_eq_last_index(const v92_p3_eq_t *eq)

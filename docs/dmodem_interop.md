@@ -80,8 +80,8 @@ STREAM=10, one call per row:
 | SM56 | V.90 | Pass. 50666 / 31200, LAPM + V.42bis |
 | Intel 537EP | V.92 offer | Pass. It has no CPu, so V.90 at 52000 / 31200 (as D-Modem says) |
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
-| ESS | V.92 PCM up, μ-law | Pass, 3 of 3, 37333 up since Jp's Su extension (below). Before: 29333-30666 on the retrain's unprecoded CPd. The first B1u still misses in 2 of 3 calls and the retrain locks |
-| ESS | V.92 PCM up, A-law | Pass, 3 of 3, B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem |
+| ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. ESS sometimes sends Tone A after our first CPd, and the retrain recovers it |
+| ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. A first TRN1u locked about ±55 ppm off still loses some calls (regression run reg7) |
 | ESS | V.90 | Fail. We CONNECT at 28800, ESS answers OK, garbage |
 | HSF | V.90, V.92 (both laws) | Fail. Reaches Phase 3 (our first S), then the peer gives NO CARRIER |
 | Agere | V.90, V.92 | Fail. Same as HSF |

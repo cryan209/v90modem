@@ -1348,6 +1348,84 @@ trn1u_wait:
 #define TRN1U2_SPAN        64
 #define TRN1U2_AFTER_FINAL 18
 
+/* The second TRN1u's pulse, from the raw samples correlated against 8.5.7's
+ * reference at lags -TRN1U2_PHASE_LAGS..+TRN1U2_PHASE_LAGS from its start
+ * (the reference is white, so that is the T-spaced response).  Its 1333 1/3
+ * Hz phase gives the pulse's position to a fraction of a sample, the same
+ * measure as Jp's (v92_su_jp_phase()).  Returns false unless one tap holds
+ * TRN1U2_PHASE_MAIN of the power: a dispersive channel's best phase is the
+ * timing loop's to find, a one-tap channel gives that loop almost nothing to
+ * pull on, and the estimate is then unambiguous. */
+#define TRN1U2_PHASE_LAGS 8
+#define TRN1U2_PHASE_MAIN 0.8
+/* The taps solved for the moved instant, inside the second TRN1u's 2040T. */
+#define TRN1U2_RETIME_SYMBOLS 1536
+/* Timing moves to the measured pulse only when the equaliser's taps are a
+ * split-pulse inverse: the measure is good to the basin, not to the sample
+ * (0.025 off on the clean loopback, where moving to it cost 4.3 -> 13.5 DS0
+ * through TRN2u). */
+#define TRN1U2_SPLIT_MIN 0.35
+
+static bool trn1u2_pulse_phase(const v92_p3_rx_t *rx, int start, double *delta,
+                               double *main_share)
+{
+    const v92_p3_eq_t *eq = &rx->eq[rx->eq_law];
+    int8_t ref[TRN1U_ALIGN_LEN];
+    double re = 0.0, im = 0.0, p = 0.0, pmax = 0.0, sign = 1.0;
+    int64_t x0 = (int64_t)start - rx->eq_base_sample;
+    double d;
+
+    if (x0 - TRN1U2_PHASE_LAGS < 0
+        || x0 + TRN1U_ALIGN_LEN + TRN1U2_PHASE_LAGS >= eq->written
+        || x0 - TRN1U2_PHASE_LAGS <= eq->written - V92_P3_EQ_HISTORY)
+        return false;
+    v92_p3_eq_reference(ref, TRN1U_ALIGN_LEN);
+    for (int l = -TRN1U2_PHASE_LAGS; l <= TRN1U2_PHASE_LAGS; l++) {
+        double c = 0.0;
+
+        for (int k = 0; k < TRN1U_ALIGN_LEN; k++)
+            c += v92_p3_eq_sample(eq, x0 + k + l)*ref[k];
+        c /= TRN1U_ALIGN_LEN;
+        re += c*cos(2.0*M_PI*l/6.0);
+        im -= c*sin(2.0*M_PI*l/6.0);
+        p += c*c;
+        if (c*c > pmax)
+            pmax = c*c, sign = c < 0.0 ? -1.0 : 1.0;
+    }
+    if (p <= 0.0)
+        return false;
+    /* An inverted line (ESS's) is pi on the phase: three samples. */
+    re *= sign;
+    im *= sign;
+    *main_share = pmax/p;
+    /* -arg/(2 pi/6) is the delay modulo 6 samples; a pulse found by its
+     * start is within a sample of lag 0. */
+    d = -atan2(im, re)*6.0/(2.0*M_PI);
+    d -= 6.0*floor((d + 3.0)/6.0);
+    if (fabs(d) > 1.0 || *main_share < TRN1U2_PHASE_MAIN)
+        return false;
+    *delta = d;
+    return true;
+}
+
+/* How far the equaliser's taps are a split-pulse inverse: the larger
+ * neighbour of the largest feed-forward tap over that tap.  ESS: 0.48 where
+ * the first TRN1u seeded main tap 30 (half a sample off its pulse; every
+ * such call precoded at 410-428 DS0 and missed B1u), 0.14-0.21 at main tap
+ * 31; the clean loopback 0.00. */
+static double trn1u2_tap_split(const v92_p3_eq_t *eq)
+{
+    int m = 0;
+
+    for (int j = 1; j < eq->cfg.ntaps; j++)
+        if (fabs(eq->taps[j]) > fabs(eq->taps[m]))
+            m = j;
+    if (eq->taps[m] == 0.0)
+        return 0.0;
+    return fmax(m > 0 ? fabs(eq->taps[m - 1]) : 0.0,
+                m + 1 < eq->cfg.ntaps ? fabs(eq->taps[m + 1]) : 0.0)/fabs(eq->taps[m]);
+}
+
 static void trn1u2_search(v92_p3_rx_t *rx)
 {
     v92_p3_eq_t *eq = &rx->eq[rx->eq_law];
@@ -1377,6 +1455,35 @@ static void trn1u2_search(v92_p3_rx_t *rx)
     if (best_s < 0 || rx->trn1u2_score_x1000 < TRN1U_START_SCORE_MIN_X1000) {
         rx->trn1u2_state = -1;
     } else {
+        /* 9.5.1.1.8 moved the analogue modem's timing (Jp's extension, and
+         * Su-bar's half symbol), so the first TRN1u's timing no longer
+         * holds.  ESS's first TRN1u is split across two samples (0.52T) and
+         * its second, with Jp, on one: the timing loop kept the old half
+         * sample in 2 of 3 calls, and on that flat channel a half-sample
+         * interpolator makes a response with a null at 4000 Hz -- 437 DS0
+         * through the feed-forward taps, a precoded CPd, no B1u.  Put tau's
+         * fraction on the measured pulse (its whole samples are frame
+         * alignment and stay), and solve the taps for it by least squares
+         * with the timing loop held open meanwhile: moved alone, the
+         * gradient detector took tau straight back to the half sample its
+         * split-pulse taps suited (+83 ppm of loop wind-up by TRN2u). */
+        double delta, share;
+
+        if (trn1u2_pulse_phase(rx, best_s, &delta, &share)) {
+            double want = delta - floor(delta);
+            double move = want - (eq->tau - floor(eq->tau));
+            double split = trn1u2_tap_split(eq);
+            bool act = split >= TRN1U2_SPLIT_MIN;
+
+            move -= floor(move + 0.5);
+            fprintf(stderr, "[P3RX] second TRN1u: pulse %+.3f samples from its start "
+                    "(main tap %.0f%% of the power), equaliser's taps split %.2f; "
+                    "timing %.3f%s%.3f\n",
+                    delta, 100.0*share, split, eq->tau,
+                    act ? " -> " : " kept, pulse at ", eq->tau + move);
+            if (act)
+                v92_p3_eq_retime(eq, eq->tau + move, TRN1U2_RETIME_SYMBOLS);
+        }
         /* Symbol k of the equaliser is DS0 sample start + k + tau.  Data-
          * aided for the guaranteed 2040T, decision-directed after it (TRN1u
          * runs on through the DIL, then CPt keeps its two levels). */
