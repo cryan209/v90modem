@@ -1474,3 +1474,21 @@ Built in `/root/deploy-5640b4d3`, checked out at 87a4827d
 0eeaee69…) as `sip_v90_modem.pre-87a4827d`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and all ten lines re-registered (2951-2960).
+
+## Deployed 8b95d16e (2026-11-24)
+
+On top of 87a4827d, this deploy adds 8b95d16e, which affects V.90 Phase 3
+(§9.3.2.7) only. An analogue modem's S during our Jd is no longer thrown away
+as "own-line noise" for being under 0.15 of our transmit RMS when the line
+watch or the 64-symbol alternation check confirmed it. Offline, ESS's real S
+came in at 0.125-0.148 and we sat in Jd until ESS retrained; ESS's V.90 row
+went from failing to 8 of 8. Calls whose S already cleared the ratio are
+unchanged. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 8b95d16e
+(`/root/deploy-8b95d16e.build.log`). The binary (md5 d4ef351e…) is kept as
+`/opt/v90ras/sip_v90_modem.8b95d16e`, and the previous one (87a4827d,
+8df61775…) as `sip_v90_modem.pre-8b95d16e`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and the lines re-registered (registration success, both services
+active).
