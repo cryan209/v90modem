@@ -1353,6 +1353,28 @@ one (3be20424, 11d94652…) as `sip_v90_modem.pre-36a574cd`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 `v90isdn` were restarted, and all ten lines re-registered (2951-2960).
 
+## Deployed 2a827d51 (2026-11-24)
+
+On top of 04daa5a2, this deploy adds 2a827d51. Two V.92 PCM upstream
+changes:
+- A precoded B1u that misses its deadline makes the retrain send an
+  unprecoded CPd (explicit identity coefficient section), with decision
+  feedback kept in data mode.
+- Data mode answers the analogue modem's own §9.8 Ru with Rd (§9.8.1.2)
+  instead of ignoring it until the peer retrains.
+
+Both were found against D-Modem's ESS peer. On the D-Modem matrix the
+SmartLink precoded rows and the V.90 rows were unchanged. Precoded peers that
+lock (slmodemd-class) never take the fallback. The Ru watcher fires only on
+48 symbols of the R sign pattern. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 2a827d51
+(`/root/deploy-2a827d51.build.log`). The binary (md5 680ba7a9…) is kept as
+`/opt/v90ras/sip_v90_modem.2a827d51`, and the previous one (04daa5a2,
+4c2c9ae5…) as `sip_v90_modem.pre-2a827d51`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960).
+
 ## Deployed 04daa5a2 (2026-11-24 10:59)
 
 On top of a6737e79, this deploy adds 04daa5a2: in V.92 Phase 4 a CPd' now
