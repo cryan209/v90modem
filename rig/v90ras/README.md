@@ -1527,3 +1527,20 @@ Built in `/root/deploy-5640b4d3`, checked out at cb6b73e6
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and the lines re-registered (registration success, both services
 active).
+
+## Deployed 7ae2f08c (2026-11-25)
+
+On top of cb6b73e6, this deploy adds 7ae2f08c, which affects V.90 Phase 4 CP
+acceptance (§5.4.5.6, §9.4.1.1). A CPt or CP whose spectral-shaping zero b1 or
+b2 lies past unity is accepted; Agere puts b2 at −65/64. Only the poles a1 and
+a2 are still held to |a| ≤ 1. Offline on CT 128, Agere V.90 now connects at
+53333 instead of falling back to V.34. Peers whose coefficients were already
+within range see no change. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 7ae2f08c
+(`/root/deploy-7ae2f08c.build.log`). The binary (md5 1c51f394…) is kept as
+`/opt/v90ras/sip_v90_modem.7ae2f08c`, and the previous one (cb6b73e6,
+0b6cd297…) as `sip_v90_modem.pre-7ae2f08c`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and the lines re-registered (registration success, both services
+active).
