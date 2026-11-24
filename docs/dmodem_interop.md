@@ -77,15 +77,16 @@ STREAM=10, one call per row:
 | SmartLink | V.92 PCM up, A-law | Pass. 56000 / 34666, precoded, B1u locked |
 | SmartLink | V.90 | Pass. 56000 / 31200 |
 | PCTel | V.90 | Pass. 52000 / 31200 |
-| SM56 | V.90 | Pass. 50666 / 31200, LAPM + V.42bis |
+| SM56 | V.90 | Pass. 46666-50666 / 31200, LAPM + V.42bis. 10 of 11 over NET_DELAY 1-11 ms, with or without the L2 hold (below); the one failing delay differs per build and retrains after B1d, so a single matrix run can show it |
 | Intel 537EP | V.92 offer | Pass. It has no CPu, so V.90 at 52000 / 31200 (as D-Modem says) |
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
 | HSF | V.90, V.92 (both laws) | Fail. Since the INFO1d re-send fix (below), V.90 gets a V.90 INFO1a (3200 up), our Jd is answered with S, and HSF retrains in the second DIL cycle without sending the §9.3.2.10 S. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
-| Agere | V.90, V.92 | Fail. Since the INFO1d re-send fix, V.90 gets a V.90 INFO1a (3200 up), then Agere retrains during our Jd, whatever the TRN1d length (2496T, 8004T and 20004T alike) |
-| Broadcom | V.90, V.92 | Fail. Declines PCM in its first INFO1a (V.34, 3000 baud, U_INFO 1). Against `half_open8` it picks V.90 with a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
+| Agere | V.90, V.92 | Connects, but as plain V.34 at 31200 after about 6 retrains (data correct both ways). Agere chooses V.90 with a 3200-baud upstream. Since the L2 hold (below), a retrain attempt gets through PCM Phase 3 (Agere logs `Jd detected`) and Phase 4 fails instead: Agere sends CPt, sees our R, and retrains 5 s later because we never decode its CPt. Its first Phase 2 still reads our L2 as silence |
+| Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
+| Broadcom | V.90 | Connects as plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
 | Courier | V.8 default | Fail. V.8 selects V.90, Phase 3, then NO CARRIER |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
@@ -93,8 +94,8 @@ D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 56000/38666 with a 64-tap prefilter where we get 34666. So these failures are
 ours to explain. Every failing row is a `NET_LOOP=0.45 NET=8000:8000` line,
 except the Courier, which has the same line. PCTel and SM56 pass on that line,
-so the line alone does not explain it. None of the failures has been
-investigated yet, apart from ESS V.92 (`docs/v92_pcm_upstream_findings.md`,
+so the line alone does not explain it. The sections below cover Phase 2
+(INFO1d re-send, L2 length) and ESS V.92 (`docs/v92_pcm_upstream_findings.md`,
 "The ESS modem itself"). There, D-Modem's own modem also fails with a
 precoder and no prefilter. Unprecoded, it gets 29333. Ours now falls back to
 an unprecoded CPd with decision feedback in data mode once a precoded B1u
@@ -122,6 +123,74 @@ Two things are now visible that were hidden behind it:
 - With D-Modem's own modem, HSF, Agere and Broadcom all choose a 3429-baud
   upstream. We offer 3000 and 3200 only, as V.90 6.2 allows, so a 3429 upstream
   receiver is the likely way to Broadcom.
-- Agere retrains during our Jd, and HSF during our DIL. Neither is explained
-  yet; Agere's `AGERE_DEBUG=1` log shows only codec register writes.
+- Agere retrains during our Jd, and HSF during our DIL. Agere's is explained
+  in the next section; HSF's is not yet.
+
+## Phase 2: L2 ends at Tone A, not at 300 ms (2026-11-25)
+
+Agere retrained during our Jd although our Sd, S̄d, TRN1d and Jd were
+sample-identical to `half_open8`'s (signs, magnitudes 7676/3772 and frame
+bits; only TRN1d's length differed). The cause was in Phase 2. As the V.90
+digital modem we sent L2 for a fixed 15 periods (300 ms, `l2_cycles()`) and
+then went silent to wait for Tone A. §9.2.1.1.7 sends INFO1d "after the
+digital modem detects Tone A and has received the local echo of L2 for a
+period of time not to exceed 550 ms plus a round-trip delay", and §9.2.2.1.8
+lets the analogue modem receive L2 for up to 500 ms. So L2 runs until Tone A.
+D-Modem's modem does that (580 ms of L2 against Agere).
+
+Agere's own status log showed what it made of our 300 ms (open8 in brackets):
+- Rx signal level −69.5 dBm (−9.6), measured about 430 ms after it saw L2
+  start, i.e. silence.
+- In-band SNR 1.75 dB (36.6), and a "frequency offset" of 18.75-37.5 Hz (0.000).
+- `PCM phase 2 detected RBS`, which open8 never gets.
+- Then in Phase 3 its PCM timing loop ran to +81.6 ppm on our TRN1d (−0.06
+  against open8), it raised exception 40009326, and it retrained. Against
+  open8 it logs `Jd detected: ffff 403f` instead.
+
+Fix (`v34tx.c`, `v90_extended_l2_arm()` and `v90_extended_l2_step()`): 300 ms
+is now the minimum. If Tone A has not come by then, L2 continues, with the
+receiver listening for Tone A under it (L1/L2 omit 2400 Hz so that it can be
+heard). INFO1d follows the first Tone A event or 40 ms block with a 2400 Hz
+share of at least 0.15. At 550 ms plus a round trip of L2 we fall back to the
+silent wait, whose §9.2.1.2.5 deadline still counts from the start of L2.
+`ME_V90_L2_UNTIL_TONE_A=0` restores the fixed L2. Two smaller changes go with
+it. A Tone A reversal left in the event slot from §9.2.2.1.6 is cleared when
+our L1 starts, because it was sending INFO1d at the end of L2 as if Tone A had
+come. And the silent wait no longer treats 50 ms of silence as a Tone A whose
+edge it missed.
+
+Result on CT 128: Agere's held-L2 attempts measure a clean line (RBS detector
+SNR 80 dB, no RBS), Agere gets through PCM Phase 3 and Phase 4 is now the
+blocker (row above). Broadcom V.92 connects first time with a PCM upstream.
+The rows that passed still pass, and `make test-fast` passes after one
+fixture change: the analogue-role renegotiation test's drn sits on a knife
+edge (codec-flip sigma 8.06 vs 7.93) and lands on 15 instead of 11 when
+INFO1d moves by 40 ms, so it now accepts either.
+
+Still open:
+- Agere's first Phase 2 attempt still reads our L2 as silence, even held to
+  540 ms; the attempts after a retrain do not. Our Tone B reversal comes
+  41.5-42.1 ms after Agere's Tone A reversal in every attempt (§9.2.1.1.6 asks
+  40 ± 1), good and bad alike, so that is not the difference.
+- Phase 4 against Agere: we never decode its CPt. Our 3200-baud upstream
+  receiver struggles with Agere's signal from Phase 3 on: its TRN came out at
+  a mean distance of 0.638 from the 4-point grid (white is 0.667), and Ja
+  decoded only through the hypothesis-8 recovery. Broadcom V.90 has the same
+  3200-baud upstream and the same retrain pattern.
+- After a retrain our INFO1d probe can read the peer's L2 as unusable
+  (SNR −8.9 dB) and offer no rates at all; the next INFO1a is then invalid.
+
+### Agere's own status log
+
+`half_agere`'s `AGERE_DEBUG=1` prints only codec writes, but the library
+formats every status event through its exported `StatusParser()`. On CT 128,
+`/root/agdbg` builds `half_agdbg`, a copy of the peer that prints them:
+`objcopy --weaken-symbol=CodecStatusHandler --add-symbol
+AgOrigCSH=.text:0xaf760,function,global` on `agrsm_core.o`, plus a
+`CodecStatusHandler()` that calls `StatusParser()`, prints the text as
+`AGST <seconds> ...` and calls the original. It is a local diagnostic build,
+not a change to D-Modem. Run it as `./half_agdbg` in place of `./half_agere`.
+Its log gives Agere's view of every phase: L1/L2 level, SNR, frequency and
+timing offsets, the RBS verdict, RTD, `S detected`, `Jd detected`, CPt sent,
+R detected and exception codes.
 

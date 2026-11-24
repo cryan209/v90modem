@@ -5235,7 +5235,10 @@ static int l2_cycles(const v34_state_t *s)
        retrained; the modems that connected answered in 20-50 ms, and a short
        L2 is what BinModem now sends.  Scoped to V.90 answering because the
        call-side lengthening above was measured against MICA and the RasFinder
-       for the opposite reason. */
+       for the opposite reason.  Since 2026-11-25 this is only the MINIMUM: if
+       Tone A has not come by then, tx_pcm_l1_l2() holds L2 until it does
+       (9.2.1.1.7), up to 550 ms plus a round trip, because the Agere soft
+       modem measures L2 for longer than 300 ms (v90_extended_l2_arm()). */
     if (s->tx.v90_mode)
         return 15;
     /*endif*/
@@ -5382,6 +5385,94 @@ static __inline__ int16_t pcm_phase2_quantise(v34_state_t *s, int16_t linear)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 digital modem: L2 held past its minimum until Tone A (9.2.1.1.7).
+   ME_V90_L2_UNTIL_TONE_A=0 restores the fixed L2 and silent wait. */
+static bool v90_extended_l2_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *value = getenv("ME_V90_L2_UNTIL_TONE_A");
+
+        cached = !(value  &&  value[0] == '0'  &&  value[1] == '\0');
+    }
+    /*endif*/
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* 9.2.1.1.7's ceiling on the L2 echo received before INFO1d, 550 ms plus a
+   round trip, as a count of whole L1/L2 periods (160 samples, 20 ms) of L2. */
+static int v90_extended_l2_max_cycles(const v34_state_t *s)
+{
+    int rtd_samples;
+
+    rtd_samples = (s->rx.round_trip_delay_estimate > 0)
+                  ? s->rx.round_trip_delay_estimate
+                  : 0;
+    return (550*(SAMPLE_RATE/1000) + rtd_samples)/LINE_PROBE_SAMPLES;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_extended_l2_arm(v34_state_t *s)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: no Tone A after %d ms of L2; holding L2 until Tone A (9.2.1.1.7, at most %d ms)\n",
+             l2_cycles(s)*LINE_PROBE_SAMPLES/(SAMPLE_RATE/1000),
+             v90_extended_l2_max_cycles(s)*LINE_PROBE_SAMPLES/(SAMPLE_RATE/1000));
+    /* As v90_wait_tone_a_init() conditions the receiver, minus the silence:
+       Tone A detection, with the INFO1a framing kept for a peer that sends
+       INFO1a early. */
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
+    s->rx.v90_info1d_sent = false;
+    s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.target_bits = 70 - (4 + 8 + 4);
+    if (s->rx.stage != V34_RX_STAGE_INFO1A  ||  s->rx.bit_count == 0)
+        s->rx.stage = V34_RX_STAGE_TONE_A;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+/* One more period of held L2 has gone out.  Returns true when the transmitter
+   has moved on (INFO1d, or the silent wait at the ceiling). */
+static bool v90_extended_l2_step(v34_state_t *s)
+{
+    int l2_sent;
+    int max_cycles;
+
+    l2_sent = s->tx.line_probe_cycles - 8;
+    max_cycles = v90_extended_l2_max_cycles(s);
+    if (s->rx.received_event == V34_EVENT_TONE_SEEN
+        ||  s->rx.received_event == V34_EVENT_REVERSAL_1
+        ||  s->rx.received_event == V34_EVENT_REVERSAL_3
+        ||  s->rx.tone_a_run > 0)
+    {
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: Tone A under held L2 (event=%d run=%d) after %d ms of L2; sending INFO1d\n",
+                 s->rx.received_event,
+                 s->rx.tone_a_run,
+                 l2_sent*LINE_PROBE_SAMPLES/(SAMPLE_RATE/1000));
+        info1_baud_init(s);
+        return true;
+    }
+    /*endif*/
+    if (s->rx.received_event == V34_EVENT_INFO1_OK  ||  l2_sent >= max_cycles)
+    {
+        /* An early INFO1a is the wait's to handle; at the ceiling, the wait
+           runs out the 9.2.1.2.5 deadline, which counts from the start of L2
+           (600 bauds a second there). */
+        v90_wait_tone_a_init(s, s->rx.received_event == V34_EVENT_INFO1_OK);
+        s->tx.tone_duration = l2_sent*LINE_PROBE_SAMPLES*600/SAMPLE_RATE;
+        return true;
+    }
+    /*endif*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
 {
     int sample;
@@ -5406,6 +5497,16 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                    trellis encoder state, not a pipeline stage -- see the note
                    in l1_l2_signal_init(). */
                 s->tx.line_probe_scaling *= 0.5f;
+            }
+            else if (s->tx.line_probe_cycles > 8 + l2_cycles(s))
+            {
+                /* Past the minimum L2 with no Tone A yet (see below): one more
+                   20 ms period has gone out.  Send INFO1d as soon as Tone A
+                   is heard; at the 9.2.1.1.7 ceiling, fall back to the silent
+                   wait. */
+                if (v90_extended_l2_step(s))
+                    break;
+                /*endif*/
             }
             else if (s->tx.line_probe_cycles == 8 + l2_cycles(s))
             {
@@ -5464,6 +5565,27 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                                      s->rx.guard_carrier_valid);
                             info1_baud_init(s);
                         }
+                        else if (v90_extended_l2_enabled())
+                        {
+                            /* 9.2.1.1.7: INFO1d goes "after the digital modem
+                               detects Tone A and has received the local echo
+                               of L2 for ... not ... more than 550 ms plus a
+                               round-trip delay" -- L2 runs until Tone A, and
+                               the analogue modem may take up to 500 ms of it
+                               (9.2.2.1.8).  Going silent after our 300 ms
+                               minimum cut the Agere soft modem's measurement
+                               short: it read silence (-69.5 dBm, 1.75 dB SNR,
+                               a 37.5 Hz "offset"), declared the line RBS, and
+                               its PCM receiver then ran to +81.6 ppm on our
+                               TRN1d and retrained during Jd.  Against
+                               D-Modem's modem, which holds L2 until Tone A, it
+                               measured -9.6 dBm and 36.6 dB and connected.
+                               Keep L2 going and listen for Tone A under it:
+                               L1/L2 omit 2400 Hz (V.34 10.1.3.6) so that it
+                               can be heard. */
+                            v90_extended_l2_arm(s);
+                            continue;
+                        }
                         else
                         {
                             v90_wait_tone_a_init(s, false);
@@ -5513,6 +5635,23 @@ static void l1_l2_signal_init(v34_state_t *s)
        -- is stale by here and must not satisfy the post-L2 wait. */
     s->rx.tone_a_bin_frac_valid = 0;
     s->rx.tone_a_run = 0;
+    /* The same holds for the event slot on the V.90 digital side.  The Tone A
+       that 9.2.1.1.7 waits for is the one the analogue modem raises after our
+       L2 (9.2.2.1.8), with no reversal.  The reversal still in the slot here is
+       its 9.2.2.1.6 one, which started this probe, and it stayed there through
+       the whole of L1/L2 and sent INFO1d at the end of L2 as if Tone A had
+       come.  The Agere soft modem listens to L2 for up to 500 ms before it
+       raises Tone A, so it missed the start of every such INFO1d and retrained
+       during our Jd (D-Modem rig, 2026-11-25).  An event raised during L1/L2
+       (a V.92 peer's reversal can land there) still counts. */
+    if (s->tx.v90_mode  &&  !s->tx.calling_party
+        &&  (s->rx.received_event == V34_EVENT_TONE_SEEN
+             ||  s->rx.received_event == V34_EVENT_REVERSAL_1
+             ||  s->rx.received_event == V34_EVENT_REVERSAL_3))
+    {
+        s->rx.received_event = V34_EVENT_NONE;
+    }
+    /*endif*/
     if (s->tx.duplex  &&  !s->tx.calling_party  &&  !s->tx.v90_mode)
         s->tx.phase2_probe_sent = true;
     /*endif*/
@@ -6191,6 +6330,22 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
                      s->tx.tone_duration);
         }
         /*endif*/
+        return zero;
+    }
+    /*endif*/
+    /* Nor is silence.  9.2.2.1.8 lets the analogue modem receive L2 for up to
+       500 ms before it raises Tone A, and ours is 300 ms, so a quiet line 50 ms
+       after our L2 is the analogue modem still listening, not a Tone A whose
+       edge we missed.  The Agere soft modem does exactly that; an INFO1d sent
+       into the silence lost its start and the call retrained during Jd.  Take
+       the shortcut only on 2400 Hz energy measured since our L1 began
+       (tone_a_run is reset there); otherwise wait for the event or the
+       9.2.1.2.5 deadline. */
+    if (s->rx.received_event == V34_EVENT_NONE
+        &&  s->tx.tone_duration >= 30
+        &&  s->tx.tone_duration < timeout_bauds
+        &&  s->rx.tone_a_run == 0)
+    {
         return zero;
     }
     /*endif*/
