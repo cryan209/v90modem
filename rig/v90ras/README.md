@@ -1353,6 +1353,22 @@ one (3be20424, 11d94652…) as `sip_v90_modem.pre-36a574cd`. Installed by
 rename with `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and
 `v90isdn` were restarted, and all ten lines re-registered (2951-2960).
 
+## Deployed a580829a (2026-11-24)
+
+On top of 2a827d51, this deploy adds a580829a. When data mode keeps the V.92
+decision feedback (an unprecoded CPd), the feedback's peak gain is now held
+at 0.9. On the dense data levels, ESS A-law's alternating feedback tail
+(1.13 at fs/2) made the output run away before B1u could lock. Only calls
+that took the unprecoded fallback are affected. Precoded peers that lock
+never reach it. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at a580829a
+(`/root/deploy-a580829a.build.log`). The binary (md5 42693b52…) is kept as
+`/opt/v90ras/sip_v90_modem.a580829a`, and the previous one (2a827d51,
+680ba7a9…) as `sip_v90_modem.pre-a580829a`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and all ten lines re-registered (2951-2960).
+
 ## Deployed 2a827d51 (2026-11-24)
 
 On top of 04daa5a2, this deploy adds 2a827d51. Two V.92 PCM upstream
