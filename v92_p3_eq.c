@@ -192,6 +192,72 @@ static bool least_squares(const double *z, const int8_t *ref, int rows,
     return solve_normal(m, dim, w);
 }
 
+/* Peak over frequency of |sum_k fb[k] z^-(k+1)|, fb in output units. */
+static double fb_peak_gain(const double *fb, int nfb, double fb_scale)
+{
+    double peak = 0.0;
+
+    for (int t = 0; t <= 128; t++) {
+        double w = M_PI*t/128.0;
+        double re = 0.0;
+        double im = 0.0;
+
+        for (int k = 0; k < nfb; k++) {
+            re += fb[k]*fb_scale*cos(w*(k + 1));
+            im -= fb[k]*fb_scale*sin(w*(k + 1));
+        }
+        peak = fmax(peak, sqrt(re*re + im*im));
+    }
+    return peak;
+}
+
+/* rms |Aw - d| over the window of eq->joint_m: d'd - 2w'A'd + w'A'Aw (a
+ * ridge solve is not the least-squares w, for which it is d'd - w'A'd). */
+static double joint_residual(const v92_p3_eq_t *eq, const double *w)
+{
+    const int dim = eq->cfg.ntaps + eq->cfg.nfb;
+    double fit = 0.0;
+
+    for (int i = 0; i < dim; i++) {
+        double aw = 0.0;
+
+        for (int j = 0; j < dim; j++)
+            aw += (i <= j ? eq->joint_m[i][j] : eq->joint_m[j][i])*w[j];
+        fit += 2.0*w[i]*eq->joint_m[i][dim] - w[i]*aw;
+    }
+    return eq->refit_n > 0 ? sqrt(fmax(eq->refit_dd - fit, 0.0)/eq->refit_n) : 0.0;
+}
+
+/* The joint solve of eq->joint_m with ridge on the feedback columns, raised
+ * until the feedback's peak gain is at most eq->fb_gain_max.  w gets the
+ * solution (the last one tried if none qualifies). */
+static bool solve_fb_limited(v92_p3_eq_t *eq, double *w)
+{
+    static double m[LS_MAX][LS_MAX + 1];
+    const int n = eq->cfg.ntaps;
+    const int nfb = eq->cfg.nfb;
+    const int dim = n + nfb;
+    double diag = 0.0;
+    bool ok = false;
+
+    for (int j = 0; j < nfb; j++)
+        diag += eq->joint_m[n + j][n + j];
+    diag /= nfb > 0 ? nfb : 1;
+    for (int step = 0; step <= 16; step++) {
+        double ridge = step ? diag*ldexp(1.0, step - 9) : 0.0;
+
+        memcpy(m, eq->joint_m, sizeof(m));
+        for (int j = 0; j < nfb; j++)
+            m[n + j][n + j] += ridge;
+        if (!solve_normal(m, dim, w))
+            return ok;
+        ok = true;
+        if (fb_peak_gain(w + n, nfb, eq->fb_scale) <= eq->fb_gain_max)
+            break;
+    }
+    return ok;
+}
+
 /* Energy centroid of the taps, in tap positions. */
 static double centroid(const v92_p3_eq_t *eq)
 {
@@ -280,7 +346,6 @@ static void refit_finish(v92_p3_eq_t *eq)
     const int dim = n + eq->cfg.nfb;
     double w[LS_MAX];
     double atd[LS_MAX];
-    double fit = 0.0;
 
     static double mff[LS_MAX][LS_MAX + 1];
     double wff[LS_MAX];
@@ -315,18 +380,24 @@ static void refit_finish(v92_p3_eq_t *eq)
             memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
             eq->refits++;
         }
-    } else if (solve_normal(eq->refit_m, dim, w)) {
-        /* For the least-squares w, |Aw - d|^2 = d'd - w'A'd. */
-        for (int i = 0; i < dim; i++)
-            fit += w[i]*atd[i];
-        eq->refit_resid = sqrt(fmax(eq->refit_dd - fit, 0.0)/eq->refit_n);
+    } else {
+        memcpy(eq->joint_m, eq->refit_m, sizeof(eq->joint_m));
+        if (!solve_normal(eq->refit_m, dim, w))
+            return;
+        if (eq->fb_gain_max > 0.0
+            && fb_peak_gain(w + n, eq->cfg.nfb, eq->fb_scale) > eq->fb_gain_max
+            && !solve_fb_limited(eq, w))
+            return;
+        eq->refit_resid = joint_residual(eq, w);
         if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
             eq->refits_rejected++;
+            eq->have_joint = false;
         } else {
             if (eq->refit_base == 0.0)
                 eq->refit_base = eq->refit_resid;
             memcpy(eq->taps, w, (size_t)n*sizeof(double));
             memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+            eq->have_joint = true;
             if (ff_ok) {
                 memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
                 eq->have_ff = true;
@@ -764,6 +835,7 @@ void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq)
 {
     if (!eq)
         return;
+    eq->fb_gain_max = 0.0;
     memset(eq->fb, 0, sizeof(eq->fb));
     eq->have_ff = false;
     eq->ff_only = false;
@@ -775,9 +847,40 @@ void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
 {
     if (!eq)
         return;
+    eq->fb_gain_max = 0.0;
     eq->ff_only = false;
     eq->refit_base = 0.0;
     eq->refit_left = 0;
+}
+
+double v92_p3_eq_fb_gain(const v92_p3_eq_t *eq)
+{
+    return eq ? fb_peak_gain(eq->fb, eq->cfg.nfb, eq->fb_scale) : 0.0;
+}
+
+bool v92_p3_eq_limit_feedback(v92_p3_eq_t *eq, double gmax,
+                              double *before, double *after)
+{
+    double w[LS_MAX];
+    double g;
+
+    if (!eq)
+        return false;
+    eq->fb_gain_max = gmax > 0.0 ? gmax : 0.0;
+    g = v92_p3_eq_fb_gain(eq);
+    if (before)
+        *before = g;
+    if (after)
+        *after = g;
+    if (eq->fb_gain_max <= 0.0 || g <= eq->fb_gain_max || eq->ff_only
+        || !eq->have_joint || eq->cfg.nfb <= 0 || !solve_fb_limited(eq, w))
+        return false;
+    memcpy(eq->taps, w, (size_t)eq->cfg.ntaps*sizeof(double));
+    memcpy(eq->fb, w + eq->cfg.ntaps, (size_t)eq->cfg.nfb*sizeof(double));
+    eq->refit_resid = joint_residual(eq, w);
+    if (after)
+        *after = v92_p3_eq_fb_gain(eq);
+    return true;
 }
 
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)

@@ -327,12 +327,60 @@ before ESS's upstream carried data.
   The exchange then reaches TRN2u sigma 0.024 LU, CPu, CPd', SUVu', Ed and
   B1d.
 
-**Still open: ESS's A-law B1u.** In A-law, whether after the startup CPd or
-the renegotiation's, ESS's B1u fails to lock on about half of the attempts,
-in one of two ways:
-- the equaliser output sits on the levels (rms 0.97 LU, 0.025 from the
-  nearest) and no frame decodes as ones;
-- the output is 3.85 LU rms, far above the agreed power.
+### ESS A-law: the decision feedback ran away (2026-11-24)
 
-The CPds are built the same way on passing and failing attempts. D-Modem
-does not run ESS's PCM upstream in A-law at all. μ-law is unaffected.
+In A-law, ESS's B1u used to fail in two ways:
+- **On the levels, but nothing decoded.** This happened on about half of the
+  startup attempts. The output sat 0.046-0.053 LU from the nearest level,
+  against 0.020-0.025 on attempts that locked.
+- **Far off the levels.** This happened on every attempt after a
+  renegotiation. The output was 3.5-3.9 LU rms and 0.71 LU from the levels.
+
+Neither was the CPd, ESS's mapping or a scale error. Identical CPds both
+locked and failed, and no gain from 0.5 to 5 fits the failing values to the
+constellation.
+
+The dumps of the B1u search's input (the equaliser output from the CPd
+acknowledgement on) show what happens. SUVu' sits on its four levels. Then,
+within about 150 symbols, the output turns into a sign-alternating
+oscillation that grows to ±5 LU. That is a decision-feedback runaway. On the
+dense data levels a wrong decision goes back through the feedback taps. Where
+the gain of sum fb_k z^-k is above 1, the error comes back larger.
+
+The TRN2u joint solves came in two shapes:
+- **One dominant tap**, fb ≈ (-0.74 or -0.82, small ...). These peaked at
+  1.01-1.05 and locked, or missed narrowly at 1.085.
+- **An alternating, slowly decaying tail**, fb ≈ (-0.20, +0.17, -0.18, +0.15,
+  -0.14, +0.13, -0.10, +0.07). This peaked at 1.12-1.14 at fs/2 and never
+  locked. Every renegotiation's solve had this shape, and so did some startup
+  ones.
+
+On four-level TRN2u, where every decision is right, both shapes fit equally
+well (0.015-0.031 LU). Only the dense levels tell them apart.
+
+**The fix.** When data mode keeps the feedback, the last joint solve is
+solved again with ridge on its feedback columns, raised until the
+feedback's peak gain is at most 0.9 (`V92_DATA_FB_GAIN_MAX`,
+`v92_p3_eq_limit_feedback()`). Every later joint refit is held to the same
+limit. Solves that peaked at 0.93-1.14 come out at 0.75-0.89, with
+0.026-0.072 LU on TRN2u.
+
+**Results.** Forced unprecoded at drn 6 (`ME_V92_PRECODER=3
+ME_V92_UP_DRN=6`), 6 calls:
+- 17 of 21 B1u attempts locked, after renegotiations as well. Before, about
+  half of the startup attempts locked and none after a renegotiation.
+- The 4 that missed were 0.028-0.054 LU from the levels.
+
+On defaults, the precoded B1u still fails first, the retrain locks, and 2 of
+3 calls passed the 20 s stream both ways at 48000-49333 down. The third
+locked B1u, ran data, then failed on a B1u after a later renegotiation
+(0.069 LU, limited peak gain 0.837) and fell back to V.34. On the same build
+the SmartLink V.92 (both laws), SmartLink V.90, PCTel, SM56, Intel and ESS
+μ-law rows pass.
+
+**Still open:**
+- ESS renegotiates in A-law again and again, sometimes three times a call.
+  The renegotiations that go wrong later in a call are where data gets lost.
+- Some B1u attempts still miss narrowly, at 0.03-0.07 LU from the levels.
+
+D-Modem does not run ESS's PCM upstream in A-law at all.

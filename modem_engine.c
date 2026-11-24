@@ -9674,6 +9674,10 @@ static double me_v92_lu_rx_locked(void)
  * as four-level PAM would put a wrong symbol into every feedback tap.  The
  * equaliser's unit is the received LU; a point's DS0 level is G x point
  * times v90_get_v92_upstream_ds0_per_unit(). */
+/* Most gain the decision feedback may have at any frequency once it runs on
+ * the dense data levels (see v92_p3_eq_limit_feedback()). */
+#define V92_DATA_FB_GAIN_MAX 0.9
+
 static void me_v92_data_slicer_locked(void)
 {
     double positive[V92_P3_EQ_MAX_LEVELS];
@@ -9721,9 +9725,27 @@ static void me_v92_data_slicer_locked(void)
                          && !g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].ff_only;
 
     g_v92_upstream_keep_fb = keep_fb;
-    if (keep_fb)
+    if (keep_fb) {
+        double gain_before = 0.0;
+        double gain_after = 0.0;
+
         ME_LOG("[ME] V.92 data slicer: unprecoded CPd, decision feedback kept on the "
                "data levels (re-solved with it every 2 s once B1u locks)\n");
+        /* On the dense levels a wrong decision goes back through the
+         * feedback; above unit gain it returns larger and the output runs
+         * away.  ESS A-law's TRN2u solves (every renegotiation, some first
+         * trainings) gave an alternating tail, 1.12-1.14 at fs/2, whose B1u
+         * grew to 5 LU within 150 symbols and never locked; those that
+         * locked peaked at 1.01-1.05. */
+        if (v92_p3_eq_limit_feedback(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
+                                     V92_DATA_FB_GAIN_MAX, &gain_before, &gain_after))
+            ME_LOG("[ME] V.92 data slicer: feedback peak gain %.3f held to %.3f "
+                   "(joint solve again, ridge on the feedback), residual %.4f\n",
+                   gain_before, gain_after,
+                   v92_p3_eq_refit_residual(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]));
+        else
+            ME_LOG("[ME] V.92 data slicer: feedback peak gain %.3f\n", gain_before);
+    }
     else if (g_v92_cpd_sent_precoded
         ? v92_p3_eq_drop_feedback(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law])
         : v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))

@@ -167,6 +167,13 @@ typedef struct {
     double refit_resid;            /* last solve's rms residual */
     double refit_m[V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB]
                   [V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB + 1];
+    /* The last accepted joint solve's normal equations (upper triangle and
+     * right-hand side), kept for v92_p3_eq_limit_feedback(). */
+    double joint_m[V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB]
+                  [V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB + 1];
+    bool have_joint;
+    double fb_gain_max;            /* > 0: joint solves keep the feedback's
+                                      peak gain at or below it */
 
     /* Feed-forward-only least-squares taps from the same window as the last
      * accepted refit (the top-left block of its normal equations), for data
@@ -235,6 +242,20 @@ void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq);
  * feed-forward taps of a joint solve leave the post-cursor ISI to the
  * feedback, so zeroing it would hand the refit an unequalised signal. */
 void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq);
+
+/* Data mode with decision feedback on dense levels: a decision error goes
+ * back through the feedback taps, and where their gain |sum fb_k z^-k|
+ * exceeds 1 at some frequency it comes back larger, until the output runs
+ * away (ESS A-law: an alternating feedback tail, 1.13 at fs/2, grew the
+ * output to 5 LU within 150 symbols).  Holds the feedback's peak gain at
+ * or below gmax from now on (0 lifts the limit): the last joint solve is
+ * solved again with ridge on its feedback columns, and so is every later
+ * one.  Returns true when the taps changed; the peak gains before and
+ * after go to *before and *after when not NULL. */
+bool v92_p3_eq_limit_feedback(v92_p3_eq_t *eq, double gmax,
+                              double *before, double *after);
+/* The feedback taps' peak gain over frequency, in output units. */
+double v92_p3_eq_fb_gain(const v92_p3_eq_t *eq);
 
 /* Data-aided training on a known sequence (V.92 8.7.1 B1u, which starts from
  * zero scrambler, encoder, precoder and prefilter memories and so is fixed by
