@@ -1492,3 +1492,20 @@ Built in `/root/deploy-5640b4d3`, checked out at 8b95d16e
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and the lines re-registered (registration success, both services
 active).
+
+## Deployed 6b368e4e (2026-11-25)
+
+On top of 8b95d16e, this deploy adds 6b368e4e, which affects V.90 Phase 2
+(§9.2.1.2.6) only. After INFO1d we no longer re-send it after 200 ms of
+silence; a silence re-send now waits for the 700 ms + round-trip deadline.
+Offline, the Agere, HSF and Broadcom soft modems go quiet for about 210 ms
+before INFO1a and our early re-send landed on top of it. Peers that answer
+INFO1d straight away are unchanged. No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 6b368e4e
+(`/root/deploy-6b368e4e.build.log`). The binary (md5 8c1cd594…) is kept as
+`/opt/v90ras/sip_v90_modem.6b368e4e`, and the previous one (8b95d16e,
+d4ef351e…) as `sip_v90_modem.pre-6b368e4e`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
+restarted, and the lines re-registered (registration success, both services
+active).
