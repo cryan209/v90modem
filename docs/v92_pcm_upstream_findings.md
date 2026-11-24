@@ -548,7 +548,8 @@ Two ESS behaviours remain, and neither comes from this change:
   after our first CPd and before ESS acknowledges it, and no B1u is armed.
   It hit 2 of 8 μ-law calls in this set; earlier it showed in f3, t6f, t8d and
   t8f, on builds without the retime and in calls the retime left alone. The
-  retrain recovers it.
+  retrain recovers it. ESS misses our CPd there; see "The 90 s ESS μ-law call"
+  below.
 - **A-law first TRN1u at about ±55 ppm and 26 dB.** This turned out to be
   ESS's transmitter. It is covered in the next section.
 
@@ -642,6 +643,51 @@ ESS on D-Modem's rig, same build otherwise:
 The regression rows (SmartLink V.92 precoded in both laws, SmartLink, PCTel,
 SM56 and Intel V.90, Intel V.92 offer) are unchanged, 9 of 9.
 
-One ESS μ-law call on the old build reached data only after a 90 s retrain
-at 31200 bps (rt2), and the data was garbage. It is unexplained, and it hasn't
-recurred in the 25 calls since.
+### The 90 s ESS μ-law call: ESS misses our first CPd (2026-11-24)
+
+One ESS μ-law call (rt2) reached data only after 90.3 s, at 31200 bps, and the
+data was garbage. Its tap replays exactly (`v90_engine_replay live-rx.g711 ulaw
+--sync --echo-ref --at "ATX3;AT+MS=V92;AT+PIG=0;AT+PQC=0"`; without `--at` the
+replay trains V.90). There are two parts to it.
+
+**ESS Tone A-retrains about 100 ms after our first CPd ends, twice** (rx
+samples 169760 and 295360 in both the live call and the replay). This is the
+"Tone A about 21.4 s into the call" behaviour above, twice in one call. ESS
+sends SUVu only after it hears our SUVd (§9.6.2.1). In a good call its CPu
+starts as soon as our CPd ends. In a bad one it sends Tone A instead, before
+our §9.6.1.1.3 repeat could go out (100 ms + RTD after the CPd without an
+acknowledgement). So ESS fails to decode the CPd, although it reliably finds
+SUVd. Rates (D-Modem rig, `NET_LOOP=0.45 NET=8000:8000:ulaw`, NET_DELAY
+varied):
+
+| Digital side | Calls with this Tone A |
+|---|---|
+| Ours, defaults | 6 of 40 (5 of 49 in an earlier set) |
+| Ours, CPd sent twice back to back (temporary hack) | 2 of 40 |
+| D-Modem's `half_open8` | 0 of 48 |
+
+The miss isn't deterministic in the line delay: the delay that gave rt2 failed
+once, then passed twice. These were ruled out:
+- The CPd's content. rt2's failing CPd (drn 11, 32 points, gain 27,
+  unprecoded) is identical to a passing call's.
+- The sigma push before it (error 0.0001), the Jp Su extension (0.500T in all
+  49 calls), the TRN2d constellation, power-limit modification (off), and
+  idle codewords (they come only after the Tone A).
+- Downstream error rate in general. With error control off on both sides
+  (`AT\N0`), ESS receives our data with 1-7 bad records a call
+  (594-1042 byte errors in 10 s), and `half_open8`'s with 2-7 (157-959), so
+  ESS's data receiver is about as unhappy with both.
+
+What is left is how ESS receives a CPd, which differs: ours is one CPd of
+about 1010 bits (48 data frames at d=21), sent after two SUVu; open8's is a
+longer one (128 points, with prefilter and precoder sections). Sending ours
+twice cuts the misses to a third, so a repeat is what ESS needs, but §9.6.1.1.2
+sends a single CPd and §9.6.1.1.3 repeats only after the timeout ESS doesn't
+wait for. Not fixed; the Tone A retrain recovers most calls.
+
+**After the second miss the call falls to plain V.34 and we CONNECT on
+nothing.** On the third attempt our PCM upstream is withdrawn and ESS declines
+V.90. Our V.34 receiver then declared training complete at a receive SNR of
+−12.7 dB and gave CONNECT 31200, while ESS never connected. That is a defect of
+ours (a training-complete gate that accepts a negative SNR), not yet
+investigated. It is what turned a slow call into a garbage one.
