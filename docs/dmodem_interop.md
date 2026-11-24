@@ -67,7 +67,7 @@ Our side needs these settings to do V.92 PCM upstream:
 The failing rows and a SmartLink control gave the same verdicts unpaced (the
 default) and with `MODEM_REALTIME=1`; the passing rows were run paced.
 
-## Results (2026-11-24, a6737e79 + half_v90modem, D-Modem eceac3b)
+## Results (2026-11-24, a6737e79 + half_v90modem, D-Modem eceac3b; ESS V.90 updated after the Jd S gate fix)
 
 STREAM=10, one call per row:
 
@@ -82,7 +82,7 @@ STREAM=10, one call per row:
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
-| ESS | V.90 | Fail. We CONNECT at 28800, ESS answers OK, garbage |
+| ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
 | HSF | V.90, V.92 (both laws) | Fail. Reaches Phase 3 (our first S), then the peer gives NO CARRIER |
 | Agere | V.90, V.92 | Fail. Same as HSF |
 | Broadcom | V.90, V.92 | Fail. Same as HSF |

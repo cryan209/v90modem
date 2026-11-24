@@ -643,10 +643,10 @@ ESS on D-Modem's rig, same build otherwise:
 The regression rows (SmartLink V.92 precoded in both laws, SmartLink, PCTel,
 SM56 and Intel V.90, Intel V.92 offer) are unchanged, 9 of 9.
 
-### The 90 s ESS μ-law call: ESS misses our first CPd (2026-11-24)
+### The "90 s" ESS μ-law call: ESS misses our first CPd (2026-11-24)
 
-One ESS μ-law call (rt2) reached data only after 90.3 s, at 31200 bps, and the
-data was garbage. Its tap replays exactly (`v90_engine_replay live-rx.g711 ulaw
+One ESS μ-law call (rt2) showed CONNECT 31200 on our side only, with garbage
+data, and `interop_call` reported 90.3 s to CONNECT. Its tap replays exactly (`v90_engine_replay live-rx.g711 ulaw
 --sync --echo-ref --at "ATX3;AT+MS=V92;AT+PIG=0;AT+PQC=0"`; without `--at` the
 replay trains V.90). There are two parts to it.
 
@@ -685,9 +685,19 @@ twice cuts the misses to a third, so a repeat is what ESS needs, but §9.6.1.1.2
 sends a single CPd and §9.6.1.1.3 repeats only after the timeout ESS doesn't
 wait for. Not fixed; the Tone A retrain recovers most calls.
 
-**After the second miss the call falls to plain V.34 and we CONNECT on
-nothing.** On the third attempt our PCM upstream is withdrawn and ESS declines
-V.90. Our V.34 receiver then declared training complete at a receive SNR of
-−12.7 dB and gave CONNECT 31200, while ESS never connected. That is a defect of
-ours (a training-complete gate that accepts a negative SNR), not yet
-investigated. It is what turned a slow call into a garbage one.
+**After the second miss ESS falls back to V.34, which nobody can decode, and we
+CONNECT on it.** The "90 s" is `interop_call` giving up on ESS's CONNECT, not
+the call's length: in TRACE time our CONNECT came 3.3 s in. On the third
+attempt ESS sends a V.34 INFO1a (U_INFO 11, downstream code 4, reserved bits
+01/02). Our strict check rejects it as V.90, and we carry on as plain V.34.
+Phase 3 and 4 train at 37.8 dB, but B1 doesn't correlate (0.22; logged as
+"receive SNR −12.7 dB") and the data is white. ESS answers OK to its ATD.
+That isn't a bad gate of ours. ESS's plain V.34 fails against D-Modem's
+`half_open8` too (`ATX3;AT+MS=V34`, NO CARRIER at both ends, ESS asking for a
+64-state trellis and the nonlinear encoder), and against us B1 fails at every
+symbol rate from 3429 down to 2800. Our V.90 fallback path skips the "did not
+correlate" symbol-rate retrain (it is gated on `!g_v90_fallback_v34_logged`),
+so we CONNECT anyway, but there was nothing to connect to.
+
+The same fall to V.34 was the whole of ESS's V.90 row. That one was ours;
+see row 12 of `docs/v90_phase3_4_spec_audit.md`.

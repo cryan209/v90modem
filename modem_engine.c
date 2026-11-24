@@ -19285,12 +19285,43 @@ skip_8k_codewords:
                                          && echo >= gate_pct / 100.0);
                         bool  is_silence = (min_rms > 0.0 && rx_rms < min_rms);
 
+                        /* An S the line watch found has already been checked on its
+                         * three lines (it is the only detector that sees 3429 baud's
+                         * single carrier, and p3_demod's 6-symbol pattern test rejected
+                         * the Intel V92 modem's real 9.3.2.10 S at the end of DIL).
+                         * Taken here, before the RX/TX ratio, because that ratio is
+                         * the gate it answers: see below. */
+                        bool line_s = g_v34 && v34_v90_take_line_s_event(g_v34);
+                        /* V.90 §9.3.2.9-.10 permits a short S burst after
+                         * silence. The 64-symbol alternation detector has
+                         * already verified V.34 §10.1.3.7's structure; a
+                         * 200 ms classifier dominated by preceding silence
+                         * must not veto it. Rotation-only candidates retain
+                         * that check, as they can also be tones or noise. */
+                        bool alternating_s = g_v34
+                            && v34_phase3_s_alternation_confirmed(g_v34);
+
                         g_v90_phase3_s_events++;
                         {
                             double tx_rms = v90_s_tx_rms_locked();
                             double want   = me_v90_s_min_rx_tx_ratio();
 
+                            /* The ratio stands in for "is this the peer at all"
+                               when all we have is energy.  A line-watch S has
+                               more: two 20 ms blocks with over 60% of the energy
+                               on one carrier's three §10.1.3.7 S lines and under
+                               20% on the other's.  So has an S whose 64
+                               equalised symbols alternated as §10.1.3.7's S
+                               does.  Neither line noise nor our broadband PCM Jd
+                               produces either, and the echo gate below still
+                               applies.  ESS's real §9.3.2.7 S during our Jd
+                               arrived at 0.125-0.148 of our Jd's RMS (lines
+                               0.99/0.01, echo corr 0.09-0.11) on D-Modem's
+                               NET_LOOP=0.45 line; rejecting it left us in Jd
+                               until ESS retrained, twice, and then fell to a
+                               V.34 neither side could decode. */
                             if (want > 0.0 && tx_rms > 1.0
+                                && !line_s && !alternating_s
                                 && rx_rms < want * tx_rms) {
                                 /* The line is carrying our own transmission and
                                    little else.  Acting on this sends J'd or ends
@@ -19301,7 +19332,8 @@ skip_8k_codewords:
                                 fprintf(stderr,
                                         "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
                                         "REJECTED as own-line noise (rx/tx=%.3f < %.2f, "
-                                        "rx_rms=%.1f tx_rms=%.1f corr=%.3f rx_sample=%llu)\n",
+                                        "rx_rms=%.1f tx_rms=%.1f corr=%.3f rx_sample=%llu; neither the line "
+                                        "watch nor 64-symbol alternation confirmed it)\n",
                                         g_v90_phase3_s_events,
                                         (int)v90_get_tx_phase(g_v90),
                                         rx_rms / tx_rms, want, rx_rms, tx_rms, echo,
@@ -19380,19 +19412,6 @@ skip_8k_codewords:
                            Echo, silence, RX/TX ratio and Tone-A gates still
                            apply in Jd; retain this extra classifier only for
                            the DIL termination it was introduced to protect. */
-                        /* An S the line watch found has already been checked on its
-                         * three lines (it is the only detector that sees 3429 baud's
-                         * single carrier, and p3_demod's 6-symbol pattern test rejected
-                         * the Intel V92 modem's real 9.3.2.10 S at the end of DIL). */
-                        bool line_s = g_v34 && v34_v90_take_line_s_event(g_v34);
-                        /* V.90 §9.3.2.9-.10 permits a short S burst after
-                         * silence. The 64-symbol alternation detector has
-                         * already verified V.34 §10.1.3.7's structure; a
-                         * 200 ms classifier dominated by preceding silence
-                         * must not veto it. Rotation-only candidates retain
-                         * that check, as they can also be tones or noise. */
-                        bool alternating_s = g_v34
-                            && v34_phase3_s_alternation_confirmed(g_v34);
                         /* The check is a p3_demod pass over 200 ms, ~20 ms of
                            work in this media callback, which also sends our
                            RTP.  During DIL's first cycle v90.c ignores S
