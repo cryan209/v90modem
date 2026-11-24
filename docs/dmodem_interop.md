@@ -84,9 +84,9 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
 | HSF | V.90, V.92 (both laws) | Fail. Since the INFO1d re-send fix (below), V.90 gets a V.90 INFO1a (3200 up), our Jd is answered with S, and HSF retrains in the second DIL cycle without sending the §9.3.2.10 S. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
-| Agere | V.90, V.92 | Mostly passes since the CPt fix (below): V.90 53333 down / 28800 up in 5 of 6 runs, V.92 (V.90 Phase 4, no PCM upstream) 53333 in 2 of 4. The other runs connect as plain V.34 at 31200 after 4 attempts that each fail after our MP (below). Data correct both ways in every run. Its first Phase 2 still reads our L2 as silence |
+| Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
-| Broadcom | V.90 | 49333 PCM in 1 of 4 runs since the CPt fix (below); the others connect as plain V.34 at 31200 after 4 attempts that fail after our MP. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
+| Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
 | Courier | V.8 default | Fail. V.8 selects V.90, Phase 3, then NO CARRIER |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
@@ -212,10 +212,54 @@ Result on CT 128: the CPt is accepted in every attempt.
 - Broadcom V.90: 49333 in 1 of 4 runs.
 - Broadcom V.92: unchanged, 50666 with a PCM upstream.
 
-The other runs fail one step later. We accept the CPt, send TRN2d and about
-750 MPs, and the peer retrains (tx_phase 15) without sending CP. One
-Broadcom attempt did send CP and retrained later (tx_phase 22). Not yet
-investigated; `half_agdbg` will show whether Agere saw our TRN2d and MP.
+The other runs failed one step later, and that was ours too (next section).
+
+### Phase 4: a false sync at the end of SCR cost us the CP (2026-11-25)
+
+Agere sends SCR while it trains on our TRN2d (§9.4.2.2), then ONE CP. It has
+already heard our MP, so it follows with ONE CP' (§9.4.2.3-.4), then E and
+B1. Its log on a failing attempt shows `CP sent`, `MP detected`, `CP' sent`,
+`Tx Data Mode Active`, and an exception 1 s later. It never logged
+`MP' detected`, because we never sent MP'. On the raw tap, the independent
+demodulator reads CP (drn 20) and CP' at 31-35 dB with valid CRCs, and no
+timing step at the SCR-to-CP boundary.
+
+SCR descrambles to ones, and Agere ends it with a few zeros before the CP's
+sync. A run of ones followed by a zero is a CP sync to `v90_cp_rx`, so the
+framer started a false frame 41 bits before the real one.
+- It took the false frame's length from noise in bits 103:128. When that
+  came out long (up to 1788 bits), the framer swallowed the CP and the CP'
+  whole.
+- When a noise DFI was out of range, the framer dropped the false frame at
+  bit 129, in time for the CP' to get through. That is why some runs passed.
+- Either way it REJECTED the false frame, and every rejection calls
+  `v34_reject_v90_phase4_hypothesis()`. That unlocks the CP tap's bit mapping
+  and restarts its preamble search, just before the real CP. The tap's bits
+  (`V90_CP_BIT_DUMP`) then came out garbled for about 300 bits from that
+  point, while the independent demodulator on the same samples read them
+  clean.
+
+Fix (`v90_cp_rx.c`):
+- Table 14 puts a zero start bit at every multiple of 17, from bit 17 to the
+  CRC's start bit (272+δ). A one there ends the frame at once: a real sync's
+  ones land on one within 17 bits.
+- The framer then hunts again through the bits it had collected, so the real
+  sync among them is found.
+- An abandoned frame counts as superseded (`superseded_syncs`), not
+  rejected, when that hunt completes a sync. Only a frame that is not
+  followed by a sync is still a rejection that unlocks the hypothesis. A
+  wrong bit order can produce sync-like ones, and its recovery is unchanged.
+
+`vpcm_loopback_test` replays 1010 bits of Agere's SCR end, CP and CP' as our
+tap recorded them. The old framer accepts nothing from them; the new one
+accepts the CP'.
+
+Result on CT 128:
+- Agere V.90, Agere V.92 and Broadcom V.90: 12 of 12 calls connect PCM on
+  the first attempt with no retrains (53333 / 53333-54666 / 49333), and data
+  is correct both ways.
+- The full matrix is at 14 of 18 rows. Only the three HSF rows and Courier
+  fail, as before.
 
 An earlier note here read Agere's Phase 3 TRN as "white" (0.638 from the
 grid) and its Ja as decoded "only through the hypothesis-8 recovery".

@@ -4965,6 +4965,59 @@ static bool test_v90_cp_agere_shaping_zero(void)
     return true;
 }
 
+/* The end of Agere's Phase 4 SCR, its one CP and its one CP' (V.90
+ * 9.4.2.2-.4), as our CP bit tap demodulated them on the D-Modem rig
+ * (CT 128, 2026-11-25; Agere V.92 without PCM upstream, codec constellations
+ * differ, so 426-bit frames).  SCR ends in ones then zeros, which reads as a
+ * sync 41 bits before the real one; the framer took that false frame's length
+ * from noise and swallowed the CP and the CP' with it, and Agere retrained
+ * after its data timed out.  Start bits now expose the false sync within 17
+ * bits, and the framer hunts again through what it had collected. */
+static bool test_v90_cp_false_sync_before_cp(void)
+{
+    static const char tap[] =
+        "11111111111111111111111111111111111111111111111111111111111111111111"
+        "11111111111111111111111111111111111100000000000000000000000011111111"
+        "11111111100100101000000100001111111111111100000000000000010000000001"
+        "00000001101111111111111111111011010110000101000000110000000000000000"
+        "00100000000000000000100000000000010000000100000010001000100010001010"
+        "10101010100111111111111111101111111111111111011111111111100000000000"
+        "00000000000000000000100000000000010000000100000010001000100010001010"
+        "10101010100111111111111111101111111111111111011111111111100000000000"
+        "00000000000101110001101101101111111111111111100100101000000101001111"
+        "11111111110000000000000001000000000100000001101111110011111101000000"
+        "00000000000000000000100000000000000000100000000000010000000100000010"
+        "00100010001000101010101010100111111111111111101111111111111111011111"
+        "11111110000000000000000000000000000000100000000000010000000100000010"
+        "00100010001000101010101010100111111111111111101111111111111111011111"
+        "1111111000000000000000000000001101100111110000111111111111";
+    v90_cp_rx_t rx;
+    v90_cp_test_capture_t capture;
+
+    vpcm_log("Test: V.90 CP' behind a false sync at the end of SCR (Agere)");
+    memset(&capture, 0, sizeof(capture));
+    v90_cp_rx_init(&rx, 4, false, v90_cp_test_frame_handler, &capture);
+    for (int i = 0;  tap[i];  i++)
+        v90_cp_rx_put_bit(&rx, tap[i] == '1');
+    for (int i = 0;  i < 30;  i++)
+        v90_cp_rx_put_bit(&rx, 1);
+    if (capture.count < 1
+        || !capture.frame.v90_compatibility
+        || !capture.frame.acknowledge
+        || capture.frame.drn != 20
+        || !capture.frame.codec_constellations_differ
+        || rx.superseded_syncs < 1) {
+        fprintf(stderr, "Agere CP': %d frames accepted, %u superseded syncs (structure rejects "
+                "%u, crc rejects %u)\n", capture.count,
+                (unsigned) rx.superseded_syncs,
+                (unsigned) rx.structure_rejected_frames,
+                (unsigned) rx.crc_rejected_frames);
+        return false;
+    }
+    vpcm_log("  PASS: Agere CP' (drn 20) accepted behind the false sync");
+    return true;
+}
+
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
 {
     const bool alaw = (law == V91_LAW_ALAW);
@@ -11647,6 +11700,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v90_cp_short_fill_back_to_back()
         && test_v90_cp_agere_shaping_zero()
+        && test_v90_cp_false_sync_before_cp()
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)
         && test_v90_negotiated_data_rates(V91_LAW_ALAW)
         && test_v90_spectral_shaping(V91_LAW_ULAW)

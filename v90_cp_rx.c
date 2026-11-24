@@ -136,14 +136,57 @@ static void v90_cp_rx_store_vote(v90_cp_rx_t *rx)
     rx->vote_count = slot + 1;
 }
 
-bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
+static bool v90_cp_rx_framer_bit(v90_cp_rx_t *rx, int bit);
+
+/* Abandon the frame being collected and hunt again through the bits it
+ * swallowed after its supposed sync, so that a real sync inside them is still
+ * found.  Agere ends its Phase 4 SCR with ones then zeros, which reads as a
+ * 17-ones-and-0 sync 41 bits before its one CP; the false frame then took its
+ * length from noise in bits 103:128 and, when that came out long, swallowed
+ * the CP and the CP' behind it, which Agere sends once each (V.90 9.4.2.3-.4),
+ * so the call retrained.
+ *
+ * If the hunt finds a sync among those bits, the abandoned frame was only a
+ * false sync, and it counts as superseded, not rejected: the engine treats a
+ * rejection as evidence against the demodulator's bit mapping and unlocks it
+ * (v34_reject_v90_phase4_hypothesis()), and a false sync in correctly
+ * decoded SCR is evidence for it.  Unlocking there garbled the CP behind it.
+ * Returns whether a frame was accepted meanwhile. */
+static bool v90_cp_rx_rehunt(v90_cp_rx_t *rx)
 {
+    uint8_t held[VPCM_CP_MAX_BITS];
+    int count = rx->bit_count - 1;
     bool accepted = false;
 
+    if (count > 0)
+        memcpy(held, rx->bits + 1, (size_t)count);
+    v90_cp_rx_reset(rx);
+    for (int i = 0;  i < count;  i++)
+        accepted |= v90_cp_rx_framer_bit(rx, held[i]);
+    if (rx->collecting) {
+        rx->superseded_syncs++;
+    } else if (rx->sync_ones > 0) {
+        /* A real sync may be under way: a start bit breaks within 17 bits
+         * of its first one, often before its 17th.  Let it decide. */
+        rx->abandoned_pending = true;
+    } else {
+        rx->rejected_frames++;
+        rx->structure_rejected_frames++;
+    }
+    return accepted;
+}
+
+bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
+{
     if (!rx || (rx->constellation_points != 4 && rx->constellation_points != 16))
         return false;
-    bit = bit ? 1 : 0;
     rx->input_bits++;
+    return v90_cp_rx_framer_bit(rx, bit ? 1 : 0);
+}
+
+static bool v90_cp_rx_framer_bit(v90_cp_rx_t *rx, int bit)
+{
+    bool accepted = false;
 
     if (!rx->collecting) {
         if (bit) {
@@ -153,7 +196,16 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
         }
         if (rx->sync_ones < 17) {
             rx->sync_ones = 0;
+            if (rx->abandoned_pending) {
+                rx->abandoned_pending = false;
+                rx->rejected_frames++;
+                rx->structure_rejected_frames++;
+            }
             return false;
+        }
+        if (rx->abandoned_pending) {
+            rx->abandoned_pending = false;
+            rx->superseded_syncs++;
         }
         memset(rx->bits, 0, sizeof(rx->bits));
         for (int i = 0; i < 17; i++)
@@ -174,6 +226,15 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
     }
     rx->bits[rx->bit_count++] = (uint8_t)bit;
 
+    /* Table 14 puts a start bit of 0 at every multiple of 17 from bit 17 to
+     * the CRC's start bit at 272+delta (target - 20).  A one there means the
+     * sync was false; it shows within 17 bits of a real sync's ones.  Such a
+     * frame could never decode (vpcm_cp_decode_diag() requires the start
+     * bits), so dropping it at once loses nothing. */
+    if (bit && (rx->bit_count - 1) % 17 == 0
+        && (rx->target_bits == 0 || rx->bit_count - 1 <= rx->target_bits - 20))
+        return v90_cp_rx_rehunt(rx);
+
     if (rx->bit_count == 129) {
         static const int dfi_pos[VPCM_CP_FRAME_INTERVALS] = {103, 107, 111, 115, 120, 124};
         int max_idx = 0;
@@ -185,12 +246,8 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
             if (value > max_idx)
                 max_idx = value;
         }
-        if (max_idx >= VPCM_CP_MAX_CONSTELLATIONS) {
-            rx->rejected_frames++;
-            rx->structure_rejected_frames++;
-            v90_cp_rx_reset(rx);
-            return false;
-        }
+        if (max_idx >= VPCM_CP_MAX_CONSTELLATIONS)
+            return v90_cp_rx_rehunt(rx);
         rx->target_bits = v90_cp_candidate_length(
             max_idx + 1,
             rx->constellation_points,

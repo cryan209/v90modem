@@ -36,6 +36,13 @@ typedef struct {
     uint32_t crc_rejected_frames;
     uint32_t structure_rejected_frames;
     uint32_t semantic_rejected_frames;
+    /* False syncs abandoned because a real one began inside the bits they
+     * had collected.  Not rejections: nothing was wrong with the bits, so
+     * they say nothing against the demodulator's hypothesis. */
+    uint32_t superseded_syncs;
+    /* An abandoned frame whose verdict waits on the run of ones the hunter
+     * is in: superseded if that run completes a sync, rejected if not. */
+    bool abandoned_pending;
     uint32_t voted_frames_accepted;
     v90_cp_rx_frame_handler_t frame_handler;
     void *frame_user_data;
