@@ -819,6 +819,7 @@ struct v90_state_s {
     uint64_t         v92_rn_suvd_symbols;       /* SUVd sent while waiting */
     double           v92_upstream_lu_rx;        /* received TRN2u rms, DS0 linear */
     int              v92_precoder_lp1;          /* Table 30 LP1; 0 = no coefficients */
+    bool             v92_identity_filters;      /* lp1 = 0 still sends LP1 = 4 zeros, LZ2 = 4 */
     int16_t          v92_precoder_p1[V92_CPD_MAX_TAPS];  /* p1(1..LP1), Q1.14 */
 
     /* Downstream PCM encoder state (data mode) */
@@ -1293,6 +1294,14 @@ double v90_get_v92_upstream_min_margin(void)
     return V92_UPSTREAM_MARGIN_PRECODED;
 }
 
+bool v90_set_v92_upstream_identity_filters(v90_state_t *s, bool on)
+{
+    if (!s || s->v92_cpd_designed)
+        return false;
+    s->v92_identity_filters = on;
+    return true;
+}
+
 bool v90_set_v92_upstream_precoder(v90_state_t *s, const double *p1, int lp1)
 {
     if (!s || s->v92_cpd_designed || lp1 < 0 || lp1 > V92_CPD_MAX_TAPS
@@ -1556,6 +1565,16 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         out->lp1 = (uint16_t)lp1;
         memcpy(out->precoder_fb, s->v92_precoder_p1,
                (size_t)s->v92_precoder_lp1*sizeof(out->precoder_fb[0]));
+        out->lz2 = 4;
+        out->prefilter_ff[0] = 32767;
+        out->lp2 = 0;
+    } else if (s->v92_identity_filters) {
+        /* The same section with p1 = 0 (see
+         * v90_set_v92_upstream_identity_filters()), as D-Modem sends its
+         * unprecoded CPd. */
+        out->coeffs_present = true;
+        out->lz1 = 0;
+        out->lp1 = 4;
         out->lz2 = 4;
         out->prefilter_ff[0] = 32767;
         out->lp2 = 0;
@@ -5244,6 +5263,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_cpd_sent = false;
     s->v92_cpd_designed = false;
     s->v92_precoder_lp1 = 0;
+    s->v92_identity_filters = false;
     s->v92_cpd_retry = false;
     s->v92_cpd_repeat = false;
     s->v92_symbol_clock = s->v92_cpd_end = 0;

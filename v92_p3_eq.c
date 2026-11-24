@@ -771,6 +771,15 @@ void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq)
     eq->refit_left = 0;
 }
 
+void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
+{
+    if (!eq)
+        return;
+    eq->ff_only = false;
+    eq->refit_base = 0.0;
+    eq->refit_left = 0;
+}
+
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
 {
     eq->pam4 = pam4;

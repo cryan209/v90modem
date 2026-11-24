@@ -80,7 +80,8 @@ STREAM=10, one call per row:
 | SM56 | V.90 | Pass. 50666 / 31200, LAPM + V.42bis |
 | Intel 537EP | V.92 offer | Pass. It has no CPu, so V.90 at 52000 / 31200 (as D-Modem says) |
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
-| ESS | V.92 PCM up, μ-law and A-law | Fail. Phase 3 completes and our CPd goes out precoded. Until a §9.6.1.1.4 fix (after 0b77eb79) we never sent Ed, because ESS acked late. Now Ed goes out and ESS sends B1u, but its precoder works behind a real prefilter only, so B1u still does not lock (`docs/v92_pcm_upstream_findings.md`, ESS section). We report CONNECT and ESS gives NO CARRIER |
+| ESS | V.92 PCM up, μ-law | Pass since the change after cb693076. The precoded CPd's B1u fails: ESS's precoder needs a real prefilter, and until 04daa5a2 we also never sent Ed after its late ack. The retrain's unprecoded CPd, with decision feedback kept in data mode, locks at 29333-30666. ESS's own §9.8 Ru is answered (`docs/v92_pcm_upstream_findings.md`, ESS section) |
+| ESS | V.92 PCM up, A-law | Fails intermittently. The same path locks B1u on about half of the attempts. Data then flows, and ESS's Ru renegotiation is answered as far as B1d, but the B1u after it fails the same way |
 | ESS | V.90 | Fail. We CONNECT at 28800, ESS answers OK, garbage |
 | HSF | V.90, V.92 (both laws) | Fail. Reaches Phase 3 (our first S), then the peer gives NO CARRIER |
 | Agere | V.90, V.92 | Fail. Same as HSF |
@@ -95,5 +96,8 @@ except the Courier, which has the same line. PCTel and SM56 pass on that line,
 so the line alone does not explain it. None of the failures has been
 investigated yet, apart from ESS V.92 (`docs/v92_pcm_upstream_findings.md`,
 "The ESS modem itself"). There, D-Modem's own modem also fails with a
-precoder and no prefilter. Unprecoded, it gets 29333. Ours cannot design an
-unprecoded CPd, because data mode has no decision feedback.
+precoder and no prefilter. Unprecoded, it gets 29333. Ours now falls back to
+an unprecoded CPd with decision feedback in data mode once a precoded B1u
+fails, and answers the analogue modem's §9.8 Ru. That passes ESS μ-law, and
+on the same build the SmartLink V.92 (precoded, both laws), SmartLink V.90,
+PCTel, SM56 and Intel rows still pass.

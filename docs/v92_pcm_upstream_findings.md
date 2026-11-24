@@ -286,3 +286,53 @@ The fix is one of two receiver features, neither of which we have:
 - decision feedback in data mode for an unprecoded CPd;
 - a prefilter design (z2 taps with the points on G.711 levels), D-Modem's
   route to 41333.
+
+### Decision feedback in data mode, and answering ESS's Ru (2026-11-24)
+
+The first of those two features is now built. Each part below was needed
+before ESS's upstream carried data.
+
+- **The fallback.** A precoded B1u that misses its deadline sets
+  `g_v92_plain_upstream` for the rest of the call (`v92_b1u_deadline_expired_locked()`).
+  From the retrain on, the CPd is unprecoded and data mode keeps the
+  decision feedback on the data levels (`me_v92_plain_dfe()`;
+  `ME_V92_PRECODER=3` forces it from the first attempt). The rate is priced
+  on the feedback equaliser's sigma. The 2 s refits solve feed-forward and
+  feedback taps together.
+- **Refits wait for B1u's lock.** A decision-directed solve with feedback,
+  run before lock, settles on its own decisions: 0.005 LU from the levels
+  while nothing decodes.
+- **The coefficient section must be present.** A CPd with Table 30's bit 20
+  clear made ESS transmit exact silence after Ed. It reads the absent
+  section as LZ2 = 0, so §6.4.2's prefilter output sums no taps. The CPd now
+  carries D-Modem's identity section: LP1 = 4 zero taps, LZ2 = 4 with
+  z2(0) = 32767, LZ1 = LP2 = 0 (`v90_set_v92_upstream_identity_filters()`).
+  The B1u receiver treats that section as unprecoded.
+- **§9.8.1.2: answering the analogue modem's renegotiation.** In μ-law the
+  above passes the row at 29333-30666 up, with 71-76 DS0 from the levels
+  over a 20 s stream. In A-law ESS sent Tone A about 9 s into every call.
+  With D-Modem's own digital modem, ESS sends Ru and drops the downstream
+  50666 -> 49333 (§9.8.2.1). We only looked for Ru after our own Rd, so its
+  Ru went unanswered and ESS retrained. Capping our downstream at 44000 or
+  48000 stopped the retrain (20 s streams both ways, 0 frames rejected), which
+  confirmed it. Data mode now watches the equaliser output for Ru (48
+  symbols of the period-6 sign pattern; `me_v92_ru_watch_symbol_locked()`).
+  It clamps the decoder on Ru and answers R-bar-u with Rd (§9.8.1.2.2), then
+  carries on as for our own renegotiation (§9.8.1.2.3 -> 9.8.1.1.2).
+- **The renegotiation keeps the feedback.** `v92_p3_eq_restore_feedback()`
+  zeroes the feedback taps, which suits the feed-forward-only data mode. In
+  the feedback mode the feed-forward taps were solved together with the
+  feedback, and zeroing it left TRN2u 1340 DS0 from its levels: rms 1.08 LU,
+  no CPd buildable (drn < 1). `v92_p3_eq_reopen_feedback()` keeps the pair.
+  The exchange then reaches TRN2u sigma 0.024 LU, CPu, CPd', SUVu', Ed and
+  B1d.
+
+**Still open: ESS's A-law B1u.** In A-law, whether after the startup CPd or
+the renegotiation's, ESS's B1u fails to lock on about half of the attempts,
+in one of two ways:
+- the equaliser output sits on the levels (rms 0.97 LU, 0.025 from the
+  nearest) and no frame decodes as ones;
+- the output is 3.85 LU rms, far above the agreed power.
+
+The CPds are built the same way on passing and failing attempts. D-Modem
+does not run ESS's PCM upstream in A-law at all. μ-law is unaffected.

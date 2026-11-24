@@ -230,6 +230,11 @@ bool v92_p3_eq_drop_feedback(v92_p3_eq_t *eq);
 /* Undo either of the above so the next refit solves feedback taps too
  * (V.92 9.8: renegotiation TRN2u is not precoded). */
 void v92_p3_eq_restore_feedback(v92_p3_eq_t *eq);
+/* The same, but keeping the feedback taps data mode already solves with the
+ * feed-forward ones (an unprecoded CPd with decision feedback kept): the
+ * feed-forward taps of a joint solve leave the post-cursor ISI to the
+ * feedback, so zeroing it would hand the refit an unequalised signal. */
+void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq);
 
 /* Data-aided training on a known sequence (V.92 8.7.1 B1u, which starts from
  * zero scrambler, encoder, precoder and prefilter memories and so is fixed by

@@ -1897,6 +1897,8 @@ static bool           g_v92_upstream_lock_logged = false;
  * E2u and B1u (9.6.2.1.4/.5). */
 static bool           g_v92_upstream_eq_mode = false;
 static bool           g_v92_upstream_slicer_set = false;
+/* The data slicer kept the decision feedback (me_v92_plain_dfe()). */
+static bool           g_v92_upstream_keep_fb = false;
 /* V.92 9.8 rate renegotiation, digital-initiated, to redesign the PCM
  * upstream CPd on the noise data mode measures (TRN2u cannot see it: its
  * 4-point levels sit on wide G.711 steps; docs/v92_quick_connect.md).
@@ -1907,6 +1909,14 @@ static bool           g_v92_rn_rx_active = false;
 static int            g_v92_rn_count = 0;
 static double         g_v92_rn_floor = 0.0;       /* DS0, applied at Rd */
 static v92_rsig_rx_t  g_v92_rn_rsig;              /* Ru / R-bar-u on the equaliser output */
+/* V.92 9.8.1.2: in data mode, watching the equaliser output for the analogue
+ * modem's own Ru.  Heard: data decoding clamped (9.8.1.2.1).  Its R-bar-u:
+ * we answer with Rd (9.8.1.2.2), and me_v92_rn_rx_begin_locked() takes the
+ * exchange from there with Ru already counted as heard. */
+static v92_rsig_rx_t  g_v92_ru_watch;
+static bool           g_v92_ru_watch_on = false;
+static bool           g_v92_ru_heard = false;
+static bool           g_v92_rn_responding = false;
 static uint64_t       g_v92_rn_symbols = 0;       /* equaliser outputs since Rd */
 static uint64_t       g_v92_rn_refit_at = 0;      /* 0 = not armed */
 static bool           g_v92_rn_ru_seen = false;
@@ -1942,6 +1952,10 @@ static bool           g_v92_b1u_train_pending = false;
  * precoder, whose state picks each symbol's class member. */
 static v92_cpd_frame_t g_v92_cpd_sent;
 static bool           g_v92_cpd_sent_precoded = false;
+/* A precoded B1u missed its deadline on this call: from the retrain on,
+ * the CPd carries no 6.4.2 coefficients and data mode keeps the decision
+ * feedback instead (me_v92_plain_dfe()).  Per call, kept across retrains. */
+static bool           g_v92_plain_upstream = false;
 /* Data-mode refits from the trellis decoder: each decoded frame's survivor
  * points (what was transmitted, with no precoder or prefilter coefficients)
  * become least-squares rows against the equaliser inputs that produced them,
@@ -8631,6 +8645,11 @@ static bool v92_b1u_deadline_expired_locked(void)
     ME_LOG("[ME] V.92 B1u not locked %d ms after the CPd acknowledgement (+5 x %d ms "
            "round trip); initiating a §9.5.1.1 retrain (%d of %d)\n",
            deadline_ms, rtd/8, g_v90_abandon_retrains, ME_V90_MAX_ABANDON_RETRAINS);
+    if (g_v92_cpd_sent_precoded && !g_v92_plain_upstream) {
+        g_v92_plain_upstream = true;
+        ME_LOG("[ME] V.92 PCM upstream: the precoded B1u failed; from the retrain on, "
+               "an unprecoded CPd and decision feedback on the data levels\n");
+    }
     trace_phase("V92 B1u deadline -> retrain");
     return true;
 }
@@ -9607,7 +9626,9 @@ static void v92_upstream_live_byte(void *user_data, uint8_t byte)
  * of the feed-forward one (see the TRN2u sigma push). */
 #define V92_PRECODER_MIN_GAIN 0.9
 
-/* ME_V92_PRECODER: 0 no 6.4.2 coefficients, 2 precode whatever the gain. */
+/* 3 is the fallback me_v92_plain_dfe() otherwise takes only after a
+ * precoded B1u has failed, from the first attempt.
+ * ME_V92_PRECODER: 0 no 6.4.2 coefficients, 2 precode whatever the gain, 3 unprecoded + DFE. */
 static int me_v92_precoder_mode(void)
 {
     static int cached = -1;
@@ -9623,6 +9644,20 @@ static int me_v92_precoder_mode(void)
 static bool me_v92_precoder_enabled(void)
 {
     return me_v92_precoder_mode() != 0;
+}
+
+/* No 6.4.2 coefficients, and the equaliser's decision feedback runs on the
+ * data decisions in their place.  ESS's analogue modem precodes correctly
+ * only behind a real prefilter: B1u never locked on our precoded CPd, nor
+ * on D-Modem's precoder-only one, while an unprecoded CPd works for both
+ * (docs/v92_pcm_upstream_findings.md, "The ESS modem itself").  Feedback on
+ * dense data decisions is what made slmodemd's data mode diverge (see
+ * me_v92_data_slicer_locked()), so it is the fallback after a precoded
+ * B1u has failed, not the first try.  ME_V92_PRECODER=3 forces it
+ * (diagnostic). */
+static bool me_v92_plain_dfe(void)
+{
+    return g_v92_plain_upstream || me_v92_precoder_mode() == 3;
 }
 
 /* Received TRN2u rms in DS0 linear units: LU as it arrives. */
@@ -9681,7 +9716,15 @@ static void me_v92_data_slicer_locked(void)
      * accepted. */
     /* Precoded (6.4.2), the analogue modem has the feedback taps: keep the
      * feed-forward taps solved with them, which deliver u(n). */
-    if (g_v92_cpd_sent_precoded
+    const bool keep_fb = !g_v92_cpd_sent_precoded && me_v92_plain_dfe()
+                         && g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].cfg.nfb > 0
+                         && !g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].ff_only;
+
+    g_v92_upstream_keep_fb = keep_fb;
+    if (keep_fb)
+        ME_LOG("[ME] V.92 data slicer: unprecoded CPd, decision feedback kept on the "
+               "data levels (re-solved with it every 2 s once B1u locks)\n");
+    else if (g_v92_cpd_sent_precoded
         ? v92_p3_eq_drop_feedback(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law])
         : v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))
         ME_LOG("[ME] V.92 data slicer: %s, decision feedback off\n",
@@ -9719,6 +9762,11 @@ static void me_v92_data_slicer_locked(void)
         /* Encoder units are G x point; the equaliser's are the levels above. */
         for (int i = 0; ok && i < V92_B1U_TRAIN_SYMBOLS; i++)
             g_v92_b1u_ref[i] *= unit/lu;
+        /* The B1u solve is feed-forward only (it clears the feedback), and
+         * the feedback taps were trained at TRN2u's fractional timing:
+         * neither applies when the feedback stays. */
+        if (keep_fb)
+            ok = false;
         g_v92_b1u_train_pending = ok;
         /* The B1u solve is T-spaced on whole samples; the interpolator at
          * the TRN2u-learned fractional offset left 0.12 LU against B1u that
@@ -9731,7 +9779,9 @@ static void me_v92_data_slicer_locked(void)
         v92_p3_eq_set_capture(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
                               ok ? g_v92_b1u_capture : NULL, V92_B1U_TRAIN_CAPTURE);
     }
-    g_v92_aided_refits = !cpd->coeffs_present;
+    /* Aided rows carry no feedback inputs: with the feedback kept, the
+     * decision-directed refit (which has them) re-solves instead. */
+    g_v92_aided_refits = !cpd->coeffs_present && !keep_fb;
     g_v92_aided_frames_seen = 0;
     v92_p3_eq_set_ring(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
                        g_v92_aided_refits ? g_v92_aided_ring : NULL, V92_AIDED_RING);
@@ -9843,6 +9893,10 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
     bool was_locked = g_v92_upstream_rx.locked;
     uint64_t before = g_v92_upstream_rx.input_symbols;
 
+    /* 9.8.1.2.1: Ru is not data; circuit 104 is clamped until the exchange. */
+    if (g_v92_ru_heard)
+        return;
+
     for (int i = 0; i < n && g_v92_data_nlevels > 0; i++) {
         double best = 1e300, dec = 0.0;
 
@@ -9923,6 +9977,14 @@ static void me_v92_arm_b1u_locked(void)
     bool built = v90_build_v92_cpd_frame(g_v90, &cpd);
 
     g_v92_cpd_sent = cpd;
+    /* An identity section (v90_set_v92_upstream_identity_filters(): p1 all
+     * zero, z2 the identity) is an unprecoded CPd to the receiver. */
+    bool taps = false;
+
+    for (int j = 0; built && cpd.coeffs_present && j < cpd.lp1; j++)
+        taps = taps || cpd.precoder_fb[j] != 0;
+    if (built && cpd.coeffs_present && !taps && cpd.lz1 == 0 && cpd.lp2 == 0)
+        cpd.coeffs_present = false;
     g_v92_cpd_sent_precoded = built && eq_mode && cpd.coeffs_present;
     if (g_v92_cpd_sent_precoded)
         cpd.coeffs_present = false;
@@ -9947,6 +10009,9 @@ static void me_v92_arm_b1u_locked(void)
         g_v92_upstream_rx_active = true;
         g_v92_upstream_eq_mode = eq_mode;
         g_v92_upstream_slicer_set = false;
+        g_v92_upstream_keep_fb = false;
+        g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
+    g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
         g_v92_upstream_lock_logged = false;
         ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed (%s): drn=%u rate=%d bps, "
                "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f, "
@@ -10040,7 +10105,7 @@ static void me_v92_rn_check_locked(void)
         || !g_v92_upstream_rx_active || !g_v92_upstream_rx.locked
         || !g_v92_upstream_slicer_set || g_v92_p3_rx.eq_law < 0
         || v90_get_tx_phase(g_v90) != V90_TX_DATA
-        || v90_rate_renegotiation_active(g_v90))
+        || v90_rate_renegotiation_active(g_v90) || g_v92_ru_heard)
         return;
     eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
     lu = me_v92_lu_rx_locked();
@@ -10092,18 +10157,31 @@ static void me_v92_rn_rx_begin_locked(void)
     if (!g_v92_active || !g_v90 || g_v92_p3_rx.eq_law < 0)
         return;
     eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+    const bool responding = g_v92_rn_responding;
+    const bool kept_fb = g_v92_upstream_keep_fb;
+
     g_v92_rn_rx_active = true;
     g_v92_rn_count++;
     v92_rsig_rx_init(&g_v92_rn_rsig, 300);   /* 0.3 LU, in milli-LU */
     g_v92_rn_symbols = 0;
     g_v92_rn_refit_at = 0;
     g_v92_rn_ru_seen = g_v92_rn_bar_seen = g_v92_rn_refit_done = false;
+    if (responding) {
+        /* 9.8.1.2.3: the peer's Ru and R-bar-u are behind us and its TRN2u
+         * (9.8.2.1.2) is on the line now; it lasts until our SUVd.  Solve
+         * once the equaliser's span has cleared Rd's start. */
+        g_v92_rn_ru_seen = g_v92_rn_bar_seen = true;
+        g_v92_rn_refit_at = (uint64_t)eq->cfg.ntaps/2 + 12;
+        v90_rate_renegotiation_note_answer(g_v90);
+    }
     g_v92_rn_arm_pending = false;
     g_v92_rn_ack_seen = false;
     v90_set_v92_upstream_sigma_floor(g_v90, g_v92_rn_floor);
 
     g_v92_upstream_rx_active = false;
     g_v92_upstream_slicer_set = false;
+    g_v92_upstream_keep_fb = false;
+    g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
     g_v92_upstream_lock_logged = false;
     g_v92_b1u_train_pending = false;
     g_v92_aided_refits = false;
@@ -10113,7 +10191,12 @@ static void me_v92_rn_rx_begin_locked(void)
     v92_p3_eq_set_levels(eq, NULL, 0);
     v92_p3_eq_set_pam4(eq, true);
     v92_p3_eq_hold(eq, true);
-    v92_p3_eq_restore_feedback(eq);
+    /* ESS (A-law, 9.8.2.1): zeroing the jointly solved feedback left
+     * TRN2u at 1340 DS0 from its levels and no CPd could be built. */
+    if (kept_fb)
+        v92_p3_eq_reopen_feedback(eq);
+    else
+        v92_p3_eq_restore_feedback(eq);
 
     g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
@@ -10125,10 +10208,44 @@ static void me_v92_rn_rx_begin_locked(void)
     v92_cp_rx_init(&g_v92_cp_rx, 4, g_law == ME_LAW_ALAW, v92_live_p4u_frame, NULL);
     v92_trn2u_demod_init(&g_v92_trn2u_demod, 4, g_v92_trn2u_lu,
                          g_law == ME_LAW_ALAW, &g_v92_cp_rx);
+    if (responding)
+        ME_LOG("[ME] V.92 9.8.1.2.2: Rd on the wire answering the analogue modem's "
+               "renegotiation (%d); TRN2u refit from symbol %llu\n",
+               g_v92_rn_count, (unsigned long long)g_v92_rn_refit_at);
+    else
     ME_LOG("[ME] V.92 9.8.1.1.1: Rd on the wire (renegotiation %d); receiver "
            "conditioned for Ru, R-bar-u and SUVu, CPd floored at %.2f DS0\n",
            g_v92_rn_count, g_v92_rn_floor);
     trace_phase("V92 9.8 Rd: rx conditioned for Ru");
+}
+
+/* V.92 9.8.1.2: per equaliser output in data mode (LU), the analogue
+ * modem's own Ru (8.5.5: {+LU,+LU,+LU,-LU,-LU,-LU}) and, 384T later, its
+ * R-bar-u.  48 symbols of one period-6 sign pattern do not come from data.
+ * ESS's V.92 modem renegotiates this way when the downstream degrades and,
+ * unanswered, retrains with Tone A about 9 s into data. */
+static void me_v92_ru_watch_symbol_locked(double y)
+{
+    v92_rsig_event_t ev;
+
+    if (!g_v92_ru_watch_on) {
+        v92_rsig_rx_init(&g_v92_ru_watch, 300);
+        g_v92_ru_watch_on = true;
+    }
+    ev = v92_rsig_rx_put(&g_v92_ru_watch, (int)lrint(y*1000.0));
+    if (ev == V92_RSIG_EV_R && !g_v92_ru_heard) {
+        g_v92_ru_heard = true;
+        ME_LOG("[ME] V.92 9.8.1.2.1: Ru from the analogue modem in data mode; "
+               "circuit 104 clamped, waiting for R-bar-u\n");
+        trace_phase("V92 9.8 peer Ru");
+    } else if (ev == V92_RSIG_EV_BAR && g_v92_ru_heard && !g_v92_rn_responding) {
+        if (v90_request_rate_renegotiation(g_v90)) {
+            g_v92_rn_responding = true;
+            ME_LOG("[ME] V.92 9.8.1.2.2: Ru-to-R-bar-u transition; answering with Rd "
+                   "at the next data frame boundary\n");
+            trace_phase("V92 9.8 peer R-bar-u -> Rd");
+        }
+    }
 }
 
 /* Per equaliser output during the renegotiation: find Ru and its bar, then
@@ -10441,6 +10558,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
     g_v92_upstream_slicer_set = false;
+    g_v92_upstream_keep_fb = false;
+    g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
     g_v92_rn_rx_active = false;
     g_v92_rn_arm_pending = false;
     g_v92_active = false;
@@ -10872,6 +10991,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
     g_v92_upstream_slicer_set = false;
+    g_v92_upstream_keep_fb = false;
+    g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
     g_v92_rn_rx_active = false;
     g_v92_rn_arm_pending = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
@@ -15928,6 +16049,7 @@ static void v92_call_state_reset_locked(void)
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
     g_v92_cpd_sent_precoded = false;
+    g_v92_plain_upstream = false;
     g_v92_aided_refits = false;
     g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
@@ -15935,6 +16057,8 @@ static void v92_call_state_reset_locked(void)
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
     g_v92_upstream_slicer_set = false;
+    g_v92_upstream_keep_fb = false;
+    g_v92_ru_watch_on = g_v92_ru_heard = g_v92_rn_responding = false;
     g_v92_rn_rx_active = false;
     g_v92_rn_count = 0;
     g_v92_rn_floor = 0.0;
@@ -23244,6 +23368,9 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                 (void)v92_p3_rx_follow_ff(&g_v92_p3_rx, ff, n);
                 for (int k = 0; v92_rn && k < n; k++)
                     me_v92_rn_rx_symbol_locked(eq, values[k]);
+                for (int k = 0; !v92_rn && g_state == ME_DATA && g_v92_upstream_slicer_set
+                                && g_v92_upstream_rx.locked && !g_v92_rn_responding && k < n; k++)
+                    me_v92_ru_watch_symbol_locked(values[k]);
                 for (int k = 0; k < n; k++) {
                     double v = values[k]*sqrt(5.0);
                     double d = 2.0*floor(v/2.0) + 1.0;
@@ -23268,7 +23395,12 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     }
                     values[k] *= g_v92_trn2u_lu;
                 }
-                if (g_v92_upstream_slicer_set && eq->refit_left == 0)
+                /* With the feedback kept, a decision-directed solve before
+                 * B1u has locked settles on its own wrong decisions (ESS:
+                 * 0.005 LU from the levels, nothing decoded); hold the
+                 * TRN2u solve until then. */
+                if (g_v92_upstream_slicer_set && eq->refit_left == 0
+                    && (!g_v92_upstream_keep_fb || g_v92_upstream_rx.locked))
                     v92_p3_eq_refit(eq, V92_DATA_REFIT_SYMBOLS);
                 if (!g_v92_upstream_slicer_set
                     && v92_p3_eq_refits(eq) != g_v92_p4_refits_seen) {
@@ -23326,7 +23458,13 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                      * solve left 23 DS0 against 4 unprecoded -- B1u never
                      * locked.  Against slmodemd the feedback took 37.6 to
                      * 24.6.  Below the gain, send no coefficients. */
-                    if (me_v92_precoder_enabled() && eq->cfg.nfb > 0 && !eq->ff_only
+                    if (me_v92_plain_dfe() && eq->cfg.nfb > 0 && !eq->ff_only) {
+                        /* Data mode keeps the feedback: its noise is the
+                         * feedback equaliser's. */
+                        (void)v90_set_v92_upstream_precoder(g_v90, NULL, 0);
+                        (void)v90_set_v92_upstream_identity_filters(g_v90, true);
+                        sigma = sig[0];
+                    } else if (me_v92_precoder_enabled() && eq->cfg.nfb > 0 && !eq->ff_only
                         && me_v92_precoder_mode() != 2
                         && sig[0] >= V92_PRECODER_MIN_GAIN*sig[1]) {
                         (void)v90_set_v92_upstream_precoder(g_v90, NULL, 0);

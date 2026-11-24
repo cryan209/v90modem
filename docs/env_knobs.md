@@ -197,7 +197,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V92_JD_SKIP_REPS` | v90.c |  | d | reps (ME_V92_JD_EXTRA_REPS) with no shift in time. |
 | `ME_V92_JP_STATES` | v90.c |  | d | replaces it on §9.5-retrained attempts only. |
 | `ME_V92_JP_STATES_RETRAIN` | v90.c |  | d | replaces it on §9.5-retrained attempts only. |
-| `ME_V92_PRECODER` | modem_engine.c |  | td | ME_V92_PRECODER: 0 no 6.4.2 coefficients, 2 precode whatever the gain. |
+| `ME_V92_PRECODER` | modem_engine.c |  | td | ME_V92_PRECODER: 0 no 6.4.2 coefficients, 2 precode whatever the gain, 3 unprecoded + DFE. |
 | `ME_V92_RN` | modem_engine.c |  | - | ME_V92_RN=0: no digital-initiated V.92 9.8 rate renegotiation. |
 | `ME_V92_RN_MAX` | modem_engine.c | 2 | td | ME_V92_RN_MAX: digital-initiated V.92 9.8 renegotiations per call. |
 | `ME_V92_RN_RATIO` | modem_engine.c |  | td | ME_V92_RN_RATIO: test hook replacing the 1.10 (0.5 forces 9.8 on noise). |

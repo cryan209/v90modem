@@ -531,6 +531,13 @@ void v90_v92_rate_renegotiation_upstream_done(v90_state_t *s);
  * and nothing to propagate.  Ignored once a CPd has been sent. */
 bool v90_set_v92_upstream_precoder(v90_state_t *s, const double *p1, int lp1);
 
+/* With no precoder coefficients, send the coefficient section anyway: LP1 = 4
+ * zero taps and the identity prefilter (LZ2 = 4).  Table 30 does not say what
+ * an absent section means, and ESS's analogue modem takes it as no prefilter
+ * taps: v(n) is a sum over none, and it transmits silence after Ed.
+ * Ignored once a CPd has been sent. */
+bool v90_set_v92_upstream_identity_filters(v90_state_t *s, bool on);
+
 /* The received TRN2u rms, LU_rx, and its decision noise, keeping the
  * profile's drn (v90_set_v92_upstream_noise() asks for the most the moduli
  * carry instead).  V.92 Table 30 has the analogue modem transmit LU x G x v,
