@@ -81,7 +81,7 @@ STREAM=10, one call per row:
 | Intel 537EP | V.92 offer | Pass. It has no CPu, so V.90 at 52000 / 31200 (as D-Modem says) |
 | Intel 537EP | V.90 | Pass. 52000 / 31200 |
 | ESS | V.92 PCM up, μ-law | Pass since the change after cb693076. The precoded CPd's B1u fails: ESS's precoder needs a real prefilter, and until 04daa5a2 we also never sent Ed after its late ack. The retrain's unprecoded CPd, with decision feedback kept in data mode, locks at 29333-30666. ESS's own §9.8 Ru is answered (`docs/v92_pcm_upstream_findings.md`, ESS section) |
-| ESS | V.92 PCM up, A-law | Mostly passes, 2 of 3 on defaults at 48000-49333 down. Its B1u had a decision-feedback runaway; the feedback's peak gain is now held at 0.9 (`docs/v92_pcm_upstream_findings.md`). ESS renegotiates repeatedly, and a late B1u miss can still lose the call |
+| ESS | V.92 PCM up, A-law | Mostly passes, 2 of 3 on defaults at 48000-49333 down. Its B1u had a decision-feedback runaway; the feedback's peak gain is now held at 0.9 (`docs/v92_pcm_upstream_findings.md`). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. A B1u miss after one can still lose the call: our upstream gets about 30000 where D-Modem's gets about 40000 |
 | ESS | V.90 | Fail. We CONNECT at 28800, ESS answers OK, garbage |
 | HSF | V.90, V.92 (both laws) | Fail. Reaches Phase 3 (our first S), then the peer gives NO CARRIER |
 | Agere | V.90, V.92 | Fail. Same as HSF |

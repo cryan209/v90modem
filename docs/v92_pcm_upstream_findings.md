@@ -378,9 +378,35 @@ locked B1u, ran data, then failed on a B1u after a later renegotiation
 the SmartLink V.92 (both laws), SmartLink V.90, PCTel, SM56, Intel and ESS
 μ-law rows pass.
 
-**Still open:**
-- ESS renegotiates in A-law again and again, sometimes three times a call.
-  The renegotiations that go wrong later in a call are where data gets lost.
-- Some B1u attempts still miss narrowly, at 0.03-0.07 LU from the levels.
+**ESS's renegotiations are its own, not ours (2026-11-24).** Against
+D-Modem's digital modem (`half_open8`) the same A-law row renegotiates 1-3
+times a call too. The first Ru always comes at symbol 40091, about 5 s into
+data, and each one steps the downstream down (50666 -> 49333 -> 48000).
+D-Modem's upstream stays at about 40000 through all of them, and all 5 of
+its calls passed. Against us, ESS steps the same way and sometimes back up
+again (drn 17 -> 16 -> 17). Each call also has one renegotiation of our own,
+asked for 6 s into data: the data-mode residual reads 112-150 DS0 against a
+CPd designed on 71-110. That is the existing §9.8 redesign on the data-mode
+figure, and those calls pass.
+
+On a580829a's defaults 3 of 6 calls passed. The failures:
+- A B1u after one of ESS's Rus misses (0.05-0.07 LU from the levels), the
+  retrain falls back to V.34, and V.34 against ESS fails.
+- Both startup B1u attempts miss, and PCM upstream is withdrawn.
+- Three Rus come in quick succession at data start, LAPM never comes up, and
+  ESS hangs up after 50 s.
+
+So the gap is our upstream receiver: about 30000 where D-Modem gets about
+40000, and too little margin for every B1u to lock.
+
+Two things were tried, and neither helped:
+- **Pricing the CPd on the gain-limited TRN2u solve.** The design sigma rose
+  to 116 DS0, data mode then read 155-166, the rate did not change, and 1 of
+  3 calls fell back to V.34.
+- **A 3% B1u budget over the whole 16-frame window.** Every lock already
+  reads 1.0000 ones, and the misses die with many errors, so no attempt was
+  saved.
+
+ESS's driver debug (`ESS_DEBUG=1`) shows only FIFO counters.
 
 D-Modem does not run ESS's PCM upstream in A-law at all.
