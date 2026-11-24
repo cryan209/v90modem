@@ -1544,3 +1544,33 @@ Built in `/root/deploy-5640b4d3`, checked out at 7ae2f08c
 `/run/v90ras/busy` empty and no PPP interface up. `v90ras` and `v90isdn` were
 restarted, and the lines re-registered (registration success, both services
 active).
+
+## Deployed 5589721f (2026-11-25)
+
+On top of 7ae2f08c, this deploy adds 5589721f, which affects V.90 Phase 4 CP
+framing (Table 14, §9.4.2.2-.4).
+- `v90_cp_rx` now drops a false sync as soon as a Table 14 start bit is one,
+  and hunts again through the bits that frame had collected.
+- When that hunt finds a sync, it counts the false frame as superseded, not
+  rejected, so the CP tap's bit mapping is no longer unlocked just before a
+  real CP.
+- Offline on CT 128, Agere V.90/V.92 and Broadcom V.90 connected PCM on the
+  first attempt in 12 of 12 calls.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 5589721f
+(`/root/deploy-5589721f.build.log`). The binary (md5 b49f8400…) is kept as
+`/opt/v90ras/sip_v90_modem.5589721f`, and the previous one (7ae2f08c,
+1c51f394…) as `sip_v90_modem.pre-5589721f`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up.
+
+Asterisk had restarted on its own at about 10:54, a minute before this
+install, and had lost every endpoint-modem endpoint (2951 "Unable to find
+object"). The first restart of `v90ras` therefore failed registration on all
+ten lines with PJSIP_EFAILEDCREDENTIAL, and the lines did not retry.
+- `asterisk -rx "module reload res_pjsip.so"` brought the endpoints back
+  (96 loaded).
+- A second restart of `v90ras` and `v90isdn` registered 2951-2960 (status
+  200), and 2951 shows "Not in use".
+- The binary was not the cause: the 10:37 restart of 7ae2f08c registered
+  normally.
