@@ -77,6 +77,15 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
             s->stable = periodic ? s->stable+1 : 0;
             double reference = s->reference_i*s->reference_i+s->reference_q*s->reference_q;
             double dot = re*s->reference_i+im*s->reference_q;
+            /* Sum the reference's own polarity only: the block straddling
+             * the reversal fails the periodic test, and a reversed block
+             * seen before the sliding detector fires fails the dot test. */
+            if (s->stage == V92_SU_ACQUIRED && periodic
+                && dot > .85*sqrt(reference*energy)) {
+                s->phase_i += re;
+                s->phase_q += im;
+                s->phase_blocks++;
+            }
             if (s->lock < 0 && s->stable >= 3) {
                 event = V92_SU_ACQUIRED;
             } else if (s->stage == V92_SU_BAR && s->stable >= 1
@@ -101,4 +110,27 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
     }
     s->phase = (s->phase+1)%6;
     return event;
+}
+
+bool v92_su_jp_phase(const v92_su_t *s, double *fraction, unsigned *blocks)
+{
+    /* Su = {a, 0, a, -a, 0, -a} has fundamental phase -pi/3 on its own
+     * slots; received m symbols late the bin sum_n y(n) e^{+j 2 pi n/6}
+     * on the absolute slot clock has argument 2 pi m/6 + pi/3, so
+     * frac(m) = frac(6 arg/2 pi) whatever whole-symbol offset the slot
+     * clock has.  After Su-bar's half symbol the delay is m + 1/2, and
+     * extending Su by 1 - frac(m + 1/2) puts it on a symbol. */
+    double m, f;
+
+    if (blocks)
+        *blocks = s ? s->phase_blocks : 0;
+    if (!s || s->phase_blocks < 4 || (s->phase_i == 0.0 && s->phase_q == 0.0))
+        return false;
+    m = 6.0*atan2(s->phase_q, s->phase_i)/(2.0*M_PI) + 0.5;
+    f = -m - floor(-m);
+    if (f >= 1.0)
+        f = 0.0;
+    if (fraction)
+        *fraction = f;
+    return true;
 }

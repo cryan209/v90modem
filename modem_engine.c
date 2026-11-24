@@ -54,6 +54,7 @@
 #include "p3_demod.h"
 #include "v92_cp_rx.h"
 #include "v92_p3_rx.h"
+#include "v92_prefilter.h"
 #include "v92_trn2u.h"
 #include "v92_su.h"
 #include "v92_upstream_rx.h"
@@ -1899,6 +1900,13 @@ static bool           g_v92_upstream_eq_mode = false;
 static bool           g_v92_upstream_slicer_set = false;
 /* The data slicer kept the decision feedback (me_v92_plain_dfe()). */
 static bool           g_v92_upstream_keep_fb = false;
+/* V.92 6.4.2 prefilter design (v92_prefilter.h): TRN2u's raw A/D samples
+ * and its four-level decisions, by symbol, since the last Phase 4 re-solve. */
+#define V92_PF_CAPTURE 4096
+static double         g_v92_pf_r[V92_PF_CAPTURE];
+static double         g_v92_pf_t[V92_PF_CAPTURE];
+static int            g_v92_pf_n = 0;          /* symbols captured (ring) */
+static bool           g_v92_pf_logged = false;
 /* V.92 9.8 rate renegotiation, digital-initiated, to redesign the PCM
  * upstream CPd on the noise data mode measures (TRN2u cannot see it: its
  * 4-point levels sit on wide G.711 steps; docs/v92_quick_connect.md).
@@ -9678,6 +9686,96 @@ static double me_v92_lu_rx_locked(void)
  * the dense data levels (see v92_p3_eq_limit_feedback()). */
 #define V92_DATA_FB_GAIN_MAX 0.9
 
+/* V.92 6.4.2: the prefilter TRN2u's channel calls for (v92_prefilter.h),
+ * from the capture since the last Phase 4 re-solve.  The raw sample of
+ * symbol k sits ntaps - 1 - main_tap symbols after the one its window is
+ * centred on.  Diagnostic (ME_V92_PF_LOG=1): logged, not sent.  Its
+ * channel taps are what showed ESS's pulse split across two samples
+ * before the 9.5.1.1.8 Jp phase (me_v92_jp_phase_locked()). */
+static void me_v92_pf_design_log_locked(const v92_p3_eq_t *eq)
+{
+    static double r[V92_PF_CAPTURE], t[V92_PF_CAPTURE];
+    double levels[128];
+    int nlev = 0;
+    v92_pf_channel_t ch;
+    v92_pf_design_t pf0, pf32;
+    int n = g_v92_pf_n < V92_PF_CAPTURE ? g_v92_pf_n : V92_PF_CAPTURE;
+    int first = g_v92_pf_n - n;
+    int main_tap = 0;
+    int lead;
+    int rows;
+
+    for (int j = 1; j < eq->cfg.ntaps; j++)
+        if (fabs(eq->taps[j]) > fabs(eq->taps[main_tap]))
+            main_tap = j;
+    lead = eq->cfg.ntaps - 1 - main_tap;
+
+    if (n < 2000 || lead < 0 || lead > V92_PF_CH_POST) {
+        ME_LOG("[ME] V.92 6.4.2 prefilter: no design (%d symbols captured, lead %d)\n",
+               g_v92_pf_n, lead);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        r[i] = g_v92_pf_r[(first + i) % V92_PF_CAPTURE];
+        t[i] = g_v92_pf_t[(first + i) % V92_PF_CAPTURE];
+    }
+    for (int c = 0; c < 256; c++) {
+        double v = (double)pcm_to_linear((uint8_t)c);
+        bool seen = false;
+
+        if (v < 0.0)
+            continue;
+        for (int j = 0; j < nlev; j++)
+            seen |= levels[j] == v;
+        if (!seen && nlev < 128)
+            levels[nlev++] = v;
+    }
+    for (int i = 1; i < nlev; i++)
+        for (int j = i; j > 0 && levels[j] < levels[j - 1]; j--) {
+            double x = levels[j];
+
+            levels[j] = levels[j - 1];
+            levels[j - 1] = x;
+        }
+    /* Row m: r of the symbol centred on s = m + V92_PF_CH_POST, captured
+     * lead symbols earlier, against t[m .. m + V92_PF_CH - 1]. */
+    rows = n - V92_PF_CH;
+    for (int m = 0; m < rows; m++)
+        r[m] = r[m + V92_PF_CH_POST - lead];
+    if (nlev != 128 || !v92_pf_fit_channel(&ch, r, t, rows, levels)
+        || !v92_pf_design(&pf0, &ch, 64, 0) || !v92_pf_design(&pf32, &ch, 64, 32)) {
+        ME_LOG("[ME] V.92 6.4.2 prefilter: no design (%d levels, fit or solve failed)\n", nlev);
+        return;
+    }
+    {
+        int peak = 0;
+        double sb = 0.0;
+
+        for (int j = 1; j < V92_PF_CH; j++)
+            if (fabs(ch.h[j]) > fabs(ch.h[peak]))
+                peak = j;
+        for (int k = 0; k < pf32.lb; k++)
+            sb += fabs(pf32.b[k]);
+        ME_LOG("[ME] V.92 6.4.2 prefilter (not sent): channel over %d TRN2u symbols, "
+               "rx %.0f DS0 rms, peak tap %d of %d (%.0f), fit error %.1f DS0 of which G.711 %.1f, "
+               "line noise %.1f; no prefilter %.1f dB; 64 taps %.1f dB (delay %d, gain %.0f, "
+               "interference %.1f dB); 64 + precoder 32 %.1f dB (sum |b| %.2f)\n",
+               rows, sqrt(ch.power), peak, V92_PF_CH, ch.h[peak], sqrt(ch.fit_err2),
+               sqrt(ch.quant2), sqrt(ch.noise2), pf0.identity_snr_db, pf0.snr_db,
+               pf0.delay, pf0.gain, 10.0*log10(pf0.interference + 1e-30),
+               pf32.snr_db, sb);
+        {
+            char b[512];
+            int o = 0;
+
+            for (int j = peak - 6; j <= peak + 8 && o < 480; j++)
+                if (j >= 0 && j < V92_PF_CH)
+                    o += snprintf(b + o, sizeof b - o, " %.0f", ch.h[j]);
+            ME_LOG("[ME] V.92 6.4.2 channel taps %d..%d:%s\n", peak - 6, peak + 8, b);
+        }
+    }
+}
+
 static void me_v92_data_slicer_locked(void)
 {
     double positive[V92_P3_EQ_MAX_LEVELS];
@@ -9720,7 +9818,18 @@ static void me_v92_data_slicer_locked(void)
      * accepted. */
     /* Precoded (6.4.2), the analogue modem has the feedback taps: keep the
      * feed-forward taps solved with them, which deliver u(n). */
-    const bool keep_fb = !g_v92_cpd_sent_precoded && me_v92_plain_dfe()
+    /* Unprecoded, the feedback is ours, whether the CPd went unprecoded
+     * after a failed precoded B1u (me_v92_plain_dfe()) or because the
+     * channel left the precoder nothing to do.  The second is new with the
+     * 9.5.1.1.8 Jp phase: ESS's response is then one tap, the design sends
+     * no p1, and the feed-forward-only path's integer-timing B1u training
+     * failed 4/4 (TRN2u's timing loop had wandered 11.6 samples on that
+     * flat channel, and rounding it left the taps 0.36 sample off), where
+     * the feedback path locked at 37333-38666.  The 0.9 peak-gain limit
+     * below is what keeps the feedback from running away on the dense
+     * levels (slmodemd always precodes: its 9600 Hz high-pass needs it). */
+    const bool keep_fb = !g_v92_cpd_sent_precoded
+                         && (me_v92_plain_dfe() || me_v92_precoder_enabled())
                          && g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].cfg.nfb > 0
                          && !g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].ff_only;
 
@@ -19540,6 +19649,56 @@ static void v92_su_rx_reset_locked(void)
     g_v92_su_final_pending = false;
 }
 
+/* V.92 9.5.1.1.6-8: the digital modem measures the phase on Su and sends
+ * Jp with the fraction of a symbol by which the analogue modem extends
+ * Su (Table 22 bits 18:33), because it cannot move the network A/D's
+ * sampling phase itself.  Left at zero the A/D samples the analogue
+ * modem's pulse wherever its clock happens to fall: ESS's landed half a
+ * symbol off the peak, split across two samples (main tap 52% of the
+ * response), so its upstream needed a long precoder and the G.711 noise
+ * on the ISI capped it at about 30000.  On the peak its response is one
+ * tap (29-31 dB with no prefilter at all).
+ *
+ * The extension (v92_su_jp_phase, from the Su before Su-bar, with Su-bar's
+ * half symbol) is sent rounded to 0 or T/2.  SmartLink applies the
+ * fraction as an ADVANCE (line taps: asked for 0.247T, its second TRN1u
+ * came 0.247T earlier), ESS as the extension Table 22 says, and only 0 and
+ * T/2 mean the same both ways.  That leaves at most T/4 on either, a main
+ * tap of about 86% or more; the exact fraction put SmartLink T/2 off.
+ * ME_V92_JP_PHASE=exact sends it unrounded, =off sends zero (as before
+ * 2026-11-24), and a number in [0, 1) sends that. */
+static void me_v92_jp_phase_locked(void)
+{
+    const char *env = getenv("ME_V92_JP_PHASE");
+    bool exact = env && strcmp(env, "exact") == 0;
+    double f = 0.0, sent;
+    unsigned blocks = 0;
+    char how[96];
+    long code;
+
+    if (env && *env && !exact) {
+        bool off = strcmp(env, "off") == 0;
+
+        sent = off ? 0.0 : atof(env);
+        snprintf(how, sizeof(how), "%s (ME_V92_JP_PHASE)", off ? "off" : "forced");
+    } else if (!v92_su_jp_phase(&g_v92_su_rx, &f, &blocks)) {
+        sent = 0.0;
+        snprintf(how, sizeof(how), "Su too short to measure");
+    } else {
+        sent = exact ? f : (f >= 0.25 && f < 0.75 ? 0.5 : 0.0);
+        snprintf(how, sizeof(how), "Su measures %.3fT%s", f,
+                 exact ? ", exact (ME_V92_JP_PHASE)" : ", rounded to 0 or T/2");
+    }
+    sent -= floor(sent);
+    code = lround(sent*65536.0);
+    if (code >= 65536)
+        code = 0;
+    if (!g_v90 || !v90_set_v92_jp_phase(g_v90, (uint16_t)code))
+        return;
+    ME_LOG("[ME] V.92 9.5.1.1.8: Jp asks for a %.3fT Su extension (%ld/65536, %s, %u Su blocks)\n",
+           code/65536.0, code, how, blocks);
+}
+
 static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
 {
     if (!g_v92_su_rx_active || !g_v92_active || !g_v90)
@@ -19555,6 +19714,7 @@ static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
         (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU);
         break;
     case V92_SU_BAR:
+        me_v92_jp_phase_locked();
         (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_BAR);
         break;
     case V92_SU_TRAINED:
@@ -23399,6 +23559,14 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
 
                     if (d > 3.0) d = 3.0;
                     if (d < -3.0) d = -3.0;
+                    if (trn2u_phase && !g_v92_upstream_slicer_set) {
+                        int slot = g_v92_pf_n % V92_PF_CAPTURE;
+
+                        g_v92_pf_r[slot] = v92_p3_eq_sample(
+                            eq, v92_p3_eq_last_index(eq) - (n - 1 - k));
+                        g_v92_pf_t[slot] = d/sqrt(5.0);
+                        g_v92_pf_n++;
+                    }
                     g_v92_trn2u_err2 += (v - d)*(v - d)/5.0;
                     g_v92_trn2u_nerr++;
                     {
@@ -23436,6 +23604,8 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
                     ME_LOG("[ME] V.92 Phase 4: equaliser re-solved by least squares "
                            "over %d TRN2u symbols\n", V92_P4_REFIT_SYMBOLS);
+                    g_v92_pf_n = 0;
+                    g_v92_pf_logged = false;
                 }
                 if (g_v92_trn2u_nerr >= 2000
                     && g_v92_trn2u_nerr - g_v92_trn2u_pushed >= 500
@@ -23489,7 +23659,13 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     } else if (me_v92_precoder_enabled() && eq->cfg.nfb > 0 && !eq->ff_only
                         && me_v92_precoder_mode() != 2
                         && sig[0] >= V92_PRECODER_MIN_GAIN*sig[1]) {
+                        /* Unprecoded, said explicitly (Table 30's identity
+                         * section): with the section absent ESS sends
+                         * data the levels fit (0.021 LU) but that never
+                         * decodes (26 of 33 B1u ones, 4/4 calls), as on
+                         * its retrain path before the identity section. */
                         (void)v90_set_v92_upstream_precoder(g_v90, NULL, 0);
+                        (void)v90_set_v92_upstream_identity_filters(g_v90, true);
                     } else if (me_v92_precoder_enabled() && eq->cfg.nfb > 0 && !eq->ff_only) {
                         /* 6.4.2: the analogue modem applies the feedback to
                          * the true symbols, so data mode has the feedback
@@ -23508,6 +23684,14 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     if (sigma < 0.01)
                         sigma = 0.01;
                     g_v92_trn2u_sigma = sigma;
+                    /* ME_V92_PF_LOG=1: tens of ms of solves on this
+                     * thread, so a diagnostic, off on live calls. */
+                    if (!g_v92_pf_logged && g_v92_pf_n >= 2000
+                        && getenv("ME_V92_PF_LOG")
+                        && atoi(getenv("ME_V92_PF_LOG")) > 0) {
+                        g_v92_pf_logged = true;
+                        me_v92_pf_design_log_locked(eq);
+                    }
 
                     (void)v90_set_v92_upstream_noise(g_v90, sigma, lu_rx);
                     g_v92_trn2u_pushed = g_v92_trn2u_nerr;

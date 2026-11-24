@@ -237,6 +237,9 @@ void v90_start_phase3(v90_state_t *s, int u_info);
  * This is separate from v90_enable_v92_mode(): callers should only enable it
  * after mutual INFO0 capability confirmation. */
 void v90_enable_v92_phase3(v90_state_t *s);
+/* V.92 Table 22 bits 18:33: the Su extension Jp asks for, in units of
+ * T/65536 (8.6.4, 9.5.1.1.8).  False once Jp has started. */
+bool v90_set_v92_jp_phase(v90_state_t *s, uint16_t fraction);
 
 /*
  * Configure the DIL descriptor requested by the far-end analogue modem.

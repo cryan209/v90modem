@@ -222,6 +222,71 @@ static int synth_86(uint8_t *cw, bool alaw, int su_len, double f1333, double lev
     return n;
 }
 
+/* 9.5.1.1.6-8: Su then Su-bar through a band-limited pulse (raised cosine,
+ * rolloff 0.25) delayed by `delay` symbols, gain `gain` (negative: an
+ * inverted line).  Returns the Jp extension measured at Su-bar; with it,
+ * the delay, and Su-bar's half symbol (9.5.2.1.7), the analogue modem's
+ * pulse should land a whole number of symbols late. */
+static double jp_extension(double delay, double gain, bool alaw, int offset, bool *ok)
+{
+    static const double base[6] = {1, 0, 1, -1, 0, -1};
+    v92_su_t s;
+    double f = -1.0;
+
+    v92_su_init(&s, alaw);
+    *ok = false;
+    for (int i = 0;  i < offset;  i++)
+        v92_su_put(&s, alaw ? 0xd5 : 0xff);
+    for (int n = 0;  n < 24 + 144 + 24 + 60;  n++) {
+        double y = 0.0;
+
+        for (int m = 0;  m < 144 + 24 + 60;  m++) {
+            double t = n - 24 - m - delay, p;
+            double x = base[m % 6]*(m >= 144  &&  m < 168  ?  -1.0  :  1.0);
+
+            if (fabs(t) > 14.0)
+                continue;
+            p = fabs(t) < 1e-9 ? 1.0 : sin(M_PI*t)/(M_PI*t);
+            p *= fabs(fabs(0.5*t) - 1.0) < 1e-9 ? M_PI/4.0
+                                                : cos(0.25*M_PI*t)/(1.0 - 0.25*t*t);
+            y += x*p;
+        }
+        y *= gain*4000.0;
+        if (v92_su_put(&s, alaw ? linear_to_alaw((int16_t) lrint(y))
+                                : linear_to_ulaw((int16_t) lrint(y))) == V92_SU_BAR) {
+            *ok = v92_su_jp_phase(&s, &f, NULL);
+            break;
+        }
+    }
+    return f;
+}
+
+static int check_jp_phase(void)
+{
+    int fails = 0;
+
+    for (int i = 0;  i < 20;  i++) {
+        double frac_delay = 3.0 + i/20.0;
+        for (int off = 0;  off < 6;  off++) {
+            bool ok;
+            double gain = (off & 1) ? -1.0 : 1.0;
+            double f = jp_extension(frac_delay, gain, off >= 3, off, &ok);
+            double r = frac_delay + 0.5 + f;
+            double err = fabs(r - floor(r + 0.5));
+
+            /* A-law's coarser steps leave up to 0.025T on 144T of Su;
+             * 0.04T costs under 1% of the main tap's energy. */
+            if (!ok  ||  err > 0.04) {
+                printf("  Jp phase: delay %.2f offset %d gain %+.0f %s: extension %.3f, error %.3f  WRONG\n",
+                       frac_delay, off, gain, off >= 3 ? "alaw" : "ulaw", f, err);
+                fails++;
+            }
+        }
+    }
+    printf("  Jp phase: 120 delays/alignments/polarities/laws, %d wrong\n", fails);
+    return fails;
+}
+
 /* Su-bar must be reported inside [lo, hi] (codeword index), or never when lo < 0. */
 static int check(const char *name, const uint8_t *cw, int n, bool alaw, int lo, int hi)
 {
@@ -274,6 +339,7 @@ int main(void)
         n = synth_86(cw, alaw, 144, 0.3, 6000.0, true);
         fails += check(alaw ? "HSF-like 4kHz alaw" : "HSF-like 4kHz ulaw", cw, n, alaw, 168, 192);
     }
+    fails += check_jp_phase();
     printf(fails ? "FAIL: %d missed Su-bar\n" : "PASS\n", fails);
     return fails ? 1 : 0;
 }

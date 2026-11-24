@@ -20,6 +20,7 @@ struct v92a_s {
     v90a_linear_t *linear;
     v92a4_t *phase4;
     int training_points;
+    unsigned jp_phase;            /* Table 22 bits 18:33, received */
     v92_trn2u_tx_t pam;
     uint8_t ja[4096], cpt_bits[V92_CP_RX_MAX_BITS];
     int ja_length, cpt_length, bit_pos;
@@ -237,10 +238,13 @@ void v92a_rx(v92a_t *s, const int16_t *samples, int count)
             s->training_points = bits[48] ? 8 : 4;
             unsigned correction = 0;
             for (int b = 0; b < 16; b++) correction |= (unsigned)bits[18+b] << b;
-            if (correction)
-                fail(s, "nonzero Jp fractional phase correction is not implemented");
-            else
-                s->jp = true;
+            /* 8.6.4: the fraction of T to extend Su by.  Kept but not
+             * applied: this transmitter sends whole codewords at the symbol
+             * rate, with no interpolator to move them by part of one.  On a
+             * digital path there is no A/D phase to correct, and the digital
+             * modem measures close to zero there. */
+            s->jp_phase = correction;
+            s->jp = true;
         }
         s->jp_prime |= (e & V90A_RX_EVENT_JP_PRIME) != 0;
         s->dil_enough |= (e & V90A_RX_EVENT_DIL_ENOUGH) != 0;

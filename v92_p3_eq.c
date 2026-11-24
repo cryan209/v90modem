@@ -853,6 +853,18 @@ void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq)
     eq->refit_left = 0;
 }
 
+int64_t v92_p3_eq_last_index(const v92_p3_eq_t *eq)
+{
+    return eq->start - eq->cfg.ntaps/2 + eq->zcount - 1 + (int64_t)llround(eq->tau);
+}
+
+double v92_p3_eq_sample(const v92_p3_eq_t *eq, int64_t index)
+{
+    if (index < 0 || index >= eq->written || index <= eq->written - V92_P3_EQ_HISTORY)
+        return 0.0;
+    return eq->x[index & HMASK];
+}
+
 double v92_p3_eq_fb_gain(const v92_p3_eq_t *eq)
 {
     return eq ? fb_peak_gain(eq->fb, eq->cfg.nfb, eq->fb_scale) : 0.0;

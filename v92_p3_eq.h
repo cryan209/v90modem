@@ -254,6 +254,13 @@ void v92_p3_eq_reopen_feedback(v92_p3_eq_t *eq);
  * after go to *before and *after when not NULL. */
 bool v92_p3_eq_limit_feedback(v92_p3_eq_t *eq, double gmax,
                               double *before, double *after);
+/* The raw input sample (no interpolation) nearest the newest window
+ * position of the symbol just produced: its absolute index, and the sample
+ * at an index still in the history (0 once it has gone).  One symbol is
+ * one sample in the V.92 upstream, so a fixed offset maps symbols to the
+ * network A/D's own samples (v92_prefilter.h's channel fit). */
+int64_t v92_p3_eq_last_index(const v92_p3_eq_t *eq);
+double v92_p3_eq_sample(const v92_p3_eq_t *eq, int64_t index);
 /* The feedback taps' peak gain over frequency, in output units. */
 double v92_p3_eq_fb_gain(const v92_p3_eq_t *eq);
 

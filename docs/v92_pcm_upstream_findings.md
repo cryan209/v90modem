@@ -410,3 +410,82 @@ Two things were tried, and neither helped:
 ESS's driver debug (`ESS_DEBUG=1`) shows only FIFO counters.
 
 D-Modem does not run ESS's PCM upstream in A-law at all.
+
+### The receiver gap was the A/D's sampling phase: Jp's Su extension (2026-11-24)
+
+Our upstream against ESS was about 30000 where D-Modem's is about 40000
+because **we always sent Jp with a zero Su extension** (Table 22 bits 18:33).
+V.92 §8.6.4 says why that field exists: the digital modem cannot change the
+central office A/D's sampling phase, so §9.5.1.1.6-8 has it measure the
+phase on Su and ask the analogue modem, in Jp, to extend Su by a fraction of
+a symbol. With zero, the A/D samples the analogue modem's pulse wherever its
+clock happens to fall.
+
+ESS's fell half a symbol off the peak. The channel fitted on TRN2u
+(`ME_V92_PF_LOG=1`) had two equal taps where one belongs: -2761 and -3446
+(the main tap 52% of the response's power). Interpolated half a sample later,
+the same response is 97% one tap. Unequalised that is 0.4 dB of SNR. A 64-tap
+prefilter would have reached only about 30 dB on it. The G.711 quantisation
+of all that ISI (62 DS0 of the 63 DS0 fit error) is noise no receiver can
+remove afterwards.
+
+**The measurement.** Su's fundamental is 1333 1/3 Hz, and its phase on the
+absolute six-slot clock of `v92_su` gives the channel's delay modulo one
+symbol. Whole symbols are frame alignment, which TRN1u sets.
+`v92_su_jp_phase()` sums the bin over the Su blocks before Su-bar.
+
+**Su-bar's half symbol.** §9.5.2.1.7 sends Su-bar for 24.5T, so the analogue
+modem's timing moves T/2 later there and stays moved. To check, fitted on
+the line taps of two calls with Jp = 0 (TRN1u found by correlating against
+§8.5.7's scrambled ones):
+
+| | first Su | returned Su | TRN1u #1 | TRN1u #2 |
+|---|---|---|---|---|
+| SmartLink | 0.753 | 0.255 | 0.744 | 0.257 |
+| ESS | 0.074 | 0.550 | 0.524 | 0.552 |
+
+These are delay fractions in T. In both, the second TRN1u is the returned
+Su's phase, which is the first Su's plus T/2. Measuring the returned Su
+directly means holding Jd until enough of it has arrived (it starts 24.5T
+after the Su-bar that ends Jd). One extra Jd repetition made SmartLink
+Tone-A retrain in 4 of 4 calls, so we add the T/2 to the first Su instead.
+
+**SmartLink applies the fraction backwards.** It advances where Table 22 says
+extend. Asked for 0.247T, its second TRN1u came 0.247T earlier and its
+response was nearly one tap (1362 with neighbours 23 and -225). ESS
+extends, as the text says. Only 0 and T/2 mean the same both ways, so by
+default the measured extension is **rounded to 0 or T/2**. That leaves at
+most T/4 on either kind of modem, a main tap of about 86% or more. Sent
+exactly, the fraction put SmartLink T/2 off: 1159 against 558, and two
+Tone A retrains. D-Modem's digital modem always sends 0x8000 ("back to the
+phase of the first TRN1u"), which is the same robustness by another route,
+but without the measurement. `ME_V92_JP_PHASE=exact` sends the fraction
+unrounded, `=off` sends zero (as before), and a number in [0, 1) sends that
+number.
+
+**What ESS needed next.** On the peak, ESS's channel is one tap
+(-4885, every other tap under 40) and the precoder has nothing to do. Two
+things broke that case:
+- The design then sent **no coefficient section**. ESS's data fitted our
+  levels (0.021 LU) but never decoded (26 of 33 B1u ones, 4 of 4 calls). With
+  an explicit identity section, as the fallback path already sent, it locks.
+- The **feed-forward-only** data path ran the integer-timing B1u training.
+  On that flat channel TRN2u's timing loop had wandered 11.6 samples, and
+  rounding it left the taps 0.36 sample off, so the reference was never
+  found. An unprecoded CPd now always keeps the decision feedback, held to
+  the 0.9 peak gain. slmodemd always precodes (its 9600 Hz high-pass), so
+  that path is unchanged for it.
+
+**Results.** STREAM=10, D-Modem's rig:
+
+| Row | Before | Now |
+|---|---|---|
+| ESS A-law | 3 of 6 calls, ~30000 up | 3 of 3, B1u at 37333 first time, 48000-52000 down |
+| ESS μ-law | passes, 29333-30666 up | 3 of 3, 37333 up |
+
+ESS's own renegotiations still step the rate down during a call (to 29333 at
+worst). μ-law missed its first B1u in 2 of 3 calls (27 of 33 ones, 0.032 LU),
+and the retrain locked 37333 both times. On the same build SmartLink V.92
+(both laws, 34666 up, as before), SmartLink V.90, PCTel, SM56 and
+both Intel rows pass, 9 of 9, twice. `v92_su_test` checks the measurement
+over 120 delay, alignment, polarity and law cases.

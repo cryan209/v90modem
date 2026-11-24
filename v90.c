@@ -685,6 +685,7 @@ struct v90_state_s {
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
     int              jd_bit_pos;    /* Current bit position in Jd frame */
     uint8_t          jp_bits[16];   /* V.92 Jp frame packed into bytes (72 bits) */
+    uint16_t         jp_phase;      /* Table 22 bits 18:33, units of T/65536 */
     int              jp_bit_pos;    /* Current bit position in Jp frame */
 
     /* DIL descriptor/state */
@@ -3344,7 +3345,13 @@ static void v90_build_jp(v90_state_t *s)
     for (int i = 0; i < 17; i++)
         s->jp_bits[pos / 8] |= (uint8_t)(1U << (pos % 8)), pos++;
     pos++; /* start bit 17 */
-    pos += 16; /* 18:33 fractional Su extension: zero */
+    /* 18:33: the fraction of a symbol by which the analogue modem extends
+     * the Su that precedes Jp-to-Jp' (8.6.4, 9.5.1.1.6-8), LSB first.  The
+     * digital modem cannot move the network A/D's sampling phase, so this
+     * is how its pulse is put on the A/D's sample instant. */
+    for (int i = 0; i < 16; i++, pos++)
+        if ((s->jp_phase >> i) & 1)
+            s->jp_bits[pos / 8] |= (uint8_t)(1U << (pos % 8));
     pos++; /* start bit 34 */
     pos += 12; /* 35:46 reserved */
     s->jp_bits[pos / 8] |= (uint8_t)(1U << (pos % 8));
@@ -5210,6 +5217,8 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     fprintf(stderr, "[V90] Starting Phase 3 TX (U_INFO=%d, law=%s)\n",
             s->u_info, s->law == V90_LAW_ALAW ? "A-law" : "u-law");
 
+    /* Each Phase 3 measures its own Su (9.5.1.1.6). */
+    s->jp_phase = 0;
     /* Build Jd frame (used later after TRN1d) */
     v90_build_jd(s);
     if (s->v92_phase3)
@@ -5276,6 +5285,17 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     /* V.90 §9.3.1.1-.3: remain silent while the analogue modem sends
      * S/S-bar, PP, TRN and Ja. Ja detection is the trigger for Sd. */
     s->tx_phase = V90_TX_WAIT_JA;
+}
+
+bool v90_set_v92_jp_phase(v90_state_t *s, uint16_t fraction)
+{
+    /* Too late once Jp is on the line: its CRC covers these bits. */
+    if (!s || s->tx_phase == V90_TX_JP || s->tx_phase == V90_TX_JP_PRIME)
+        return false;
+    s->jp_phase = fraction;
+    if (s->v92_phase3)
+        v90_build_jp(s);
+    return true;
 }
 
 void v90_enable_v92_phase3(v90_state_t *s)
@@ -5606,6 +5626,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->v92_trn1u_trained = false;
             s->v92_su_seen = false;
             s->v92_su_bar_seen = false;
+            s->jp_phase = 0;
             s->dil_terminate_requested = false;
             s->dil_early_s = false;
             s->v92_ri_on_frame = false;
