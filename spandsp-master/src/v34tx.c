@@ -6235,7 +6235,6 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     enum
     {
         V90_INFO1A_TONE_GUARD_BAUDS = 120,
-        V90_INFO1A_FAST_RETRY_BAUDS = 120,
         V90_INFO1A_MAX_FAST_RETRIES = 3,
         V90_INFO1A_MAX_TOTAL_RETRIES = 6,
         V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES = 1,
@@ -6554,8 +6553,16 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     }
     /*endif*/
 
+    /* Silence is not a reason to re-send before the deadline.  §9.2.1.2.6
+       gives the analogue modem 700 ms plus a round trip from the end of
+       INFO1d, and some go quiet in that window: the Agere, HSF and Broadcom
+       soft modems stop Tone A once they have INFO1d and start INFO1a about
+       210 ms later (D-Modem's half_open8 log, 5965 -> 6174 ms).  A re-send
+       after 120 bauds (200 ms) of silence went out on top of that INFO1a in
+       every call, so we never decoded one, the peer retrained, and the
+       second attempt fell to V.34 (D-Modem rig, NET_LOOP=0.45). */
     if (!s->rx.signal_present
-        && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
+        && s->tx.tone_duration >= timeout_bauds
         && s->tx.v90_info1a_fast_retries < max_fast_retries)
     {
         s->tx.v90_info1a_fast_retries++;
@@ -6586,7 +6593,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     /*endif*/
 
     if (!s->rx.signal_present
-        && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
+        && s->tx.tone_duration >= timeout_bauds
         && s->tx.v90_info1a_fast_retries >= max_fast_retries)
     {
         s->tx.v90_info1a_total_retries++;
