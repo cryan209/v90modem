@@ -549,7 +549,38 @@ Two ESS behaviours remain, and neither comes from this change:
   It hit 2 of 8 μ-law calls in this set; earlier it showed in f3, t6f, t8d and
   t8f, on builds without the retime and in calls the retime left alone. The
   retrain recovers it.
-- **A-law first TRN1u locked about ±55 ppm off at about 26 dB** (others are
-  30-34 dB, ±2 ppm). Tau has then wandered about 13 samples by the second
-  TRN1u. Later renegotiations come in at 131-147 DS0 against 57-93, and the
-  call can lose its upstream: 8 of the 15 such calls failed.
+- **A-law first TRN1u at about ±55 ppm and 26 dB.** This turned out to be
+  ESS's transmitter. It is covered in the next section.
+
+### ESS's transmit clock slews through its first TRN1u (2026-11-24)
+
+About 1 A-law call in 8 passes our first TRN1u gate at 26 dB and ±55 ppm,
+where the rest give 30-34 dB and ±2 ppm. Our timing loop then winds to about
+±200 ppm, and tau reaches about −13 samples by the second TRN1u. Those calls
+all have an odd TRN1u start sample; no μ-law call has done it.
+
+The loop isn't biased. It is tracking a real slew:
+- **ESS's pulse moves.** A 256-symbol channel fit across ESS's TRN1u
+  (`live-rx.g711`, p6g) moves the pulse steadily from 2.94 to 0.83 samples
+  over 11500 symbols, about −180 ppm. In a good call (p6e) it stays within
+  2.83-2.92.
+- **A fixed fit can't follow it.** One fit over the first 1800 symbols leaves
+  780 error, against 63 in good calls, for the same channel shape.
+- **The clock is free-running.** The digital modem is silent through the
+  analogue modem's Ru, TRN1u and Ja (our transmit tap is at rms 8 from sample
+  67000). ESS's transmit clock therefore runs on the frequency it estimated
+  in Phase 2, and that estimate depends on how our Phase 2 signals line up
+  with its samples.
+- **It happens against D-Modem's own modem too.** With ESS against
+  `half_open8` in A-law, `NET_DELAY` was swept over 16 one-sample steps.
+  Delays of 1 and 4 samples gave `open8`'s first TRN1u fit 20.2-20.4 dB,
+  against 36.9-38.0 dB at the other 14, with the main tap still 83-97% of
+  the power. With no delay every run is identical, which is why it never
+  showed there.
+
+Since this happens with D-Modem's modem too, it isn't caused by anything we
+transmit, and the receiver already copes with it. Of the 8 off-frequency calls
+on the current receiver, 7 passed, and every one locked the first B1u at
+57-64 DS0. The 8th (reg7) lost its upstream after ESS's third renegotiation.
+Renegotiation TRN2u at 104-152 DS0 also occurs in calls without the slew, so
+that problem belongs to ESS's renegotiations, not to this.
