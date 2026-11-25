@@ -1574,3 +1574,23 @@ ten lines with PJSIP_EFAILEDCREDENTIAL, and the lines did not retry.
   200), and 2951 shows "Not in use".
 - The binary was not the cause: the 10:37 restart of 7ae2f08c registered
   normally.
+
+## Deployed 221960e2 (2026-11-25)
+
+On top of 5589721f, this deploy adds 221960e2, which affects V.90 Phase 3 Ja
+recognition (Table 12, §9.3.1.3).
+- A Ja that matches the CX93001 template but carries a clean Table 12
+  header naming a different descriptor (3 or more of the N/Lsp/Ltp field
+  bits differ) is no longer answered with the CX's DIL. We wait for its
+  CRC-valid descriptor instead.
+- Offline on CT 128, the Conexant HSF now gets its own DIL (N=147, not the
+  CX's 119). The CX93001 fixture still matches at 384/384.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 221960e2
+(`/root/deploy-221960e2.build.log`). The binary (md5 83720859…) is kept as
+`/opt/v90ras/sip_v90_modem.221960e2`, and the previous one (5589721f,
+b49f8400…) as `sip_v90_modem.pre-221960e2`. Installed by rename with
+`/run/v90ras/busy` empty (it is a directory; test it with `ls -A`, not
+`test -s`) and no PPP interface up. `v90ras` registered 2951-2960, and
+`v90isdn` came up ready.
