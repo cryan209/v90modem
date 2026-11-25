@@ -83,7 +83,7 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
-| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). It also fails in Phase 2 (no CRC-valid INFO1a) in about half the runs. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -340,9 +340,48 @@ The −6 dBm0 value was chosen for the RasFinder (v34tx.c, bits 33:37). With
 `ME_V90_CP_POWER_ENFORCE` off (the default), a quieter declaration would not
 reject anyone's CPt.
 
-Separately, the HSF rows often fail in Phase 2. We never get a CRC-valid
-INFO1a and retrain, in about half the runs on this build, and more often when
-three calls run in parallel. That failure is not investigated.
+### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
+
+The HSF rows often failed in Phase 2: no CRC-valid INFO1a, then a retrain.
+Six sequential HSF V.90 calls on 221960e2 got INFO1a on the first Phase 2 in
+1 of 6, and in 2 of 6 never. In a failing call the HSF is silent through all
+of our L1/L2 and our INFO1d. It raises Tone A about 0.35 s after INFO1d has
+ended, then holds it while we wait for INFO1a.
+
+That is what §9.2.2.1.7 predicts when the analogue modem has not seen our Tone
+B phase reversal. It conditions its receiver for L1/L2 only after detecting
+that reversal. The recording shows the reversal was never sent:
+- Failing call: the HSF's Tone A reversal is at 7.1311 s. Our Tone B runs
+  unreversed until 7.1725 s and goes straight into L1.
+- Passing call: our reversal is at 7.1500 s, 42 ms after the HSF's. About
+  22 ms of reversed Tone B follows before L1, against the 10 ms §9.2.1.1.6
+  asks for.
+
+Both calls log the same transmitter timing (SECOND_B_WAIT 38.3 ms,
+SECOND_NOT_B 8.3 ms). The cause is `tx_cc_modulation()`. It keeps
+generating the control channel to the end of the `v34_tx()` block (20 ms
+here), even after a baud handler has switched the modulator to PCM L1/L2. So
+L1 starts at the block boundary:
+- If the reversal baud falls early in a block, 10–30 ms of reversed tone goes
+  out.
+- If it falls within the nine-symbol shaper's delay (about 6.7 ms) of the
+  block's end, none does.
+
+The K56flex Tone A reversal (V.34 §11.2.1.2.5) already had the fix: keep the
+CC output for (9−1)/2 bauds, then switch to L1 at that exact sample. The V.90
+digital modem's SECOND_NOT_B now takes the same path, into PCM L1/L2. On the
+wire that is about 8 ms of reversed Tone B, then L1.
+
+After the fix, on CT 128:
+- Sequential HSF V.90 calls get INFO1a on the first Phase 2 in 9 of 9.
+- On the full matrix, all three HSF rows do, with three calls in parallel.
+- The HSF rows still fail at Phase 4 on the −6 dBm0 constellation (above).
+- The matrix stays at 14 of 18, data exact on every connecting row. Rates
+  are within run-to-run spread: Intel 49333, SM56 50666, Agere 53333.
+
+The plain V.34 call modem's Tone B reversal (`V34_MODULATION_L1_L2`) still
+hands over at the block boundary. It is unchanged here, and it has the same
+exposure.
 
 ### Agere's own status log
 

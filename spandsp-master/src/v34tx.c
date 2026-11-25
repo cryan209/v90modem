@@ -5613,14 +5613,28 @@ static void l1_l2_signal_init(v34_state_t *s)
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
-    if (s->rx.k56_phase2 && !s->tx.calling_party
-        && s->tx.stage == V34_TX_STAGE_SECOND_A)
+    if ((s->rx.k56_phase2 && !s->tx.calling_party
+         && s->tx.stage == V34_TX_STAGE_SECOND_A)
+        ||
+        (s->tx.v90_mode && !s->tx.calling_party
+         && s->tx.stage == V34_TX_STAGE_SECOND_NOT_B))
     {
         /* V.34 11.2.1.2.5: Tone A lasts 10 ms on the WIRE after its
            reversal, not 10 ms at the input of the nine-symbol CC shaper.
            L1 bypasses that shaper; switching immediately truncates A by
            its group delay. Keep the CC output for (9-1)/2 bauds, then
-           start L1 without inserting/deleting any line samples. */
+           start L1 without inserting/deleting any line samples.
+           V.90 9.2.1.1.6 asks the same of the digital modem's Tone B
+           reversal.  There the handover used to wait for the end of the
+           v34_tx() block, because tx_cc_modulation() ran CC to the end of
+           the block whatever the baud handler had switched to: 10-30 ms of
+           reversed Tone B when the reversal baud fell early in a 20 ms
+           block, and none at all when it fell within the shaper's delay of
+           the block's end -- L1 then started on unreversed Tone B.  The
+           HSF modem (D-Modem rig, 2026-11-25) never saw a reversal in those
+           calls, so it was not listening for our L1/L2 (9.2.2.1.7), raised
+           Tone A only after our INFO1d had gone by, and Phase 2 looped until
+           the call failed. */
         s->tx.k56_probe_cc_tail_samples =
             ((V34_INFO_TX_FILTER_STEPS - 1)*40 + 3)/(2*3);
         s->tx.current_modulator = V34_MODULATION_CC;
@@ -11054,10 +11068,16 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
         if (s->tx.k56_probe_cc_tail_samples > 0
             && --s->tx.k56_probe_cc_tail_samples == 0)
         {
-            s->tx.current_modulator = V34_MODULATION_L1_L2;
             /* A transition at the first sample must still fill this call.
                Returning zero makes v34_tx() stop and the engine pad silence,
                violating 11.2.1.2.5's contiguous CC-to-L1 handover. */
+            if (s->tx.v90_mode && !s->tx.calling_party)
+            {
+                s->tx.current_modulator = V34_MODULATION_PCM_L1_L2;
+                return sample ? sample : tx_pcm_l1_l2(s, amp, max_len);
+            }
+            /*endif*/
+            s->tx.current_modulator = V34_MODULATION_L1_L2;
             return sample ? sample : tx_l1_l2(s, amp, max_len);
         }
         if ((s->tx.baud_phase += 3) >= 40)
