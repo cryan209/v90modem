@@ -1641,3 +1641,24 @@ Built in `/root/deploy-5640b4d3`, checked out at 2c81a62c
 `/run/v90ras/busy` empty and no PPP interface up. Asterisk's endpoints were
 present this time (2951 "Not in use"). The restart logged 20 v90ras
 "registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
+## Deployed 9e7f5cf4 (2026-11-25)
+
+On top of 2c81a62c, this deploy adds 9e7f5cf4, which affects the INFO and
+tone receiver used in every Phase 2 (V.34 §10.1.2.3.1).
+- A reversal is now a phase jump of over 90 degrees across three samples, not
+  two. In noise the two-sample test could miss a reversal, and the 10 dB
+  `v34_duplex_test` caller lost INFO1a's sync word that way.
+- Offline: INFO1a decodes at all 12 delays of the 10 dB sweep (10/12 pass,
+  the other two fail later, at MP). The `v56_loopback_test` echo case passes
+  12/12, as before. `test-fast` 775/775. HSF first-Phase-2 INFO1a 6/6.
+  D-Modem matrix 14 of 18, data exact.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
+(`/root/deploy-9e7f5cf4.build.log`). The binary (md5 1290652b…) is kept as
+`/opt/v90ras/sip_v90_modem.9e7f5cf4`, and the previous one (2c81a62c,
+81a4bd9d…) as `sip_v90_modem.pre-9e7f5cf4`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. Asterisk's endpoints were
+present. The restart logged 20 v90ras "registration success" lines, and
+v90isdn logged "SIP V.90 modem ready".
