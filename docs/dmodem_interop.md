@@ -83,7 +83,7 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
-| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours fails against the HSF at 3200 baud (0/4 vs 4/4; below, 2026-11-26). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -339,6 +339,45 @@ other row still passes, but most connect lower:
 The −6 dBm0 value was chosen for the RasFinder (v34tx.c, bits 33:37). With
 `ME_V90_CP_POWER_ENFORCE` off (the default), a quieter declaration would not
 reject anyone's CPt.
+
+### The −6 dBm0 failure is the HSF's; its V.34 fallback fails on us (2026-11-26)
+
+The open question above is settled, and the default stays at −6 dBm0.
+Each arm below is 4 calls at `NET_DELAY` 1-4, μ-law, on 1496fe03.
+
+The cause is not clipping or level in the harness. A diagnostic copy of
+`netsim` (`/root/netdiag/netsim_diag` on CT 128) scales the loop path toward
+the HSF (`NET_LOOP_GAIN_DB`) and counts samples past 16 bits:
+- The loop output peaks at 20696 with 0 samples over 16 bits in every call.
+- With 6 dB of extra loss, our −6 dBm0 arm still fails 0/4. In that arm the
+  HSF's CPt is unchanged (97, 88, 77, 52) and its levels arrive below those
+  of the −12 dBm0 set. The −12 dBm0 arm connects V.90 at 0 dB (3/4) and at
+  −6 dB (4/4).
+
+D-Modem's own modem fails the same way when it declares what we declare. A
+diagnostic `half_open8` (`/root/netdiag/half_open8_pwr`) takes INFO0d bits
+33:37 and bit 38 from `DIAG_V90_MAX_POWER` / `DIAG_V90_B38`:
+- **Code 11 (−6 dBm0), at the codec output or at the terminals:** the HSF
+  asks it for CPt 97, 88, 77, 52 too. It never sends CP, retrains twice
+  (Tone A), then connects plain V.34 at 33600. That holds in 8 of 8 calls
+  and is never V.90.
+- **Code 23 (−12 dBm0, its default):** V.90 on the first attempt, 4 of 4.
+
+So the HSF chooses, from a −6 dBm0 ceiling, a training constellation it
+cannot train on, whoever the digital modem is. Changing the default would
+cost every other row 1.3-2.7k to suit one peer.
+
+What IS ours is the fallback. open8 survives the HSF's two retrains because
+its plain V.34 works against the HSF; ours does not. HSF caller with
+`AT+MS=V34`:
+- **Us:** 0/4. Phase 3 completes and our Phase 4 TRN reads 30-34 dB, then
+  the HSF sends Tone A, retrains and gives up (NO CARRIER).
+- **open8:** 4/4 at 33600 (3429 baud).
+- **open8 with `DSP_V34_INFO0=7b,a` (no 3429):** 4/4 at 31200. So 3429 is
+  not the cause, since our calls run at 3200 baud.
+
+The HSF rows now fail on our plain V.34 at 3200 baud, not on the power
+declaration. That is the next thing to chase on this peer.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
