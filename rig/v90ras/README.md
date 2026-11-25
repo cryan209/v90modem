@@ -1620,3 +1620,24 @@ first restart failed registration with PJSIP_EFAILEDCREDENTIAL.
 - `asterisk -rx "module reload res_pjsip.so"` brought back 96 endpoints.
 - A second restart of `v90ras` and `v90isdn` registered 2951-2960, all
   "Not in use" and Avail. v90isdn logged "SIP V.90 modem ready".
+
+## Deployed 2c81a62c (2026-11-25)
+
+On top of 58655519, this deploy adds 2c81a62c, which affects V.34/V.90
+Phase 2: the Tone B reversal (§11.2.1.1.6, §9.2.1.1.6).
+- The SECOND_NOT_B CC tail covers the plain V.34 call modem too, not only
+  the V.90 digital modem.
+- The tail gains one baud, so the reversed Tone B lasts 10 ms on the wire:
+  9.8 ms measured, where it was 8.2 ms with 58655519's tail. The reversal
+  instant is unchanged.
+- Offline: HSF V.90 first-Phase-2 INFO1a 6/6. D-Modem matrix 14 of 18, data
+  exact. V.34 duplex symbol-rate matrix 12/12.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 2c81a62c
+(`/root/deploy-2c81a62c.build.log`). The binary (md5 81a4bd9d…) is kept as
+`/opt/v90ras/sip_v90_modem.2c81a62c`, and the previous one (58655519,
+8328d662…) as `sip_v90_modem.pre-2c81a62c`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. Asterisk's endpoints were
+present this time (2951 "Not in use"). The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
