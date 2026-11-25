@@ -83,7 +83,7 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
-| HSF | V.90, V.92 (both laws) | Fail. Since the INFO1d re-send fix (below), V.90 gets a V.90 INFO1a (3200 up), our Jd is answered with S, and HSF retrains in the second DIL cycle without sending the §9.3.2.10 S. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). It also fails in Phase 2 (no CRC-valid INFO1a) in about half the runs. Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -266,6 +266,83 @@ grid) and its Ja as decoded "only through the hypothesis-8 recovery".
 Hypothesis 8 is the ordinary differential map (`v34_rx_map_phase4_raw_bits`),
 and Agere's upstream at 3200 baud is a 33 dB signal that we demodulate
 correctly. That reading was wrong.
+
+### Phase 3: we answered the HSF's Ja with the CX93001's descriptor (2026-11-25)
+
+The HSF V.90 row got its Jd answered with S, then retrained in our second
+DIL cycle. We had sent the DIL for N=119, LSP=124, LTP=126: the CX93001's
+descriptor, which `v90_ja_template_scan()` substitutes when a 384-bit stretch
+of Ja agrees with the CX's frame at 70% or more. The HSF's Ja matched at
+271-273/384, before a whole frame of it had arrived. Its own descriptor is
+N=147, LSP=126, LTP=126 (CRC-valid, the same in every call). With
+`ME_V90_JA_TEMPLATE=0` we decode it, send that DIL, and the HSF ends it with
+S/S-bar as §9.3.2.10 says.
+
+The template's "8 sigma from chance" assumed random bits. Table 12 frames
+are not. Aligned at frame bit 18, the HSF's Ja agrees with the CX's at
+71% over bits 18:401, 77-78% over 146:529 (the SP/TP patterns and early
+training Ucodes are near-common), and only 52-58% past bit 1000. What tells
+the two apart is the header. The HSF's bits 18:50 arrive clean: all 11
+fixed-zero bits (26:34, 42, 50) read zero, and N/LSP-1/LTP-1 differ from
+the CX's in 5 of 22 field bits.
+
+Fix: `v90_ja_header_names_other_descriptor()` (`v90_ja_match.h`). A template
+match whose header is well formed and differs from the template's in 3 or more
+field bits is another peer's Ja, and we wait for its CRC-valid descriptor. A
+noisy header (any fixed-zero bit set) gives no verdict, so the CX's poorly
+equalized Ja is still recognised. The CX fixture
+(`reference-data/artifacts/cx93001-ja-crc-fails-20261023`) still matches,
+384/384. On CT 128 the HSF now logs "header names another descriptor", parses
+N=147 and gets the right DIL in every call.
+
+### Phase 4: the HSF fails on the training constellation our INFO0d lets it ask for (2026-11-25)
+
+With the right DIL, the HSF sends 5 CPt frames, sees our Ri-to-R̄i (§9.4.2.2),
+sends SCR for about 2.8 s and retrains. It never sends CP. Against
+`half_open8` it sends CP 3.5 s after CPt and connects. That holds with a
+3200-baud upstream too (`DSP_V34_INFO0=7b,a` withholds 3429, giving
+52000/31200), so its 3200 path is not the cause.
+
+Everything we send is the same as what `half_open8` sends. Comparing the two
+calls' downstreams from `NET_WAV`:
+- Sd, S̄d and the start of TRN1d are byte-identical. `half_open8`'s TRN1d is
+  about 8000T, ours 20004T, and 8004T changes nothing.
+- Jd is identical (same rate mask, ld 1, CRC), as are J'd and the position of
+  the last Jd frame before DIL.
+- Both DILs equal our §8.4.1 generator for HSF's descriptor through a full
+  cycle.
+- Ri and R̄i are identical. Our TRN2d equals `half_open8`'s for all 2166 of
+  its symbols, which also confirms our §5.4.5 shaper for a1 = 63/64.
+- MP is CRC-valid in both. Ours offers 28800, 16-state, minimum shaping.
+  Offering 31200 (`ME_V90_UPSTREAM_NO_SNR_CAP=1`) changes nothing.
+- TRN2d length (2166T, 16000T), Ri length (4000T-16000T) and holding Jd 50 ms
+  past S also change nothing.
+
+What differs is the CPt the HSF sends: Ucodes 97, 88, 77, 52 to us, and
+88, 81, 68, 45 to `half_open8`, in every call. The cause is INFO0d bits 33:37
+(Table 7): we declare a −6 dBm0 maximum at the codec output, while
+`half_open8` declares −12 dBm0 at the terminals. With
+`ME_V90_MAX_TX_DBM0_CODE=23` (−12 dBm0) the HSF asks for 88, 81, 68, 45 and
+connects V.90 in 3 of 4 calls, with data correct both ways (the fourth failed
+in Phase 2). So the HSF chooses a training constellation it then cannot train
+on when it is offered −6 dBm0. We have not established whether that is the
+HSF, or the codec model of D-Modem's harness.
+
+The default stays at −6 dBm0 for now. On the full matrix at −12 dBm0, every
+other row still passes, but most connect lower:
+- SmartLink V.90: 54667 (was 56000).
+- Agere: 52000 (was 53333).
+- Intel: 50666 (was 52000).
+- SM56: 45333.
+- ESS and Broadcom: unchanged.
+
+The −6 dBm0 value was chosen for the RasFinder (v34tx.c, bits 33:37). With
+`ME_V90_CP_POWER_ENFORCE` off (the default), a quieter declaration would not
+reject anyone's CPt.
+
+Separately, the HSF rows often fail in Phase 2. We never get a CRC-valid
+INFO1a and retrain, in about half the runs on this build, and more often when
+three calls run in parallel. That failure is not investigated.
 
 ### Agere's own status log
 

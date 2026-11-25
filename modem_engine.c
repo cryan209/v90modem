@@ -11933,10 +11933,12 @@ static bool v90_dil_try_repeated_frames(const uint8_t *bits, int total_bits)
 #define V90_JA_TPL_HYPS          24
 
 static int g_v90_ja_tpl_scanned[V90_JA_TPL_HYPS];
+static bool g_v90_ja_tpl_other_logged;
 
 static void v90_ja_template_reset(void)
 {
     memset(g_v90_ja_tpl_scanned, 0, sizeof(g_v90_ja_tpl_scanned));
+    g_v90_ja_tpl_other_logged = false;
 }
 
 static bool v90_ja_template_scan(void)
@@ -11987,6 +11989,22 @@ static bool v90_ja_template_scan(void)
                                                V90_JA_TPL_MAX_MISMATCH);
             if (mismatches > V90_JA_TPL_MAX_MISMATCH)
                 continue;
+            /* The frame body is near-common across vendors; a clean header
+             * naming another descriptor is another peer's Ja (the HSF's
+             * matched 273/384 and we answered it with the CX's N=119, so
+             * its DIL measurement failed every time).  Leave it to the
+             * CRC-valid parse. */
+            if (v90_ja_header_names_other_descriptor(bits + i, tpl)) {
+                if (!g_v90_ja_tpl_other_logged) {
+                    g_v90_ja_tpl_other_logged = true;
+                    ME_LOG("[ME] V.90: Ja window fits the CX93001 frame "
+                           "(%d/%d, hypothesis %d) but its Table 12 header "
+                           "names another descriptor; waiting for a "
+                           "CRC-valid Ja\n",
+                           V90_JA_TPL_LEN - mismatches, V90_JA_TPL_LEN, h);
+                }
+                continue;
+            }
             if (!v90_dil_load_cx93001(&desc))
                 return false;
             g_v90_pending_dil = desc;

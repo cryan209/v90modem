@@ -34,6 +34,34 @@ int main(void)
             }
         }
     }
+    /* Table 12 header check, frame bits 18:50.  CX93001: N=119 Lsp=124
+     * Ltp=126; HSF (D-Modem rig, 2026-11-25): N=147 Lsp=126 Ltp=126, bits
+     * as received on hypothesis 8. */
+    {
+        static const char *cx  = "111011100000000001101111010111110";
+        static const char *hsf = "110010010000000001011111010111110";
+        uint8_t c[33], h[33];
+
+        for (int k = 0; k < 33; k++) {
+            c[k] = (uint8_t)(cx[k] - '0');
+            h[k] = (uint8_t)(hsf[k] - '0');
+        }
+        assert(!v90_ja_header_names_other_descriptor(c, c));
+        assert(v90_ja_header_names_other_descriptor(h, c));
+        /* Two field-bit errors on the template's own header still match. */
+        c[0] ^= 1; c[20] ^= 1;
+        {
+            uint8_t t[33];
+
+            for (int k = 0; k < 33; k++)
+                t[k] = (uint8_t)(cx[k] - '0');
+            assert(!v90_ja_header_names_other_descriptor(c, t));
+            /* A set fixed-zero bit (frame bit 30) makes the header noisy:
+             * no verdict, even with HSF's fields. */
+            h[12] = 1;
+            assert(!v90_ja_header_names_other_descriptor(h, t));
+        }
+    }
     puts("v90_ja_match_test: PASSED");
     return 0;
 }
