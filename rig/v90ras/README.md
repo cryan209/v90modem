@@ -1663,6 +1663,26 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 4035f476 (2026-11-25)
+
+On top of 780969a0, this deploy adds 4035f476. In V.34 Phase 4, after the
+peer's MP' has been decoded, E (§11.4.1.x.3) is now taken on the MP frame
+grid when the 20 bits are nearer E than the MP' prefix, counted in symbols:
+at most 2 symbol errors, and a 2-symbol margin for 2. One noise hit in E
+used to strand Phase 4 while the far end went on to B1.
+- Off the grid, or without a decoded MP', E still needs all 20 ones.
+- Offline: the 10 dB duplex row fails 2/96 over 8 noise seeds × 12 delays,
+  against 5/96 before. The two left never accept any MP.
+- `test-fast` 781/781.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 4035f476
+(`/root/deploy-4035f476.build.log`). The binary (md5 e52b9c16…) is kept as
+`/opt/v90ras/sip_v90_modem.4035f476`, and the previous one (780969a0,
+77da78d8…) as `sip_v90_modem.pre-4035f476`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed 780969a0 (2026-11-25)
 
 On top of 9e7f5cf4, this deploy adds 780969a0. In plain V.34 Phase 3 the far
