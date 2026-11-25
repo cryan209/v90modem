@@ -1662,3 +1662,24 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 `/run/v90ras/busy` empty and no PPP interface up. Asterisk's endpoints were
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
+
+## Deployed 780969a0 (2026-11-25)
+
+On top of 9e7f5cf4, this deploy adds 780969a0. In plain V.34 Phase 3 the far
+end's J now decides our Phase 4 TRN constellation (V.34 §10.1.3.8, §11.4) by
+the majority of its near-exact windows, not one J period. One bit error used
+to make a 4-point J read as J(16).
+- When J is confirmed is unchanged.
+- The V.90 digital modem's Ja path is untouched.
+- Offline: the 10 dB duplex row fails 5/96 over 8 noise seeds × 12 delays,
+  against 8/96 before. The three wrong-J runs pass; the other five miss E
+  after MP, the same runs before and after.
+- `test-fast` 777/777. The MT5634 3429 replay still finds B1 at +8.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 780969a0
+(`/root/deploy-780969a0.build.log`). The binary (md5 77da78d8…) is kept as
+`/opt/v90ras/sip_v90_modem.780969a0`, and the previous one (9e7f5cf4,
+1290652b…) as `sip_v90_modem.pre-780969a0`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
