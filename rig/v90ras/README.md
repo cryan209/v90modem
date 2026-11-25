@@ -1594,3 +1594,29 @@ b49f8400…) as `sip_v90_modem.pre-221960e2`. Installed by rename with
 `/run/v90ras/busy` empty (it is a directory; test it with `ls -A`, not
 `test -s`) and no PPP interface up. `v90ras` registered 2951-2960, and
 `v90isdn` came up ready.
+
+## Deployed 58655519 (2026-11-25)
+
+On top of 221960e2, this deploy adds 58655519, which affects V.90 Phase 2:
+the digital modem's Tone B reversal (§9.2.1.1.6).
+- The handover from reversed Tone B to PCM L1 now waits (9−1)/2 bauds for the
+  CC shaper's tail, then switches at that exact sample. Before, it waited for
+  the end of the 20 ms `v34_tx()` block. That sent 10–30 ms of reversed tone,
+  or none at all when the reversal baud fell within about 6.7 ms of the
+  block's end.
+- Offline on CT 128, the HSF gets INFO1a on the first Phase 2 in 9 of 9
+  calls (was 1 of 6). The D-Modem matrix is unchanged at 14 of 18.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 58655519
+(`/root/deploy-58655519.build.log`). The binary (md5 8328d662…) is kept as
+`/opt/v90ras/sip_v90_modem.58655519`, and the previous one (221960e2,
+83720859…) as `sip_v90_modem.pre-58655519`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up.
+
+Asterisk had restarted on its own about a minute before the install, again
+losing every endpoint-modem endpoint ("Unable to find object 2951"), so the
+first restart failed registration with PJSIP_EFAILEDCREDENTIAL.
+- `asterisk -rx "module reload res_pjsip.so"` brought back 96 endpoints.
+- A second restart of `v90ras` and `v90isdn` registered 2951-2960, all
+  "Not in use" and Avail. v90isdn logged "SIP V.90 modem ready".
