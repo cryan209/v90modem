@@ -1663,6 +1663,26 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed ce417b72 (2026-11-26)
+
+On top of 5849d2e1, this deploy adds ce417b72. When a V.34 caller's INFO1c
+announces an MD, the plain V.34 answerer now goes silent for the MD (V.34
+§11.3.1.2.4), waits for the caller's second S-to-S̄, and trains on its PP and
+TRN. Before, it kept sending J through the MD and went to Phase 4 on the
+second S, ahead of the caller's PP, TRN and J. Its two opt-ins,
+`V34_DUPLEX_SPEC_S` and `V34_P4_KEEP_BAUD_PHASE`, are off and not set here.
+- Offline: the HSF's plain V.34 on the D-Modem rig goes from 0/4 to 1/8
+  (`docs/dmodem_interop.md`).
+- `test-fast` 783/783. The D-Modem matrix is unchanged at 14/18.
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at ce417b72
+(`/root/deploy-ce417b72.build.log`). The binary (md5 b4fea629…) is kept as
+`/opt/v90ras/sip_v90_modem.ce417b72`, and the previous one (5849d2e1,
+fdae0f0f…) as `sip_v90_modem.pre-ce417b72`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines.
+
 ## Deployed 5849d2e1 (2026-11-25)
 
 On top of 4035f476, this deploy adds 5849d2e1. When V.34 Phase 4 resets the
