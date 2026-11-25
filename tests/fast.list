@@ -1188,10 +1188,11 @@ V34_TEST_RENEG_NO_TRN=answer V34_DUPLEX_DELAY=5 V34_DUPLEX_RENEG=4000 ./v34_dupl
 # error-free, where the formula asked 12000 and came out white.  Both are
 # stable over delays 0-7.
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=35 V34_DUPLEX_EXPECT_RATES=19200,19200 ./v34_duplex_test 2400 21600 ulaw
-# The 10 dB row is NOT stable over delay: at 10 dB the caller's INFO1a decode
-# is luck, and a few ms of Phase 2 timing moves it (2026-11-25, delays 0-11:
-# 4/12 pass at 58655519, 9/12 with an 8.2 ms reversed Tone B, 3/12 with the
-# 10 ms one), so it runs at a delay that passes on all three.
+# The 10 dB row is NOT stable over delay.  Its caller used to lose INFO1a to
+# reversals the two-sample jump test missed (delays 0-11: 3/12-9/12 pass
+# depending on Phase 2 timing); with the three-sample test (2026-11-25)
+# INFO1a decodes at every delay and 10/12 pass.  Delays 2 and 8 still fail,
+# later, at MP.  It runs at a delay that has passed throughout.
 V34_DUPLEX_DELAY=5 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=15 V34_DUPLEX_EXPECT_RATES=9600,9600 ./v34_duplex_test 3000 28800 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=44 V34_DUPLEX_EXPECT_RATES=24000,24000 ./v34_duplex_test 2743 26400 ulaw

@@ -2276,6 +2276,9 @@ typedef struct
     int target_bits;
     uint16_t crc;
     uint32_t last_angles[2];
+    /*! Recent info_rx angles, for the three-sample reversal test. */
+    uint32_t info_angle_hist[16];
+    int info_angle_idx;
 
     /*! \brief V.90 mode: when true, INFO0 RX expects V.90 INFO0a format (49 bits)
         instead of standard V.34 INFO0.  Set by external v90 module. */

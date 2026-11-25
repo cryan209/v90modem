@@ -6937,6 +6937,7 @@ V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
                    cause spurious reversals when CC resumes */
                 s->last_angles[0] = 0;
                 s->last_angles[1] = 0;
+                memset(s->info_angle_hist, 0, sizeof(s->info_angle_hist));
                 s->blip_duration = 0;
             }
             /*endif*/
@@ -6976,7 +6977,18 @@ V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         zz.re = sample.re*z.re - sample.im*z.im;
         zz.im = -sample.re*z.im - sample.im*z.re;
         angle = arctan2(zz.im, zz.re);
-        phase_delta = (int32_t) (angle - s->last_angles[1]);
+        /* A reversal (V.34 10.1.2.3.1: a one is a 180 degree change) is
+           sought as a jump of over 90 degrees across three samples.  Two was
+           too few: the RRC-shaped turn takes several samples, and in noise
+           its 180 degrees can split into steps that never exceed 90 degrees
+           in any two.  At 10 dB of injected noise the caller missed a
+           reversal in INFO1a's sync word (01110000 for 01110010) and never
+           decoded it (v34_duplex_test 2400/21600, delays 0-11: 3/12 -> 10/12
+           pass, INFO1a decoded at all 12; 2026-11-25).  Four was too many:
+           the wobble of a strong echo of our own CC (v56_loopback_test,
+           -1 dB echo) then corrupted a clean INFO0.  The refractory period
+           below (about 7 samples) still keeps one turn to one bit. */
+        phase_delta = (int32_t) (angle - s->info_angle_hist[(s->info_angle_idx - 3) & 15]);
         /* V34_DUMP_INFO_RX (diagnostic, 2026-07-19): dumps the info_rx
            demod chain -- pre-AGC matched-filter output, post-mix baseband,
            angle, and phase_delta -- to find why put_info_bit() never sees
@@ -7018,6 +7030,8 @@ V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         /*endif*/
         s->last_angles[1] = s->last_angles[0];
         s->last_angles[0] = angle;
+        s->info_angle_hist[s->info_angle_idx & 15] = angle;
+        s->info_angle_idx++;
         s->duration++;
         s->blip_duration += 3;
         dds_advancef(&s->carrier_phase, s->cc_carrier_phase_rate);

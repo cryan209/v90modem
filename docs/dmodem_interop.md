@@ -397,13 +397,47 @@ Verification:
   out to be a coin flip. There the caller decodes INFO1a only at some delays,
   and any few-ms change in Phase 2 timing moves which ones. Over delays 0-11 it
   passes 4/12 at 58655519, 9/12 with the 8.2 ms tail, and 3/12 with 10 ms. It
-  now runs at delay 5, which passes on all three. Why INFO1a is lost at 10 dB
-  is not investigated.
+  now runs at delay 5, which passes on all three. Why INFO1a was lost at
+  10 dB is the next section.
 - No usable offline third-party peer for our V.34 *call* role:
   - Against `half_open8` our B1 never correlates at any symbol rate (receive
     SNR about −10 dB) on either build, so both calls fall into retrain loops.
     The old build's CONNECT 19200 carries garbage.
   - `half_smartlink` called with `PROTO_B=ATX3` never completes V.8.
+
+### The INFO receiver missed reversals in noise (2026-11-25)
+
+The 10 dB failures were ours: our caller lost INFO1a to a missed reversal.
+The bits it received in INFO1a's window show it:
+- At delay 5 it gets fill and sync `1111 01110010` and decodes INFO1a.
+- At delay 0 it gets `1111 01110000`. One '1' (a 180° phase change, V.34
+  §10.1.2.3.1) never registered, the flywheel supplied a '0', and the sync
+  never matched.
+
+`info_rx()` declares a '1' when the phase jumps more than 90° between two
+samples. The RRC-shaped turn takes several samples, and in noise its 180° can
+split into steps that never exceed 90° in any two. The control channel's
+in-band SNR there is far above what DPSK needs, so the loss is the detector's.
+
+The jump is now measured across three samples. The other options failed:
+
+| Variant | 10 dB sweep, delays 0-11 | Other tests |
+|---|---|---|
+| Two samples (as before) | 3/12–9/12, varying with Phase 2 timing | all pass |
+| One-baud phase check at the flywheel's zero decision | 10/12 | broke the `engine_pair` §11.5 retrain: false INFO0 sync codes in the peer's tones |
+| Four samples | 10/12 | broke `v56_loopback_test` at 40 dB with a −1 dB echo: echo wobble corrupted a clean INFO0 |
+| Three samples (now) | 10/12, INFO1a decoded at all 12 | all pass |
+
+The three-sample results in full:
+- 10 dB sweep: delays 2 and 8 still fail, later, at MP.
+- `v56_loopback_test` echo case over delays 40–140 at 40 and 25 dB SNR:
+  12/12, the same as the old receiver.
+- `test-fast` 775/775. V.34 duplex matrix 12/12.
+- HSF V.90 first-Phase-2 INFO1a 6/6.
+- D-Modem matrix 14 of 18, data exact on every connecting row.
+
+The four-sample build's ESS V.90 data failure did not recur on three samples.
+That one run cannot say whether it was the receiver.
 
 ### Agere's own status log
 
