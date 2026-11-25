@@ -1663,6 +1663,25 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 5849d2e1 (2026-11-25)
+
+On top of 4035f476, this deploy adds 5849d2e1. When V.34 Phase 4 resets the
+receive front end, which puts the symbol instant back to phase 0, the T/2
+eye chooser now gets two flips of its own and a fresh window, as the V.90 CP
+stage already did. A spent per-call cap had left Phase 4 TRN at the eye
+crossing.
+- Offline: the 10 dB duplex row passes 96/96 over 8 noise seeds × 12 delays,
+  against 94/96 before.
+- `test-fast` 783/783; `test-slow` 25/26 (the existing courier-emu row).
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at 5849d2e1
+(`/root/deploy-5849d2e1.build.log`). The binary (md5 fdae0f0f…) is kept as
+`/opt/v90ras/sip_v90_modem.5849d2e1`, and the previous one (4035f476,
+e52b9c16…) as `sip_v90_modem.pre-5849d2e1`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed 4035f476 (2026-11-25)
 
 On top of 780969a0, this deploy adds 4035f476. In V.34 Phase 4, after the
