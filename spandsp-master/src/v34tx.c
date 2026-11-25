@@ -5616,8 +5616,7 @@ static void l1_l2_signal_init(v34_state_t *s)
     if ((s->rx.k56_phase2 && !s->tx.calling_party
          && s->tx.stage == V34_TX_STAGE_SECOND_A)
         ||
-        (s->tx.v90_mode && !s->tx.calling_party
-         && s->tx.stage == V34_TX_STAGE_SECOND_NOT_B))
+        s->tx.stage == V34_TX_STAGE_SECOND_NOT_B)
     {
         /* V.34 11.2.1.2.5: Tone A lasts 10 ms on the WIRE after its
            reversal, not 10 ms at the input of the nine-symbol CC shaper.
@@ -5634,9 +5633,20 @@ static void l1_l2_signal_init(v34_state_t *s)
            HSF modem (D-Modem rig, 2026-11-25) never saw a reversal in those
            calls, so it was not listening for our L1/L2 (9.2.2.1.7), raised
            Tone A only after our INFO1d had gone by, and Phase 2 looped until
-           the call failed. */
+           the call failed.  The plain V.34 call modem's reversal
+           (11.2.1.1.6: "Tone B shall be transmitted for an additional
+           10 ms after the phase reversal") ran through the same stage and
+           had the same exposure, so SECOND_NOT_B takes the tail in every
+           role that reaches it.
+           SECOND_NOT_B counts the reversal baud as its first and hands
+           over as its sixth starts, so only five reversed bauds precede the
+           shaper's delay: one more baud of tail makes the 10 ms (measured
+           8.2 ms on the wire without it, 2026-11-25). */
         s->tx.k56_probe_cc_tail_samples =
             ((V34_INFO_TX_FILTER_STEPS - 1)*40 + 3)/(2*3);
+        if (s->tx.stage == V34_TX_STAGE_SECOND_NOT_B)
+            s->tx.k56_probe_cc_tail_samples += 40/3;
+        /*endif*/
         s->tx.current_modulator = V34_MODULATION_CC;
     }
     /* 11.2.1.2.5 conditions the receiver to detect Tone B as L1 begins, so

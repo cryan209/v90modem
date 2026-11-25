@@ -370,7 +370,8 @@ L1 starts at the block boundary:
 The K56flex Tone A reversal (V.34 §11.2.1.2.5) already had the fix: keep the
 CC output for (9−1)/2 bauds, then switch to L1 at that exact sample. The V.90
 digital modem's SECOND_NOT_B now takes the same path, into PCM L1/L2. On the
-wire that is about 8 ms of reversed Tone B, then L1.
+wire that was 8.2 ms of reversed Tone B, then L1; the follow-up below makes it
+10 ms.
 
 After the fix, on CT 128:
 - Sequential HSF V.90 calls get INFO1a on the first Phase 2 in 9 of 9.
@@ -379,9 +380,30 @@ After the fix, on CT 128:
 - The matrix stays at 14 of 18, data exact on every connecting row. Rates
   are within run-to-run spread: Intel 49333, SM56 50666, Agere 53333.
 
-The plain V.34 call modem's Tone B reversal (`V34_MODULATION_L1_L2`) still
-hands over at the block boundary. It is unchanged here, and it has the same
-exposure.
+Follow-up, same day: the plain V.34 call modem's Tone B reversal
+(§11.2.1.1.6) ran through the same SECOND_NOT_B stage and handed over at the
+block boundary too. It now takes the same tail. The tail also gained one baud:
+- SECOND_NOT_B counts the reversal baud as its first and hands over as its
+  sixth starts, so only five reversed bauds came before the shaper's delay.
+- Measured to the sample on an engine-pair V.34 tap, the reversed tone was
+  8.2 ms with the original tail and is 9.8 ms with the extra baud. The old
+  block-end handover gave 13.3 ms on that alignment.
+- The reversal instant is unchanged (7.2665 s in both builds).
+
+Verification:
+- HSF V.90: 6 of 6 first-Phase-2 INFO1a. Matrix: 14 of 18 again, data exact.
+- V.34 duplex symbol-rate matrix (2400-3429, both laws): 12 of 12, error-free.
+- The `test-fast` row at 10 dB injected noise (`V34_DUPLEX_NOISE_DB=10`) turned
+  out to be a coin flip. There the caller decodes INFO1a only at some delays,
+  and any few-ms change in Phase 2 timing moves which ones. Over delays 0-11 it
+  passes 4/12 at 58655519, 9/12 with the 8.2 ms tail, and 3/12 with 10 ms. It
+  now runs at delay 5, which passes on all three. Why INFO1a is lost at 10 dB
+  is not investigated.
+- No usable offline third-party peer for our V.34 *call* role:
+  - Against `half_open8` our B1 never correlates at any symbol rate (receive
+    SNR about −10 dB) on either build, so both calls fall into retrain loops.
+    The old build's CONNECT 19200 carries garbage.
+  - `half_smartlink` called with `PROTO_B=ATX3` never completes V.8.
 
 ### Agere's own status log
 
