@@ -1195,14 +1195,22 @@ V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=35 V34_DUPLEX_EXPECT_RATES=19200,1920
 # single bit error made the far end's J read J(16) (Table 18's J(4) and J(16)
 # differ in one bit) and that modem sent 16-point Phase 4 TRN; the J type is
 # now the majority over every J window received (phase3_j_vote()), decided at
-# the same moment as before.  What remains is the receiver
-# missing E after MP (11.4): over V34_DUPLEX_NOISE_SEED 1-8 x delays 0-11 the
-# row fails 5/96, all missed E, against 8/96 before (3 wrong J, the same 5).
-# Delay 2 is our caller's wrong J and delay 8 our answerer's; 5 has passed
-# throughout.
+# the same moment as before.  Delay 2 is our caller's wrong J and delay 8 our
+# answerer's; 5 has passed throughout.
+# Then E (11.4.1.x.3), sent once: a 1-2 symbol noise hit in its 20 ones lost it
+# while the peer went on to B1.  On the MP frame grid, after the peer's MP', E
+# is now taken when it is nearer E than the MP' prefix in symbols.  Over
+# V34_DUPLEX_NOISE_SEED 1-8 x delays 0-11 the row fails 2/96 (seed 2 delay 10
+# and seed 7 delay 3: our caller never accepts any MP), against 5/96 before.
+# Seeds 3/0, 5/0 and 7/10 are recovered E's; seed 4 delay 5 is the MP' prefix
+# with a symbol error that bit-level distance took for E.
 V34_DUPLEX_DELAY=5 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
 V34_DUPLEX_DELAY=2 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
 V34_DUPLEX_DELAY=8 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_NOISE_SEED=3 V34_DUPLEX_DELAY=0 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_NOISE_SEED=5 V34_DUPLEX_DELAY=0 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_NOISE_SEED=7 V34_DUPLEX_DELAY=10 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_NOISE_SEED=4 V34_DUPLEX_DELAY=5 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=15 V34_DUPLEX_EXPECT_RATES=9600,9600 ./v34_duplex_test 3000 28800 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=44 V34_DUPLEX_EXPECT_RATES=24000,24000 ./v34_duplex_test 2743 26400 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=14 V34_DUPLEX_EXPECT_MAX_RATES=9600,9600 ./v34_duplex_test 2743 26400 alaw

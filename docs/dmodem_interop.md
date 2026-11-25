@@ -481,11 +481,50 @@ MT5634 3429-baud replay, and the replay diverged (B1 at +17 instead of +8).
 Results:
 - **10 dB row** (`V34_DUPLEX_NOISE_SEED` 1–8 × delays 0–11): 5/96 failures,
   against 8/96 before. The three wrong-J runs now pass. The other five are
-  the same runs before and after: the receiver misses E after MP (§11.4).
-  That failure is not investigated.
+  the same runs before and after. Three of them miss E after MP (§11.4),
+  and two never accept any MP; see the next section.
 - **J confirmation:** at the same bit count as before at every delay
   checked.
 - **`test-fast`:** 777/777, including new rows at delays 2 and 8.
+
+### One noise hit lost E (2026-11-25)
+
+Three of the five remaining 10 dB failures were E (V.34 §11.4.1.1.3 and
+§11.4.1.2.3). E is 20 ones, sent once, straight after the last MP'. The
+receiver needed all 20 bits to be ones. At 10 dB, one or two symbol errors in
+E lost it, and by then the far end had gone on to B1 and data. Its MP' frames
+had stopped, so nothing else could end Phase 4. E as received:
+- `11111111100111111111` (seed 3, delay 0, our caller).
+- `11111111111111111101` (seed 5, delay 0, our answerer).
+- `11111111111111110011` (seed 7, delay 10, our answerer).
+
+On the MP frame grid, after a decoded MP', only two things can start: E or
+the next repeated MP'. Table 20 fixes MP's first 20 bits: 17 ones, start 0,
+type, and reserved 0. They differ from E in two of the ten 4-point symbols.
+The receiver now takes E on the grid when the 20 bits are nearer E than that
+prefix:
+- Counted in symbols, not bits: a noise hit is one symbol and often flips
+  both its bits. Counted in bits, an MP0' prefix with its (18,19) symbol hit
+  (`0xFFFFB`) was 1 bit from E and 2 from MP, and was taken for E (seed 4,
+  delay 5, B1 then −10.7 dB). In symbols it is 1 and 1, and a tie stays with
+  the frame parser.
+- At most 2 symbol errors, and 2 need a 2-symbol margin.
+- Only after the peer's MP' has been decoded. Before it, the peer may still
+  be repeating plain MP. One such frame, 3 symbols from its prefix and 2
+  from E, was taken for E (seed 2, delay 10).
+
+The B1 search after E looks only forward, so the decision cannot wait for
+the bits that follow. Off the grid, and without a decoded MP', E still needs
+all 20 ones.
+
+Results:
+- **10 dB row** (`V34_DUPLEX_NOISE_SEED` 1–8 × delays 0–11): 2/96 failures,
+  against 5/96 before. The three on-grid E's are the only inexact matches
+  in the 96 runs.
+- **Still failing:** seed 2 delay 10 and seed 7 delay 3. In both, our caller
+  never accepts any MP, so it never sends MP'. Not investigated.
+- **`test-fast`:** 781/781, including rows for seeds 3/0, 5/0, 7/10 and the
+  false-E case 4/5.
 
 ### Agere's own status log
 

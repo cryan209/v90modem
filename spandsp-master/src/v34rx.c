@@ -481,6 +481,10 @@ static int phase3_rx_dump_count = 0;
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               15
 #define MP_PREAMBLE_SCORE_MIN           18
+/* Most symbol errors an on-grid E may carry (11.4.1.x.3); it must also be
+   nearer E than the MP prefix, which differs from E in only 2 symbols, by a
+   2-symbol margin when it carries 2. */
+#define MP_E_GRID_SYMBOL_ERRORS_MAX     2
 #define MP_HINT_LOCK_SCORE_MIN          14
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
@@ -10939,6 +10943,50 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     continue;
                 }
                 /*endif*/
+                /* 11.4.1.1.3/11.4.1.2.3: E is sent once, so one noise hit in its
+                   20 ones loses it, and by then the peer has gone on to B1 and
+                   data (v34_duplex_test 2400/21600 at 10 dB: E received as
+                   11111111100111111111 and 11111111111111111101).  On the MP
+                   frame grid only two things can start: E, or the peer's next
+                   repeated MP', whose first 20 bits are known -- 17 ones, start
+                   0, type and the reserved 0 of Table 20 bits 0..19.  Take E
+                   when those bits are strictly nearer to it than to that
+                   prefix, a maximum-likelihood choice between the two.
+                   Distance is counted in SYMBOLS, the dibits the 4-point MP
+                   signal carries: a noise hit is one symbol, and it often flips
+                   both its bits.  Counted in bits, an MP0' prefix with its
+                   (18,19) symbol hit read 1 bit from E and 2 from MP, and was
+                   taken for E (seed 4, delay 5); in symbols it is 1 and 1, and
+                   a tie goes to the frame parser.  So the test runs only when
+                   the 20 bits end on a symbol boundary.  Two symbol errors need
+                   a two-symbol margin, and the peer's MP' must have been
+                   decoded: before it the peer may still be repeating plain MP,
+                   and one such frame 3 symbols from its prefix and 2 from E was
+                   taken for E (seed 2, delay 10).  Otherwise, and off the grid,
+                   E still needs all 20 ones. */
+                bool e_on_grid = false;
+                int e_errors = 0;
+                if (i == 1
+                    && s->mp_seen == 1
+                    && s->mp_remote_ack_seen
+                    && s->mp_last_frame_bits > 0
+                    && s->mp_bits_since_frame >= 20
+                    && ((s->mp_bits_since_frame - 20) % s->mp_last_frame_bits) == 0)
+                {
+                    uint32_t w = s->bitstream & 0xFFFFF;
+                    uint32_t mp_prefix = 0xFFFF8u | ((s->mp_last_frame_bits == 188)  ?  0x2u  :  0x0u);
+                    int mp_errors = 0;
+
+                    for (int k = 0;  k < 20;  k += 2)
+                    {
+                        e_errors += (((w >> k) & 3u) != 3u);
+                        mp_errors += (((w >> k) & 3u) != ((mp_prefix >> k) & 3u));
+                    }
+                    /*endfor*/
+                    e_on_grid = (e_errors <= MP_E_GRID_SYMBOL_ERRORS_MAX
+                                 && (e_errors < mp_errors - 1  ||  (e_errors <= 1  &&  e_errors < mp_errors)));
+                }
+                /*endif*/
                 /* 11.4.1.1.3/11.4.1.2.3: after sending MP' a modem may complete on
                    E even when the peer's own MP' was damaged.  Without the
                    acknowledged frame there is no exact boundary to start the
@@ -10962,13 +11010,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 }
                 /*endif*/
                 if (s->mp_seen == 1
-                    && (s->mp_remote_ack_seen  ||  e_without_ack)
-                    && (s->bitstream & 0xFFFFF) == 0xFFFFF)
+                    && ((s->mp_remote_ack_seen
+                         && ((s->bitstream & 0xFFFFF) == 0xFFFFF  ||  e_on_grid))
+                        ||  e_without_ack))
                 {
                     if (e_without_ack)
                         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: E after %d bits on the MP frame grid with no peer MP' decoded (11.4.1.x.3)\n",
                                  s->mp_bits_since_frame);
+                    if (e_errors > 0)
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: E on the MP frame grid with %d symbol errors (nearer E than the MP' prefix): 0x%05X after %d bits\n",
+                                 e_errors, (unsigned) (s->bitstream & 0xFFFFF), s->mp_bits_since_frame);
                     /* V.34 11.4.1.1.3/11.4.1.2.3 permits E only after MP' has
                        been received.  Requiring the acknowledged frame is also
                        essential for alignment: the tail of an ordinary MP can
