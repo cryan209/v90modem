@@ -12006,7 +12006,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
  * number of flips so it cannot oscillate. */
 #define V34_EYE_OBSERVE_SYMBOLS         256
 #define V34_EYE_MARGIN                  1.05f
-#define V34_EYE_MAX_FLIPS               4
+#define V34_EYE_MAX_FLIPS               V34_RX_EYE_MAX_FLIPS
 #define V34_EYE_MIN_MAG                 0.10f
 #define V34_EYE_VOTES                   1
 

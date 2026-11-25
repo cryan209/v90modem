@@ -9295,6 +9295,25 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
         cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
         s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
         s->rx.baud_half = 0;
+        /* The symbol instant goes back to phase 0 here, whatever Phase 3
+           chose, so Phase 4 must be able to choose again.  The per-call cap
+           on T/2 eye flips (V34_EYE_MAX_FLIPS) is often spent by now: at
+           2400/21600 A-law, 10 dB, seed 7 delay 3, the caller's fourth flip
+           fell on the far end's Phase 4 S, and its 4800-baud TRN then read
+           52% ones and 3.2 dB at the eye crossing, so MP never decoded.
+           The eye sums must go too: at seed 2 delay 10 a flip 20 ms after
+           this reset was judged "over 256 symbols", all from before it.  As
+           the V.90 CP stage does (v34_force_v90_phase4_cp_rx()), give Phase 4
+           two flips of its own and a fresh window. */
+        if (V34_RX_EYE_MAX_FLIPS - s->rx.eye_flips < 2)
+            s->rx.eye_flips = V34_RX_EYE_MAX_FLIPS - 2;
+        /*endif*/
+        s->rx.eye_votes = 0;
+        s->rx.eye_n = 0;
+        s->rx.eye_on_sum = s->rx.eye_off_sum = 0.0f;
+        s->rx.eye_on_aerr = s->rx.eye_off_aerr = 0.0f;
+        memset(&s->rx.eye_prev_on, 0, sizeof(s->rx.eye_prev_on));
+        memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
         s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
         s->rx.carrier_phase = 0;
         memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));

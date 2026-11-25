@@ -39,6 +39,9 @@
 
 #define V34_RX_FILTER_STEPS                 27
 #define V34_RX_PULSESHAPER_COEFF_SETS       192
+/* Per-call cap on the receiver's T/2 eye flips (v34rx.c); shared so the
+   transmitter's Phase 4 conditioning can reserve flips for Phase 4. */
+#define V34_RX_EYE_MAX_FLIPS                4
 #define V34_RX_CC_PULSESHAPER_COEFF_SETS    12
 
 #define V34_EQUALIZER_PRE_LEN               63

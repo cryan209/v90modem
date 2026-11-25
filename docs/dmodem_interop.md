@@ -522,9 +522,34 @@ Results:
   against 5/96 before. The three on-grid E's are the only inexact matches
   in the 96 runs.
 - **Still failing:** seed 2 delay 10 and seed 7 delay 3. In both, our caller
-  never accepts any MP, so it never sends MP'. Not investigated.
+  never accepts any MP, so it never sends MP'. See the next section.
 - **`test-fast`:** 781/781, including rows for seeds 3/0, 5/0, 7/10 and the
   false-E case 4/5.
+
+### Phase 4 had no eye flip left (2026-11-25)
+
+In the last two 10 dB failures, both ends read J(4) correctly (votes 1049–10
+and 798–30), and the answerer sent 4-point Phase 4 TRN. Our caller read that
+TRN at 51–55% ones and 3.2 dB for all 4800 bauds, so MP never decoded. A
+passing neighbour (seed 7, delay 4) read 97–100% ones 0.2 s into TRN.
+
+The front-end reset that conditions Phase 4 puts the symbol instant back to
+`baud_half = 0`, whatever Phase 3 chose. The T/2 eye chooser has to find the
+eye again, but its per-call cap (`V34_EYE_MAX_FLIPS`, 4) carried over from
+Phase 3:
+- Seed 7 delay 3: the caller's fourth flip fell on the far end's Phase 4 S,
+  leaving none for TRN.
+- Seed 2 delay 10: the caller flipped at S and again early in TRN, on eye
+  sums carried over from before the reset.
+
+The V.90 CP stage already gets two flips of its own and a fresh window for
+the same reason (`v34_force_v90_phase4_cp_rx()`). The plain V.34 front-end
+reset now does the same: it reserves two flips and clears the eye sums.
+
+Results:
+- **10 dB row** (`V34_DUPLEX_NOISE_SEED` 1–8 × delays 0–11): 0/96 failures,
+  against 2/96 before. Both runs read TRN at 11.6–11.7 dB.
+- **`test-fast`:** 783/783 with rows for both seeds.
 
 ### Agere's own status log
 
