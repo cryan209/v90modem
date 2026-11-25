@@ -128,6 +128,8 @@ KEPT = {
     "V32BIS_DATA_EYE": "diagnostic: V.32bis data-mode eye log",
     "P3_LEGACY_FRONTEND": "offline decoders compare the old Phase 3 front end",
     "V34_HDX_SPEC_TRAINING": "recent fix (2026-10-09): A/B against other fax peers still useful",
+    "V34_DUPLEX_SPEC_S": "experiment (2026-11-26): 1 sends the V.34 10.1.3.7 Phase 4 S/S-bar (HSF 8/8 at 33600); off until our caller receiver handles it",
+    "V34_P4_KEEP_BAUD_PHASE": "experiment (2026-11-26): 1 keeps the TX symbol clock into Phase 4 (HSF 4800 -> 33600); off until our caller receiver stops relying on the reset",
     "ME_V92_MH_T1": "test hook: V.92 9.10 modem-on-hold T1 code",
     "ME_K56FLEX_GATE_MS": "experimental probe gate wait, default 8000 ms, quantized to 12-sample pairs",
     "ME_X2_UPSTREAM_ACQUIRE": "default on: 0 disables server V.34 upstream B1/DATA acquisition for comparison",

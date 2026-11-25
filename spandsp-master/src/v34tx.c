@@ -914,6 +914,7 @@ static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
 static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s);
 static void v34_answer_phase3_wait_j_init(v34_state_t *s);
+static void v34_answer_phase3_md_wait_init(v34_state_t *s, int md_units);
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason);
 static int mp_rate_n_is_valid(int rate_n);
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a);
@@ -7603,6 +7604,38 @@ static bool hdx_spec_s_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The duplex Phase 4 S and S-bar (11.4.1.2.1) are the same 10.1.3.7
+   signals as above.  The duplex generator alternates by swapping re and im
+   from (A, 0), so S goes out at 0/90 degrees, 45 degrees off the axes TRN
+   is defined on; it counts the reversal on the 128th symbol (127T of S);
+   and its S-bar ends by rotating back to an S point, so TRN begins 17T
+   after the reversal instead of 16T.  D-Modem's modem transmits exactly
+   the sequence above, and the HSF takes TRN's phase from it: on the
+   D-Modem rig (2026-11-26, Phase 4 symbol clock kept, see
+   phase4_wait_init()) the HSF's MP asked 33600 bit/s of us on 8 of 8
+   calls with this sequence, and 31200 or 4800 with the old one (4 of 8
+   connected).  The old points with only the counts corrected still got
+   4800 on 5 of 8, so it is the orientation the HSF needs.
+   V34_DUPLEX_SPEC_S=1 sends it.  It stays off by default because our own
+   call-modem receiver is tuned to the old sequence: against it, joining
+   Phase 4 late (v34_duplex_test 3200 at V34_DUPLEX_DELAY=23) it reads our
+   answerer's TRN at 2.9 dB.  Every real answerer sends the spec sequence,
+   so that receiver needs the fix first (docs/dmodem_interop.md). */
+static bool duplex_spec_s_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *env = getenv("V34_DUPLEX_SPEC_S");
+
+        enabled = (env  &&  env[0] == '1');
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_hdx_s_not_s_baud(v34_state_t *s, int silence_bauds)
 {
     complex_sig_t point;
@@ -8671,8 +8704,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.mp_phase4_retry_mode = 0;
                         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
-                                 "waiting %d samples for next S transition\n",
+                                 "silent for %d samples, then waiting for the next S transition\n",
                                  md_units, md_wait_samples);
+                        v34_answer_phase3_md_wait_init(s, md_units);
                         break;
                     }
                     /*endif*/
@@ -8970,14 +9004,27 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return zero;
 
     case V34_TX_STAGE_PHASE4_S:
-        /* V.34 10.1.3.7 and 11.4.1.2.1: alternate points separated by 90°
-           for 128T, exactly as the Phase 3 S generator does. */
+        /* V.34 10.1.3.7 and 11.4.1.2.1: S for 128T, then S-bar for 16T,
+           then TRN.  duplex_spec_s_enabled() says why the spec sequence is
+           still opt-in; the default below is the old generator. */
+        if (duplex_spec_s_enabled())
+        {
+            int n = s->tx.tone_duration++;
+
+            if (n == PHASE4_S_BAUDS - 1)
+            {
+                s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
+                s->tx.tone_duration = 0;
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: S complete (%d bauds), starting S-bar (16T)\n",
+                         PHASE4_S_BAUDS);
+            }
+            /*endif*/
+            return training_constellation_4[(n & 1)  ?  1  :  2];
+        }
+        /*endif*/
         if (++s->tx.tone_duration == PHASE4_S_BAUDS)
         {
-            /* Same defect as the Phase 3 generator had: negating only the real
-               part is a 180 degree rotation only where the imaginary part is
-               zero, and the alternation guarantees it is not, so S-bar went
-               out identical to S. */
             v34_rotate_180(&s->tx.lastbit);
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
@@ -8994,26 +9041,39 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return s->tx.lastbit;
 
     case V34_TX_STAGE_PHASE4_NOT_S:
-        /* The 180 degree rotation above is the normative S-to-S-bar
-           transition; continue the 90-degree-separated alternation for 16T. */
-        if (++s->tx.tone_duration == 16)
         {
-            v34_rotate_180(&s->tx.lastbit);
-            /* V.34 10.1.3.8 initializes the TRN scrambler to zero. */
-            s->tx.scramble_reg = 0;
-            s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
-            s->tx.tone_duration = 0;
-            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: S-bar complete, starting TRN (>=512T, mode=%s-point)\n",
-                     phase4_tx_16point(s) ? "16" : "4");
+            complex_sig_t point;
+            bool spec = duplex_spec_s_enabled();
+            int n = s->tx.tone_duration++;
+
+            if (spec)
+            {
+                point = training_constellation_4[(n & 1)  ?  3  :  0];
+            }
+            else
+            {
+                if (n == 15)
+                    v34_rotate_180(&s->tx.lastbit);
+                /*endif*/
+                point = s->tx.lastbit;
+                s->tx.lastbit.re = point.im;
+                s->tx.lastbit.im = point.re;
+                point = s->tx.lastbit;
+            }
+            /*endif*/
+            if (n == 15)
+            {
+                /* V.34 10.1.3.8 initializes the TRN scrambler to zero. */
+                s->tx.scramble_reg = 0;
+                s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
+                s->tx.tone_duration = 0;
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: S-bar complete, starting TRN (>=512T, mode=%s-point)\n",
+                         phase4_tx_16point(s) ? "16" : "4");
+            }
+            /*endif*/
+            return point;
         }
-        /*endif*/
-        {
-            complex_sig_t z = s->tx.lastbit;
-            s->tx.lastbit.re = z.im;
-            s->tx.lastbit.im = z.re;
-        }
-        return s->tx.lastbit;
 
     case V34_TX_STAGE_PHASE4_TRN:
         /* Phase 4 TRN: scrambled training before MP.
@@ -9765,8 +9825,123 @@ static void v34_answer_phase3_wait_j_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Clear both Phase 3 S detectors for a fresh S/S-bar: the symbol-domain
+   windows and the sample-domain watcher, which returns early while
+   phase3_s_present is still set from the S before. */
+static void answer_rearm_phase3_s(v34_state_t *s)
+{
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+    s->rx.duration = 0;
+    s->rx.bit_count = 0;
+    s->rx.s_detect_count = 0;
+    s->rx.s_window = 0;
+    s->rx.phase3_s_alt_window = 0;
+    s->rx.phase3_s_alt_count = 0;
+    s->rx.phase3_s_stable_windows = 0;
+    s->rx.phase3_s_present = false;
+    s->rx.phase3_s_detect_armed = true;
+    s->rx.phase3_s_dom_windows = 0;
+    s->rx.phase3_s_dom_symbol = -1;
+    s->rx.phase3_s_fired_symbol = -1;
+    memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+    memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+    memset(s->rx.p3s_g1, 0, sizeof(s->rx.p3s_g1));
+    memset(s->rx.p3s_g2, 0, sizeof(s->rx.p3s_g2));
+    s->rx.p3s_energy = 0.0f;
+    s->rx.p3s_samples = 0;
+    s->rx.p3s_blocks = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.34 11.3.1.2.4 with MD: after the caller's first S-to-S-bar, "transmit
+   silence ... wait for the duration of signal MD as indicated by INFO1c and
+   condition its receiver to detect signal S and the S-to-S-bar transition.
+   After detecting the S-to-S-bar transition, the modem shall proceed
+   according to 11.3.1.2.5" -- the same PP/TRN/J wait the no-MD case enters
+   after its first S.
+
+   This used to keep sending J and arm only a guard field nothing read, with
+   phase3_s_present still set, so the sample-domain watcher stayed off for
+   the second S; and when the symbol-domain one did see it, the caller went
+   straight to Phase 4, before the caller's PP, TRN and J.  Against the HSF
+   (INFO1c MD 20 x 35 ms, J(16)) that meant 4-point Phase 4 TRN and MP to a
+   modem that had asked for 16-point, its Phase 3 TRN read as our Phase 4 TRN
+   (52% ones for 4300 bauds), no MP lock, and its retrains ended in NO
+   CARRIER: 0/4 where D-Modem's open modem connects 4/4 at 33600.
+
+   tone_duration > 0 counts down MD; it then goes negative and counts up to
+   0 as a bound on the wait for the second S, after which the PP/TRN/J wait
+   is entered anyway (11.3.1.1.6 bounds MD-to-end-of-TRN by two round trips
+   plus 2000 ms, so the caller is past S by then either way). */
+#define ANSWER_MD_S_WAIT_MS 1500
+
+static complex_sig_t get_v34_answer_phase3_md_wait_baud(v34_state_t *s)
+{
+    int baud;
+
+    baud = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+    if (s->tx.tone_duration > 0)
+    {
+        /* Whatever the detectors make of the caller's MD is not its S. */
+        s->rx.received_event = V34_EVENT_NONE;
+        if (--s->tx.tone_duration == 0)
+        {
+            /* The carrier, timing and equalizer loops have spent the MD
+               adapting to whatever the caller chose to send (10.1.3.5: it
+               is manufacturer-defined).  Without MD they hear silence there
+               and start the caller's S/PP from the reset of Phase 3's start
+               (v34_force_phase3_rx side); give them the same start. */
+            reset_primary_rx_frontend_for_phase3(s);
+            answer_rearm_phase3_s(s);
+            s->tx.tone_duration = -(baud*ANSWER_MD_S_WAIT_MS)/1000;
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.34 answerer: caller MD over; armed for its second S/S-bar (11.3.1.2.4)\n");
+        }
+        /*endif*/
+        return zero;
+    }
+    /*endif*/
+    if (s->rx.received_event == V34_EVENT_S)
+    {
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 answerer: caller S after MD received\n");
+        v34_answer_phase3_wait_j_init(s);
+        return zero;
+    }
+    /*endif*/
+    if (s->tx.tone_duration < 0  &&  ++s->tx.tone_duration == 0)
+    {
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 answerer: no S within %d ms of the caller's MD; acquiring PP/TRN/J anyway\n",
+                 ANSWER_MD_S_WAIT_MS);
+        v34_answer_phase3_wait_j_init(s);
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_answer_phase3_md_wait_init(v34_state_t *s, int md_units)
+{
+    int baud;
+
+    baud = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+    s->tx.tone_duration = (baud*md_units*35 + 500)/1000;
+    if (s->tx.tone_duration <= 0)
+        s->tx.tone_duration = 1;
+    /*endif*/
+    /* tx.stage stays V34_TX_STAGE_J: v34_rx_answerer_awaiting_phase3_s()
+       keys the sample-domain S watcher on it, and only the getbaud (silence)
+       changes. */
+    s->tx.current_getbaud = get_v34_answer_phase3_md_wait_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void phase4_wait_init(v34_state_t *s)
 {
+    bool was_v34 = (s->tx.current_modulator == V34_MODULATION_V34);
+
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
     s->primary_channel_active = true;
     s->tx.current_modulator = V34_MODULATION_V34;
@@ -9777,12 +9952,42 @@ static void phase4_wait_init(v34_state_t *s)
     /* External V.90 Phase 3 may hand us back TX while the native V.34 side is
        still parked on silence/control-channel state. Re-prime the V.34 TX
        pulse-shaping path so Phase 4 S/S-bar/TRN starts on the actual primary
-       channel instead of remaining in the old SILENCE modulator. */
+       channel instead of remaining in the old SILENCE modulator.
+       It should be only then.  When the V.34 modulator has been running since Phase 3
+       (plain V.34: J, then silence through the caller's MD/PP/TRN/J, all
+       primary-channel symbols) our symbol clock is the one the far end's
+       timing recovery locked to on our PP and TRN, and zeroing baud_phase
+       jumped it by whatever fraction of a symbol had elapsed -- a fraction
+       that moves with the line's delay.  The HSF holds its Phase 3 timing
+       into Phase 4: on the D-Modem rig its MP rated our Phase 4 TRN at
+       4800 bit/s on 4 of 8 calls with the reset and 33600 on 8 of 8 without
+       it (2026-11-26, both with V34_DUPLEX_SPEC_S=1).
+       V34_P4_KEEP_BAUD_PHASE=1 keeps the clock.  It is off by default
+       because our own call-modem receiver depends on the reset: against our
+       answerer with the clock kept, v34_duplex_test 3429 at
+       V34_DUPLEX_DELAY=23 never decodes MP, and the FDM engine pair reads
+       31200 where it read 33600.  A real answerer's clock does not reset,
+       so that receiver needs the fix first (docs/dmodem_interop.md). */
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
-    s->tx.baud_phase = 0;
-    s->tx.rrc_filter_step = 0;
-    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
-    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+    {
+        static int keep = -1;
+
+        if (keep < 0)
+        {
+            const char *env = getenv("V34_P4_KEEP_BAUD_PHASE");
+
+            keep = (env  &&  env[0] == '1');
+        }
+        /*endif*/
+        if (!(keep  &&  was_v34))
+        {
+            s->tx.baud_phase = 0;
+            s->tx.rrc_filter_step = 0;
+            memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+            memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+        }
+        /*endif*/
+    }
 
     /* Phase 4 answerer RX conditioning (V.34 11.4.1.2.1/11.4.1.2.2):
        while sending S, condition receiver to detect caller J' followed by TRN,

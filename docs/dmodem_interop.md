@@ -83,7 +83,7 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
-| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours fails against the HSF at 3200 baud (0/4 vs 4/4; below, 2026-11-26). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours fails against the HSF at 3200 baud (0/4 vs 4/4; below, 2026-11-26). Our plain V.34 against it is now 1/8 by default and 7/8 with `V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1`, which wait on a fix to our own call-modem Phase 4 receiver (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -378,6 +378,107 @@ its plain V.34 works against the HSF; ours does not. HSF caller with
 
 The HSF rows now fail on our plain V.34 at 3200 baud, not on the power
 declaration. That is the next thing to chase on this peer.
+
+### Plain V.34 against the HSF: three defects of ours, one fixed (2026-11-26)
+
+These are calls with the HSF as caller (`AT+MS=V34`), us answering, μ-law,
+`NET_LOOP=0.45`, at `NET_DELAY` 1-4 ms. The HSF's own `AT#UD` after a failed
+call gives key 60 = 0x3D, which is V.58 clearCause 61, trainingFailed. Key
+0x33 = 5 is the count of retrains.
+
+Results over 8 calls an arm, alternated:
+- **Defaults (fix 1 only):** 1/8. That was 0/4 on 1496fe03.
+- **`V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1` (fixes 2 and 3 as
+  well):** 7/8, data exact both ways. The HSF's MP asked 33600 of us on all 7
+  calls that reached MP, and the eighth died in Phase 2 (below).
+
+Fixes 2 and 3 are opt-in because our own call-modem receiver depends on the
+defects they remove (below).
+
+**1. We ignored the HSF's MD (V.34 §11.3.1.2.4). Fixed, default.** Its
+INFO1c asks for 20 × 35 ms of MD. After the caller's first S-to-S̄ the
+answerer must transmit silence, wait out the MD, then detect the second
+S-to-S̄ and train on the PP that follows. We kept sending J through the MD
+and armed only a guard field that nothing read. When we did see the second S,
+we went straight to Phase 4, ahead of the caller's PP, TRN and J. So we sent
+4-point Phase 4 TRN and MP to a modem whose J asked for 16-point, and we read
+its Phase 3 TRN as Phase 4 TRN (52% ones). Now
+`v34_answer_phase3_md_wait_init()` sends silence for the MD, re-arms both S
+detectors, and waits up to 1.5 s for the second reversal before training on
+PP/TRN and waiting for J.
+
+**2. We jumped our symbol clock at Phase 4. `V34_P4_KEEP_BAUD_PHASE=1`.**
+`phase4_wait_init()` zeroes `tx.baud_phase` and the shaper, which is meant
+for a V.90 path that hands TX back from another modulator. In plain V.34 the
+V.34 modulator has been running since Phase 3, and its clock is the one the
+HSF's timing recovery locked to on our PP and TRN. The reset moves our
+symbols by whatever fraction of a symbol has elapsed. That fraction depends
+on the line delay, so the HSF's verdict did too: 4800 at 2-3 ms, often good
+at 1 ms. With spec S on, over 8 calls, the HSF's MP asked of us:
+- clock reset: 33600 or 28800 on 3, 4800 on 4, and 1 call died in Phase 2;
+  4 connected.
+- clock kept: 33600 on 8; 7 connected.
+
+**3. Our duplex Phase 4 S and S̄ are not V.34's (§10.1.3.7, §11.4.1.2.1).
+`V34_DUPLEX_SPEC_S=1`.** This is the generator defect that the half-duplex
+path fixed on 2026-10-09 for the Diva card (`get_hdx_s_not_s_baud()`):
+- S alternates 0° and 90°, not 45° and 135° (point 0 of Figure 5 and its
+  90° rotation).
+- S runs 127T.
+- S̄ ends by rotating back to an S point, so TRN begins 17T after the
+  reversal, not 16T.
+
+D-Modem's modem sends exactly the specified sequence (`v34_trn4` is our
+`training_constellation_4`). With the clock kept, the HSF asked:
+- spec S: 33600 on 8 of 8;
+- old points with only the counts corrected: 4800 on 5 of 8. So it is the
+  orientation the HSF needs; it takes TRN's phase from S.
+- old S: 31200 or 4800 (4/8 connected).
+
+The same spec sequence in Phase 3 (S, S̄ before PP) did not help (6/8). It
+also broke our own answerer's Phase 3 receive (TRN at 2.9 dB), so it is not
+in.
+
+**Why 2 and 3 are opt-in.** Both break rows of our own pair in `test-fast`:
+- The kept clock: `v34_duplex_test 3429` at `V34_DUPLEX_DELAY=23` never
+  decodes MP. The FDM engine pair (fast.list 802), whose TRN SNR sits on the
+  32 dB edge for 33600, reads 31200.
+- Spec S: `v34_duplex_test 3200` at delay 23 reads the answerer's TRN at
+  2.9 dB.
+
+Both delay-23 failures are our caller joining Phase 4 late. It takes the
+"no junction seen; taking TRN as begun" path and then cannot acquire TRN.
+So our call-modem Phase 4 receiver acquires only against our own
+answerer's reset clock and 0/90° S. A real answerer gives it neither.
+Fixing that receiver is the next step, and then 2 and 3 become the defaults.
+
+The receiver's S-to-S̄ countdown (`phase4_s_bar_left = 16`) is also ours.
+The repeated +90° step lands on the first S̄ symbol, so 15 remain under
+§11.4.1.2.1. The 16 matches only our own stray S symbol. Changed alone, it
+passed our loopback but cost the FDM pair its 33600, so it is not in.
+
+What it was not, measured on the way:
+- **Our 16-point TRN/MP mapping and scrambler.** They match D-Modem's.
+- **Our level.** At −18 and −22 dBm0, 2/4 and 1/4 connected, against 0/4 at
+  −14.
+- **The Phase 4 S delay.**
+- **The MP differential encoder seed.** §10.1.3.9 (1996) seeds it from the
+  last TRN symbol, and ours starts from 0. That only rotates the first
+  symbol, which differential decoding absorbs. It is still a spec deviation.
+
+Still open on this peer:
+- **Our B1 §11.6 renegotiation.** B1 reads 27-30 dB where Phase 4 TRN read
+  31-34, so `b1_rate_check` asks for one rate step down. The HSF answers with
+  60 ms of silence and a retrain. With `ME_V34_RETRAIN_ON_LOSS=0`, delay-1
+  calls run at 31200 with no retrain and exact data. The policy also serves
+  live peers, so it is unchanged.
+- **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
+  INFOMARKSa and dies. Every arm shows it.
+- **The HSF matrix rows.** These still fail (matrix 14 of 18, unchanged,
+  data exact on every connecting row). Their V.90-declined fallback does not
+  run the plain answerer. After our Phase 3 J it goes into Phase 4 TRN with no
+  Phase 4 S/S̄, through a `J_DASHED` stage, which is a call-modem signal.
+  The HSF never sends MP, and retrains.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
