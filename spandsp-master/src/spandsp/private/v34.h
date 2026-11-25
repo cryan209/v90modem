@@ -2552,6 +2552,15 @@ typedef struct
     int phase3_j_candidate_pat;
     int phase3_j_candidate_count;
     int phase3_j_candidate_last_bits;
+    /*! \brief Near-exact J windows of one hypothesis/phase that read
+               J(4-point) [0] and J(16-point) [1], that hypothesis/phase, and
+               the bit count of its first window: the TRN size is the majority
+               over the J received so far, not the last window. */
+    int phase3_j_votes[2];
+    int phase3_j_vote_hyp;
+    int phase3_j_vote_phase;
+    int phase3_j_vote_first_bits;
+    int phase3_j_vote_last_bits;
     uint32_t phase3_trn_scramble[24];
     uint16_t phase3_trn_one_count[24];
     int phase3_trn_bits;

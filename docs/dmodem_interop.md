@@ -439,6 +439,54 @@ The three-sample results in full:
 The four-sample build's ESS V.90 data failure did not recur on three samples.
 That one run cannot say whether it was the receiver.
 
+### One bit error picked the wrong Phase 4 TRN (2026-11-25)
+
+The remaining 10 dB failures at delays 2 and 8 were also ours. In both, one
+receiver read Phase 4 TRN at 4.5–4.8 dB with 66–68% ones, while the other
+direction read 11.6–11.9 dB, and MP never decoded.
+
+What it was not:
+- **The Phase 4 sampling instant.** Offsets of 0 to 0.75 T/2 changed nothing,
+  and neither did suppressing the T/2 flip or keeping the Phase 3 front end.
+- **The noise in that direction.** Without any noise on that path, the
+  answerer still read 4.8 dB.
+
+The far end's transmitter was the cause. Demodulated offline from the
+transmit side, before the channel, our caller's Phase 3 TRN and J read 24 dB,
+and its Phase 4 TRN read 7.6 dB with 4th-power coherence 0.36. That
+coherence is what a 16-point constellation gives.
+
+J says which TRN constellation the other end will use (V.34 §10.1.3.8), and
+both ends use it in Phase 4 (§11.4). Table 18's J(4) = 0x8990 and
+J(16) = 0x89B0 differ in one bit, and J repeats every 16 bits. Our J
+confirmation needs eight near-exact hits at most four bits apart. Those
+eight windows all lie in one J period, so one error on that bit made all
+eight read a clean J(16) (dmin 0):
+- At delay 2, our caller read J(16).
+- At delay 8, our answerer read J(16).
+
+Each then sent 16-point TRN to a receiver expecting 4-point.
+
+The fix (`phase3_j_vote()`) takes the TRN size from the majority of every
+near-exact window from one hypothesis and phase:
+- **Before the 6000-bit gate.** J has usually been arriving for half a
+  second by then. At delay 2 the vote was J(4) 1035 against J(16) 5.
+- **After confirmation.** J keeps arriving until the far end hears our S,
+  and nothing reads the TRN size before Phase 4.
+
+When J is confirmed is unchanged. An earlier version delayed confirmation
+until the vote spanned 96 bits. That moved our S 12 ms later against the
+MT5634 3429-baud replay, and the replay diverged (B1 at +17 instead of +8).
+
+Results:
+- **10 dB row** (`V34_DUPLEX_NOISE_SEED` 1–8 × delays 0–11): 5/96 failures,
+  against 8/96 before. The three wrong-J runs now pass. The other five are
+  the same runs before and after: the receiver misses E after MP (§11.4).
+  That failure is not investigated.
+- **J confirmation:** at the same bit count as before at every delay
+  checked.
+- **`test-fast`:** 777/777, including new rows at delays 2 and 8.
+
 ### Agere's own status log
 
 `half_agere`'s `AGERE_DEBUG=1` prints only codec writes, but the library

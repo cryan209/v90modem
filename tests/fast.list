@@ -1191,9 +1191,18 @@ V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=35 V34_DUPLEX_EXPECT_RATES=19200,1920
 # The 10 dB row is NOT stable over delay.  Its caller used to lose INFO1a to
 # reversals the two-sample jump test missed (delays 0-11: 3/12-9/12 pass
 # depending on Phase 2 timing); with the three-sample test (2026-11-25)
-# INFO1a decodes at every delay and 10/12 pass.  Delays 2 and 8 still fail,
-# later, at MP.  It runs at a delay that has passed throughout.
+# INFO1a decodes at every delay.  Delays 2 and 8 then failed at MP because a
+# single bit error made the far end's J read J(16) (Table 18's J(4) and J(16)
+# differ in one bit) and that modem sent 16-point Phase 4 TRN; the J type is
+# now the majority over every J window received (phase3_j_vote()), decided at
+# the same moment as before.  What remains is the receiver
+# missing E after MP (11.4): over V34_DUPLEX_NOISE_SEED 1-8 x delays 0-11 the
+# row fails 5/96, all missed E, against 8/96 before (3 wrong J, the same 5).
+# Delay 2 is our caller's wrong J and delay 8 our answerer's; 5 has passed
+# throughout.
 V34_DUPLEX_DELAY=5 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_DELAY=2 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
+V34_DUPLEX_DELAY=8 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=10 V34_DUPLEX_EXPECT_RATES=2400,2400 ./v34_duplex_test 2400 21600 alaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=15 V34_DUPLEX_EXPECT_RATES=9600,9600 ./v34_duplex_test 3000 28800 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=44 V34_DUPLEX_EXPECT_RATES=24000,24000 ./v34_duplex_test 2743 26400 ulaw
 V34_DUPLEX_AUTO_RATE=1 V34_DUPLEX_NOISE_DB=14 V34_DUPLEX_EXPECT_MAX_RATES=9600,9600 ./v34_duplex_test 2743 26400 alaw

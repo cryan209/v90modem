@@ -219,6 +219,12 @@ static int16_t add_noise(int16_t sample)
         const char *value = getenv("V34_DUPLEX_NOISE_DB");
 
         snr_db = (value && *value) ? (float) atof(value) : 0.0f;
+        /* V34_DUPLEX_NOISE_SEED=<n> draws a different noise realisation.
+           A marginal row's outcome at one delay is one draw; seeds as well as
+           delays turn it into a pass rate. */
+        value = getenv("V34_DUPLEX_NOISE_SEED");
+        if (value && *value)
+            srand((unsigned) atoi(value));
     }
     if (snr_db <= 0.0f)
         return sample;

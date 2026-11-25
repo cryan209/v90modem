@@ -143,6 +143,59 @@ static void phase3_ja_capture_append(v34_rx_state_t *s, int bit0, int bit1)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 10.1.3.8 / Table 18: the far end's J says which constellation its
+   Phase 4 TRN (11.4) will use, and this modem sends the same (see
+   phase4_tx_16point()).  J(4) = 0x8990 and J(16) = 0x89B0 differ in ONE bit
+   and J repeats every 16 bits, while the confirmation below takes eight hits
+   at most four bits apart -- eight windows of one J period.  One error on
+   that bit made all eight read a clean J(16) (dmin 0), so the modem sent
+   16-point TRN to a far end expecting 4-point, the far receiver never
+   trained (TRN at 4.5-4.8 dB, 66% ones) and MP never decoded:
+   v34_duplex_test 2400/21600 A-law at 10 dB, our caller at delay 2 and our
+   answerer at delay 8.  The TRN size is therefore the majority over every
+   near-exact window of one hypothesis/phase: those before the 6000-bit gate
+   (J has usually been arriving for half a second by then; 1035 against 5 in
+   the delay 2 case), and those after confirmation, since J keeps arriving
+   until the far end hears our S and nothing reads the TRN size before
+   Phase 4.  WHEN J is confirmed is unchanged, so no transmission moves.
+   Returns whether the votes describe this hypothesis/phase.  Plain V.34
+   only: the V.90 digital modem's Ja path is unchanged. */
+static bool phase3_j_vote(v34_rx_state_t *s, int h, int p, int score, int pat, int dmin,
+                          bool may_restart)
+{
+    if (s->v90_mode  &&  !s->v90_v34_fallback)
+        return false;
+    /*endif*/
+    if (pat < 0  ||  pat > 1  ||  dmin > 1  ||  score < 28)
+        return (s->phase3_j_vote_hyp == h  &&  s->phase3_j_vote_phase == p
+                &&  s->phase3_j_votes[0] + s->phase3_j_votes[1] > 0);
+    /*endif*/
+    if (s->phase3_j_vote_hyp != h
+        ||  s->phase3_j_vote_phase != p
+        ||  s->phase3_j_bits < s->phase3_j_vote_last_bits
+        ||  s->phase3_j_votes[0] + s->phase3_j_votes[1] == 0)
+    {
+        if (!may_restart)
+            return false;
+        /*endif*/
+        s->phase3_j_vote_hyp = h;
+        s->phase3_j_vote_phase = p;
+        s->phase3_j_vote_first_bits = s->phase3_j_bits;
+        s->phase3_j_votes[0] = 0;
+        s->phase3_j_votes[1] = 0;
+    }
+    /*endif*/
+    if (s->phase3_j_bits > s->phase3_j_vote_last_bits
+        ||  s->phase3_j_votes[0] + s->phase3_j_votes[1] == 0)
+    {
+        s->phase3_j_votes[pat]++;
+        s->phase3_j_vote_last_bits = s->phase3_j_bits;
+    }
+    /*endif*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
     uint32_t ang1;
@@ -504,6 +557,14 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                live captures show a false "confirmed J" firing
                                mid-TRN (score 25/32, d4=2..3) which launched Sd
                                ~900 ms before the analogue modem was listening. */
+                            /* Which J it is -- the TRN size of 10.1.3.8 that
+                               the far end will send in Phase 4 (11.4) -- is the
+                               majority over every near-exact window of the J
+                               received, not the last window: see
+                               phase3_j_vote().  The run of hits below still
+                               decides WHEN J is confirmed, unchanged. */
+                            bool j_vote = phase3_j_vote(s, best_h, best_p, best_score, pat, dmin, true);
+
                             if (s->phase3_j_bits < 6000
                                 ||  dmin > 1
                                 ||  best_score < 28)
@@ -530,10 +591,20 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 s->phase3_j_candidate_count = 1;
                                 s->phase3_j_candidate_last_bits = s->phase3_j_bits;
                             }
+                            /*endif*/
                             if (s->phase3_j_candidate_count >= 8)
                             {
                                 int v90_ja_already_consumed;
 
+                                if (j_vote)
+                                {
+                                    pat = (s->phase3_j_votes[1] > s->phase3_j_votes[0])  ?  1  :  0;
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 3: J votes over %d bits: J(4) %d, J(16) %d\n",
+                                             s->phase3_j_bits - s->phase3_j_vote_first_bits,
+                                             s->phase3_j_votes[0], s->phase3_j_votes[1]);
+                                }
+                                /*endif*/
                                 /* The V.90 digital answerer consumes Ja before
                                    the analogue modem later transmits S.  The
                                    canonical detector continues observing the
@@ -590,6 +661,41 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         }
                         /*endif*/
                     }
+                }
+                /*endif*/
+
+                /* J keeps arriving after it is confirmed, until the far end
+                   hears our S: keep voting, and let the majority settle the
+                   TRN size Phase 4 will read (phase3_j_vote()). */
+                if (s->phase3_s_detect_armed
+                    &&  s->phase3_j_trn16 >= 0
+                    &&  best_h >= 0
+                    &&  s->phase3_j_bits >= 32)
+                {
+                    int vdmin;
+                    int vpat;
+
+                    vpat = v34_rx_j_classify(v34_rx_j_ordered16((uint16_t) (s->phase3_j_stream[best_h] & 0xFFFFU),
+                                                                 s->phase3_j_bits, best_p),
+                                             &vdmin);
+                    if (vpat <= 1
+                        &&  vdmin <= 1
+                        &&  phase3_j_vote(s, best_h, best_p, best_score, vpat, vdmin, false))
+                    {
+                        int majority = (s->phase3_j_votes[1] > s->phase3_j_votes[0])  ?  1  :  0;
+
+                        if (majority != s->phase3_j_trn16)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3: J votes after confirmation now J(4) %d, J(16) %d over %d bits; far-end TRN is %s\n",
+                                     s->phase3_j_votes[0], s->phase3_j_votes[1],
+                                     s->phase3_j_bits - s->phase3_j_vote_first_bits,
+                                     majority  ?  "16-point"  :  "4-point");
+                            s->phase3_j_trn16 = majority;
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                 }
                 /*endif*/
 
