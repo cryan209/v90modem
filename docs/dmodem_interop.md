@@ -516,8 +516,10 @@ event timed by noise: it fires within 3 bits of J′, which J itself (4 bits
 from J′) also meets. Tighter gates scored worse (strict dJ′ ≤ 2: 139/144;
 plus the preceding 16 bits reading as J: 136/144). So did locking on J
 first, which never locked and fell back to a 1024-bit floor (133/144):
-detecting late starts TRN scoring late. The detector is unchanged. Why its
-Phase 4 symbols do not decode J is open.
+detecting late starts TRN scoring late. The default detector is unchanged. Why its
+Phase 4 symbols do not decode J: the answerer resets its receiver under the
+running J, and the decode differenced twice. The opt-in fix,
+`V34_P4_ANSWER_J_FRAMING=1`, is in [v34_phase4_j_dashed.md](v34_phase4_j_dashed.md).
 
 **Still open: MP in the fallback, both ways.** With the 8T J′ the HSF rows
 still fail after Phase 4 TRN, on CT 128 (`hsf_v90_ulaw`, 3200 baud a2c and

@@ -2598,11 +2598,22 @@ typedef struct
     int phase4_j_seen;
     int phase4_j_lock_hyp;
     int phase4_j_bits;
-    uint32_t phase4_j_scramble_tap[2][2][2][8];
-    uint32_t phase4_j_stream_tap[2][2][2][8];
-    uint8_t phase4_j_prev_z_tap[2][2][2][8];
-    uint8_t phase4_j_prev_valid_tap[2][2][2][8];
-    uint32_t phase4_j_win_tap[2][2][2][8][16];
+    uint32_t phase4_j_scramble_tap[2][2][2][24];
+    uint32_t phase4_j_stream_tap[2][2][2][24];
+    uint8_t phase4_j_prev_z_tap[2][2][2][24];
+    uint8_t phase4_j_prev_valid_tap[2][2][2][24];
+    uint32_t phase4_j_win_tap[2][2][2][24][16];
+    /* Phase 4 J framing (v34rx_phase4_trn.c): the descrambled stream, as
+       [domain][tap][order][hyp] flattened, that carries two identical J
+       periods; the bit count, mod 16, at which its frames end; and how many
+       whole J frames it has delivered since.  -1: not locked. */
+    int phase4_jf_combo;
+    int phase4_jf_mod;
+    int phase4_jf_frames;
+    /* Set only when the answer modem enters Phase 4 from Phase 3's J, where
+       the caller's J runs on into J' (11.4.1.1.1).  An 11.6 responder sees
+       no J, and keeps the old search. */
+    bool phase4_jf_expect_j;
     int phase4_trn_after_j;
     /* V.34 11.4: the Phase-4 TRN segment is a constant-modulus 4-point
        constellation carried through the converged equalizer, so it is the

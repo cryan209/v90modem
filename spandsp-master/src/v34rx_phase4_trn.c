@@ -240,6 +240,50 @@ static int phase4_trn_tap_value(int tap_idx)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* J framing.  J is one 16-bit pattern (Table 18) repeated, and J' is one
+   copy of Table 19's pattern on the same period (10.1.3.3, 10.1.3.4; the
+   call modem sends it once, then TRN, 11.4.1.1.1).  j_frame_rot() gives the
+   newest-at-bit-0 16-bit window that holds pattern `pat` with its bit k
+   oldest, so k == 0 is a window that is exactly one pattern period. */
+static uint16_t j_frame_rot(uint16_t pat, int k)
+{
+    uint16_t r;
+    int t;
+
+    r = 0;
+    for (t = 0;  t < 16;  t++)
+        r |= (uint16_t) (((pat >> ((k + t) & 15)) & 1) << (15 - t));
+    /*endfor*/
+    return r;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Bits of descrambler output the J framing waits for: the 23-bit
+   descrambler must be full before its output means anything, and the lock
+   needs 32 bits after that. */
+#define PHASE4_JF_MIN_BITS          56
+/* With no J framing by this many bits, fall back to the hypothesis search
+   (the front end may not have settled on J at all). */
+#define PHASE4_JF_LEGACY_MIN_BITS   192
+
+static void phase4_j_dashed_accept(v34_rx_state_t *s, int h, const char *how)
+{
+    s->phase4_j_seen = 1;
+    s->phase4_trn_after_j = 0;
+    s->phase4_trn_refit_installed = false;
+    v34_rx_phase4_trn_hyp_reset(s);
+    s->phase4_j_lock_hyp = h;
+    /* The call modem descrambles the answer modem's GPA, and a V.90 call
+       that fell back to V.34 is the call modem with calling_party clear
+       (V.90 9.2.1.1.8). */
+    s->scrambler_tap = (s->calling_party  ||  s->v90_v34_fallback) ? 4 : 17;
+    s->received_event = V34_EVENT_J_DASHED;
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4: J' %s (J frames=%d bits=%d)\n",
+             how, s->phase4_jf_frames, s->phase4_j_bits);
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
     uint32_t ang1;
@@ -322,7 +366,7 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     tap = phase4_trn_tap_value(tap_idx);
                     for (order_idx = 0;  order_idx < 2;  order_idx++)
                     {
-                        for (h = 0;  h < 8;  h++)
+                        for (h = 0;  h < (s->phase4_jf_expect_j  ?  MP_HYPOTHESIS_COUNT  :  8);  h++)
                         {
                             int raw_sym;
                             int in_sym;
@@ -333,7 +377,23 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             raw_sym = v34_rx_map_phase4_raw_bits(domain_idx ? abs_bits : data_bits, h);
                             if (s->phase4_j_prev_valid_tap[domain_idx][tap_idx][order_idx][h])
                             {
-                                in_sym = (raw_sym - s->phase4_j_prev_z_tap[domain_idx][tap_idx][order_idx][h]) & 0x3;
+                                /* J and J' are differentially encoded (10.1.3.3,
+                                   10.1.3.4).  data_bits is already the
+                                   differential dibit, so it is descrambled as
+                                   it stands, as the Phase 3 J detector does;
+                                   differencing it again decodes nothing.  Only
+                                   the absolute domain needs the difference,
+                                   and the map J decodes under (Phase 3 locks
+                                   hyp 8, q -> -q) is not among the first
+                                   eight.  The default path keeps the old
+                                   decode, which fires on a noise-level match
+                                   near Phase 4 entry; its timing is what the
+                                   default pass rates were tuned on. */
+                                if (domain_idx  ||  !s->phase4_jf_expect_j)
+                                    in_sym = (raw_sym - s->phase4_j_prev_z_tap[domain_idx][tap_idx][order_idx][h]) & 0x3;
+                                else
+                                    in_sym = raw_sym;
+                                /*endif*/
                                 reg = s->phase4_j_scramble_tap[domain_idx][tap_idx][order_idx][h];
                                 if (order_idx == 0)
                                 {
@@ -351,6 +411,47 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     ((s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
                                 s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] =
                                     ((s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
+                                if (s->phase4_jf_expect_j
+                                    &&
+                                    s->phase4_jf_combo < 0
+                                    &&
+                                    s->phase4_j_bits + 2 >= PHASE4_JF_MIN_BITS)
+                                {
+                                    uint32_t w;
+
+                                    /* Two identical periods of J, framed:
+                                       random bits do that about once in
+                                       2^16 x 2048 tries. */
+                                    w = s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h];
+                                    if ((w >> 16) == (w & 0xFFFFU))
+                                    {
+                                        int k;
+
+                                        for (k = 0;  k < 16;  k++)
+                                        {
+                                            if ((w & 0xFFFFU) == j_frame_rot(0x8990, k)
+                                                ||
+                                                (w & 0xFFFFU) == j_frame_rot(0x89B0, k))
+                                            {
+                                                s->phase4_jf_combo = ((domain_idx*2 + tap_idx)*2 + order_idx)*MP_HYPOTHESIS_COUNT + h;
+                                                s->phase4_jf_mod = (s->phase4_j_bits + 2 - k) & 15;
+                                                s->phase4_jf_frames = 2;
+                                                span_log(s->logging, SPAN_LOG_FLOW,
+                                                         "Rx - Phase 4: J framed (hyp=%d dom=%s tap=%d ord=%s bits=%d)\n",
+                                                         h,
+                                                         v34_rx_phase4_trn_domain_name(domain_idx),
+                                                         tap,
+                                                         v34_rx_phase4_trn_order_name(order_idx),
+                                                         s->phase4_j_bits + 2);
+                                                break;
+                                            }
+                                            /*endif*/
+                                        }
+                                        /*endfor*/
+                                    }
+                                    /*endif*/
+                                }
+                                /*endif*/
 
                                 for (b = 0;  b < 2;  b++)
                                 {
@@ -397,6 +498,60 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /*endfor*/
 
             s->phase4_j_bits += 2;
+            if (s->phase4_jf_combo >= 0
+                &&
+                ((s->phase4_j_bits - s->phase4_jf_mod) & 15) == 0)
+            {
+                int c;
+                int jh;
+                int jo;
+                int jt;
+                int jd;
+                uint16_t frame;
+                int dj;
+                int djd;
+
+                c = s->phase4_jf_combo;
+                jh = c % MP_HYPOTHESIS_COUNT;
+                jo = (c/MP_HYPOTHESIS_COUNT) & 1;
+                jt = (c/(2*MP_HYPOTHESIS_COUNT)) & 1;
+                jd = c/(4*MP_HYPOTHESIS_COUNT);
+                frame = (uint16_t) (s->phase4_j_stream_tap[jd][jt][jo][jh] & 0xFFFFU);
+                dj = __builtin_popcount((unsigned) (frame ^ j_frame_rot(0x8990, 0)));
+                djd = __builtin_popcount((unsigned) (frame ^ j_frame_rot(0x89B0, 0)));
+                if (djd < dj)
+                    dj = djd;
+                /*endif*/
+                djd = __builtin_popcount((unsigned) (frame ^ j_frame_rot(0x899F, 0)));
+                if (dj <= 2  &&  dj < djd)
+                {
+                    s->phase4_jf_frames++;
+                }
+                else if (djd <= 2)
+                {
+                    /* 11.4.1.2.1: the frame after the last J is J'; TRN
+                       starts with the next symbol. */
+                    phase4_j_dashed_accept(s, jh, "framed after J");
+                }
+                else if (__builtin_popcount((unsigned) frame) >= 13)
+                {
+                    /* Neither J nor J' but nearly all ones: TRN, which
+                       descrambles to ones (10.1.3.8).  J' was this frame's
+                       predecessor and was hit by errors; TRN is 8T old. */
+                    phase4_j_dashed_accept(s, jh, "inferred from TRN after J");
+                    s->phase4_trn_after_j = 8;
+                }
+                else
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: J framing lost after %d frames (dJ=%d dJ'=%d)\n",
+                             s->phase4_jf_frames, dj, djd);
+                    s->phase4_jf_combo = -1;
+                    s->phase4_jf_frames = 0;
+                }
+                /*endif*/
+            }
+            /*endif*/
             if (s->phase4_j_bits >= 16
                 &&
                 (s->phase4_j_bits == 16
@@ -412,7 +567,9 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             /*endif*/
 
-            if (s->phase4_j_bits >= 32
+            if (!s->phase4_j_seen
+                && s->phase4_jf_combo < 0
+                && s->phase4_j_bits >= (s->phase4_jf_expect_j  ?  PHASE4_JF_LEGACY_MIN_BITS  :  32)
                 && best_h >= 0
                 && best_score >= 24)
             {

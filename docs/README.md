@@ -93,6 +93,7 @@ Where to start:
 |---|---|
 | [v34_flow_mapping.md](v34_flow_mapping.md) | SpanDSP, `modem_engine` and d-modem side by side |
 | [v34_spec_gap.md](v34_spec_gap.md) | Duplex specification gaps |
+| [v34_phase4_j_dashed.md](v34_phase4_j_dashed.md) | The answer modem's Phase 4 J′ detection (opt-in framing) |
 | [v34_data_mode_rates.md](v34_data_mode_rates.md) | Data mode above 12000 bit/s |
 | [v34_3429_dense_data.md](v34_3429_dense_data.md) | 3429-baud dense-data receiver |
 | [v34_fixed_point_datapath.md](v34_fixed_point_datapath.md) | Fixed-point datapath |

@@ -2455,6 +2455,10 @@ static void mp_phase4_update_auto_domain(v34_rx_state_t *s, const int diff_hist[
 static void phase4_j_detector_reset(v34_rx_state_t *s)
 {
     s->phase4_j_bits = 0;
+    s->phase4_jf_combo = -1;
+    s->phase4_jf_mod = 0;
+    s->phase4_jf_frames = 0;
+    s->phase4_jf_expect_j = false;
     memset(s->phase4_j_scramble_tap, 0, sizeof(s->phase4_j_scramble_tap));
     memset(s->phase4_j_stream_tap, 0, sizeof(s->phase4_j_stream_tap));
     memset(s->phase4_j_prev_z_tap, 0, sizeof(s->phase4_j_prev_z_tap));

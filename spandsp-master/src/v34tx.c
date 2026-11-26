@@ -7621,6 +7621,27 @@ static bool hdx_spec_s_enabled(void)
    Phase 4 late (v34_duplex_test 3200 at V34_DUPLEX_DELAY=23) it reads our
    answerer's TRN at 2.9 dB.  Every real answerer sends the spec sequence,
    so that receiver needs the fix first (docs/dmodem_interop.md). */
+/* V34_P4_ANSWER_J_FRAMING=1: the answer modem keeps its Phase 3 receiver
+   into Phase 4 and frames the caller's J' in it, instead of resetting and
+   firing on a noise-level match.  Opt-in: it finds J' where TRN begins, but
+   over V34_DUPLEX_DELAY 0-47 (2400/21600 10 dB, 3429/28800 36 dB,
+   3429/31200 38 dB) it passes 138/144 against 140/144 without it, so it
+   waits for live evidence.  See docs/v34_phase4_j_dashed.md. */
+static bool answer_j_framing_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *env = getenv("V34_P4_ANSWER_J_FRAMING");
+
+        enabled = (env  &&  env[0] == '1');
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool duplex_spec_s_enabled(void)
 {
     static int enabled = -1;
@@ -8221,6 +8242,10 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
     s->rx.phase4_j_bits = 0;
+    s->rx.phase4_jf_combo = -1;
+    s->rx.phase4_jf_mod = 0;
+    s->rx.phase4_jf_frames = 0;
+    s->rx.phase4_jf_expect_j = false;
     memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
     memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
     memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
@@ -8518,6 +8543,10 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 s->rx.phase4_j_lock_hyp = -1;
                 s->rx.phase4_trn_after_j = 0;
                 s->rx.phase4_j_bits = 0;
+                s->rx.phase4_jf_combo = -1;
+                s->rx.phase4_jf_mod = 0;
+                s->rx.phase4_jf_frames = 0;
+                s->rx.phase4_jf_expect_j = false;
                 memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
                 memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
                 memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
@@ -8690,6 +8719,10 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase4_j_lock_hyp = -1;
                         s->rx.phase4_trn_after_j = 0;
                         s->rx.phase4_j_bits = 0;
+                        s->rx.phase4_jf_combo = -1;
+                        s->rx.phase4_jf_mod = 0;
+                        s->rx.phase4_jf_frames = 0;
+                        s->rx.phase4_jf_expect_j = false;
                         memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
                         memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
                         memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
@@ -9334,6 +9367,10 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
     s->rx.phase4_j_bits = 0;
+    s->rx.phase4_jf_combo = -1;
+    s->rx.phase4_jf_mod = 0;
+    s->rx.phase4_jf_frames = 0;
+    s->rx.phase4_jf_expect_j = false;
     memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
     memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
     memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
@@ -10011,7 +10048,25 @@ static void phase4_wait_init(v34_state_t *s)
        while sending S, condition receiver to detect caller J' followed by TRN,
        then receive MP. We therefore enter TRN/descrambler conditioning directly
        instead of waiting on a far-end S detector. */
-    phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_TRN, "J'/TRN then MP");
+    if (answer_j_framing_enabled())
+    {
+        /* V34_P4_ANSWER_J_FRAMING=1: the caller's J runs on into J' and TRN
+           without a break (11.4.1.1.1), so keep the receiver that decoded J
+           in Phase 3 and frame J' in it (v34rx_phase4_trn.c).  Resetting
+           it here cost ~260T of re-acquisition, all of J, so J' could not
+           be seen.  The carrier rate alone goes back to nominal: Phase 3's
+           estimate read 1961.6 Hz against 1959.2 Hz in a loopback with no
+           offset, and that 2.4 Hz turned the constellation until TRN fell
+           to 50% ~700T in (3429/28800, 36 dB, V34_DUPLEX_DELAY=17). */
+        phase4_rx_conditioning_init_ex(s, V34_RX_STAGE_PHASE4_TRN, "J'/TRN then MP", true);
+        s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+        s->rx.phase4_jf_expect_j = true;
+    }
+    else
+    {
+        phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_TRN, "J'/TRN then MP");
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
