@@ -295,11 +295,11 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `P3_LEGACY_FRONTEND` | p3_demod.c |  | d | offline decoders compare the old Phase 3 front end |
 | `V32BIS_DATA_EYE` | v32bis.c |  | d | diagnostic: V.32bis data-mode eye log |
 | `V32BIS_TRN_SYMBOLS` | v32bis.c |  | - | test hook: a far end that sends long TRN (slmodemd runs to ~8000) |
-| `V34_DUPLEX_SPEC_S` | v34tx.c |  | d | experiment (2026-11-26): 1 sends the V.34 10.1.3.7 Phase 4 S/S-bar (HSF 8/8 at 33600); off until our caller receiver handles it |
+| `V34_DUPLEX_SPEC_S` | v34tx.c |  | d | recent fix (default since 2026-11-26): the V.34 10.1.3.7 Phase 4 S/S-bar; 0 restores the old 0/90-degree generator for an A/B |
 | `V34_HDX_SPEC_TRAINING` | v34tx.c |  | dh | recent fix (2026-10-09): A/B against other fax peers still useful |
 | `V34_MP_TX_BITS` | v34tx.c |  | dh | diagnostic: dump the transmitted MP bits |
 | `V34_P4_ANSWER_J_FRAMING` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the answerer's Phase 3 receiver into Phase 4 and frames the caller's J' (loopback 139/144 vs 143/144); off until live evidence |
-| `V34_P4_KEEP_BAUD_PHASE` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the TX symbol clock into Phase 4 (HSF 4800 -> 33600); off until our caller receiver stops relying on the reset |
+| `V34_P4_KEEP_BAUD_PHASE` | v34tx.c |  | d | recent fix (default since 2026-11-26): the plain V.34 TX symbol clock runs on into Phase 4; 0 restores the reset for an A/B |
 | `V8_GUARD_TONE_HZ` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |
 | `V8_GUARD_TONE_LEVEL` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |
 | `V90_CARRIER_TRACK_P` | v34rx.c, v34tx.c |  | d | experiment (2026-11-26): proportional gain of the V.90 primary training carrier loop (default 40000; plain V.34 uses 2000000); D-Modem V.90 rows A/B 35/40 vs 34/40 at 2000000, no difference; docs/v34_carrier_loop.md |

@@ -7655,11 +7655,13 @@ static bool hdx_spec_s_enabled(void)
    calls with this sequence, and 31200 or 4800 with the old one (4 of 8
    connected).  The old points with only the counts corrected still got
    4800 on 5 of 8, so it is the orientation the HSF needs.
-   V34_DUPLEX_SPEC_S=1 sends it.  It stays off by default because our own
-   call-modem receiver is tuned to the old sequence: against it, joining
-   Phase 4 late (v34_duplex_test 3200 at V34_DUPLEX_DELAY=23) it reads our
-   answerer's TRN at 2.9 dB.  Every real answerer sends the spec sequence,
-   so that receiver needs the fix first (docs/dmodem_interop.md). */
+   It is the default since 2026-11-26; V34_DUPLEX_SPEC_S=0 restores the old
+   generator.  It was opt-in while our own call-modem receiver failed on it
+   (v34_duplex_test 3200 at V34_DUPLEX_DELAY=23 read TRN at 2.9 dB); that no
+   longer reproduces, and the fast and slow test tiers pass with it.  That
+   receiver finds no S here at most delays either way: 11.4.1.1.1 has the
+   call modem detect S and S-bar before its J', so its Phase 4 receiver
+   usually starts in TRN (docs/dmodem_interop.md). */
 /* V34_P4_ANSWER_J_FRAMING=1: the answer modem keeps its Phase 3 receiver
    into Phase 4 and frames the caller's J' in it, instead of resetting and
    firing on a noise-level match.  Opt-in: it finds J' where TRN begins, but
@@ -7690,7 +7692,7 @@ static bool duplex_spec_s_enabled(void)
     {
         const char *env = getenv("V34_DUPLEX_SPEC_S");
 
-        enabled = (env  &&  env[0] == '1');
+        enabled = !(env  &&  env[0] == '0');
     }
     /*endif*/
     return enabled != 0;
@@ -10057,12 +10059,12 @@ static void phase4_wait_init(v34_state_t *s)
        into Phase 4: on the D-Modem rig its MP rated our Phase 4 TRN at
        4800 bit/s on 4 of 8 calls with the reset and 33600 on 8 of 8 without
        it (2026-11-26, both with V34_DUPLEX_SPEC_S=1).
-       V34_P4_KEEP_BAUD_PHASE=1 keeps the clock.  It is off by default
-       because our own call-modem receiver depends on the reset: against our
-       answerer with the clock kept, v34_duplex_test 3429 at
-       V34_DUPLEX_DELAY=23 never decodes MP, and the FDM engine pair reads
-       31200 where it read 33600.  A real answerer's clock does not reset,
-       so that receiver needs the fix first (docs/dmodem_interop.md). */
+       The clock is kept by default since 2026-11-26;
+       V34_P4_KEEP_BAUD_PHASE=0 restores the reset.  It was opt-in while our
+       own call-modem receiver depended on the reset (v34_duplex_test 3429 at
+       V34_DUPLEX_DELAY=23 never decoded MP, the FDM pair read 31200); that
+       no longer reproduces, and both test tiers pass with the clock kept
+       (docs/dmodem_interop.md). */
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     {
         static int keep = -1;
@@ -10071,7 +10073,7 @@ static void phase4_wait_init(v34_state_t *s)
         {
             const char *env = getenv("V34_P4_KEEP_BAUD_PHASE");
 
-            keep = (env  &&  env[0] == '1');
+            keep = !(env  &&  env[0] == '0');
         }
         /*endif*/
         if (!(keep  &&  was_v34))

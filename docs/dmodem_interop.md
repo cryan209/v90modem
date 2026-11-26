@@ -387,7 +387,31 @@ These are calls with the HSF as caller (`AT+MS=V34`), us answering, μ-law,
 call gives key 60 = 0x3D, which is V.58 clearCause 61, trainingFailed. Key
 0x33 = 5 is the count of retrains.
 
-Results over 8 calls an arm, alternated:
+**Update (2026-11-26, later): fixes 2 and 3 are now the defaults.** The
+loopback failures that kept them opt-in (below) no longer reproduce at
+`V34_DUPLEX_DELAY=23`. With both on, the fast tier passes 783/783 and the
+slow tier passes too; the two slow failures seen under load passed alone, or
+failed the same without the knobs. The same HSF A/B on 3dc003df, 8 calls an
+arm alternated over `NET_DELAY` 1-4:
+- new defaults: 7/8, 28800-31200 after our B1 step-down;
+- `V34_DUPLEX_SPEC_S=0 V34_P4_KEEP_BAUD_PHASE=0`: 2/8.
+
+The full matrix on the new defaults is unchanged: 15 of 18 that run, plus
+`ess_v90_ulaw`, which lost data (7002/7391) in that run. Rerun alone, it
+fails 1 of 3 on the new defaults and 1 of 3 on 3dc003df (the old ones), with
+received octets short or extra both ways. That is an intermittent
+data-integrity defect on the ESS V.90 row, independent of this change, and
+not yet investigated.
+
+The failing new-arm call is the Phase 2 INFO1c loss below. Our caller's
+Phase 4 receiver was not the problem it looked like. It finds no S/S̄ at
+most delays with either S (old S: at 1 of 5 delays), and §11.4.1.1.1 is
+the reason: the call modem detects S then S̄ *before* its J′, so its
+Phase 4 receiver normally starts in TRN and takes the "no junction seen"
+path. Our caller sends J′ on S alone (a tone-energy detector), not on S
+then S̄; that is still a deviation from the clause.
+
+Results over 8 calls an arm, alternated (before the update):
 - **Defaults (fix 1 only):** 1/8. That was 0/4 on 1496fe03.
 - **`V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1` (fixes 2 and 3 as
   well):** 7/8, data exact both ways. The HSF's MP asked 33600 of us on all 7
