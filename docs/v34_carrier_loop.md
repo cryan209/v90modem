@@ -64,8 +64,37 @@ p = 2000000 there, the batch CP decoder no longer found the 428-bit CP in
 the CX93001 replay in `tests/fast.list`
 (`cx93001-unqualified-e-20261023`). So `v90_mode` keeps `p = 40000` until
 V.90 is measured on its own, and that includes the V.90-declined V.34
-fallback. V.90 has its own Phase 3 PP tracking (`v90_mode ||
-hdx_primary_resync`), and its Phase 3 rate error has not been measured.
+fallback.
+
+## V.90 measured: no rate error to fix (2026-11-26)
+
+This covers the digital side's v34rx upstream receiver at 3200 baud,
+nominal 1828.571 Hz. The analogue side's downstream receiver does not use
+this loop. Rate error is the loop rate minus nominal, traced every 32T.
+
+| Run | Gain p | `PHASE3_TRAINING` | `PHASE3_WAIT_S` | `V90_CP` |
+|---|---|---|---|---|
+| `engine_pair_test --expect V90` (loopback) | 40000 | 0 to +0.55 Hz | −0.24 to +0.55 Hz, ends 0.00 | 0.00 |
+| same | 2000000 | 0 to +0.38 Hz | −0.06 to +0.38 Hz, ends 0.00 | 0.00 |
+| CX93001 live replay (`cx93001-unqualified-e-20261023`) | 40000 | 0 to +0.39 Hz | +0.03 to +0.40 Hz, drifts slowly, ends +0.04 | 0 to +0.04 Hz |
+| same | 2000000 | 0 to +0.28 Hz | +0.04 to +0.28 Hz, ends +0.10 | 0 to +0.10 Hz |
+
+There is no ringing at either gain; the slow drift over 8 s is the
+CX93001's own clock. The undamped loop costs plain V.34 0.7–2.8 Hz but
+V.90 less than 0.6 Hz, and V.90's CP stage holds near nominal anyway. So
+V.90 keeps p = 40000.
+
+The gain does change which CP decoder wins on that replay. Both arms
+accept the first CPt (batch, 292 bits) at the same point.
+- At p = 40000, the 428-bit CP is accepted 14 times by the batch decoder
+  and twice by the live (`spandsp`) receiver, with 22 rejected frames.
+- At p = 2000000, it is accepted 96 times by the live receiver and never
+  by the batch decoder, with 10 rejected frames.
+
+So the fast.list gate that failed asks for the batch decoder in
+particular. With the damped gain the live receiver decodes CP more often,
+not less. That is a reason to try the damped gain in a V.90 rig A/B, not
+a carrier-rate defect.
 
 Over the 240 calls, p = 2000000 passes 234 against 229. p = 4000000 lost two
 10 dB calls that never trained, to phase noise. Data mode does not use

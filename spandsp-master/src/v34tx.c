@@ -950,7 +950,9 @@ static void reset_primary_rx_frontend_for_phase3(v34_state_t *s)
        V.90 receiver shares this loop, and with p=2000000 the batch CP
        decoder no longer finds the 428-bit CP in a CX93001 replay
        (tests/fast.list, cx93001-unqualified-e-20261023).  V.90 keeps the
-       old pair until it is measured on its own (docs/v34_carrier_loop.md). */
+       old pair: measured, its Phase 3 rate stays within 0.55 Hz at either
+       gain (engine pair and that live replay), so it has no rate error to
+       fix (docs/v34_carrier_loop.md). */
     s->rx.carrier_track_i = 5000.0f;
     s->rx.carrier_track_p = s->rx.v90_mode  ?  40000.0f  :  2000000.0f;
     s->rx.total_baud_timing_correction = 0;
