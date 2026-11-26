@@ -21290,6 +21290,27 @@ void v34_rx_set_primary_channel(v34_state_t *s, int baud_rate, int high_carrier)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V90_CARRIER_TRACK_P (experiment, 2026-11-26): the proportional gain of the
+   primary training carrier loop in V.90 mode.  Plain V.34 uses 2000000 since
+   280f12fd; V.90 keeps 40000 because its Phase 3 rate stays within 0.55 Hz
+   at either gain (docs/v34_carrier_loop.md).  The A/B question is the CP
+   decoders: at 2000000 the live receiver decodes the 428-bit CP more often
+   and the batch decoder less on the CX93001 replay. */
+static float v90_carrier_track_p(void)
+{
+    static float p = -1.0f;
+
+    if (p < 0.0f)
+    {
+        const char *env = getenv("V90_CARRIER_TRACK_P");
+
+        p = (env  &&  atof(env) > 0.0)  ?  (float) atof(env)  :  40000.0f;
+    }
+    /*endif*/
+    return p;
+}
+/*- End of function --------------------------------------------------------*/
+
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier)
 {
     int i;
@@ -21380,7 +21401,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     /* Carrier loop gains: see reset_primary_rx_frontend_for_phase3() in
        v34tx.c, which sets the same pair for Phase 3. */
     s->rx.carrier_track_i = 5000.0f;
-    s->rx.carrier_track_p = s->rx.v90_mode  ?  40000.0f  :  2000000.0f;
+    s->rx.carrier_track_p = s->rx.v90_mode  ?  v90_carrier_track_p()  :  2000000.0f;
 
     /* Create a default symbol sync filter */
     create_godard_coeffs(&s->rx.pri_ted,

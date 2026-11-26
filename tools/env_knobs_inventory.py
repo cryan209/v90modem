@@ -130,6 +130,7 @@ KEPT = {
     "V34_HDX_SPEC_TRAINING": "recent fix (2026-10-09): A/B against other fax peers still useful",
     "V34_DUPLEX_SPEC_S": "experiment (2026-11-26): 1 sends the V.34 10.1.3.7 Phase 4 S/S-bar (HSF 8/8 at 33600); off until our caller receiver handles it",
     "V34_P4_ANSWER_J_FRAMING": "experiment (2026-11-26): 1 keeps the answerer's Phase 3 receiver into Phase 4 and frames the caller's J' (loopback 139/144 vs 143/144); off until live evidence",
+    "V90_CARRIER_TRACK_P": "experiment (2026-11-26): proportional gain of the V.90 primary training carrier loop (default 40000; plain V.34 uses 2000000); A/B of which CP decoder wins, docs/v34_carrier_loop.md",
     "V34_P4_KEEP_BAUD_PHASE": "experiment (2026-11-26): 1 keeps the TX symbol clock into Phase 4 (HSF 4800 -> 33600); off until our caller receiver stops relying on the reset",
     "ME_V92_MH_T1": "test hook: V.92 9.10 modem-on-hold T1 code",
     "ME_K56FLEX_GATE_MS": "experimental probe gate wait, default 8000 ms, quantized to 12-sample pairs",
