@@ -475,10 +475,74 @@ Still open on this peer:
 - **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
   INFOMARKSa and dies. Every arm shows it.
 - **The HSF matrix rows.** These still fail (matrix 14 of 18, unchanged,
-  data exact on every connecting row). Their V.90-declined fallback does not
-  run the plain answerer. After our Phase 3 J it goes into Phase 4 TRN with no
-  Phase 4 S/S̄, through a `J_DASHED` stage, which is a call-modem signal.
-  The HSF never sends MP, and retrains.
+  data exact on every connecting row), in the fallback's Phase 4 MP; see the
+  next section. (This bullet used to say the fallback should run the plain
+  answerer. It should not: it is the V.34 call modem.)
+
+### The V.90-declined fallback is the V.34 call modem; J′ was 16T (2026-11-26)
+
+**Correction.** The bullet above once read the fallback's missing Phase 4
+S/S̄ and MD wait as a defect. They are correct. V.90 §9.2.1.1.8: when INFO1a
+selects V.34, the digital modem continues with V.34 Phase 3 "assuming the
+role of a call modem", and the analogue modem becomes the answer modem
+(§9.2.2.1.9). The call modem's Phase 4 is §11.4.1.1.1: after S-to-S̄ it stops
+J, sends one J′ and then TRN. It sends no Phase 4 S, and §11.3.1.2.4's MD
+belongs to the answerer. D-Modem's own digital fallback takes the same role.
+
+**Fixed: our J′ lasted 16T.** J′ is one 16-bit pattern (0x899F, Table 19) at
+two bits a symbol (§10.1.3.4 via §10.1.3.3), so 8T. `get_trn_baud()` counted
+16T: J′ and then 8T more before TRN, so every call-modem Phase 4 TRN of ours
+(plain caller and the fallback) started 8T late. Real callers already send
+8T, and our answerer connects with them live. In loopback, the 3429/33600 pass
+rates over `V34_DUPLEX_DELAY` 0-47 are unchanged at 140/144 (10 dB/2400,
+36 dB/28800 and 38 dB/31200 rows); the 38 dB fast row moved from delay 0 to
+delay 1, because delay 0 is now one of its four failing delays. The FDM
+engine pair connects 33600 both ways (the answer side was 31200).
+`V34_J_DASHED_BAUDS=16` replays taps recorded before the fix
+(`rf-mt5634-v34-3429-swp`).
+The D-Modem matrix with the fix is 13 of 18: the three HSF rows, Courier and
+`ess_v90_ulaw`. ESS V.90 never reaches J′ (no `J_DASHED` in any of 7 runs).
+It passed 0/3 with the fix and 2/3 with `V34_J_DASHED_BAUDS=16`. Every failure,
+the old-J′ one included, ends identically: our own upstream-error §9.6
+renegotiation, then 1.4 s with no line signal. That is run-to-run variance in a
+path this change does not touch.
+
+**Our answerer cannot decode the caller's J or J′.** In Phase 4 its J′
+detector scores 1024 descrambler hypotheses against a periodic J′. During
+the caller's J (§11.4.1.2.1 arms it at least 128T before J′), no hypothesis
+matches J above 24-27 of 32 bits at 36 dB SNR, which is the noise level; TRN
+itself starts at 55-71% ones and converges later. Its "J′" is therefore an
+event timed by noise: it fires within 3 bits of J′, which J itself (4 bits
+from J′) also meets. Tighter gates scored worse (strict dJ′ ≤ 2: 139/144;
+plus the preceding 16 bits reading as J: 136/144). So did locking on J
+first, which never locked and fell back to a 1024-bit floor (133/144):
+detecting late starts TRN scoring late. The detector is unchanged. Why its
+Phase 4 symbols do not decode J is open.
+
+**Still open: MP in the fallback, both ways.** With the 8T J′ the HSF rows
+still fail after Phase 4 TRN, on CT 128 (`hsf_v90_ulaw`, 3200 baud a2c and
+c2a, high carrier both ways):
+- Our receiver locks the HSF's Phase 4 TRN at 100% ones on tap 4 (GPA, as
+  the role requires). The scrambler tap, bit order (b0,b1) and the 4-point
+  constellation our J asks for all check out.
+- The HSF's MP then decodes at only 13/18 preamble bits in the differential
+  domain. Retry modes reach 16/18 once, and that frame fails CRC. The HSF
+  cannot read our MP either: it abandons about 1 s into MP and retrains.
+- These made no difference: Phase 3 TRN length, 4- vs 16-point Phase 4 TRN,
+  the Phase 4 TRN refit, the carrier choice, the echo canceller and loop
+  timing. Our MP bits are the same as in a plain call.
+- **The lead:** plain V.34 with us as the caller against the HSF connects at
+  26400 (3200 baud, data exact), and at 28800 (3429 baud, then the known
+  §11.6 retrain). That call runs our engine in the analogue role; the fallback
+  runs it in the digital role (`v90_mode` set, `calling_party` clear). Look
+  for what differs between the two paths after Phase 3. In the logs the
+  fallback confirms J through the non-caller branch, takes TRN as begun with
+  "no S/S-bar alternation", and settles on a different TRN hypothesis
+  (hyp 3/8/10 against 1).
+
+The HSF V.92 rows never reach the fallback. The HSF sends Tone A 80 ms
+into our V.92 Phase 3. We log "peer initiated a retrain" but never answer it,
+and sit in PP acquisition until the timeout.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 

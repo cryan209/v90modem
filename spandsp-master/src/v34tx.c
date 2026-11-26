@@ -8315,6 +8315,19 @@ static bool phase3_tx_16point(const v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* One J' (10.1.3.4, Table 19): 16 bits at two bits a symbol, so 8T.
+   V34_J_DASHED_BAUDS=16 restores the old padded J' so a replay of a call
+   recorded before this fix reproduces that call's own timing. */
+#define J_DASHED_BAUDS v34_j_dashed_bauds()
+
+static int v34_j_dashed_bauds(void)
+{
+    const char *e = getenv("V34_J_DASHED_BAUDS");
+    int bauds = (e  &&  *e)  ?  atoi(e)  :  8;
+
+    return (bauds < 8)  ?  8  :  (bauds > 16)  ?  16  :  bauds;
+}
+
 static complex_sig_t get_trn_baud(v34_state_t *s)
 {
     /* J pattern per V.34 §10.1.3.3, Table 18.
@@ -8759,7 +8772,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /* Apply differential encoding per V.34 §10.1.3.3 */
         s->tx.diff = (s->tx.diff + bit) & 3;
         bit = s->tx.diff;
-        if (++s->tx.tone_duration >= 16)
+        /* 11.4.1.1.1: "transmit one J' sequence, and then transmit signal
+           TRN".  J' is one 16-bit Table 19 pattern at two bits a symbol
+           (10.1.3.4 via 10.1.3.3), so 8T.  This counted 16T: J' followed by
+           8T of scrambled zeros, which put our Phase 4 TRN 8T after where
+           the answerer's reference TRN starts. */
+        if (++s->tx.tone_duration >= J_DASHED_BAUDS)
         {
             if (s->tx.calling_party  ||  s->tx.v90_v34_fallback)
             {
