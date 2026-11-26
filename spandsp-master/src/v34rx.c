@@ -14973,6 +14973,221 @@ static int64_t v90_t3_4point_end(const v34_rx_state_t *s,
    the 4-point signal stops, and start data there.  Returns the raw index of
    the first B1 symbol, or -1. */
 enum { V90_T3_BLIND_TRAIN = 600, V90_T3_BLIND_LOOKAHEAD = 96 };
+/* v90_t3_blind_locate()/_acquire(): the 4-point signal runs on past what has
+   arrived (see v90_t3_blind_locate()). */
+enum { V90_T3_BLIND_OPEN_END = -3 };
+
+static bool b1_template_skip_cma;
+
+/* B1 from a peer that carries its scrambler on from CP'/E.
+
+   10.1.3.1/V.34 zeroes the scrambler before B1, and the templates assume
+   it.  The ESS V.90 analogue modem (D-Modem's half_ess, 2026-11-26) does not:
+   every template scored 5-9% coarse, 17-23% fit -- chance -- at start-up and
+   after each of its 9.6 renegotiations, so its B1 was placed blind, and after
+   a renegotiation the blind placement sometimes never decoded (49% ones
+   until LAPM's N400 ran out: octets lost at the end of the call).
+
+   What it does instead is exact, and readable off the line.  The 4-point
+   CP'/E just before B1 is scrambled bits I1n, I2n differentially encoded
+   (10.1.3.3/V.34: In = 2*I2n + I1n, Zn = In + Zn-1 mod 4, point 0 turned
+   clockwise by Zn*90 degrees), so the quadrant step between two decisions
+   IS the pair of scrambled bits, whatever the carrier phase.  The scrambler
+   register holds the last 23 scrambled bits (clause 7), so the last twelve
+   4-point symbols give the state B1 starts from if nothing reset it.  A
+   template seeded with it fits the ESS's B1 100.0% (coarse 96.6-99.8%),
+   starting the symbol after the last 4-point decision.
+
+   The end of the 4-point signal is found to within a symbol or two, so the
+   state is read as if it ended anywhere from three symbols before to eight
+   after the end found, from the decisions there, in either sense of
+   rotation; the matched filter's coarse score picks between them (a wrong
+   state scores what a wrong template does) and only the winner is fitted.  Returns the fit, with
+   s->v90_t3_b1_seed set to the state if it is 0.95 or better and cleared
+   otherwise. */
+static float v90_t3_carried_b1(v34_rx_state_t *s,
+                               const complexf_t w[V34_V90_T3_FSE_TAPS],
+                               int64_t qend,
+                               int scrambler_tap,
+                               int trellis,
+                               complexf_t coeff[V34_V90_T3_FSE_TAPS],
+                               int64_t *first_out,
+                               bool *conjugate_out,
+                               int *initial_state_out)
+{
+    enum { N = 13, EARLY = 3, LATE = 8, BEFORE = 4, AFTER = 24 };
+    int q[EARLY + N + LATE];
+    uint32_t best_seed = 0;
+    float best_coarse = 0.0f;
+    int best_end = 0;
+    int best_sense = 0;
+    int64_t best_at = 0;
+    float coarse = 0.0f;
+    float fit;
+    int64_t lo = qend + V34_V90_T3_RRC_TAPS/2 - 3*BEFORE;
+    int64_t hi = qend + V34_V90_T3_RRC_TAPS/2 + 3*AFTER;
+
+    if (qend - 3*(EARLY + N) < V34_V90_T3_FSE_TAPS
+        ||  hi + 3*s->v90_t3_b1_symbols > s->v90_t3_raw_count)
+        return 0.0f;
+    /*endif*/
+    /* Decisions on the symbols from N + EARLY before qend to LATE after it;
+       q[EARLY + N - 1] is qend's. */
+    for (int n = 0;  n < EARLY + N + LATE;  n++)
+    {
+        complexf_t y = v90_t3_fse_at(s, w, qend - 3*(EARLY + N - 1 - n));
+
+        /* Quadrant, counted anticlockwise from the first. */
+        q[n] = (y.re >= 0.0f)  ?  ((y.im >= 0.0f)  ?  0  :  3)
+                               :  ((y.im >= 0.0f)  ?  1  :  2);
+    }
+    /*endfor*/
+    /* Candidate -1 is 10.1.3.1's reset itself (seed 0): a peer that does
+       reset must still find its B1 here, because once this 4-point
+       placement succeeds the CP'-anchored search skips the templates. */
+    for (int sense = -1;  sense < 2;  sense++)
+    {
+        /* The 4-point signal taken to end EARLY symbols before qend ... LATE
+           after it: the last N decisions up to there. */
+        for (int end = EARLY + N - 1 - EARLY;  end <= EARLY + N - 1 + LATE;  end++)
+        {
+            uint32_t reg = 0;
+            double target_power = 0.0;
+            bool built;
+
+            if (sense < 0  &&  end > EARLY + N - 1 - EARLY)
+                break;
+            /*endif*/
+            for (int n = end - N + 2;  sense >= 0  &&  n <= end;  n++)
+            {
+                /* Clockwise rotation by Zn: Zn - Zn-1 is the quadrant step
+                   back.  The other sense covers a conjugated branch. */
+                int in = sense  ?  ((q[n] - q[n - 1]) & 3)  :  ((q[n - 1] - q[n]) & 3);
+
+                reg = (reg << 1) | (uint32_t) (in & 1);         /* I1n, first */
+                reg = (reg << 1) | (uint32_t) ((in >> 1) & 1);  /* I2n */
+            }
+            /*endfor*/
+            s->v90_t3_b1_seed = (sense < 0)  ?  0  :  ((reg & 0x7FFFFF) | 0x800000);
+            b1_template_skip_cma = true;
+            built = v34_build_expected_b1_tap_trellis(s, scrambler_tap, trellis, 0);
+            b1_template_skip_cma = false;
+            if (!built)
+                continue;
+            /*endif*/
+            for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+                target_power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
+                              + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
+            /*endfor*/
+            for (int64_t f = lo;  f <= hi;  f++)
+            {
+                float score[2];
+
+                v90_t3_coarse_scores(s, f, target_power, score);
+                for (int c = 0;  c < 2;  c++)
+                {
+                    if (score[c] > best_coarse)
+                    {
+                        best_coarse = score[c];
+                        best_seed = s->v90_t3_b1_seed;
+                        best_end = end - (EARLY + N - 1);
+                        best_sense = sense;
+                        best_at = f;
+                    }
+                    /*endif*/
+                }
+                /*endfor*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    s->v90_t3_b1_seed = 0;
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 T/3 carried-scrambler B1: best coarse %.1f%% with the "
+             "4-point signal ending %+d symbols from where it was found (sense %d), "
+             "B1 at %+lld\n",
+             100.0f*best_coarse, best_end, best_sense,
+             (long long) ((best_at - V34_V90_T3_RRC_TAPS/2 - qend)/3));
+    /* A wrong scrambler state scores like a wrong template, 5-9 % here; the
+       right one 93 % and up, or 47-58 % with the wrong trellis state. */
+    if (best_coarse < 0.3f)
+        return 0.0f;
+    /*endif*/
+    s->v90_t3_b1_seed = best_seed;
+    *initial_state_out = 0;
+    if (best_coarse < 0.9f)
+    {
+        /* The right scrambler state with the wrong trellis state scores
+           50-66 %: after a 9.6 renegotiation the ESS does not reset its
+           trellis encoder either (10.1.3.1), and carries it on from the data
+           mode before.  Its 16 states (Table 10/V.34's 16-state code) are
+           cheap to try for the one scrambler state. */
+        float state_coarse = best_coarse;
+
+        for (int st = 1;  st < 16;  st++)
+        {
+            double target_power = 0.0;
+
+            b1_template_skip_cma = true;
+            if (!v34_build_expected_b1_tap_trellis(s, scrambler_tap, trellis, st))
+            {
+                b1_template_skip_cma = false;
+                continue;
+            }
+            /*endif*/
+            b1_template_skip_cma = false;
+            for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+                target_power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
+                              + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
+            /*endfor*/
+            for (int64_t f = best_at - 3;  f <= best_at + 3;  f++)
+            {
+                float score[2];
+
+                v90_t3_coarse_scores(s, f, target_power, score);
+                if (score[0] > state_coarse  ||  score[1] > state_coarse)
+                {
+                    state_coarse = (score[0] > score[1])  ?  score[0]  :  score[1];
+                    *initial_state_out = st;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 carried-scrambler B1: trellis state %d scores "
+                 "%.1f%%\n", *initial_state_out, 100.0f*state_coarse);
+    }
+    /*endif*/
+    b1_template_skip_cma = true;
+    (void) v34_build_expected_b1_tap_trellis(s, scrambler_tap, trellis, *initial_state_out);
+    b1_template_skip_cma = false;
+    fit = v90_t3_acquire_pass(s, lo, hi, coeff, first_out, conjugate_out, &coarse, 0.0f);
+    if (best_seed & 0x800000)
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 B1 from the scrambler carried on from CP'/E "
+                 "(state 0x%06x, trellis state %d, not 10.1.3.1's reset): "
+                 "coarse=%.1f%% fit=%.1f%%, B1 %+lld symbols from the 4-point "
+                 "signal's end\n",
+                 (unsigned) (best_seed & 0x7FFFFF), *initial_state_out,
+                 100.0f*coarse, 100.0f*fit,
+                 (long long) ((*first_out - qend)/3));
+    else
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 B1 from 10.1.3.1's reset state (trellis state "
+                 "%d) after the 4-point signal: coarse=%.1f%% fit=%.1f%%, B1 "
+                 "%+lld symbols from its end\n",
+                 *initial_state_out, 100.0f*coarse, 100.0f*fit,
+                 (long long) ((*first_out - qend)/3));
+    /*endif*/
+    if (fit < 0.95f)
+        s->v90_t3_b1_seed = 0;
+    /*endif*/
+    return fit;
+}
 /* How far before E the 4-point signal may end: 1 s at 3200 baud. */
 enum { V90_T3_BLIND_BACK = 3200 };
 
@@ -15048,7 +15263,23 @@ static int64_t v90_t3_blind_locate(v34_rx_state_t *s)
              "Rx - V.90 T/3 4-point CP'/E found %lld symbols before E "
              "(decision error %.4f)\n",
              (long long) ((s->v90_t3_e_anchor - end)/3), err);
-    return v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
+    {
+        int64_t qend = v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
+
+        /* A CP'-anchored search reaches to the edge of what has arrived,
+           and a peer that has not yet heard our MP is still repeating CP
+           there (9.4.2.4-.5/V.90, and after each 9.6 renegotiation): the
+           4-point signal has not ended YET.  Say so, so the next window
+           looks again instead of the search counting the 4-point placement
+           as tried and failed -- after which only the templates ran, which
+           cannot fit a peer that carries its scrambler into B1, and the ESS
+           (2026-11-26) went on to a 9.6 timeout and a retrain with its CP'/E
+           and B1 sitting in the ring. */
+        if (qend < 0  &&  s->v90_t3_blind_wide)
+            return V90_T3_BLIND_OPEN_END;
+        /*endif*/
+        return qend;
+    }
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -15105,7 +15336,7 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
         qend = v90_t3_4point_end(s, w, base + phase, limit, threshold);
     }
     if (qend < 0)
-        return -1;
+        return s->v90_t3_blind_wide  ?  V90_T3_BLIND_OPEN_END  :  -1;
     /* B1 starts nine symbols after it, on every call measured
        (reference-data/artifacts/rf-pve-20261015: v90-6311-1, v90-6313-1, diag-6313-21600,
        and v90-6313-cap9600 where B1 decodes to the mapping frame): one
@@ -15118,6 +15349,34 @@ static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
        symbols after it (v90ras 2026-11-09, white at every other gap), so
        the data path still searches the symbol offset while the decode is
        white (v90_t3_sym_search). */
+    /* A peer that carries its scrambler into B1 is not blind at all: its
+       B1 is known exactly from the CP'/E just decided. */
+    if (!V34_DIAG_GETENV("ME_V90_T3_NO_CARRIED_B1"))
+    {
+        complexf_t carried_coeff[V34_V90_T3_FSE_TAPS];
+        int64_t carried_first = 0;
+        bool carried_conjugate = false;
+        int carried_state = 0;
+        int carried_tap = v34_expected_b1_default_tap(s);
+        float carried = v90_t3_carried_b1(s, w, qend, carried_tap,
+                                          s->v90_t3_trellis_size,
+                                          carried_coeff, &carried_first,
+                                          &carried_conjugate, &carried_state);
+
+        if (carried >= 0.95f  &&  carried > s->v90_t3_srch_match)
+        {
+            s->v90_t3_srch_match = carried;
+            s->v90_t3_srch_coarse = carried;
+            s->v90_t3_srch_first = carried_first;
+            s->v90_t3_srch_conjugate = carried_conjugate;
+            s->v90_t3_srch_tap = carried_tap;
+            s->v90_t3_srch_trellis = s->v90_t3_trellis_size;
+            s->v90_t3_srch_initial_state = carried_state;
+            memcpy(s->v90_t3_srch_coeff, carried_coeff, sizeof(carried_coeff));
+        }
+        /*endif*/
+    }
+    /*endif*/
     first = qend + 3*9;
     V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 T/3 4-point training: %d symbols, decision error "
@@ -15607,6 +15866,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_srch_trellis = -1;
     s->v90_t3_srch_initial_state = 0;
     s->v90_t3_srch_state_anchor = 0;
+    s->v90_t3_b1_seed = 0;
     s->v90_t3_srch_expanded = s->parms.expanded_shaping;
 
 search:
@@ -15664,7 +15924,9 @@ search:
             s->v90_t3_srch_blind_stage = (s->v90_t3_srch_blind_first >= 0)  ?  3  :  2;
             if (s->v90_t3_srch_blind_stage == 2)
             {
-                s->v90_t3_blind_tried = true;
+                /* Not yet ended is not tried: the next window runs it again. */
+                s->v90_t3_blind_tried = s->v90_t3_srch_blind_first != V90_T3_BLIND_OPEN_END;
+                s->v90_t3_srch_blind_first = -1;
                 (void) v90_t3_cma_continue(s, V34_V90_T3_CMA_MEASURE_SYMBOLS);
             }
             /*endif*/
@@ -15675,8 +15937,15 @@ search:
         s->v90_t3_blind_tried = true;
         s->v90_t3_srch_blind_first = v90_t3_blind_acquire(s, s->v90_t3_srch_blind_first,
                                                           s->v90_t3_srch_blind_coeff);
+        if (s->v90_t3_srch_blind_first == V90_T3_BLIND_OPEN_END)
+        {
+            s->v90_t3_blind_tried = false;
+            s->v90_t3_srch_blind_first = -1;
+        }
+        /*endif*/
         s->v90_t3_srch_blind_stage = 2;
-        if (s->v90_t3_4point_final  &&  s->v90_t3_srch_blind_first >= 0)
+        if ((s->v90_t3_4point_final  &&  s->v90_t3_srch_blind_first >= 0)
+            ||  s->v90_t3_srch_match >= 0.95f)
         {
             /* Skip the six template steps (one media packet each, ~12 ms
                apiece unoptimised on the slowest host): they cannot fit a
@@ -20638,6 +20907,11 @@ static v34_state_t *b1_template_model(v34_rx_state_t *rx,
         v34_free(tx);
         return NULL;
     }
+    /* A peer that carries its scrambler on from CP'/E into B1: see
+       v90_t3_carried_b1(). */
+    if (rx->v90_t3_b1_seed & 0x800000)
+        tx->tx.scramble_reg = rx->v90_t3_b1_seed & 0x7FFFFF;
+    /*endif*/
     return tx;
 }
 /*- End of function --------------------------------------------------------*/
@@ -21019,6 +21293,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_freq_seed = 0.0f;
     rx->v90_t3_blind_tried = false;
     rx->v90_t3_4point_final = false;
+    rx->v90_t3_b1_seed = 0;
     rx->v90_t3_packet_steps = false;
     rx->v90_t3_cpprime_anchor = -1;
     rx->v90_t3_blind_wide = false;

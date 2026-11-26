@@ -400,8 +400,8 @@ The full matrix on the new defaults is unchanged: 15 of 18 that run, plus
 `ess_v90_ulaw`, which lost data (7002/7391) in that run. Rerun alone, it
 fails 1 of 3 on the new defaults and 1 of 3 on 3dc003df (the old ones), with
 received octets short or extra both ways. That is an intermittent
-data-integrity defect on the ESS V.90 row, independent of this change, and
-not yet investigated.
+data-integrity defect on the ESS V.90 row, independent of this change. It is
+fixed: "ESS V.90 carries its scrambler and trellis state into B1" below.
 
 The failing new-arm call is the Phase 2 INFO1c loss below. Our caller's
 Phase 4 receiver was not the problem it looked like. It finds no S/S̄ at
@@ -646,6 +646,72 @@ Our transmitter was checked first. The TRN2d/SUVd tap is steady (8
 codewords, 5600-5900 RMS). Its points are exactly those of the HSF's CPt
 (one constellation, no codec set, trn1d_gain 0.9988). This direction of
 `netsim` adds no echo.
+
+### ESS V.90 carries its scrambler and trellis state into B1 (2026-11-26)
+
+**Fixed in our upstream B1 search (spandsp `v34rx.c`, `v90_t3_carried_b1()`).**
+`ess_v90_ulaw` lost octets in about 1 call of 3, short or extra, on every
+build. The ESS's B1 matched none of our templates: coarse 5-9% and fit
+17-23%, which is chance. Every other peer fits 100%. So every ESS B1 was
+placed blind from the 4-point CP′/E (`v90_t3_blind_acquire()`), with the
+"+9 symbols" gap measured on the MT5634. The ESS renegotiates (§9.6) 1-4
+times a call, and each time B1 was placed blind again. Those placements
+sometimes decoded white (49% ones) until LAPM's N400 ran out, and the call
+lost its tail.
+
+V.34 §10.1.3.1 resets the scrambler, trellis encoder, differential encoder
+and precoder before B1. The ESS resets none of the first two:
+
+- **Scrambler.** It runs on from CP′/E. The 4-point CP′/E is differentially
+  coded (§10.1.3.3: I_n = Z_n − Z_{n−1} mod 4, rotated clockwise). So the
+  quadrant step between two of our decisions is the pair of scrambled bits,
+  whatever the carrier phase. The last twelve symbols give the 23-bit
+  register (clause 7). A template seeded with it fits the ESS's B1 100.0%
+  (coarse 93-99.8%), starting the symbol after the last 4-point symbol.
+- **Trellis encoder.** At start-up it is in state 0. After a renegotiation
+  it carries state 4 on from the data mode before. The right scrambler
+  state with trellis state 0 scores 47-58% coarse; with state 4 it scores
+  93.7-99.8%, and the fit is 100.0%.
+
+The search now reads that state, as if the 4-point signal ended anywhere
+from three symbols before to eight after where it was found, in either
+sense of rotation. It keeps the best coarse score (a wrong state scores
+5-9%), tries the 16 trellis states when that score is under 90%, and fits
+the winner. The spec's own reset state is one of the candidates. If the
+fit is 0.95 or better, B1 commits through the normal template path,
+including the out-of-sample check. Otherwise the blind placement goes on as
+before. `ME_V90_T3_NO_CARRIED_B1=1` turns it off.
+
+A second defect showed once B1 was exact. After a renegotiation the search
+is anchored on CP′ and looks for the end of the 4-point signal in whatever
+has arrived. The ESS is still repeating CP (ack=0) there until our MP
+reaches it. The 4-point placement found no end, marked itself tried, and
+every later window ran only the templates, which cannot fit this peer. The
+§9.6 renegotiation then timed out ("no E within 56000 symbols") and the
+call retrained, with CP′/E and B1 sitting in the ring. A 4-point signal
+that runs off the end of what has arrived now counts as not yet ended
+(`V90_T3_BLIND_OPEN_END`), and the next window looks again. That retry
+needs the reset candidate. Once the 4-point placement succeeds, the
+CP′-anchored search skips the templates. Without the reset candidate, our
+own analogue role's fall-forward (`engine_pair_test` with
+`ME_V90_UPSTREAM_TEST_FIRST_BPS=19200`) got a blind B1 after its
+renegotiation, and its V.42 failed 3 of 3. Before the retry, a template had
+found that B1 in a later window.
+
+Results: `ess_v90_ulaw`, arms alternated against 52ccd4d0, 8 calls each.
+- New build: 8 of 8. 17 of 19 B1s fitted exactly (fit=100.0%), and no §9.6
+  timeout or retrain.
+- 52ccd4d0: 7 of 8. All 20 B1s were blind (fit=0.0%), with 4 §9.6
+  timeouts or retrains.
+
+Over the four A/Bs the old build passed 15 of 20. The build with the
+trellis search has passed 14 of 14 (including 6 runs of an earlier gate).
+
+Our switch to MNP in one earlier failing call came from this too. A blind
+B1 on the wrong frame phase decoded junk for ten sweep steps, and an "LR"
+arrived after V.42 detection had already succeeded. The ESS then really did
+complete MNP, and later received its own data back. That MNP echo was not
+investigated.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 

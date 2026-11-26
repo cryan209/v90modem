@@ -1894,6 +1894,12 @@ typedef struct
     int v90_t3_srch_tap;
     int v90_t3_srch_trellis;
     int v90_t3_srch_initial_state;
+    /*! The scrambler state the far end's B1 starts from, when it does not
+        reset its scrambler before B1 as 10.1.3.1/V.34 says: bit 23 set means
+        use bits 0-22 in place of the reset state in every B1 template built
+        for this acquisition.  Read off the CP'/E that precedes B1
+        (v90_t3_carried_b1()). */
+    uint32_t v90_t3_b1_seed;
     int64_t v90_t3_srch_state_anchor;
     bool v90_t3_srch_expanded;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
