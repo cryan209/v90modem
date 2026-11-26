@@ -1663,6 +1663,29 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed d8963a70 (2026-11-27)
+
+On top of fdd95bdb, this deploy adds d8963a70.
+- **V.32bis S acquisition at either T/2 phase.** S alternates A and B, so at
+  the eye crossing it fits half way and the timing loop took ~150 symbols to
+  reach the eye centre. The search now also fits the other T/2 phase and
+  moves the sampling point there when it fits better.
+- **V.32bis answer modem restarts on the far end's AA during start-up**
+  (7.1), once its tone phase is over: a tone at 0.9 of a pure tone, within
+  6 dB of the tone phase's AA. Before, a stalled start-up sat silent.
+- **Offline.** D-Modem's emulated Courier calling in V.32bis: 32/32 against
+  31/32 on fdd95bdb (arms alternated), then 24/24; forced stalls
+  (`V32BIS_TEST_DROP_FIRST_R=1`, not set here) 2/2 retrain and connect.
+  `test-fast` 783/783. See `docs/dmodem_interop.md`, "The emulated Courier".
+- **No smoke call was made.** Only V.32bis calls change.
+
+Built in `/root/deploy-5640b4d3`, checked out at d8963a70
+(`/root/deploy-d8963a70.build.log`). The binary (md5 de0c0a56…) is kept as
+`/opt/v90ras/sip_v90_modem.d8963a70`, and the previous one (fdd95bdb,
+a79624cd…) as `sip_v90_modem.pre-d8963a70`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20
+"registration success" lines and 10 "SIP V.90 modem ready".
+
 ## Deployed fdd95bdb (2026-11-27)
 
 On top of 21da3dfa, this deploy adds fdd95bdb (and the docs-only 408ab20e).
