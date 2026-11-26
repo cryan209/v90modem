@@ -209,6 +209,10 @@ struct v22bis_state_s
 
         int pattern_repeats;
         int last_raw_bits;
+        /*! \brief Calling modem: the answerer's unscrambled 11 (or 00), and the last 8 symbols
+                   that departed from it, one bit each, to find the end of that signal. */
+        int unscrambled_pattern;
+        unsigned int unscrambled_departures;
         /*! \brief The previous symbol's dibit by phase change (Table 1/V.22bis), for the S1 search. */
         int s1_last_bits;
         /*! \brief Independent S1 search on the other T/2 eye during answer acquisition. */
@@ -258,6 +262,9 @@ struct v22bis_state_s
         int training;
         /*! \brief A counter used to track progress through sending the training sequence. */
         int training_count;
+        /*! \brief Calling modem: the answerer's unscrambled ones ended during our S1, so
+                   the timed scrambled ones follow it (V.22bis 6.3.1.1.1 b)). */
+        bool timed_s11_after_s1;
         /*! \brief The current phase of the carrier (i.e. the DDS parameter). */
         uint32_t carrier_phase;
         /*! \brief The update rate for the phase of the carrier (i.e. the DDS increment). */

@@ -234,7 +234,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V92_CP_LAW_STRICT` | v92_cp_rx.c |  | ctd |  |
 | `VPCM_V90_PP_PHASE` | v34rx.c |  | c | vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. |
 
-## Kept on purpose (67, 27 with no test/script/doc reference)
+## Kept on purpose (67, 26 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -295,7 +295,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_X2_UPSTREAM_MAX_RATE` | modem_engine.c |  | d | server upstream diagnostic ceiling, default 33600; 2400..33600 in 2400 steps; AT+MS also bounds rates |
 | `P3_LEGACY_FRONTEND` | p3_demod.c |  | d | offline decoders compare the old Phase 3 front end |
 | `V32BIS_DATA_EYE` | v32bis.c |  | d | diagnostic: V.32bis data-mode eye log |
-| `V32BIS_TEST_DROP_FIRST_R` | v32bis.c |  | - | test hook: the answer modem ignores the first rate signal, so the far end's start-up restart (AA) is exercised |
+| `V32BIS_TEST_DROP_FIRST_R` | v32bis.c |  | d | test hook: the answer modem ignores the first rate signal, so the far end's start-up restart (AA) is exercised |
 | `V32BIS_TRN_SYMBOLS` | v32bis.c |  | - | test hook: a far end that sends long TRN (slmodemd runs to ~8000) |
 | `V34_DUPLEX_SPEC_S` | v34tx.c |  | d | recent fix (default since 2026-11-26): the V.34 10.1.3.7 Phase 4 S/S-bar; 0 restores the old 0/90-degree generator for an A/B |
 | `V34_HDX_SPEC_TRAINING` | v34tx.c |  | dh | recent fix (2026-10-09): A/B against other fax peers still useful |

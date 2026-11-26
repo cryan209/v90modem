@@ -421,7 +421,22 @@ SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
 
 static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len);
 static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len, bool in_startup);
+/*! 7.1/7.2 lost reception.  The data decision error is measured against the
+    nearest constellation point, in the units where a decoder with no eye
+    left (white decisions) reads about 0.58 rms and a healthy 14400 bit/s
+    call 0.16-0.36: 0.45 rms is power 0.2.  It must hold for 2 s (4800T), as
+    D-Modem's call modem requires, so a noise burst the equalizer comes back
+    from does not retrain; and at most 3 times a call, so a line that cannot
+    hold the rate is not retrained forever. */
+/* rms below which the call modem's start-up watch ignores AC: about
+   -40 dB relative to v32bis_duplex_test's line signal (rms ~4500). */
+#define V32BIS_STARTUP_AC_FLOOR 50.0f
+#define V32BIS_LOST_ERROR_POWER  0.2f
+#define V32BIS_LOST_SYMBOLS      4800
+#define V32BIS_LOST_RETRAINS     3
+
 static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool local);
+static bool v32bis_trace(void);
 static void startup_b1_reset_vote(v32bis_state_t *s);
 static bool v32bis_rx_carrying_data(v32bis_state_t *s);
 static bool v32bis_rx_in_far_preamble(v32bis_state_t *s);
@@ -432,6 +447,27 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
 
     if (s->reneg_cleared)
         return 0;
+    if (s->startup_complete  &&  s->reactive_startup
+        &&  v32bis_rx_carrying_data(s)
+        &&  s->rx.v32bis_lost_symbols >= V32BIS_LOST_SYMBOLS
+        &&  s->loss_retrains < V32BIS_LOST_RETRAINS)
+    {
+        /* 7.1/7.2: "A retrain may be initiated during data transmission if
+           either modem incorporates a means of detecting unsatisfactory
+           signal reception."  Called by the emulated Courier as answer modem
+           at 14400 bit/s, this receiver's decisions went white 4-5 s into
+           data on 14 calls in 108 and stayed white, and LAPM timed out
+           (T401 x N400) with the far end still transmitting; a retrain at 7 s
+           (ME_V32BIS_RETRAIN_AFTER_MS) recovered every such call, 16/16. */
+        s->loss_retrains++;
+        if (v32bis_trace())
+            fprintf(stderr, "[V32BIS %s] reception lost (decision error %.3f for %d symbols): retrain %d\n",
+                    s->calling_party ? "call  " : "answer", (double) s->rx.v32bis_dd_err,
+                    s->rx.v32bis_lost_symbols, s->loss_retrains);
+        /*endif*/
+        v32bis_begin_retrain(s, s->rx_line_samples, true);
+    }
+    /*endif*/
     if (s->startup_complete  &&  s->reactive_startup
         &&  v32bis_rx_carrying_data(s))
     {
@@ -461,7 +497,7 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
     }
     /*endif*/
     if (!s->startup_complete  &&  s->reactive_startup  &&  !s->tone_phase_active
-        &&  !s->calling_party)
+        &&  (!s->calling_party  ||  s->startup_far_rate_seen))
     {
         /* 7.1/7.2 during the start-up itself: the clause 6 tones are over,
            so the far end's AA (or AC) for more than 128T is it starting
@@ -474,7 +510,11 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
            NT + 256T.  Answer modem only: the call modem's tone phase ends
            at its second reversal, and the answer modem's AC rightly runs on
            after that until it sees AA stop (6.2), past 128T on a long round
-           trip -- the RasFinder replay's call modem took that for a restart. */
+           trip -- the RasFinder replay's call modem took that for a restart.
+           The call modem watches once it has received a rate signal, when
+           no AC is left to come but a 7.2 retrain's: the emulated Courier's,
+           after an E it never got, held this side 80 s in its S search,
+           which took the AC for S. */
         used = v32bis_retrain_watch(s, amp, len, true);
         if (used >= 0)
         {
@@ -1805,6 +1845,9 @@ static int startup_enter_data_rx(v32bis_state_t *s,
     memset(s->rx.past_state_locations, 0,
            sizeof(s->rx.past_state_locations));
     s->rx.trellis_ptr = 14;
+    s->rx.v32bis_dd_err = 0.0f;
+    s->rx.v32bis_lost_symbols = 0;
+    s->rx.v32bis_lost_threshold = V32BIS_LOST_ERROR_POWER;
     s->rx.v32bis_offhalf_wanted = false;
     s->rx.v32bis_offhalf_valid = false;
     s->rx.symbol_sink = NULL;
@@ -1858,6 +1901,9 @@ static void v32bis_rx_event_rate(v32bis_state_t *s, int rates)
     }
     /*endif*/
     s->startup_remote_rates = rates;
+    if (!s->startup_complete)
+        s->startup_far_rate_seen = true;
+    /*endif*/
     /* A rate signal naming exactly one rate is R3, which is what 6.1 has the
        call modem echo in its E word. */
     switch (rates)
@@ -1876,6 +1922,24 @@ static void v32bis_rx_event_rate(v32bis_state_t *s, int rates)
         break;
     case V32BIS_RATE_14400:
         s->startup_selected_rate = 14400;
+        break;
+    default:
+        /* 6.2 has R3 name "the data rate to be used", but some answer modems'
+           R3 names every common rate -- the emulated Courier's is its R1
+           again, 0x9ff0 -- and the call modem left this at 0 and so never
+           sent E: the Courier waited, then retrained with AC.  E then names
+           the fastest rate both offer, as D-Modem's call modem does for
+           Agere's.  R1 passes through here too, and its choice is replaced
+           when R3 comes. */
+        if (s->calling_party)
+        {
+            int local_rates;
+
+            if (v32bis_decode_rate_signal(s->permitted_rates_signal, &local_rates) == 0)
+                s->startup_selected_rate = v32bis_select_common_rate(local_rates, rates);
+            /*endif*/
+        }
+        /*endif*/
         break;
     }
     /*endswitch*/
@@ -3115,12 +3179,32 @@ static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len,
 
     for (i = 0;  i < len;  i++)
     {
+        /* The call modem's start-up watch has to tell AC from S, which has the
+           same 600/3000 Hz lines: S alternates A and B, a quarter turn apart,
+           so half its power is the 1800 Hz carrier, while AC alternates
+           opposite states and has none.  The Courier's filtering kept its S
+           under the purity test; a clean line's S passes it for all its
+           256T, and the loopback's call modem restarted on the answer
+           modem's second S.  So the 1800 Hz line is measured too (before the
+           shared counter moves) and must be absent.  The purity test is a ratio,
+           so it also passes on silence: while the answer modem is quiet
+           after R1, v32bis_duplex_test's 31 dB hybrid residual (rms 3.5)
+           read as AC and restarted the call.  A line's AC is far above
+           V32BIS_STARTUP_AC_FLOOR. */
+        if (in_startup  &&  s->calling_party)
+            v32bis_tone_det_rx(&s->tone[2], (float) amp[i], s->rx_sample_count);
+        /*endif*/
         v32bis_far_tone_present(s, amp[i], fraction);
+        if (in_startup  &&  s->calling_party
+            &&  (s->tone[2].mag > 0.35f*(s->tone[0].mag + s->tone[1].mag)
+                 ||  s->reneg_watch_pow < V32BIS_STARTUP_AC_FLOOR*V32BIS_STARTUP_AC_FLOOR))
+            s->retrain_tone_run = 0;
+        /*endif*/
         /* A restart's AA comes at the level of the AA heard in the tone
            phase.  Just after that phase the call modem's CC dies away as a
            pure but weak 1800 Hz (rms 95 against ~3000 in
            v32bis_duplex_test's clause 7 retrains), which is not one. */
-        if (in_startup  &&  s->tone[2].mag < 0.5f*s->tone_phase_aa_peak)
+        if (in_startup  &&  !s->calling_party  &&  s->tone[2].mag < 0.5f*s->tone_phase_aa_peak)
             s->retrain_tone_run = 0;
         /*endif*/
         if (s->retrain_tone_run
@@ -3693,6 +3777,8 @@ static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool
     span_log(&s->logging, SPAN_LOG_FLOW, "V.32bis retrain %s\n",
              local ? "initiated" : "requested by the far end");
     v17_rx_restart(&s->rx, s->bit_rate, false);
+    s->rx.v32bis_lost_threshold = 0.0f;
+    s->rx.v32bis_lost_symbols = 0;
     s->retrain_tone_run = 0;
     s->retrain_count++;
     v32bis_start_tones(s);
@@ -3768,6 +3854,7 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s)
     s->rx_hold_symbols = 0;
     s->rx_repeat_word = 0;
     s->startup_selected_rate = 0;
+    s->startup_far_rate_seen = false;
     /* 8.2 watches during data even when a harness skips clause 6 tones. */
     v32bis_tone_det_init(&s->tone[0], 600.0f);
     v32bis_tone_det_init(&s->tone[1], 3000.0f);

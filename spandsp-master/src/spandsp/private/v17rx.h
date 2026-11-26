@@ -95,6 +95,12 @@ struct v17_rx_state_s
     FILE *v32bis_t2_dump;
     double v32bis_eye_sum;
     int v32bis_eye_count;
+    /*! V.32bis 7.1/7.2 lost-reception watch: the decision error power,
+        averaged over about 256 symbols, and the symbols for which it has
+        stayed above v32bis_lost_threshold (0 disables the watch). */
+    float v32bis_dd_err;
+    float v32bis_lost_threshold;
+    int v32bis_lost_symbols;
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
     /*! \brief The scaling factor assessed by the AGC algorithm. */

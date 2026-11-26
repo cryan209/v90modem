@@ -511,7 +511,8 @@ static complexf_t training_get(v22bis_state_t *s)
             if (s->calling_party)
             {
                 s->tx.training_count = 0;
-                s->tx.training = V22BIS_TX_TRAINING_STAGE_S11;
+                s->tx.training = (s->tx.timed_s11_after_s1)  ?  V22BIS_TX_TRAINING_STAGE_TIMED_S11  :  V22BIS_TX_TRAINING_STAGE_S11;
+                s->tx.timed_s11_after_s1 = false;
             }
             else
             {
@@ -770,6 +771,7 @@ static int v22bis_tx_restart(v22bis_state_t *s)
         s->tx.training = V22BIS_TX_TRAINING_STAGE_INITIAL_TIMED_SILENCE;
     /*endif*/
     s->tx.training_count = 0;
+    s->tx.timed_s11_after_s1 = false;
     s->tx.carrier_phase = 0;
     s->tx.guard_tone_phase = 0;
     s->tx.answer_tone_phase = 0;

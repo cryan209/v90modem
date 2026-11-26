@@ -552,9 +552,15 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
            for the remaining training (6.3.1.1.2 c)-e)); finding S1 while
            continuing to decide at the crossing can leave the receiver
            unable to acquire the 2400 bit/s scrambled ones. No sampling
-           instant is moved and no input sample is inserted or removed. */
-        if (!s->calling_party
-            && s->negotiated_bit_rate == 1200
+           instant is moved and no input sample is inserted or removed.
+           The call modem looks for the answer modem's S1 the same way
+           (6.3.1.1.1 c)): the answering Courier's S1 follows a pure-tone
+           unscrambled 1, which carries no timing, and on 4 of 40 emulated
+           calls our decision eye sat at its crossing for the whole of it
+           (consecutive points 7-20 degrees apart) and the call fell to
+           1200 bit/s.  An offline replay of one of them takes 2400 on the
+           other eye (61 long). */
+        if (s->negotiated_bit_rate == 1200
             && s->rx.training == V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200)
         {
             z = equalizer_get(s);
@@ -565,13 +571,24 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
             }
             else
             {
+                /* The call modem keeps its decision eye while that eye is in
+                   an S1 run of its own: when the sampling instant is a
+                   quarter symbol out both eyes see the alternation, and
+                   the other eye's run can end first. */
                 if (s->rx.s1_other_repeats >= 15
                     && (s->rx.s1_other_bits == 0x0 || s->rx.s1_other_bits == 0x3)
-                    && s->bit_rate == 2400)
+                    && s->bit_rate == 2400
+                    && (!s->calling_party  ||  s->rx.pattern_repeats < 2))
                 {
                     span_log(&s->logging, SPAN_LOG_FLOW, "+++ S1 detected on other T/2 eye (%d long)\n", s->rx.s1_other_repeats);
-                    s->tx.training = V22BIS_TX_TRAINING_STAGE_U0011;
-                    s->tx.training_count = 0;
+                    if (!s->calling_party)
+                    {
+                        /* Accept establishment at 2400bps; the call modem
+                           has sent its own S1 already. */
+                        s->tx.training = V22BIS_TX_TRAINING_STAGE_U0011;
+                        s->tx.training_count = 0;
+                    }
+                    /*endif*/
                     s->negotiated_bit_rate = 2400;
                     s->rx.baud_phase ^= 1;
                     s->rx.last_z = z;
@@ -745,6 +762,8 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
             /*endif*/
             s->rx.pattern_repeats = 0;
             s->rx.training_count = 0;
+            s->rx.unscrambled_pattern = raw_bits;
+            s->rx.unscrambled_departures = 0;
             s->rx.training = V22BIS_RX_TRAINING_STAGE_UNSCRAMBLED_ONES_SUSTAINING;
         }
         /*endif*/
@@ -764,14 +783,37 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
             /* Bell 212A: this is the 2225Hz answer tone, and its end is reported by
                v22bis_bell212a_answer_tone_ended(), from a tone detector. */
         }
-        else if (raw_bits != s->rx.last_raw_bits)
+        else
         {
-            /* This looks like the end of the sustained initial unscrambled 11 or 00. */
-            s->tx.training_count = 0;
-            s->tx.training = V22BIS_TX_TRAINING_STAGE_TIMED_S11;
-            s->rx.training_count = 0;
-            s->rx.training = V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200;
-            s->rx.pattern_repeats = 0;
+            /* The end of the sustained initial unscrambled 11 or 00 is the answerer's S1 or
+               scrambled ones (6.3.1.1.1 c)), which depart from that pattern on every other
+               symbol or more.  One wrong phase decision departs on two symbols in a row, and
+               this modem's own S1 starts in the middle of the answerer's signal (b)), so
+               require 3 departures in the last 8 symbols.  Ending here on a single one cut
+               our S1 from 100ms to 75ms against an emulated Courier, which then refused
+               2400bit/s. */
+            s->rx.unscrambled_departures = (s->rx.unscrambled_departures << 1)
+                                         | (raw_bits != s->rx.unscrambled_pattern);
+            if (__builtin_popcount(s->rx.unscrambled_departures & 0xFFu) >= 3)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW, "+++ end of unscrambled ones (Caller)\n");
+                /* b) has S1 last 100 +-3ms: one still being sent completes, and the
+                   transmitter moves on to the timed scrambled ones itself. */
+                if (s->tx.training == V22BIS_TX_TRAINING_STAGE_U0011)
+                {
+                    s->tx.timed_s11_after_s1 = true;
+                }
+                else
+                {
+                    s->tx.training_count = 0;
+                    s->tx.training = V22BIS_TX_TRAINING_STAGE_TIMED_S11;
+                }
+                /*endif*/
+                s->rx.training_count = 0;
+                s->rx.training = V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200;
+                s->rx.pattern_repeats = 0;
+            }
+            /*endif*/
         }
         /*endif*/
         break;
@@ -1256,6 +1298,8 @@ int v22bis_rx_restart(v22bis_state_t *s)
 
     s->rx.pattern_repeats = 0;
     s->rx.last_raw_bits = 0;
+    s->rx.unscrambled_pattern = 0;
+    s->rx.unscrambled_departures = 0;
     s->rx.s1_last_bits = 0x1;
     s->rx.s1_other_bits = 0x1;
     s->rx.s1_other_repeats = 0;

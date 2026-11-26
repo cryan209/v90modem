@@ -12925,6 +12925,12 @@ static void start_v22bis_training(void)
     g_v22bis = v22bis_init(NULL, bps, guard, g_calling_party,
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
+    if (g_v22bis) {
+        logging_state_t *log = v22bis_get_logging_state(g_v22bis);
+
+        if (log)
+            span_log_set_level(log, me_span_flow_level());
+    }
     if (!g_v22bis)
         ME_LOG("[ME] v22bis_init failed\n");
     else if (g_gui_enabled) {

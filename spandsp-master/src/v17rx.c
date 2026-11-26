@@ -554,6 +554,19 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
        less often, but using the output of the traceback would put more lag
        into the feedback path. */
     constellation_state = constel_maps[s->space_map][re][im][min_index];
+    if (s->v32bis_lost_threshold > 0.0f  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
+    {
+        float dre = z->re - s->constellation[constellation_state].re;
+        float dim = z->im - s->constellation[constellation_state].im;
+
+        s->v32bis_dd_err += (dre*dre + dim*dim - s->v32bis_dd_err)*(1.0f/256.0f);
+        if (s->v32bis_dd_err > s->v32bis_lost_threshold)
+            s->v32bis_lost_symbols++;
+        else
+            s->v32bis_lost_symbols = 0;
+        /*endif*/
+    }
+    /*endif*/
     if (s->v32bis_eye_log  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
     {
         float dre = z->re - s->constellation[constellation_state].re;

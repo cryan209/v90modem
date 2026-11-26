@@ -88,10 +88,11 @@ STREAM=10, one call per row:
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
-| Courier | V.8 default | Not a valid target: D-Modem's own `half_open8` fails it the same way (V.90 Phase 3, the Courier's Tone A, a V.34 retrain that never finishes, NO CARRIER at 63 s), and D-Modem's source lists the emulated Courier's V.34 as not yet working even between two Couriers. See "The emulated Courier" below |
+| Courier | V.8 default | Not a valid target, dropped from `dmodem_matrix.sh`: D-Modem's own `half_open8` fails it the same way (V.90 Phase 3, the Courier's Tone A, a V.34 retrain that never finishes, NO CARRIER at 63 s), and D-Modem's source lists the emulated Courier's V.34 as not yet working even between two Couriers. See "The emulated Courier" below |
 | Courier | V.32bis, Courier calls | Pass, 32 of 32 since the S fit at both T/2 phases (below), 14400, data exact. 0 before the CA reversal fix, then about 1 in 12 to 1 in 4 lost the S |
 | Courier | V.22bis, Courier calls | Pass, 2400/ARQ, data exact |
-| Courier | V.32bis / V.22bis, we call | Fail (open): V.32bis never connects; V.22bis CONNECTs 1200 then NO CARRIER |
+| Courier | V.32bis, we call | Pass, 32 of 32 at 14400, data exact (`we_courier_v32b_ulaw`); 0 before the R3 and loss-retrain fixes below |
+| Courier | V.22bis, we call | Pass, 24 of 24 at 2400, data exact (`we_courier_v22b_ulaw`); every call fell to 1200 before the S1 fix below, then 4 of 40 before the other-eye S1 search |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 `half_open8` passes on CT 128, and SmartLink V.92 against it connects at
@@ -807,12 +808,77 @@ tone phase is over, with two guards:
   pure 1800 Hz at rms 95, against about 3000 normally, and the unguarded watch
   restarted on that every time.
 
-The call modem does not run this watch. Its tone phase ends at its second
-reversal, and the answer modem's AC rightly runs on until it sees AA stop,
-past 128T on a long round trip. The RasFinder replay's call modem took that
-AC for a restart. `V32BIS_TEST_DROP_FIRST_R=1` (a test hook) ignores the
+The call modem does not run this watch through its tone phase. That phase
+ends at its second reversal, and the answer modem's AC rightly runs on until
+it sees AA stop, past 128T on a long round trip. The RasFinder replay's call
+modem took that AC for a restart. Since the next section, the call modem runs
+the watch once a rate signal has arrived. `V32BIS_TEST_DROP_FIRST_R=1` (a test hook) ignores the
 first R2 to force the stall. With it, two of two calls retrain on the
 Courier's AA and connect at 14400 with data exact in 17 s.
+
+### The emulated Courier answering our call (2026-11-27)
+
+`dmodem_matrix.sh` now runs both directions: `courier_v32b_ulaw` and
+`courier_v22b_ulaw` have the Courier call, and the `we_` rows have us call
+(`DIAL=1`). Four defects were ours.
+
+**V.22bis: we cut our own S1 short.** 6.3.1.1.1 b) has the call modem send S1
+for 100 +-3 ms; the Courier then sends its S1 and goes to 2400. We ended the
+unscrambled-ones stage on the first symbol that departed from the pattern.
+Our own S1 starts while the Courier's ones are still arriving, so one wrong
+phase decision ended the stage, and that switched our transmitter to timed
+scrambled ones early: our S1 went out 75 ms long. The Courier refused it and
+the call came up at 1200, then lost carrier. The stage now ends on 3
+departures in the last 8 symbols, and an S1 already being sent completes
+before the timed scrambled ones. With that, 16 of 16 calls trained at 2400.
+
+**V.22bis: the Courier's S1 on our eye crossing.** A further run of 40 calls
+lost 4 to 1200. In each, our decision samples of the Courier's S1 were 7-20
+degrees apart for its whole 60 symbols, not the 80-90 of a passing call, so
+the phase-change detector saw a run of 0-degree steps. The Courier's S1
+follows its unscrambled ones, a pure tone with no timing in it, so the
+sampling phase at S1's start is chance. The answer modem already searched the
+other T/2 eye for S1 (the CX93001's case); the call modem now does too,
+except while its own eye is in an S1 run. Replaying the receive side of one
+call offline reproduces the fault (1200 before, 2400 after, the other eye's
+run 61 long); it is the regression fixture
+`reference-data/courier-v22bis-caller-s1-eye`. After the fix: 24 of 24 at
+2400.
+
+**V.32bis: a multi-rate R3 left us without E.** 6.2 has R3 name the data rate
+to use. The Courier's R3 is its R1 again (0x9ff0), every rate both offer. We
+took the rate only from a one-rate R3, so we never sent E. The Courier waited,
+then retrained with AC. The call modem now picks the fastest rate both sides
+offer, as D-Modem's call modem does against Agere's R3.
+
+**V.32bis: the call modem answers a 7.2 retrain during start-up.** With E
+missing, the Courier's AC held us 80 s in our S search, which took the AC for
+S. The call modem now runs the 7.1 retrain watch during start-up, but only
+after a rate signal has arrived, when no AC is left to come except a retrain's.
+That avoids the RasFinder replay's long-round-trip AC above. Two guards keep it
+off S and off silence:
+- The 1800 Hz carrier must be absent, under 0.35 of the 600/3000 Hz lines.
+  S alternates A and B a quarter turn apart, so half its power is at 1800 Hz,
+  while AC alternates opposite states and has none. In loopback, a clean S
+  passed the purity test, and the call modem restarted on the answer modem's
+  second S.
+- The signal must be above rms 50. The purity test is a ratio, so in
+  `v32bis_duplex_test`'s 31 dB hybrid row the rms 3.5 residual, heard while
+  the answer modem was silent after R1, read as AC.
+
+**V.32bis: data that goes white now retrains (7.1/7.2).** Once connected, 14
+of 108 calls with us calling went white 4-5 s into data and stayed white,
+until LAPM gave up (T401 x N400) with the Courier still transmitting. A
+retrain at 7 s (`ME_V32BIS_RETRAIN_AFTER_MS`) recovered all 16 tried. 7.1 and
+7.2 let either modem retrain on "unsatisfactory signal reception". The data
+receiver tracks its decision error against the nearest point, about 0.58 rms
+when the decisions are white and 0.16-0.36 on a healthy 14400 call. Above
+0.45 rms (power 0.2) for 2 s (4800T, D-Modem's call-modem hold), it retrains,
+at most 3 times a call. Results:
+- We call: 32 of 32, with 5 calls rescued by a retrain.
+- Courier calls (V.32bis and V.22bis), and we call on V.22bis: 8 of 8 each,
+  with no false retrains.
+- Control: D-Modem's own caller against the Courier passed 6 of 6.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 

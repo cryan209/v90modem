@@ -173,6 +173,9 @@ struct v32bis_state_s
     int32_t tone_transition_symbol;
     /*! The far end's AA level as the answer modem's tone phase ended. */
     float tone_phase_aa_peak;
+    /*! A rate signal has been received in this start-up, so any further AC
+        from the answer modem is a 7.2 retrain (the call modem's watch). */
+    bool startup_far_rate_seen;
     int32_t rx_sample_count;
 
     bool reactive_startup;
@@ -247,6 +250,8 @@ struct v32bis_state_s
        7.2: 1800 Hz) has been continuously present in data mode. */
     int retrain_tone_run;
     int retrain_count;
+    /* Retrains this end has started on lost reception (7.1/7.2). */
+    int loss_retrains;
     /* The first conditioning signal's TRN is extended by trn_ec_symbols and
        trains the echo canceller; tx_cond_count counts conditionings sent. */
     int trn_ec_symbols;
