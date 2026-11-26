@@ -1663,6 +1663,27 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed be7665c2 (2026-11-26)
+
+On top of 280f12fd (dce4885c and 3872849c in between are docs and an
+off-by-default knob), this deploy adds be7665c2.
+- **V.90-declined V.34 fallback.** The MP search keeps the V.34 descrambler
+  defaults instead of rotating through V.90's CP retry modes
+  (`docs/dmodem_interop.md`, "The fallback's MP receiver rotated away"). Only
+  calls whose analogue modem declines PCM take this path.
+- **Offline.**
+  - D-Modem `hsf_v90_ulaw`: 4/4 against 0/4, alternated over four line delays.
+  - Matrix 15/18 (was 14/18).
+  - `test-fast` 783/783.
+- **No smoke call was made.**
+
+Built clean in `/root/deploy-5640b4d3`, checked out at be7665c2
+(`/root/deploy-be7665c2.build.log`). The binary (md5 5a3cb888…) is kept as
+`/opt/v90ras/sip_v90_modem.be7665c2`, and the previous one (280f12fd) as
+`sip_v90_modem.pre-be7665c2`. Installed by rename with `/run/v90ras/busy`
+empty and no PPP interface up. The restart logged 20 v90ras "registration
+success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed 280f12fd (2026-11-26)
 
 On top of baf083cc, this deploy adds eea66c86 and 280f12fd.
