@@ -119,6 +119,9 @@ struct v32bis_state_s
     int startup_rx_stage;
     complexf_t startup_rx_acq[64];
     int startup_rx_acq_count;
+    /*! The same S window at the other T/2 sampling phase. */
+    complexf_t startup_rx_acq_alt[64];
+    int startup_rx_acq_alt_count;
     complexf_t startup_rx_gain;
     int startup_rx_sbar_run;
     int startup_rx_sbar_remaining;
@@ -168,6 +171,8 @@ struct v32bis_state_s
     bool tx_in_symbol_source;
     int32_t tone_counter_start;
     int32_t tone_transition_symbol;
+    /*! The far end's AA level as the answer modem's tone phase ended. */
+    float tone_phase_aa_peak;
     int32_t rx_sample_count;
 
     bool reactive_startup;

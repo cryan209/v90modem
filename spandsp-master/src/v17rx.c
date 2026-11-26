@@ -724,6 +724,16 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
 #endif
         s->eye_report(s->eye_user_data, sample, &eye, s->baud_half ^ 1);
     }
+#if !defined(SPANDSP_USE_FIXED_POINTx)
+    /* The off-baud T/2 output, for V.32bis's S search to fit at the other
+       sampling phase.  This dot product changes no state. */
+    if (s->v32bis_offhalf_wanted  &&  s->baud_half == 0)
+    {
+        s->v32bis_offhalf_z = equalizer_get(s);
+        s->v32bis_offhalf_valid = true;
+    }
+    /*endif*/
+#endif
     if ((s->baud_half ^= 1))
         return;
     /*endif*/

@@ -105,6 +105,7 @@ KEPT = {
     "ME_ANS_NOTCH_RATIO": "interop: lets ANSam through band noise on a poor line (a caller otherwise sends CI all call)",
     "ME_SOUNDER_RMS": "measurement: level of the channel sounder (ME_SOUNDER)",
     "V32BIS_TRN_SYMBOLS": "test hook: a far end that sends long TRN (slmodemd runs to ~8000)",
+    "V32BIS_TEST_DROP_FIRST_R": "test hook: the answer modem ignores the first rate signal, so the far end's start-up restart (AA) is exercised",
     "ME_V90_ANALOGUE_DIL": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_INFO1A_REPEATS": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_INFO1D_TIMEOUT": "V.90 analogue role: configuration and the open real-loop investigation",

@@ -420,7 +420,7 @@ SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
 /*- End of function --------------------------------------------------------*/
 
 static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len);
-static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len);
+static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len, bool in_startup);
 static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool local);
 static void startup_b1_reset_vote(v32bis_state_t *s);
 static bool v32bis_rx_carrying_data(v32bis_state_t *s);
@@ -451,7 +451,31 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
            128T, no reversal).  The first 40T cannot tell them apart, so the
            renegotiation watch has already clamped circuit 104; the tone is
            followed on until it either breaks or outlasts any preamble. */
-        used = v32bis_retrain_watch(s, amp, len);
+        used = v32bis_retrain_watch(s, amp, len, false);
+        if (used >= 0)
+        {
+            v32bis_begin_retrain(s, s->rx_line_samples + used, false);
+            return v32bis_rx_clean(s, &amp[used], len - used);
+        }
+        /*endif*/
+    }
+    /*endif*/
+    if (!s->startup_complete  &&  s->reactive_startup  &&  !s->tone_phase_active
+        &&  !s->calling_party)
+    {
+        /* 7.1/7.2 during the start-up itself: the clause 6 tones are over,
+           so the far end's AA (or AC) for more than 128T is it starting
+           again, typically because the start-up stalled -- the emulated
+           Courier waited for an R3 that never came, then sent AA for 50 s
+           while this side sat in its S search.  Answer it as a retrain.
+           The tone has to be purer than in data: S carries 1800 Hz and
+           600/3000 Hz lines too (0.46 and 0.54 of its power on the Courier,
+           0.68 and 0.73 of a clean tone's measurement), and lasts up to
+           NT + 256T.  Answer modem only: the call modem's tone phase ends
+           at its second reversal, and the answer modem's AC rightly runs on
+           after that until it sees AA stop (6.2), past 128T on a long round
+           trip -- the RasFinder replay's call modem took that for a restart. */
+        used = v32bis_retrain_watch(s, amp, len, true);
         if (used >= 0)
         {
             v32bis_begin_retrain(s, s->rx_line_samples + used, false);
@@ -1153,6 +1177,10 @@ enum
     clause 8 preamble, the only other place the same tone appears. */
 #define V32BIS_RETRAIN_TONE_SYMBOLS 128
 
+/*! The tone purity a start-up restart needs (see v32bis_rx_clean()): a clean
+    AA or AC measures 1.0, S at most 0.73. */
+#define V32BIS_STARTUP_RETRAIN_TONE_FRACTION 0.9f
+
 /*! 8.1: R4 "shall indicate the desired rate in the initiating modem and all
     lower data signalling rates at which the initiating modem is enabled to
     operate".  8.2 says the same of R5 in the responding modem, "irrespective
@@ -1407,7 +1435,10 @@ static complexf_t startup_gain_observation(const complexf_t *z, int state)
 }
 /*- End of function --------------------------------------------------------*/
 
-static bool startup_try_acquire_s(v32bis_state_t *s)
+/*! Fit a 64-symbol window to S (5.2.1: alternating A and B) through one
+    complex gain.  Returns the residual power over the input power, and the
+    gain, for the better of the two state parities. */
+static float startup_fit_s(const complexf_t win[64], complexf_t *gain_out)
 {
     complexf_t gains[2];
     complexf_t predicted;
@@ -1415,16 +1446,12 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
     const complexf_t *p;
     float input_power;
     float reference_power;
-    float error_power[2];
+    float error_power;
     float metric;
     float best_metric;
-    int best;
     int parity;
     int i;
 
-    if (s->startup_rx_acq_count < 64)
-        return false;
-    best = -1;
     best_metric = 1.0e30f;
     for (parity = 0;  parity < 2;  parity++)
     {
@@ -1433,18 +1460,16 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
         reference_power = 0.0f;
         for (i = 0;  i < 64;  i++)
         {
-            /* 5.2.1: S alternates states A and B. */
             p = &v17_v32bis_4800_constellation[((i + parity) & 1)
                                                ? V32BIS_STARTUP_B : V32BIS_STARTUP_A];
-            gains[parity].re += s->startup_rx_acq[i].re*p->re
-                              + s->startup_rx_acq[i].im*p->im;
-            gains[parity].im += s->startup_rx_acq[i].im*p->re
-                              - s->startup_rx_acq[i].re*p->im;
+            gains[parity].re += win[i].re*p->re + win[i].im*p->im;
+            gains[parity].im += win[i].im*p->re - win[i].re*p->im;
             reference_power += startup_power(p);
         }
+        /*endfor*/
         gains[parity].re /= reference_power;
         gains[parity].im /= reference_power;
-        error_power[parity] = 0.0f;
+        error_power = 0.0f;
         input_power = 0.0f;
         for (i = 0;  i < 64;  i++)
         {
@@ -1452,18 +1477,70 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
                                                ? V32BIS_STARTUP_B : V32BIS_STARTUP_A];
             predicted.re = gains[parity].re*p->re - gains[parity].im*p->im;
             predicted.im = gains[parity].re*p->im + gains[parity].im*p->re;
-            error.re = s->startup_rx_acq[i].re - predicted.re;
-            error.im = s->startup_rx_acq[i].im - predicted.im;
-            error_power[parity] += startup_power(&error);
-            input_power += startup_power(&s->startup_rx_acq[i]);
+            error.re = win[i].re - predicted.re;
+            error.im = win[i].im - predicted.im;
+            error_power += startup_power(&error);
+            input_power += startup_power(&win[i]);
         }
-        metric = error_power[parity]/input_power;
+        /*endfor*/
+        metric = (input_power > 0.0f)  ?  error_power/input_power  :  1.0e30f;
         if (metric < best_metric)
         {
             best_metric = metric;
-            best = parity;
+            *gain_out = gains[parity];
         }
+        /*endif*/
     }
+    /*endfor*/
+    return best_metric;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool startup_try_acquire_s(v32bis_state_t *s)
+{
+    complexf_t gain;
+    complexf_t alt_gain;
+    float best_metric;
+    float alt_metric;
+    float reference_power;
+    int i;
+
+    if (s->startup_rx_acq_count < 64)
+        return false;
+    /*endif*/
+    best_metric = startup_fit_s(s->startup_rx_acq, &gain);
+    /* 5.2.1's S alternates A and B every symbol, so sampled at the eye
+       crossing it averages to a constant that fits one gain only half way
+       (residual ~0.5 at reduced power), and the timing loop takes ~150
+       symbols to walk from there to the eye centre.  The emulated Courier's
+       S is its NT probe and its conditioning S back to back (~350T); losing
+       150T of it to the walk, then 6.2's MT hold, left no S to train on.
+       The window at the other T/2 phase is fitted too, and if it fits
+       better the receiver moves its sampling there. */
+    if (s->startup_rx_acq_alt_count >= 64)
+    {
+        alt_metric = startup_fit_s(s->startup_rx_acq_alt, &alt_gain);
+        if (alt_metric < best_metric)
+        {
+            if (alt_metric > 0.12f)
+                return false;
+            /*endif*/
+            /* Process the next T/2 output as the baud: the sampling phase
+               moves half a symbol, to the one the window was fitted at. */
+            s->rx.baud_half = 1;
+            gain = alt_gain;
+            best_metric = alt_metric;
+            if (v32bis_trace())
+            {
+                fprintf(stderr,
+                        "[V32BIS %s] S fits at the other T/2 phase (residual %.3f); sampling moved\n",
+                        s->calling_party ? "call  " : "answer", alt_metric);
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
     /* V.32bis 5.2.1 / 6.1: acquire S before the line equalizer is trained.
        This is a receiver-fit tolerance, not a prescribed ITU signal value.
        The RasFinder/MP-114 captures in reference-data/v32bis-rf-s/ have
@@ -1472,9 +1549,9 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
        0.08 rejected all three lines before TRN or R1.  0.12 admits them;
        AC (opposite states, no carrier component) still has residual 0.5.
        The consecutive Table 5 rate-word check remains the startup gate. */
-    if (best < 0  ||  best_metric > 0.12f)
+    if (best_metric > 0.12f)
         return false;
-    s->startup_rx_gain = gains[best];
+    s->startup_rx_gain = gain;
 #if !defined(SPANDSP_USE_FIXED_POINTx)
     /* Put the S-derived complex gain into the shared FSE immediately.  TRN
        can then train against canonical 4-point targets instead of asking LMS
@@ -1728,6 +1805,8 @@ static int startup_enter_data_rx(v32bis_state_t *s,
     memset(s->rx.past_state_locations, 0,
            sizeof(s->rx.past_state_locations));
     s->rx.trellis_ptr = 14;
+    s->rx.v32bis_offhalf_wanted = false;
+    s->rx.v32bis_offhalf_valid = false;
     s->rx.symbol_sink = NULL;
     s->rx.symbol_sink_user_data = NULL;
     return 0;
@@ -1761,6 +1840,7 @@ static void v32bis_rx_event_s(v32bis_state_t *s)
         s->rx_hold_symbols = s->mt_symbols;
         s->startup_rx_stage = V32BIS_RX_SEARCH_S;
         s->startup_rx_acq_count = 0;
+        s->startup_rx_acq_alt_count = 0;
     }
     /*endif*/
 }
@@ -1985,9 +2065,11 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
             && s->tx_step > 0 && s->tx_step < 3)
         {
             s->startup_rx_acq_count = 0;
+            s->startup_rx_acq_alt_count = 0;
             return -1;
         }
         /*endif*/
+        s->rx.v32bis_offhalf_wanted = true;
         if (s->rx_hold_symbols > 0)
         {
             s->rx_hold_symbols--;
@@ -2005,8 +2087,25 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
                     63*sizeof(s->startup_rx_acq[0]));
             s->startup_rx_acq[63] = z;
         }
+        if (s->rx.v32bis_offhalf_valid)
+        {
+            if (s->startup_rx_acq_alt_count < 64)
+                s->startup_rx_acq_alt[s->startup_rx_acq_alt_count++] = s->rx.v32bis_offhalf_z;
+            else
+            {
+                memmove(&s->startup_rx_acq_alt[0],
+                        &s->startup_rx_acq_alt[1],
+                        63*sizeof(s->startup_rx_acq_alt[0]));
+                s->startup_rx_acq_alt[63] = s->rx.v32bis_offhalf_z;
+            }
+            /*endif*/
+            s->rx.v32bis_offhalf_valid = false;
+        }
+        /*endif*/
         if (startup_try_acquire_s(s))
         {
+            s->rx.v32bis_offhalf_wanted = false;
+            s->rx.v32bis_offhalf_valid = false;
             s->startup_rx_stage = V32BIS_RX_S_BAR;
             v32bis_rx_event_s(s);
         }
@@ -2099,6 +2198,7 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
         {
             s->startup_rx_stage = V32BIS_RX_SEARCH_S;
             s->startup_rx_acq_count = 0;
+            s->startup_rx_acq_alt_count = 0;
             s->startup_rx_word_pos = 0;
             return -1;
         }
@@ -2165,6 +2265,17 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
                                 1280 + s->startup_rx_slide_count - 16);
                     }
                     /*endif*/
+                    if (s->retrain_count == 0  &&  getenv("V32BIS_TEST_DROP_FIRST_R"))
+                    {
+                        /* Test hook: stall the first start-up here, so the
+                           far end's restart can be exercised. */
+                        s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+                        s->startup_rx_acq_count = 0;
+                        s->startup_rx_acq_alt_count = 0;
+                        s->rx_hold_symbols = 1000000;
+                        return -1;
+                    }
+                    /*endif*/
                     s->startup_rx_first_r = newer;
                     s->startup_remote_rates = expected;
                     s->rx_repeat_word = newer;
@@ -2183,6 +2294,7 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
             {
                 s->startup_rx_stage = V32BIS_RX_SEARCH_S;
                 s->startup_rx_acq_count = 0;
+                s->startup_rx_acq_alt_count = 0;
                 return -1;
             }
             /*endif*/
@@ -2207,6 +2319,7 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
                the next conditioning signal rather than framing silence. */
             s->startup_rx_stage = V32BIS_RX_SEARCH_S;
             s->startup_rx_acq_count = 0;
+            s->startup_rx_acq_alt_count = 0;
             s->startup_rx_word_pos = 0;
             return -1;
         }
@@ -2946,13 +3059,13 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
     3000 Hz) on the line?  Shared by the clause 8 preamble watch and the
     clause 7 retrain watch, which see the same tone and must not both run the
     detectors over one sample. */
-static bool v32bis_far_tone_present(v32bis_state_t *s, int16_t x)
+static bool v32bis_far_tone_present(v32bis_state_t *s, int16_t x, float fraction)
 {
     float mag;
     float rms;
     /* The call modem watches for AC's two lines, the answer modem for AA's
        one. */
-    const float threshold = V32BIS_RENEG_TONE_FRACTION*V32BIS_TONE_WINDOW
+    const float threshold = fraction*V32BIS_TONE_WINDOW
                           *sqrtf((s->calling_party  ?  2.0f  :  1.0f)/2.0f);
 
     s->reneg_watch_pow += ((float) x*x - s->reneg_watch_pow)*(1.0f/64.0f);
@@ -2994,13 +3107,22 @@ static bool v32bis_far_tone_present(v32bis_state_t *s, int16_t x)
     measurement dips, and then gives way to R4/R5, so it never approaches
     128T.  Returns the index of the sample on which a retrain is declared, or
     -1. */
-static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len)
+static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len, bool in_startup)
 {
+    const float fraction = in_startup  ?  V32BIS_STARTUP_RETRAIN_TONE_FRACTION
+                                       :  V32BIS_RENEG_TONE_FRACTION;
     int i;
 
     for (i = 0;  i < len;  i++)
     {
-        v32bis_far_tone_present(s, amp[i]);
+        v32bis_far_tone_present(s, amp[i], fraction);
+        /* A restart's AA comes at the level of the AA heard in the tone
+           phase.  Just after that phase the call modem's CC dies away as a
+           pure but weak 1800 Hz (rms 95 against ~3000 in
+           v32bis_duplex_test's clause 7 retrains), which is not one. */
+        if (in_startup  &&  s->tone[2].mag < 0.5f*s->tone_phase_aa_peak)
+            s->retrain_tone_run = 0;
+        /*endif*/
         if (s->retrain_tone_run
                 > (int) (V32BIS_RETRAIN_TONE_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL))
             return i + 1;
@@ -3017,7 +3139,7 @@ static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
 
     for (i = 0;  i < len;  i++)
     {
-        if (v32bis_far_tone_present(s, amp[i]))
+        if (v32bis_far_tone_present(s, amp[i], V32BIS_RENEG_TONE_FRACTION))
         {
             /* The block is scanned here before v17_rx() sees any of it, so
                this is the frequency from before the data decoder was fed the
@@ -3483,6 +3605,9 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
             if (s->tone_drop_run
                     >= (int) (V32BIS_TONE_DROP_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL))
             {
+                /* What the far end's AA measured, for telling a restart
+                   (v32bis_rx_clean()) from the tail of its CC. */
+                s->tone_phase_aa_peak = s->tone[2].peak;
                 s->tone_phase_active = false;
                 v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_SILENT);
                 s->tx_transition_at = s->tx_symbol_index + V32BIS_TONE_DROP_SYMBOLS;
@@ -3708,6 +3833,7 @@ static void startup_rx_reset(v32bis_state_t *s)
     s->startup_rx_symbol_count = 0;
     s->startup_rx_stage = V32BIS_RX_SEARCH_S;
     s->startup_rx_acq_count = 0;
+    s->startup_rx_acq_alt_count = 0;
     s->startup_rx_sbar_run = 0;
     s->startup_rx_sbar_remaining = 0;
     s->startup_rx_trn_reg = 0;

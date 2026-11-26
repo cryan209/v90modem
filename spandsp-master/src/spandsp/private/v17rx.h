@@ -84,6 +84,11 @@ struct v17_rx_state_s
     bool eq_normalized_lms;
     bool v32bis_data_eq;
     bool v32bis_timing_hold;
+    /*! V.32bis S search: also take the FSE output between bauds, the other
+        T/2 sampling phase, into v32bis_offhalf_z. */
+    bool v32bis_offhalf_wanted;
+    bool v32bis_offhalf_valid;
+    complexf_t v32bis_offhalf_z;
     bool v32bis_carrier_hold;
     bool v32bis_eye_log;
     FILE *v32bis_sym_dump;

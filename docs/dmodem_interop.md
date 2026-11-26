@@ -89,7 +89,7 @@ STREAM=10, one call per row:
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
 | Courier | V.8 default | Not a valid target: D-Modem's own `half_open8` fails it the same way (V.90 Phase 3, the Courier's Tone A, a V.34 retrain that never finishes, NO CARRIER at 63 s), and D-Modem's source lists the emulated Courier's V.34 as not yet working even between two Couriers. See "The emulated Courier" below |
-| Courier | V.32bis, Courier calls | About 3 of 4 since the CA reversal fix (below); 0 before. The rest miss the Courier's R2 (open) |
+| Courier | V.32bis, Courier calls | Pass, 32 of 32 since the S fit at both T/2 phases (below), 14400, data exact. 0 before the CA reversal fix, then about 1 in 12 to 1 in 4 lost the S |
 | Courier | V.22bis, Courier calls | Pass, 2400/ARQ, data exact |
 | Courier | V.32bis / V.22bis, we call | Fail (open): V.32bis never connects; V.22bis CONNECTs 1200 then NO CARRIER |
 
@@ -770,8 +770,49 @@ the symbol it is first emitted as, and the AC to CA switch also waits for an
 even count of AC symbols sent (6.2). On CT 128 with the Courier calling, 9 of
 12 calls connect at 14400 with data exact, over `NET_DELAY` 1-11. The tone
 dialogue completes in all 12. The other three never frame the Courier's R2
-after its TRN, and then ignore its 7.1 retrain AA until the timeout. That is
-still open.
+after its TRN, and then ignore its 7.1 retrain AA until the timeout.
+
+**V.32bis: S found late, at the eye crossing.** The three calls that missed R2
+all detected the Courier's S at rx symbol 226, against 77-78 in every passing
+call. The Courier sends 6.1's NT probe S and its conditioning S back to back,
+one S of about 350T (145 ms on the line, starting as our R1 begins). Our S
+acquisition fits 64 symbols to alternating A and B through one complex gain.
+In a failing call that fit's residual sat at 0.47-0.50 for 100 symbols while
+the S was on the line at steady power. Then the power rose from 20 to 32 and
+the residual fell to 0.13 by symbol 224. That is the signature of sampling at
+the eye crossing: A and B average to a constant that fits one gain half way,
+and the Godard timing loop took about 150 symbols to walk to the eye centre.
+6.2 then holds the receiver for MT (124-130T) after detecting S. By the end
+of the hold the S was over (residual near 1.0 from symbol 400), so we never
+trained and never framed R2.
+
+The S search now also fits the FSE output at the other T/2 phase, which the
+V.17 receiver takes between bauds while V.32bis asks for it. If that window
+fits and beats the current phase, the receiver processes the next T/2 output
+as its baud, moving the sampling point half a symbol, and acquires there.
+Arms alternated over `NET_DELAY` 1-8 against fdd95bdb:
+- Old build: 31 of 32. The one failure detected S at 226.
+- New build: 32 of 32. It moved its phase in 7 calls, and no S came late.
+- The final build, with the restart below: 24 of 24.
+
+**V.32bis: a stalled start-up now answers the far end's restart.** After its
+R2 went unanswered, the Courier sent AA for 50 s (V.32bis 7.1's retrain tone),
+and we sat in our S search. The clause 7 retrain watch ran only once start-up
+was complete. The answer modem now also runs it during start-up, once its
+tone phase is over, with two guards:
+- The tone must measure 0.9 of a pure tone, not 0.7. The Courier's S carries
+  0.46 of its power at 1800 Hz, which measures 0.68.
+- It must come within 6 dB of the AA heard in the tone phase. In
+  `v32bis_duplex_test`'s clause 7 retrains, the call modem's CC dies away as a
+  pure 1800 Hz at rms 95, against about 3000 normally, and the unguarded watch
+  restarted on that every time.
+
+The call modem does not run this watch. Its tone phase ends at its second
+reversal, and the answer modem's AC rightly runs on until it sees AA stop,
+past 128T on a long round trip. The RasFinder replay's call modem took that
+AC for a restart. `V32BIS_TEST_DROP_FIRST_R=1` (a test hook) ignores the
+first R2 to force the stall. With it, two of two calls retrain on the
+Courier's AA and connect at 14400 with data exact in 17 s.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
