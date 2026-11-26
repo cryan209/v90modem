@@ -1663,6 +1663,41 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 669bf72c (2026-11-27)
+
+On top of d8963a70 (and its README commit 308a8a89), this deploy adds 669bf72c.
+- **V.32bis call modem:**
+  - When R3 names several rates (the Courier's 0x9ff0), it picks the fastest
+    common rate. Before, it never sent E.
+  - It answers a 7.2 retrain (AC) during start-up once a rate signal has
+    arrived.
+- **V.32bis, both roles:** data whose decision error stays above 0.45 rms for
+  2 s retrains (7.1/7.2), at most 3 times a call.
+- **V.22bis call modem:**
+  - Its S1 is no longer cut to 75 ms.
+  - It searches the other T/2 eye for the answer modem's S1.
+- **Offline.**
+  - We call D-Modem's emulated Courier: V.32bis 32/32 at 14400 and V.22bis
+    24/24 at 2400, data exact. Before, V.32bis never connected and V.22bis
+    came up at 1200.
+  - The Courier calling us: 8/8 per modulation.
+  - `test-fast` 783/783 plus the new V.22bis fixture.
+  - `test-slow` failures are the courier-emu x2 probes only. Three of them
+    pass on a rerun one at a time. `slow.list:67` was already failing: its
+    probe passes `--serial-output`, which the pinned courier-emu f1ccd92
+    rejects.
+- **No smoke call was made.** v90ras answers, so the call-modem changes don't
+  apply here. Answer-side calls change only by the V.32bis lost-reception
+  retrain.
+
+Built in `/root/deploy-5640b4d3`, checked out at 669bf72c
+(`/root/deploy-669bf72c.build.log`; all of spandsp and the engine objects
+that include its private headers rebuilt). The binary (md5 83ce6bc1…) is
+kept as `/opt/v90ras/sip_v90_modem.669bf72c`, and the previous one (d8963a70,
+de0c0a56…) as `sip_v90_modem.pre-669bf72c`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20
+"registration success" lines and 10 "SIP V.90 modem ready".
+
 ## Deployed d8963a70 (2026-11-27)
 
 On top of fdd95bdb, this deploy adds d8963a70.
