@@ -431,6 +431,10 @@ static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len,
 /* rms below which the call modem's start-up watch ignores AC: about
    -40 dB relative to v32bis_duplex_test's line signal (rms ~4500). */
 #define V32BIS_STARTUP_AC_FLOOR 50.0f
+/* Data-mode decision-directed timing loop gains, in eq_put_step units
+   (1/640 T) per unit of normalised Mueller-Muller error (about -2 tau). */
+#define V32BIS_DD_TIMING_KP 1.6f
+#define V32BIS_DD_TIMING_KI 0.002f
 #define V32BIS_LOST_ERROR_POWER  0.2f
 #define V32BIS_LOST_SYMBOLS      4800
 #define V32BIS_LOST_RETRAINS     3
@@ -1848,6 +1852,38 @@ static int startup_enter_data_rx(v32bis_state_t *s,
     s->rx.v32bis_dd_err = 0.0f;
     s->rx.v32bis_lost_symbols = 0;
     s->rx.v32bis_lost_threshold = V32BIS_LOST_ERROR_POWER;
+#if !defined(SPANDSP_USE_FIXED_POINTx)
+    /* Data-mode symbol timing from the decisions; see
+       v32bis_dd_timing_update() in v17rx.c for why the Godard detector the
+       start-up trained with cannot keep it. */
+    {
+        const char *e;
+        bool on = true;
+        float kp = V32BIS_DD_TIMING_KP;
+        float ki = V32BIS_DD_TIMING_KI;
+        float sign = 1.0f;
+
+        if ((e = getenv("V32BIS_DD_TIMING")))
+            on = (atoi(e) != 0);
+        /*endif*/
+        if ((e = getenv("V32BIS_DD_TIMING_KP")))
+            kp = (float) atof(e);
+        /*endif*/
+        if ((e = getenv("V32BIS_DD_TIMING_KI")))
+            ki = (float) atof(e);
+        /*endif*/
+        if ((e = getenv("V32BIS_DD_TIMING_SIGN")))
+            sign = (atof(e) < 0.0f)  ?  -1.0f  :  1.0f;
+        /*endif*/
+        v17_rx_v32bis_dd_timing(&s->rx, on, kp, ki, sign);
+        if (v32bis_trace())
+            fprintf(stderr, "[V32BIS %s] data timing: %s, clock offset seed %.4f steps/baud (%.0f ppm)\n",
+                    s->calling_party ? "call  " : "answer",
+                    on ? "decision-directed" : "Godard",
+                    s->rx.v32bis_dd_t_rate, s->rx.v32bis_dd_t_rate*1.0e6f/640.0f);
+        /*endif*/
+    }
+#endif
     s->rx.v32bis_offhalf_wanted = false;
     s->rx.v32bis_offhalf_valid = false;
     s->rx.symbol_sink = NULL;

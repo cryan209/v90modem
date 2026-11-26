@@ -94,7 +94,7 @@ STREAM=10, one call per row:
 | Courier | V.32bis, we call | Pass, 32 of 32 at 14400, data exact (`we_courier_v32b_ulaw`); 0 before the R3 and loss-retrain fixes below |
 | Courier | V.22bis, we call | Pass, 24 of 24 at 2400, data exact (`we_courier_v22b_ulaw`); every call fell to 1200 before the S1 fix below, then 4 of 40 before the other-eye S1 search |
 | Courier, live | V.32bis / V.22bis, Courier calls v90ras | Pass, 5 of 5 each: 14400/ARQ and 2400/ARQ through Asterisk into v90ras's pppd; every call LCP + IPCP open and 20 of 20 LCP echoes and pings intact, no retrain. See "The emulated Courier on a live SIP call" below |
-| Courier, live | V.32bis / V.22bis, we call | Pass, 5 of 5 each: CONNECT 14400 and CONNECT 2400, 40 of 40 lines exact both ways. 1 call in 16 had a V.32bis loss retrain in data, which completed. The cause is our data-mode symbol timing, still open (see below) |
+| Courier, live | V.32bis / V.22bis, we call | Pass, 5 of 5 each: CONNECT 14400 and CONNECT 2400, 40 of 40 lines exact both ways. 1 call in 16 had a V.32bis loss retrain in data, which completed. The cause was our data-mode symbol timing, now decision-directed (see below) |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 `half_open8` passes on CT 128, and SmartLink V.92 against it connects at
@@ -974,10 +974,30 @@ All of these hold the live tap, but each one gives up drift tracking:
   in steps.
 
 The unchanged loop also loses reception at +-200 ppm, so the netsim rows do
-reproduce the live symptom. The next step is a timing error that isn't
-self-noise-limited (decision-directed, or derived from the equalizer), not a
-retuned Godard. The experiment patch, `V32BIS_DATA_TIMING_BAUDS` plus a
-data-mode trigger override, was not committed.
+reproduce the live symptom.
+
+**Fixed: data-mode timing is decision-directed.** Once data begins,
+`v17rx.c` (`v32bis_dd_timing_update`) drives the timing from a Mueller-Muller
+error on the equalizer output against each symbol's decision,
+`Re{z[n] d*[n-1] - z[n-1] d*[n]} / E|d|^2`. That error has no band-edge
+self-noise. A PI loop applies it:
+- Kp 1.6 and Ki 0.002 eq_put_step units per unit of error.
+- The integral term starts from the Godard loop's mean fine-step rate through
+  training. On netsim calls the seed read 134-164 ppm at a 200 ppm offset, and
+  -4 ppm on the live call.
+
+The Godard detector still trains the start-up and every retrain, and
+`V32BIS_DD_TIMING=0` brings it back for data. Results:
+- The live tap, now a fast-tier fixture
+  (`reference-data/courier-v32bis-data-timing-dither`), decodes to the end
+  with data-eye rms 0.171, against 0.360 under the Godard loop. The detector's
+  sense is verified: with it inverted the eye goes white within 10k symbols.
+- Two alternated netsim A/Bs of 80 calls each (NET_PPM 0, +-100, +-200):
+  - we call: 6 loss retrains in 40 calls, against 21, and no failed calls,
+    against 1;
+  - the Courier calls: 0 losses in either arm.
+- The 6 that remain all fall 2-7 s into data, a different pattern from the
+  live failure, which went white 10 s into steady data. They are still open.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
