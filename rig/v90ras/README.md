@@ -1663,6 +1663,25 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed baf083cc (2026-11-26)
+
+On top of ce417b72, this deploy adds baf083cc. As a V.34 call modem, which
+includes the V.90-declined fallback (V.90 §9.2.1.1.8), we now send one 8T J′
+before Phase 4 TRN (V.34 §11.4.1.1.1, §10.1.3.4). Before, we sent 16T: J′
+followed by 8T of scrambled zeros. v90ras answers, so this reaches its calls
+only through the fallback; as answerer nothing changes.
+- Offline: `test-fast` 783/783. Loopback pass rates are unchanged.
+- D-Modem matrix 13/18. The extra ESS V.90 failure never reaches J′
+  (`docs/dmodem_interop.md`).
+- No smoke call was made.
+
+Built in `/root/deploy-5640b4d3`, checked out at baf083cc
+(`/root/deploy-baf083cc.build.log`). The binary (md5 9e92769e…) is kept as
+`/opt/v90ras/sip_v90_modem.baf083cc`, and the previous one (ce417b72,
+b4fea629…) as `sip_v90_modem.pre-baf083cc`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed ce417b72 (2026-11-26)
 
 On top of 5849d2e1, this deploy adds ce417b72. When a V.34 caller's INFO1c
