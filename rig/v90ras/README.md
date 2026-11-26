@@ -1663,6 +1663,31 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 3dc003df (2026-11-26)
+
+On top of be7665c2 (a2a7b851 is its deploy note), this deploy adds 3dc003df.
+- **V.92 Phase 3 receiver.**
+  - Ru2 now locks on whichever period-6 phase it arrives in after MD
+    (V.92 9.5.1.1.1).
+  - The Su detector's energy floor is 6 dB lower (9.5.2.1.7).
+  - See `docs/dmodem_interop.md`, "V.92 Phase 3 against the HSF". Only
+    V.92 calls from analogue modems whose MD shifts Ru's phase, or whose Su
+    is quiet, change.
+- **Offline.**
+  - D-Modem HSF V.92 at −12 dBm0: 4/4 against 0/4. At the default −6 dBm0
+    it still fails, on the HSF's own failure.
+  - Matrix 16/18, no regressions.
+  - `test-fast` 783/783.
+- **No smoke call was made.**
+
+Built clean in `/root/deploy-5640b4d3`, checked out at 3dc003df
+(`/root/deploy-3dc003df.build.log`, which rebuilt `v92_p3_rx.o` and
+`v92_su.o`). The binary (md5 e602bbb0…) is kept as
+`/opt/v90ras/sip_v90_modem.3dc003df`, and the previous one (be7665c2) as
+`sip_v90_modem.pre-3dc003df`. Installed by rename with `/run/v90ras/busy`
+empty and no PPP interface up. The restart logged 20 v90ras "registration
+success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed be7665c2 (2026-11-26)
 
 On top of 280f12fd (dce4885c and 3872849c in between are docs and an
