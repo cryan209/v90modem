@@ -1663,6 +1663,29 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 52ccd4d0 (2026-11-26)
+
+On top of 3dc003df, this deploy adds 52ccd4d0.
+- **Plain V.34 answer calls.**
+  - Phase 4 S/S̄ is now the V.34 10.1.3.7 sequence.
+  - Our symbol clock runs on into Phase 4 instead of resetting.
+  - `V34_DUPLEX_SPEC_S=0` and `V34_P4_KEEP_BAUD_PHASE=0` restore the old
+    behaviour; neither is set here.
+  - V.90 calls don't use this S.
+- **Offline.**
+  - D-Modem HSF calling V.34: 7/8 against 2/8.
+  - Matrix unchanged.
+  - `test-fast` 783/783, and `test-slow` passes.
+- **No smoke call was made.** This changes what every V.34 caller hears
+  from us, so watch the first live V.34 answers.
+
+Built clean in `/root/deploy-5640b4d3`, checked out at 52ccd4d0
+(`/root/deploy-52ccd4d0.build.log`). The binary (md5 c6b770c1…) is kept as
+`/opt/v90ras/sip_v90_modem.52ccd4d0`, and the previous one (3dc003df) as
+`sip_v90_modem.pre-52ccd4d0`. Installed by rename with `/run/v90ras/busy`
+empty and no PPP interface up. The restart logged 20 v90ras "registration
+success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed 3dc003df (2026-11-26)
 
 On top of be7665c2 (a2a7b851 is its deploy note), this deploy adds 3dc003df.
