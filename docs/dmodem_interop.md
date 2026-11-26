@@ -710,8 +710,33 @@ trellis search has passed 14 of 14 (including 6 runs of an earlier gate).
 Our switch to MNP in one earlier failing call came from this too. A blind
 B1 on the wrong frame phase decoded junk for ten sweep steps, and an "LR"
 arrived after V.42 detection had already succeeded. The ESS then really did
-complete MNP, and later received its own data back. That MNP echo was not
-investigated.
+complete MNP, and later received its own data back.
+
+That "echo" never crossed the line. It is the ESS in command state, echoing
+its DTE's characters (E1) after its own MNP link has failed. Four failing
+`ess_v90_ulaw` runs on CT 128 (`fb/carry1`, `fb/abess_spec_8`,
+`fb/ess_p3fix_1`, `dmi/frmat`) all show the same thing when the ESS's received
+stream (`gotA`) is matched against both directions' data:
+- `gotA` first holds our data in order: 3858, 3858, 2618 and 6239 octets.
+- After that it holds the ESS's own transmit stream (`wantB`), unchanged and
+  complete to the last octet. It starts mid-stream, at octet 1903, 1903, 1964
+  and 4476.
+- A single `\r\nOK\r\n` sits inside that copy, 810-1005 octets in. At the
+  DTE's pace of 389 octets per 0.5 s, that is 1.0-1.3 s after the copy
+  starts.
+- `gotA` never shows NO CARRIER, so the ESS kept its carrier.
+
+`interop_call` sends no `+++` with `CALLS=1`, and the data contains no `AT`.
+We never send LN (mnp.c answers one with LNA and nothing more), and no LD
+went out before our own N400 ran out about 12 s later. In every one of the
+four, B1 after the §9.6 renegotiation was blind (fit 0.0%, the frame-phase
+sweep ran through all 112 steps), so the upstream decoded white. We received
+1042-3515 octets, all from before the renegotiation, and acknowledged
+nothing after it. The ESS gave up its MNP link, went offline, and its
+command-mode echo was graded as received data. So this is the same defect
+as the blind B1, now fixed above, not a separate data-path problem. MNP
+itself still connects in passing calls on the carried-state build
+(`fb/abess_carried_*`).
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
