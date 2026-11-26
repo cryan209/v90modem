@@ -234,7 +234,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V92_CP_LAW_STRICT` | v92_cp_rx.c |  | ctd |  |
 | `VPCM_V90_PP_PHASE` | v34rx.c |  | c | vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. |
 
-## Kept on purpose (65, 27 with no test/script/doc reference)
+## Kept on purpose (65, 26 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -302,7 +302,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_P4_KEEP_BAUD_PHASE` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the TX symbol clock into Phase 4 (HSF 4800 -> 33600); off until our caller receiver stops relying on the reset |
 | `V8_GUARD_TONE_HZ` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |
 | `V8_GUARD_TONE_LEVEL` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |
-| `V90_CARRIER_TRACK_P` | v34rx.c, v34tx.c |  | - | experiment (2026-11-26): proportional gain of the V.90 primary training carrier loop (default 40000; plain V.34 uses 2000000); A/B of which CP decoder wins, docs/v34_carrier_loop.md |
+| `V90_CARRIER_TRACK_P` | v34rx.c, v34tx.c |  | d | experiment (2026-11-26): proportional gain of the V.90 primary training carrier loop (default 40000; plain V.34 uses 2000000); D-Modem V.90 rows A/B 35/40 vs 34/40 at 2000000, no difference; docs/v34_carrier_loop.md |
 
 ## Live-path diagnostics (78, 20 with no test/script/doc reference)
 

@@ -66,6 +66,10 @@ the CX93001 replay in `tests/fast.list`
 V.90 is measured on its own, and that includes the V.90-declined V.34
 fallback.
 
+Over the 240 calls, p = 2000000 passes 234 against 229. p = 4000000 lost two
+10 dB calls that never trained, to phase noise. Data mode does not use
+these gains.
+
 ## V.90 measured: no rate error to fix (2026-11-26)
 
 This covers the digital side's v34rx upstream receiver at 3200 baud,
@@ -96,6 +100,30 @@ particular. With the damped gain the live receiver decodes CP more often,
 not less. That is a reason to try the damped gain in a V.90 rig A/B, not
 a carrier-rate defect.
 
-Over the 240 calls, p = 2000000 passes 234 against 229. p = 4000000 lost two
-10 dB calls that never trained, to phase noise. Data mode does not use
-these gains.
+## V.90 gain A/B on D-Modem's vendor peers: no difference (2026-11-26)
+
+`V90_CARRIER_TRACK_P` (3872849c) sets the V.90 gain. On CT 128,
+`tools/dmodem_matrix.sh` ran every `_v90_` row (SmartLink, ESS, HSF, Agere,
+SM56, PCTel, Broadcom, Intel) at `NET_DELAY` 0,
+2.5, 5.3, 9.1 and 13.7 ms. Arm A was 40000 and arm B 2000000. The arms
+alternated, with the first arm swapped at each delay, and nothing else
+changed: 40 calls per arm.
+
+| | A: p = 40000 | B: p = 2000000 |
+|---|---|---|
+| CONNECT | 35/40 | 34/40 |
+| HSF (fails in Phase 4, known) | 0/5 | 0/5 |
+| SM56 rate | 50666 ×5 | 46666 ×2, 50666 ×3 |
+
+- **The extra loss in B** is ESS at 2.5 ms. It reached data at 50666/31200,
+  then dropped in a §9.6 renegotiation after nine good CPs. ESS V.90 failed
+  the same way at the default gain in the 280f12fd matrix, so this call
+  doesn't separate the arms.
+- **The CP decoders don't separate the arms either.** Per row, the counts of
+  accepted CPs from the live and batch decoders overlap between A and B.
+  The batch decoder decodes CP only on ESS and Intel, at either gain. The
+  CX93001 replay's swing from batch to live does not recur on these peers.
+
+**Verdict:** there is no evidence for changing V.90's gain, so it stays
+40000. The knob stays, off. The real CX93001, the one peer where the
+replay showed the effect, has not been called.
