@@ -1663,6 +1663,29 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 280f12fd (2026-11-26)
+
+On top of baf083cc, this deploy adds eea66c86 and 280f12fd.
+- **Plain V.34 calls.** The training carrier loop's proportional gain goes
+  from 40000 to 2000000. The loop was undamped and left Phase 3 0.7–2.8 Hz
+  off nominal in a loopback with no offset (`docs/v34_carrier_loop.md`).
+  V.90 calls, the V.90-declined V.34 fallback included, keep the old gain.
+- **Opt-in only.** `V34_P4_ANSWER_J_FRAMING=1` (answerer J′ framing) is
+  off here.
+- **Offline.**
+  - `test-fast` 783/783.
+  - Delay sweep 234/240 against 229.
+  - D-Modem matrix 13/18, the same five rows as before, with data exact on
+    every connecting row.
+- **No smoke call was made.**
+
+Built clean in `/root/deploy-5640b4d3`, checked out at 280f12fd
+(`/root/deploy-280f12fd.build.log`). The binary (md5 9d9b5a7b…) is kept as
+`/opt/v90ras/sip_v90_modem.280f12fd`, and the previous one (baf083cc,
+9e92769e…) as `sip_v90_modem.pre-280f12fd`. Installed by rename with
+`/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
+"registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
 ## Deployed baf083cc (2026-11-26)
 
 On top of ce417b72, this deploy adds baf083cc. As a V.34 call modem, which
