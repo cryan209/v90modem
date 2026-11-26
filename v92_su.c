@@ -2,6 +2,15 @@
 #include <spandsp.h>
 #include <string.h>
 #include <math.h>
+/* The six-slot bin energy a Su must reach.  It was 900^2*9 (a 900-unit
+ * mean amplitude), which the HSF's Su sits just under: its bin reads
+ * 7.20-7.24M and its 24.5T Su-bar 6.56-7.68M against a floor of 7.29M,
+ * so the 9.5.2.1.7 reversal was never seen, Jp was never sent and the HSF
+ * retrained after 3.6 s of Su on every V.92 call (D-Modem rig,
+ * 2026-11-26).  6 dB lower; the periodicity and polarity tests, not the
+ * level, are what reject non-Su signals. */
+#define V92_SU_MIN_ENERGY (450.0*450*9)
+
 void v92_su_init(v92_su_t *s, bool alaw)
 {
     memset(s, 0, sizeof(*s));
@@ -57,7 +66,7 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
             double e = s->slide_sum_i*s->slide_sum_i + s->slide_sum_q*s->slide_sum_q;
             double r = s->reference_i*s->reference_i + s->reference_q*s->reference_q;
             double d = s->slide_sum_i*s->reference_i + s->slide_sum_q*s->reference_q;
-            s->bar_run = (e > 900.0*900*9 && d < -.85*sqrt(r*e)) ? s->bar_run+1 : 0;
+            s->bar_run = (e > V92_SU_MIN_ENERGY && d < -.85*sqrt(r*e)) ? s->bar_run+1 : 0;
             if (s->bar_run >= 6) {
                 event = V92_SU_BAR;
                 s->stage = event;
@@ -73,7 +82,7 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
             double previous = s->previous_i*s->previous_i+s->previous_q*s->previous_q;
             double change = (re-s->previous_i)*(re-s->previous_i)
                           + (im-s->previous_q)*(im-s->previous_q);
-            bool periodic = energy > 900.0*900*9 && previous > 0 && change < .03*energy;
+            bool periodic = energy > V92_SU_MIN_ENERGY && previous > 0 && change < .03*energy;
             s->stable = periodic ? s->stable+1 : 0;
             double reference = s->reference_i*s->reference_i+s->reference_q*s->reference_q;
             double dot = re*s->reference_i+im*s->reference_q;

@@ -1136,12 +1136,35 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         }
 
         {
-            int run = rx->p6_hyp_soft_run[rx->ru_hyp];
+            /* V.92 9.5.1.1.1 asks for "signal Ru" after MD, not Ru1's phase:
+             * MD is manufacturer-defined and need not keep Ru's period-6
+             * phase.  The HSF's 700 ms MD (MD=20, 5600 samples) brings Ru2
+             * in one sample later than Ru1 (pattern phase 5 against 4), so
+             * scoring only Ru1's hypothesis never locked Ru2 and the
+             * receiver timed out of MD on every call (D-Modem rig,
+             * 2026-11-26).  Take Ru2 on whichever hypothesis has run longest
+             * since MD ended, and the uR that follows from it. */
             int min_run = rx->p6_soft_mode ? RU2_LOCK_MIN_SOFT : P6_LOCK_MIN_SOFT;
+            int best_h = rx->ru_hyp;
+            int run = 0;
+
+            for (int h = 0; h < 12; h++) {
+                if (rx->p6_hyp_soft_run[h] > rx->p6_hyp_soft_run[best_h])
+                    best_h = h;
+            }
+            run = rx->p6_hyp_soft_run[best_h];
             /* Do not backdate Ru2 into MD using a run accumulated there. */
             if (run > elapsed - rx->md_symbols)
                 run = elapsed - rx->md_symbols;
             if (run >= min_run) {
+                if (best_h != rx->ru_hyp && p3rx_debug_enabled()) {
+                    fprintf(stderr,
+                            "[P3RX] sample=%d ru2 on hyp=%d (ru1 was hyp=%d)\n",
+                            sample_index, best_h, rx->ru_hyp);
+                }
+                rx->ru_hyp = best_h;
+                rx->ur_hyp = p6_hyp_index(!p6_hyp_pol(best_h), p6_hyp_phase0(best_h));
+                rx->p6_ru_polarity = p6_hyp_pol(best_h);
                 rx->p6_run = run;
                 rx->ru2_start = sample_index - run + 1;
                 rx->state = V92_P3_RX_RU2;
