@@ -83,7 +83,8 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, μ-law | Pass, 8 of 8, 37333 up, B1u locked first time since the Phase 3 retime (`docs/v92_pcm_upstream_findings.md`, "ESS μ-law's first B1u miss"). Before: 29333-30666 on the retrain's unprecoded CPd, then 37333 with the first B1u missing in 2 of 3. In about 6 of 40 calls ESS misses our first CPd and sends Tone A (0 of 48 against `half_open8`). The retrain usually recovers it; one call took two retrains and then a plain V.34 CONNECT at a negative SNR (`docs/v92_pcm_upstream_findings.md`, "The 90 s ESS μ-law call") |
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
-| HSF | V.90, V.92 (both laws) | Fail. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours fails against the HSF at 3200 baud (0/4 vs 4/4; below, 2026-11-26). Our plain V.34 against it is now 1/8 by default and 7/8 with `V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1`, which wait on a fix to our own call-modem Phase 4 receiver (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90 | Pass since the fallback MP fix (below): the HSF declines V.90 after two retrains (its own −6 dBm0 failure), and our V.34 fallback connects 26400 down / 24000 up at the first attempt, 4 of 4 over `NET_DELAY`, data exact (0 of 4 before) |
+| HSF | V.90, V.92 (both laws) | V.92 fails; this cell is the history of both rows. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours failed against the HSF at 3200 baud (0/4 vs 4/4) until the fallback MP fix (below, 2026-11-26). Our plain V.34 against it is now 1/8 by default and 7/8 with `V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1`, which wait on a fix to our own call-modem Phase 4 receiver (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -474,10 +475,11 @@ Still open on this peer:
   live peers, so it is unchanged.
 - **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
   INFOMARKSa and dies. Every arm shows it.
-- **The HSF matrix rows.** These still fail (matrix 14 of 18, unchanged,
-  data exact on every connecting row), in the fallback's Phase 4 MP; see the
-  next section. (This bullet used to say the fallback should run the plain
-  answerer. It should not: it is the V.34 call modem.)
+- **The HSF matrix rows.** `hsf_v90_ulaw` passes since the fallback MP fix
+  (matrix 15 of 18, 2026-11-26; see "The fallback's MP receiver rotated
+  away" below). The two HSF V.92 rows never reach the fallback. (This bullet
+  used to say the fallback should run the plain answerer. It should not: it
+  is the V.34 call modem.)
 
 ### The V.90-declined fallback is the V.34 call modem; J′ was 16T (2026-11-26)
 
@@ -521,26 +523,45 @@ Phase 4 symbols do not decode J: the answerer resets its receiver under the
 running J, and the decode differenced twice. The opt-in fix,
 `V34_P4_ANSWER_J_FRAMING=1`, is in [v34_phase4_j_dashed.md](v34_phase4_j_dashed.md).
 
-**Still open: MP in the fallback, both ways.** With the 8T J′ the HSF rows
-still fail after Phase 4 TRN, on CT 128 (`hsf_v90_ulaw`, 3200 baud a2c and
-c2a, high carrier both ways):
-- Our receiver locks the HSF's Phase 4 TRN at 100% ones on tap 4 (GPA, as
-  the role requires). The scrambler tap, bit order (b0,b1) and the 4-point
-  constellation our J asks for all check out.
-- The HSF's MP then decodes at only 13/18 preamble bits in the differential
-  domain. Retry modes reach 16/18 once, and that frame fails CRC. The HSF
-  cannot read our MP either: it abandons about 1 s into MP and retrains.
-- These made no difference: Phase 3 TRN length, 4- vs 16-point Phase 4 TRN,
-  the Phase 4 TRN refit, the carrier choice, the echo canceller and loop
-  timing. Our MP bits are the same as in a plain call.
-- **The lead:** plain V.34 with us as the caller against the HSF connects at
-  26400 (3200 baud, data exact), and at 28800 (3429 baud, then the known
-  §11.6 retrain). That call runs our engine in the analogue role; the fallback
-  runs it in the digital role (`v90_mode` set, `calling_party` clear). Look
-  for what differs between the two paths after Phase 3. In the logs the
-  fallback confirms J through the non-caller branch, takes TRN as begun with
-  "no S/S-bar alternation", and settles on a different TRN hypothesis
-  (hyp 3/8/10 against 1).
+### The fallback's MP receiver rotated away from the HSF's MP (2026-11-26)
+
+**Fixed.** The HSF's V.90-declined fallback now connects: `hsf_v90_ulaw`
+connects 4 of 4 over `NET_DELAY` 1/2.5/4/6.3 ms, against 0 of 4 on the
+same delays without the fix, data exact both ways. Each call ran at 26400
+down / 24000 up on the first fallback attempt, with B1 at 28.9-30.7 dB.
+
+It was our MP receiver, not the HSF and not our transmitter. The method
+was to compare the fallback with plain V.34 against the HSF, with us as the
+caller (`DIAL=1 ./interop_call half_v90modem ./half_hsf`,
+`ME_V34_SPAN_FLOW_LOG=1`, which is safe offline). With `ME_V34_BAUD=3200`
+the plain call's INFO1a matches the fallback's field for field (3200 baud,
+high carrier both ways, N=10, no power reduction) and it connects 26400,
+2 of 2. Up to MP the two calls match: same Phase 3/4 stage timeline, Phase 4
+TRN locked at 100% ones on GPA (tap 4), MP bit-identical.
+
+They differ in the MP search. The HSF sends TRN for close to the full
+2000 ms that §11.4.1.2.2 allows, so its MP comes 1460-1836 bauds after
+our receiver starts looking. At 1200 bauds with no lock,
+`mp_phase4_rotate_retry_mode()` moves to the next descrambler setting.
+`mp_phase4_apply_retry_mode()` holds a plain duplex call on the defaults
+(differential, GPA, b0,b1). That is the guard
+`s->duplex && !s->v90_mode`, and the fallback keeps `v90_mode`. So the
+fallback went to b1,b0 at about 1200 bauds and to GPC (tap 17) by 2400,
+and it was off the defaults when the HSF's MP went past. Then retry mode 4
+(absolute domain) locked TRN's ones as an MP preamble. A boundary
+brute-force made a CRC-valid "MP1" from it with 5 start-bit errors,
+reserved bit 19 set and a rate missing from its own mask. We sent MP′ and E
+to a modem still in TRN, and failed 11.4's E timeout. The plain calls
+locked the HSF's MP at 16-18/18 in the default setting each time.
+
+The guard now also covers `v90_v34_fallback`, so the fallback, which is
+the V.34 11.4 exchange (V.90 §9.2.1.1.8), keeps the V.34 defaults. V.90's
+own CP search keeps the rotation. The earlier reading here ("the HSF cannot
+read our MP", 13/18 in the differential domain) was the HSF still in TRN.
+
+Still a defect, separately: the MP1 acceptance above should not have taken
+a frame with 5 start-bit errors and a reserved bit set. It is reachable
+only when the search has left the defaults.
 
 The HSF V.92 rows never reach the fallback. The HSF sends Tone A 80 ms
 into our V.92 Phase 3. We log "peer initiated a retrain" but never answer it,

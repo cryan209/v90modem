@@ -2481,8 +2481,14 @@ static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
        preamble while the peer is still sending TRN is not evidence for
        another polynomial, bit order or absolute-phase modulation. Keep
        those defaults when reacquiring; rotating away can miss the peer's
-       MP and spend the E deadline on false preamble locks. */
-    if (s->duplex && !s->v90_mode)
+       MP and spend the E deadline on false preamble locks.
+       The V.90 fallback (V.90 9.2.1.1.8) is that same V.34 11.4 MP exchange,
+       though v90_mode stays set: against the HSF, whose MP follows the full
+       2000 ms of TRN that 11.4.1.2.2 allows (1460-1836 bauds into our MP
+       search on the plain-V.34 calls), the rotation had moved on to b1,b0
+       and then GPC by then, missed it, and the absolute-domain retry locked
+       TRN's ones as an MP1 (D-Modem rig, 2026-11-26). */
+    if (s->duplex && (!s->v90_mode || s->v90_v34_fallback))
     {
         retry_mode = 0;
         s->mp_phase4_retry_mode = 0;
