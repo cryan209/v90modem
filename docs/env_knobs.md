@@ -298,7 +298,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `V34_DUPLEX_SPEC_S` | v34tx.c |  | d | experiment (2026-11-26): 1 sends the V.34 10.1.3.7 Phase 4 S/S-bar (HSF 8/8 at 33600); off until our caller receiver handles it |
 | `V34_HDX_SPEC_TRAINING` | v34tx.c |  | dh | recent fix (2026-10-09): A/B against other fax peers still useful |
 | `V34_MP_TX_BITS` | v34tx.c |  | dh | diagnostic: dump the transmitted MP bits |
-| `V34_P4_ANSWER_J_FRAMING` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the answerer's Phase 3 receiver into Phase 4 and frames the caller's J' (loopback 138/144 vs 140/144); off until live evidence |
+| `V34_P4_ANSWER_J_FRAMING` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the answerer's Phase 3 receiver into Phase 4 and frames the caller's J' (loopback 139/144 vs 143/144); off until live evidence |
 | `V34_P4_KEEP_BAUD_PHASE` | v34tx.c |  | d | experiment (2026-11-26): 1 keeps the TX symbol clock into Phase 4 (HSF 4800 -> 33600); off until our caller receiver stops relying on the reset |
 | `V8_GUARD_TONE_HZ` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |
 | `V8_GUARD_TONE_LEVEL` | modem_engine.c |  | - | national V.8 guard-tone option, off by default |

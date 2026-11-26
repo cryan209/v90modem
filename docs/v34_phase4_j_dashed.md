@@ -47,13 +47,14 @@ counts from that event, so do not change it piecemeal.
 
 ## The opt-in: `V34_P4_ANSWER_J_FRAMING=1`
 
-- **Receiver.** The answer modem keeps its Phase 3 receiver into Phase 4
-  and resets only the carrier rate to nominal. Keeping Phase 3's own
-  carrier estimate failed: it read 1961.6 Hz against 1959.2 Hz in a
-  loopback with no offset. That 2.4 Hz turned the constellation until TRN
-  fell from 98% to 50% about 700T in (3429/28800, 36 dB, delay 17). The
-  estimate being that far out is a Phase 3 defect of its own, not yet
-  looked at.
+- **Receiver.** The answer modem keeps its Phase 3 receiver into Phase 4,
+  carrier rate included. Before the carrier loop was damped
+  ([v34_carrier_loop.md](v34_carrier_loop.md)), Phase 3's rate was 2.4 Hz off
+  nominal (1961.6 Hz against 1959.2 Hz) in a loopback with no offset, and
+  kept, it turned the constellation until TRN fell from 98% to 50% about
+  700T in (3429/28800, 36 dB, delay 17). The first version reset the rate
+  to nominal; with the damped loop, resetting it or not gives the same
+  sweep.
 - **J framing.** The receiver locks on a descrambled stream whose last 32
   bits are two identical, correctly framed J periods (4- or 16-point J).
   Random bits do that about once in 2^16 × 2048 tries. It then classifies
@@ -72,16 +73,26 @@ begins.
 
 ## Results (loopback, `V34_DUPLEX_DELAY` 0–47, same machine)
 
+Before the carrier loop was damped:
+
 | Arm | 2400/21600 10 dB | 3429/28800 36 dB | 3429/31200 38 dB | Total |
 |---|---|---|---|---|
-| default (= HEAD b3ed85f1 + baf083cc) | 48 | 48 | 44 | 140/144 |
+| default (HEAD b3ed85f1 + baf083cc) | 48 | 48 | 44 | 140/144 |
 | framing, receiver reset | 48 | 48 | 41 | 137/144 |
 | framing, receiver kept with Phase 3 carrier rate | 45 | 47 | 40 | 132/144 |
-| `V34_P4_ANSWER_J_FRAMING=1` | 48 | 48 | 42 | 138/144 |
+| framing, receiver kept, carrier rate reset to nominal (eea66c86) | 48 | 48 | 42 | 138/144 |
 
-The 38 dB row sits on the 31200/33600 rate boundary. There the opt-in
-fixes delay 0 and loses delays 9, 10 and 45; 15, 22 and 39 fail in both
-arms. That is no gain either way in loopback, so it stays opt-in. Loopback
-cannot show whether a correctly timed TRN count helps a real caller; that
-needs the rig. With the switch off, result lines are byte-identical to
-HEAD.
+With the damped carrier loop (`carrier_track_p = 2000000`):
+
+| Arm | 2400/21600 10 dB | 3429/28800 36 dB | 3429/31200 38 dB | Total |
+|---|---|---|---|---|
+| default | 48 | 48 | 47 | 143/144 |
+| `V34_P4_ANSWER_J_FRAMING=1` (Phase 3 rate kept, or reset: identical) | 48 | 48 | 43 | 139/144 |
+
+The opt-in loses delays 10, 18, 24 and 30 on the 38 dB row, which sits on
+the 31200/33600 rate boundary; 22 fails in both arms. So it stays opt-in.
+The cause is not yet known: `PHASE4_TRN_READY_MIN_BAUD` and the TRN
+scoring skip were tuned on the noise-timed event, and a correct J′ starts
+them about 260T later. Loopback cannot show whether a correctly timed TRN
+count helps a real caller; that needs the rig. With the switch off, result
+lines are byte-identical to the default build.

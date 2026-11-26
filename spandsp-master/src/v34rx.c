@@ -21377,8 +21377,10 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.agc_scaling_save = 0.0f;
     s->rx.agc_scaling = 0.0017f/V34_RX_PULSESHAPER_GAIN;
     equalizer_reset(&s->rx);
+    /* Carrier loop gains: see reset_primary_rx_frontend_for_phase3() in
+       v34tx.c, which sets the same pair for Phase 3. */
     s->rx.carrier_track_i = 5000.0f;
-    s->rx.carrier_track_p = 40000.0f;
+    s->rx.carrier_track_p = s->rx.v90_mode  ?  40000.0f  :  2000000.0f;
 
     /* Create a default symbol sync filter */
     create_godard_coeffs(&s->rx.pri_ted,

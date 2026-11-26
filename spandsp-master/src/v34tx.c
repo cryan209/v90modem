@@ -935,8 +935,24 @@ static void hdx_recipient_phase3_init(v34_state_t *s);
 static void reset_primary_rx_frontend_for_phase3(v34_state_t *s)
 {
     s->rx.agc_scaling = 0.0017f/V34_RX_PULSESHAPER_GAIN;
+    /* The training-stage carrier loop (process_primary_symbol() in v34rx.c)
+       is proportional-plus-integral in DDS units per symbol.  It was
+       i=5000, p=40000, as imported from SpanDSP: a proportional step of
+       0.003 degrees per unit of error, so the loop was almost pure integral,
+       damping ~0.007, and it rang +-2-3 Hz with a period near 0.45 s.  In a
+       loopback with no offset Phase 3 ended 0.7-2.8 Hz off nominal (3429
+       baud, 1959.18 Hz), while the symbols, with the loop frozen, turned at
+       the nominal carrier.  The other SpanDSP receivers run p at 500-5000
+       times i.  p=2000000 (damping ~0.35) ends Phase 3 within 0.28 Hz.
+       Over V34_DUPLEX_DELAY on 2400/21600 10 dB and 3429/31200 38 dB
+       (0-95) and 3429/28800 36 dB (0-47) it passes 234/240 against 229;
+       p=4000000 lost two 10 dB calls to phase noise.  Plain V.34 only: the
+       V.90 receiver shares this loop, and with p=2000000 the batch CP
+       decoder no longer finds the 428-bit CP in a CX93001 replay
+       (tests/fast.list, cx93001-unqualified-e-20261023).  V.90 keeps the
+       old pair until it is measured on its own (docs/v34_carrier_loop.md). */
     s->rx.carrier_track_i = 5000.0f;
-    s->rx.carrier_track_p = 40000.0f;
+    s->rx.carrier_track_p = s->rx.v90_mode  ?  40000.0f  :  2000000.0f;
     s->rx.total_baud_timing_correction = 0;
     s->rx.carrier_phase = 0;
     s->rx.baud_half = 0;
@@ -7625,8 +7641,9 @@ static bool hdx_spec_s_enabled(void)
    into Phase 4 and frames the caller's J' in it, instead of resetting and
    firing on a noise-level match.  Opt-in: it finds J' where TRN begins, but
    over V34_DUPLEX_DELAY 0-47 (2400/21600 10 dB, 3429/28800 36 dB,
-   3429/31200 38 dB) it passes 138/144 against 140/144 without it, so it
-   waits for live evidence.  See docs/v34_phase4_j_dashed.md. */
+   3429/31200 38 dB), with the damped carrier loop, it passes 139/144
+   against 143/144 without it, all of it on the 38 dB row, so it waits for
+   live evidence.  See docs/v34_phase4_j_dashed.md. */
 static bool answer_j_framing_enabled(void)
 {
     static int enabled = -1;
@@ -10054,12 +10071,11 @@ static void phase4_wait_init(v34_state_t *s)
            without a break (11.4.1.1.1), so keep the receiver that decoded J
            in Phase 3 and frame J' in it (v34rx_phase4_trn.c).  Resetting
            it here cost ~260T of re-acquisition, all of J, so J' could not
-           be seen.  The carrier rate alone goes back to nominal: Phase 3's
-           estimate read 1961.6 Hz against 1959.2 Hz in a loopback with no
-           offset, and that 2.4 Hz turned the constellation until TRN fell
-           to 50% ~700T in (3429/28800, 36 dB, V34_DUPLEX_DELAY=17). */
+           be seen.  The carrier rate is kept too: Phase 3's estimate was
+           0.7-2.8 Hz out until the carrier loop was damped (see
+           reset_primary_rx_frontend_for_phase3()), and resetting it to
+           nominal now makes no difference over the delay sweep. */
         phase4_rx_conditioning_init_ex(s, V34_RX_STAGE_PHASE4_TRN, "J'/TRN then MP", true);
-        s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
         s->rx.phase4_jf_expect_j = true;
     }
     else
