@@ -162,6 +162,10 @@ struct v32bis_state_s
     int32_t tx_symbol_index;
     int32_t tx_transition_at;
     int32_t tx_phase_start_symbol;
+    /*! True while the transmit symbol source is refilling: a phase entered
+        there starts on the symbol being emitted now, one entered from the
+        receive path on the next one. */
+    bool tx_in_symbol_source;
     int32_t tone_counter_start;
     int32_t tone_transition_symbol;
     int32_t rx_sample_count;

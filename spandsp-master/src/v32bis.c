@@ -1020,7 +1020,12 @@ static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
     if (s->startup_tx_symbol_count <= 0
         || s->startup_tx_symbol_pos >= s->startup_tx_symbol_count)
     {
-        if (!s->reactive_startup  ||  !v32bis_tx_refill(s))
+        bool refilled;
+
+        s->tx_in_symbol_source = true;
+        refilled = s->reactive_startup  &&  v32bis_tx_refill(s);
+        s->tx_in_symbol_source = false;
+        if (!refilled)
         {
             s->tx.symbol_source = NULL;
             s->tx.symbol_source_user_data = NULL;
@@ -2755,7 +2760,11 @@ static void v32bis_tx_tone_symbol(v32bis_state_t *s)
         /*endswitch*/
     }
     /*endif*/
-    offset = s->tx_symbol_index - s->tx_phase_start_symbol;
+    /* Count from the symbol this one will be emitted as.  Built from the
+       receive path (a phase entered there), it goes out on the next symbol
+       interval, not the current one. */
+    offset = s->tx_symbol_index + (s->tx_in_symbol_source  ?  0  :  1)
+           - s->tx_phase_start_symbol;
     switch (s->tx_phase)
     {
     case V32BIS_TX_PHASE_TONE_A:
@@ -2798,7 +2807,15 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
     if (phase != V32BIS_TX_PHASE_EC_TRAIN)
         s->tx_far_end_quiet = false;
     /*endif*/
-    s->tx_phase_start_symbol = s->tx_symbol_index;
+    /* The phase's first symbol: the one being emitted now when the symbol
+       source entered it, the next one when the receive path did.  Taking the
+       current index in the second case made the tone phases repeat their
+       first state and skip offset 1: AC began A, A, C and CA began C, C, A.
+       After an odd count of AC that left no phase reversal on the line
+       (A, C, C, C, A), and the emulated Courier sent AA for ever waiting for
+       one (6.1); after an even count the reversal came a symbol late. */
+    s->tx_phase_start_symbol = s->tx_symbol_index
+                             + (s->tx_in_symbol_source  ?  0  :  1);
     s->startup_tx_symbol_pos = 0;
     s->startup_tx_symbol_count = 0;
     switch (phase)
@@ -3419,10 +3436,14 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
             else
                 s->tone_present_run = 0;
             /*endif*/
+            /* 6.2's count is of symbols sent: AC starts on A, so an even
+               count ends on C, and CA's opening C is the reversal. */
             if (s->tone_present_run
                     >= (int) (V32BIS_TONE_PRESENT_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL)
                 &&
-                s->tx_symbol_index - s->tx_phase_start_symbol >= 128)
+                s->tx_symbol_index + 1 - s->tx_phase_start_symbol >= 128
+                &&
+                ((s->tx_symbol_index + 1 - s->tx_phase_start_symbol) & 1) == 0)
             {
                 s->reversals_seen = 1;
                 /* 6.2 measures the reversal delay at the line terminals, so
@@ -3552,7 +3573,9 @@ static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool
     v32bis_start_tones(s);
     s->rx_sample_count = (int32_t) (rx_line_sample - base);
     s->tx_symbol_index = (int32_t) (((tx_line - base)*3)/10);
-    s->tx_phase_start_symbol = s->tx_symbol_index;
+    /* v32bis_start_tones() entered AC from here, outside the symbol source:
+       its first symbol is the next one. */
+    s->tx_phase_start_symbol = s->tx_symbol_index + 1;
 }
 /*- End of function --------------------------------------------------------*/
 

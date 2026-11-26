@@ -88,7 +88,10 @@ STREAM=10, one call per row:
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
-| Courier | V.8 default | Fail. V.8 selects V.90, Phase 3, then NO CARRIER |
+| Courier | V.8 default | Not a valid target: D-Modem's own `half_open8` fails it the same way (V.90 Phase 3, the Courier's Tone A, a V.34 retrain that never finishes, NO CARRIER at 63 s), and D-Modem's source lists the emulated Courier's V.34 as not yet working even between two Couriers. See "The emulated Courier" below |
+| Courier | V.32bis, Courier calls | About 3 of 4 since the CA reversal fix (below); 0 before. The rest miss the Courier's R2 (open) |
+| Courier | V.22bis, Courier calls | Pass, 2400/ARQ, data exact |
+| Courier | V.32bis / V.22bis, we call | Fail (open): V.32bis never connects; V.22bis CONNECTs 1200 then NO CARRIER |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 `half_open8` passes on CT 128, and SmartLink V.92 against it connects at
@@ -737,6 +740,38 @@ command-mode echo was graded as received data. So this is the same defect
 as the blind B1, now fixed above, not a separate data-path problem. MNP
 itself still connects in passing calls on the carried-state build
 (`fb/abess_carried_*`).
+
+### The emulated Courier (2026-11-27)
+
+`courier_v34_ulaw` (both sides `ATX3`, so V.8 picks V.90) fails identically with
+D-Modem's `half_open8` in our place: Phase 3 completes (open8 logs S after
+163 Jd), the Courier sends Tone A, the V.34 retrain never finishes, and
+`interop_call` gives up at 62.7 s. D-Modem's `interop_test.cpp` lists V.34 as
+not yet working between two emulated Couriers and has no V.90 row for it. Its
+Courier rows against `half_open8` are HST, V.32bis, V.22bis and V.FC; we can
+run V.32bis and V.22bis. The Courier's S registers pick the modulation:
+`ATS34=128S56=224S58=33` for V.32bis, `ATS27=4S56=224S58=33&N3` for V.22bis.
+When we call, `interop_call` needs `DIAL=1`, because we answer a bare `ATD`
+with ERROR.
+
+**V.32bis: our CA carried no phase reversal.** With the Courier calling, every
+call hung at 6.2's tone dialogue: the Courier sent AA (a clean 1800.0 Hz) for
+60 s, and we sent AC/CA. Our trace showed AA detected and CA begun at symbol
+163. `half_open8`, which sends a plain answer tone, gets AA first and passes.
+
+`v32bis_tx_enter_phase()` set a phase's first symbol to the current index even
+when the receive path entered it. The symbol it prepared went out on the next
+symbol, and the next refill counted from two, so tone phases entered there
+repeated their first state: AC went A, A, C, … and CA went C, C, A, …. After an
+odd AC count the line carried A, C, C, C, A, C. That is one stray symbol, not
+the reversal 6.1 has the call modem wait for. After an even count the
+reversal came one symbol after the counter's start. The phase now starts on
+the symbol it is first emitted as, and the AC to CA switch also waits for an
+even count of AC symbols sent (6.2). On CT 128 with the Courier calling, 9 of
+12 calls connect at 14400 with data exact, over `NET_DELAY` 1-11. The tone
+dialogue completes in all 12. The other three never frame the Courier's R2
+after its TRN, and then ignore its 7.1 retrain AA until the timeout. That is
+still open.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 
