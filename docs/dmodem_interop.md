@@ -93,6 +93,8 @@ STREAM=10, one call per row:
 | Courier | V.22bis, Courier calls | Pass, 2400/ARQ, data exact |
 | Courier | V.32bis, we call | Pass, 32 of 32 at 14400, data exact (`we_courier_v32b_ulaw`); 0 before the R3 and loss-retrain fixes below |
 | Courier | V.22bis, we call | Pass, 24 of 24 at 2400, data exact (`we_courier_v22b_ulaw`); every call fell to 1200 before the S1 fix below, then 4 of 40 before the other-eye S1 search |
+| Courier, live | V.32bis / V.22bis, Courier calls v90ras | Pass, 5 of 5 each: 14400/ARQ and 2400/ARQ through Asterisk into v90ras's pppd; every call LCP + IPCP open and 20 of 20 LCP echoes and pings intact, no retrain. See "The emulated Courier on a live SIP call" below |
+| Courier, live | V.32bis / V.22bis, we call | Pass, 5 of 5 each: CONNECT 14400 and CONNECT 2400, 40 of 40 lines exact both ways. 1 call in 16 had a V.32bis loss retrain in data, which completed. The cause is our data-mode symbol timing, still open (see below) |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 `half_open8` passes on CT 128, and SmartLink V.92 against it connects at
@@ -879,6 +881,103 @@ at most 3 times a call. Results:
 - Courier calls (V.32bis and V.22bis), and we call on V.22bis: 8 of 8 each,
   with no false retrains.
 - Control: D-Modem's own caller against the Courier passed 6 of 6.
+
+### The emulated Courier on a live SIP call (2026-11-27)
+
+`tools/soak/half_sip_call.py` puts a D-Modem harness (`half_courier` here) on
+a real SIP/RTP call from CT 128, with no netsim:
+- It feeds the harness's fd 3/4 from a PCMU stream on a local 20 ms clock.
+  The only conversion is the standard u-law tables: no gain, no resampling.
+- It drives the harness's DTE as `interop_call` does: ATZ, the S-register
+  string, then `ATD` once the call is answered (`ATA` with `--answer`).
+- Calling, it INVITEs as 2903 (the u-law test account). Answering, it
+  registers as 2902 and takes one call.
+
+**The Courier calls v90ras (2950).** Each v90ras line answers into pppd, and
+CT 128 has no pppd, so the bridge checks the data at the PPP layer itself:
+- every frame's FCS;
+- LCP, with the server's multilink options refused, so the link runs plain;
+- IPCP, taking 10.254.200.2;
+- 20 LCP echoes, then 20 ICMP pings to 10.254.200.1, each with a random
+  100-byte payload.
+
+The calls alternated, 5 per modulation: all 10 passed. V.32bis connected at
+14400/ARQ in 11.3 s; v90ras logged its start-up complete at 14400 (MT=249).
+V.22bis connected at 2400/ARQ in 8.7 s. None retrained, and there were no
+bad frames.
+
+One earlier V.32bis call did retrain, during the pings, and then completed:
+the Courier sent AA after 120 ms of silence on its line. That silence was the
+bridge's own fault. v90ras's RTP log shows its sending evenly paced (largest
+gap 20.2 ms), while what it received from the bridge had one 54 ms gap. A
+late tick catching up skipped reading the RTP socket and fed the Courier
+silence. Fixed: every tick now polls the socket once.
+
+**We call the Courier.** `half_sip_call.py --answer` registers the Courier
+as 2902. `tools/soak/wecall_live.sh` runs our modem on CT 117 as 2903 (PCMU,
+SIP port 5100) and dials it. After CONNECT each side sends 40 numbered lines,
+and each counts the other's exact lines. Launch the bridge with the ssh
+command itself in the background: `pct exec` waits for every process it
+started, `nohup ... &` included, so a backgrounded bridge inside it held the
+caller back until the bridge had unregistered, and Asterisk refused every call
+(603, cause 16).
+
+The calls alternated, 5 per modulation, on 669bf72c: all 10 passed. V.32bis
+gave CONNECT 14400 (Courier 14400/ARQ after 12.6 s), V.22bis CONNECT 2400
+(Courier 2400/ARQ after 11.3 s), 40 of 40 lines both ways, no retrain.
+
+Over all 16 we-call calls, one V.32bis call lost reception about 23.7 s in.
+Our modem sent AA (V.32bis 7.1), retrained and finished with every line. The
+bearer was clean: our largest received RTP gap was 22.7 ms.
+
+That call's tap reproduces offline, every time: `v90_engine_replay
+live-rx.g711 ulaw --fast --dial --sync --at "ATX3;AT+MS=V32B"` loses
+reception at 21.8 s (decision error 0.328 for 4818 symbols).
+`V32BIS_TIMING_HOLD=1` decodes the whole call at 0.024-0.037; holding the
+carrier loop instead fails sooner. So the cause is our Godard symbol timing in
+data mode:
+- It ran no coarse steps, only fine ones (1/640 T each). Their total went from
+  1 to 12 within 100 bauds, 10 s into data.
+- Over the next few seconds the decision error rose 0.056 -> 0.11 -> 0.26 ->
+  0.336 and the carrier loop's swing grew from about +-0.15 to +-0.75 Hz.
+  Equalizer energy fell from 4.8 to 2.85.
+
+The detector's "integrator" (`godard_ted_per_baud`) is not one. Its DC filter
+subtracts the output from two bauds back, so the sum telescopes, and the fine
+trigger (100) tests the band-edge product of the last two bauds. On 14400
+bit/s data, that product's self-noise crosses the trigger by itself.
+
+Quietening the detector does not fix it. Netsim A/Bs on CT 128 (`half_v90modem`
+against `half_courier`, our modem calling and called, NET_PPM 0, +-100 and
++-200, arms alternated) counted loss retrains and failed calls:
+
+| Data-mode timing | Calls | Loss retrains | Failed calls |
+|---|---|---|---|
+| unchanged (trigger 100) | 40 | 8 | 0 |
+| fine trigger 300 | 40 | 71 | 17 |
+| unchanged (trigger 100), second batch | 40 | 11 | 0 |
+| 16-baud average, trigger 100 | 40 | 45 | 8 |
+
+At 0 ppm both changes did as well as or better than the unchanged loop. All
+of the extra losses came with a clock offset. At +-200 ppm alone, 6 calls per
+row:
+- unchanged: 3 loss retrains, 0 failed calls;
+- 16 bauds/trigger 60: 25 retrains, 4 failed;
+- 32 bauds/trigger 40: 26 retrains, 7 failed;
+- 64 bauds/trigger 30: 33 retrains, 11 failed.
+
+All of these hold the live tap, but each one gives up drift tracking:
+- The loop is bang-bang, and the noise dithering across the trigger is what
+  makes it act roughly proportionally near zero error. Without that noise,
+  the mean error has to reach the trigger before the loop steps.
+- An average adds delay, so the loop overshoots by about the averaging length
+  in steps.
+
+The unchanged loop also loses reception at +-200 ppm, so the netsim rows do
+reproduce the live symptom. The next step is a timing error that isn't
+self-noise-limited (decision-directed, or derived from the equalizer), not a
+retuned Godard. The experiment patch, `V32BIS_DATA_TIMING_BAUDS` plus a
+data-mode trigger override, was not committed.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 

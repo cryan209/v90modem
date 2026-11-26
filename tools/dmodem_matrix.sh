@@ -7,6 +7,8 @@
 #   DMODEM_TEST=<D-Modem build>/dsp/test   (default /root/D-Modem/build/dsp/test)
 #   HALF_V90MODEM=<path>                   (default: this checkout's)
 #   RT=1                                   pace the calls in real time
+#   LIVE=1                                 also the live SIP rows (below), one at a time
+#   SIP_V90MODEM=<sip_v90_modem>           for the live "we call" rows (else skipped)
 # Prints one line per row: interop_call's status, the caller's CONNECT, the
 # data check, and whether our PCM-upstream receiver sent a precoded CPd and
 # locked B1u.
@@ -57,4 +59,39 @@ run() {
 }
 export -f run; export OUT T US
 printf '%s\n' "${rows[@]}" | grep -E "$FILT" | xargs -P3 -I{} bash -c 'run "$@"' _ {}
+# Live rows: the peer on a real SIP call through asterisk.net.cryan.nz
+# (tools/soak/half_sip_call.py), on a wired rig host.  "live": the peer calls
+# v90ras's pilot 2950 and checks PPP through it (LCP, IPCP, echoes, pings).
+# "livewe": the peer answers as 2902 and our SIP_V90MODEM (as 2903) calls it
+# (tools/soak/wecall_live.sh); both sides check 40 numbered lines.
+#   name|peer|peer AT|our AT+MS (livewe)|dir
+live_rows=(
+"live_courier_v32b|courier|$CV32||live"
+"live_courier_v22b|courier|$CV22||live"
+"livewe_courier_v32b|courier|$CV32|AT+MS=V32B|livewe"
+"livewe_courier_v22b|courier|$CV22|AT+MS=V22B|livewe"
+)
+SOAK=$(cd "$(dirname "$0")" && pwd)/soak
+live() {
+  IFS='|' read -r name peer pa ms dir <<< "$1"
+  D=$OUT/$name; rm -rf $D; mkdir -p $D
+  if [ "$dir" = live ]; then
+    res=$(cd $T && python3 -W ignore $SOAK/half_sip_call.py --harness ./half_$peer --at "$pa" \
+          --number 2950 --echoes 20 --echo-bytes 100 --out $D 2>&1 | tail -1)
+  else
+    [ -x "${SIP_V90MODEM:-}" ] || { echo "$name skipped (SIP_V90MODEM unset)"; return; }
+    ( cd $T && python3 -W ignore $SOAK/half_sip_call.py --answer --user 2902 --sip-port 5192 \
+          --rtp-port 31100 --harness ./half_$peer --at "$pa" --out $D/peer > $D/peer.out 2>&1 ) &
+    for _ in $(seq 1 20); do sleep 1; grep -q registered $D/peer.out 2>/dev/null && break; done
+    ours=$(BIN=$SIP_V90MODEM $SOAK/wecall_live.sh $D/ours "$ms" 2>&1 | tail -1)
+    wait
+    res="$ours | peer: $(tail -1 $D/peer.out)"
+  fi
+  echo "$name $res"
+}
+if [ -n "${LIVE:-}" ]; then
+  for r in "${live_rows[@]}"; do
+    echo "$r" | grep -qE "$FILT" && live "$r"
+  done
+fi
 echo MATRIX-DONE
