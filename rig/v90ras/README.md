@@ -1663,6 +1663,35 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 21da3dfa (2026-11-26)
+
+On top of 52ccd4d0, this deploy adds 21da3dfa.
+- **V.90 upstream B1 search.**
+  - B1 is now also fitted from the scrambler and trellis state the analogue
+    modem carries into it, read off its CP′/E (V.34 10.1.3.1 says to reset
+    both; the ESS resets neither).
+  - A CP′-anchored 4-point search that finds no end yet is retried in the
+    next window. The spec's reset state is one of its candidates, so peers
+    that do reset still get an exact B1 there.
+  - `ME_V90_T3_NO_CARRIED_B1=1` turns the new candidates off; it is not set
+    here. See `docs/dmodem_interop.md`, "ESS V.90 carries its scrambler and
+    trellis state into B1".
+- **Offline.**
+  - D-Modem `ess_v90_ulaw`: 8/8 against 7/8, with 17/19 B1s exact against
+    20/20 blind; the final build 6/6.
+  - Matrix 15/18, was 14/18.
+  - `test-fast` 782 passed; the one failure was the `env_knobs` check, run
+    before the regenerated file, which passes now.
+- **No smoke call was made.** Peers whose B1 matched a template before
+  should see no change. Watch the first live V.90 renegotiations.
+
+Built clean in `/root/deploy-5640b4d3`, checked out at 21da3dfa
+(`/root/deploy-21da3dfa.build.log`). The binary (md5 487b6bfe…) is kept as
+`/opt/v90ras/sip_v90_modem.21da3dfa`, and the previous one (52ccd4d0) as
+`sip_v90_modem.pre-21da3dfa`. Installed by rename with `/run/v90ras/busy`
+empty and no PPP interface up. The restart logged 20 "registration success"
+lines and "SIP V.90 modem ready".
+
 ## Deployed 52ccd4d0 (2026-11-26)
 
 On top of 3dc003df, this deploy adds 52ccd4d0.
