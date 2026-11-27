@@ -1540,6 +1540,97 @@ static float startup_fit_s(const complexf_t win[64], complexf_t *gain_out)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! V.32bis 2.1: the receiver must work with up to +-7 Hz of received
+    frequency offset.  The S search and the S-bar wait (6.1, 6.2) return no
+    decision to V.17's carrier loop, which therefore sits at the nominal
+    1800 Hz until TRN begins, and S is the only signal before TRN; at 2 Hz S
+    turns 0.3 degree a symbol, so over the ~200T of S between acquisition and
+    S-bar the fixed gain from the 64T window slid past the 45 degree decision
+    boundary and S-bar was never recognised.  S therefore measures the offset
+    as well as the gain: 5.2.1's S repeats every two symbols, so the window
+    correlated against itself 32 symbols on turns by 32 times the rotation per
+    symbol whichever state parity it starts on.  The window is derotated about
+    its centre before the gain fit, so a 64T window no longer smears 67
+    degrees of 7 Hz rotation into the fit residual.  Returns radians/symbol. */
+#define V32BIS_S_ROTATION_LAG   32
+#define V32BIS_BAUD_RATE_HZ     2400
+/* 10 Hz at 2400 baud: beyond 2.1's 7 Hz, and far too little rotation to make
+   AC (opposite states) or a tone look like S's alternation. */
+#define V32BIS_S_ROTATION_MAX   (2.0f*3.14159265f*10.0f/V32BIS_BAUD_RATE_HZ)
+
+static bool v32bis_s_freq_est(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv("V32BIS_S_FREQ_EST");
+
+        enabled = (e == NULL  ||  atoi(e) != 0);
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float startup_s_rotation(const complexf_t win[64])
+{
+    complexf_t acc;
+    float rotation;
+    int i;
+
+    acc.re = 0.0f;
+    acc.im = 0.0f;
+    for (i = 0;  i < 64 - V32BIS_S_ROTATION_LAG;  i++)
+    {
+        const complexf_t *a = &win[i + V32BIS_S_ROTATION_LAG];
+        const complexf_t *b = &win[i];
+
+        acc.re += a->re*b->re + a->im*b->im;
+        acc.im += a->im*b->re - a->re*b->im;
+    }
+    /*endfor*/
+    if (acc.re == 0.0f  &&  acc.im == 0.0f)
+        return 0.0f;
+    /*endif*/
+    rotation = atan2f(acc.im, acc.re)/V32BIS_S_ROTATION_LAG;
+    if (fabsf(rotation) > V32BIS_S_ROTATION_MAX)
+        return 0.0f;
+    /*endif*/
+    return rotation;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! startup_fit_s() on the window derotated about its centre; the gain it
+    returns is moved to the window's last symbol, the one just received. */
+static float startup_fit_s_rotating(const complexf_t win[64],
+                                    float rotation,
+                                    complexf_t *gain_out)
+{
+    complexf_t derotated[64];
+    complexf_t gain;
+    float metric;
+    float phase;
+    int i;
+
+    if (rotation == 0.0f)
+        return startup_fit_s(win, gain_out);
+    /*endif*/
+    for (i = 0;  i < 64;  i++)
+    {
+        phase = -rotation*((float) i - 31.5f);
+        derotated[i].re = win[i].re*cosf(phase) - win[i].im*sinf(phase);
+        derotated[i].im = win[i].re*sinf(phase) + win[i].im*cosf(phase);
+    }
+    /*endfor*/
+    metric = startup_fit_s(derotated, &gain);
+    phase = rotation*31.5f;
+    gain_out->re = gain.re*cosf(phase) - gain.im*sinf(phase);
+    gain_out->im = gain.re*sinf(phase) + gain.im*cosf(phase);
+    return metric;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool startup_try_acquire_s(v32bis_state_t *s)
 {
     complexf_t gain;
@@ -1547,12 +1638,15 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
     float best_metric;
     float alt_metric;
     float reference_power;
+    float rotation;
+    float alt_rotation;
     int i;
 
     if (s->startup_rx_acq_count < 64)
         return false;
     /*endif*/
-    best_metric = startup_fit_s(s->startup_rx_acq, &gain);
+    rotation = v32bis_s_freq_est()  ?  startup_s_rotation(s->startup_rx_acq)  :  0.0f;
+    best_metric = startup_fit_s_rotating(s->startup_rx_acq, rotation, &gain);
     /* 5.2.1's S alternates A and B every symbol, so sampled at the eye
        crossing it averages to a constant that fits one gain only half way
        (residual ~0.5 at reduced power), and the timing loop takes ~150
@@ -1563,7 +1657,8 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
        better the receiver moves its sampling there. */
     if (s->startup_rx_acq_alt_count >= 64)
     {
-        alt_metric = startup_fit_s(s->startup_rx_acq_alt, &alt_gain);
+        alt_rotation = v32bis_s_freq_est()  ?  startup_s_rotation(s->startup_rx_acq_alt)  :  0.0f;
+        alt_metric = startup_fit_s_rotating(s->startup_rx_acq_alt, alt_rotation, &alt_gain);
         if (alt_metric < best_metric)
         {
             if (alt_metric > 0.12f)
@@ -1574,6 +1669,7 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
             s->rx.baud_half = 1;
             gain = alt_gain;
             best_metric = alt_metric;
+            rotation = alt_rotation;
             if (v32bis_trace())
             {
                 fprintf(stderr,
@@ -1596,6 +1692,21 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
     if (best_metric > 0.12f)
         return false;
     s->startup_rx_gain = gain;
+    if (rotation != 0.0f)
+    {
+        /* Move the carrier NCO onto the measured frequency, so S, S-bar and
+           TRN arrive standing still; TRN's carrier loop takes the rest. */
+        float offset_hz = rotation*(float) V32BIS_BAUD_RATE_HZ/(2.0f*3.14159265f);
+
+        s->rx.carrier_phase_rate += dds_phase_ratef(offset_hz);
+        if (v32bis_trace())
+        {
+            fprintf(stderr, "[V32BIS %s] S carrier offset %+.2f Hz\n",
+                    s->calling_party ? "call  " : "answer", offset_hz);
+        }
+        /*endif*/
+    }
+    /*endif*/
 #if !defined(SPANDSP_USE_FIXED_POINTx)
     /* Put the S-derived complex gain into the shared FSE immediately.  TRN
        can then train against canonical 4-point targets instead of asking LMS
@@ -2211,6 +2322,11 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
         return -1;
     case V32BIS_RX_S_BAR:
         state = startup_nearest_state(s, &z);
+        /* Follow what rotation the S estimate left (2.1), on the decisions:
+           A/B, then C/D, are all four points 90 degrees apart. */
+        if (v32bis_s_freq_est())
+            startup_track_gain(s, &z, state);
+        /*endif*/
         if (s->startup_rx_sbar_run == 0)
         {
             if (state == V32BIS_STARTUP_C)

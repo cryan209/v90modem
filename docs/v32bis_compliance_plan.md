@@ -1004,9 +1004,56 @@ The symbol timing looked guilty first. A retuned Godard loop failed, and a
 decision-directed one was deployed and rolled back. Those dead ends are in
 `dmodem_interop.md` ("The emulated Courier on a live SIP call").
 
-Open: with the received carrier offset by 2 Hz or more (taps shifted
-offline), our call modem never completes start-up; it stops after "incoming
-S". 2.1 requires operation at up to +-7 Hz.
+That fix left one gap, closed in the next section: with the received carrier
+offset by 2 Hz or more, start-up never completed.
+
+## Received frequency offset: S measures it (2026-11-27)
+
+2.1 requires operation with up to +-7 Hz of received frequency offset. Our call
+modem completed start-up at 0 and +-1 Hz. From 2 Hz the trace stopped after
+"incoming S", under either data carrier gain set. The taps were shifted offline
+with `tools/g711_freq_shift.py` (a Hilbert FIR, times e^{j 2 pi f t}). The
+cause was in the training path, not the data path:
+
+- The S search and the S-bar wait return no decision to V.17's carrier loop,
+  so the loop sits at the nominal 1800 Hz until TRN starts.
+- The S-derived complex gain from the 64T window is then held fixed for the
+  ~200T of S that remain before S-bar.
+- At +2 Hz S turns 0.3 degree a symbol. In the e1 tap S fitted at +11.8
+  degrees and crossed the 45 degree decision boundary at symbol ~950, 120T in.
+  S-bar (symbol ~1030) was read as the wrong state pair and never recognised.
+- Nothing times out of the S-bar wait, so the call sat there for the rest of
+  the tap.
+
+The fix is in `startup_try_acquire_s()`:
+
+- S also measures the offset. 5.2.1's S repeats every 2T, so the window
+  correlated with itself 32T on turns by 32 times the rotation per symbol,
+  whatever state parity it starts on. Estimates beyond 10 Hz are ignored, as
+  far too little rotation to make AC or a tone look like S.
+- The window is derotated about its centre before the gain fit, so 7 Hz (67
+  degrees across 64T) no longer inflates the 0.12 fit residual.
+- The gain is moved to the window's last symbol, and `carrier_phase_rate`
+  moves onto the measured frequency. S, S-bar and TRN then arrive standing
+  still, and TRN's carrier loop takes the residual.
+- The S-bar wait also tracks the S gain on its four-point decisions
+  (`startup_track_gain()`), for whatever rotation the estimate left.
+
+Measured over the e1 and dd4 taps shifted to 0, +-1..+-7 and +-9 Hz (34 taps):
+
+| | start-up at 14400, no "reception lost" |
+| --- | --- |
+| before (`V32BIS_S_FREQ_EST=0`) | 8/34 (0, +-1 Hz, and dd4 at -3 Hz) |
+| after | 34/34, data-eye rms 0.156-0.179 (unshifted: 0.156/0.162) |
+
+- **Estimate error:** the single-window estimate reads within about 0.7 Hz
+  (+7 Hz read +6.40 and +7.80 on the two taps, -7 read -7.59 and -7.20, 0 read
+  -0.64 and -0.20). TRN's loop removes that easily.
+- **Regression:** `reference-data/courier-v32bis-carrier-offset` holds e1
+  shifted +7 Hz and dd4 shifted -7 Hz. Both fail before the fix and pass after.
+- **Test harness:** these replays now pass `--pty-link "$TMPDIR/pty"`.
+  Parallel runs shared `/tmp/modem-replay`, and one in eight lost its `--at`
+  and never dialled.
 
 ## Reference vs SpanDSP
 

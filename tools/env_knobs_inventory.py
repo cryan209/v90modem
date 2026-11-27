@@ -106,6 +106,7 @@ KEPT = {
     "ME_SOUNDER_RMS": "measurement: level of the channel sounder (ME_SOUNDER)",
     "V32BIS_TRN_SYMBOLS": "test hook: a far end that sends long TRN (slmodemd runs to ~8000)",
     "V32BIS_DATA_CARRIER": "experiment: data-mode carrier loop gains as i:p (default 100:500000, V.17's tracking values; 0:0 keeps the acquisition gains 5000:40000, which ring)",
+    "V32BIS_S_FREQ_EST": "experiment: default on; 0 drops the received-carrier offset measured from S (2.1's +-7 Hz), so start-up fails from 2 Hz as before",
     "V32BIS_TEST_DROP_FIRST_R": "test hook: the answer modem ignores the first rate signal, so the far end's start-up restart (AA) is exercised",
     "ME_V90_ANALOGUE_DIL": "V.90 analogue role: configuration and the open real-loop investigation",
     "ME_V90_ANALOGUE_INFO1A_REPEATS": "V.90 analogue role: configuration and the open real-loop investigation",
