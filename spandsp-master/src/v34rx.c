@@ -852,6 +852,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample);
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample);
 static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym);
 static void l1_l2_analysis_init(v34_rx_state_t *s);
+static bool v34_rx_info1c_in_l1_l2(const v34_rx_state_t *s);
 static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
 static bool v90_upstream_t2_enabled(void);
@@ -6361,6 +6362,10 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                             &&
                             s->stage == V34_RX_STAGE_L1_L2)
                            ||
+                           /* V.34 answer modem: INFO1c may start inside the
+                              fixed L1/L2 analysis window (v34_rx_info1c_in_l1_l2()). */
+                           v34_rx_info1c_in_l1_l2(s)
+                           ||
                            /* V.90 answerer: once INFO1d has been sent, keep INFO1a
                               sync search active across all Tone A/B event states so
                               we can lock immediately after the 10 ms A-bar period. */
@@ -6523,6 +6528,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              "Rx - V.90 caller: INFO1d received during L1/L2 analysis\n");
                     s->stage = V34_RX_STAGE_INFO1C;
                     s->phase2_reversal_count = 3;
+                    s->received_event = V34_EVENT_INFO1_OK;
+                }
+                else if (v34_rx_info1c_in_l1_l2(s))
+                {
+                    /* 11.2.1.1.7: INFO1c, arriving before this receiver's
+                       L1/L2 analysis window has closed. */
+                    process_rx_info1c(s, &s->info1c, s->info_buf);
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - INFO1c received during L1/L2 analysis (11.2.1.1.7)\n");
+                    s->stage = V34_RX_STAGE_INFO1C;
                     s->received_event = V34_EVENT_INFO1_OK;
                 }
                 else switch (s->stage)
@@ -6824,6 +6839,27 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
    one bit, every repetition, costing ~1.5 s until the resend
    (v92_mh_retrain_test, 2026-10-03). */
 #define V34_INFO_REVERSAL_REFRACTORY 20
+
+/* V.34 11.2.1.1.7 has the call modem send INFO1c once it detects Tone A and
+   has received the local echo of its L2 for up to 550 ms plus a round trip:
+   L2 has no minimum, and 11.2.1.2.8 lets the answer modem receive L2 for
+   "not to exceed 500 ms".  This receiver's L1/L2 analysis window is a fixed
+   420 ms (21 x 20 ms) from the second Tone B reversal, and only framed INFO
+   for V.90.  When our Tone A was already up as the call modem probed, the
+   HSF (D-Modem rig, live on rig/v90ras, 2026-11-28) cut its L2 to about
+   140 ms and sent INFO1c inside the window.  We never framed it, our INFO1c
+   deadline (11.2.2.2.4) sent INFOMARKSa, which replaces the Tone A that
+   call modem was waiting for, and the call sat there until it hung up --
+   every live plain-V.34 call (8 of 8).  So the plain V.34 answer modem
+   frames INFO1c (armed at the second Tone B reversal) during L1/L2 too. */
+static bool v34_rx_info1c_in_l1_l2(const v34_rx_state_t *s)
+{
+    return s->duplex
+        &&  !s->v90_mode
+        &&  !s->calling_party
+        &&  s->stage == V34_RX_STAGE_L1_L2
+        &&  s->target_bits == (109 - (4 + 8 + 4));
+}
 
 static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 {
@@ -7927,9 +7963,121 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     int i;
     int j;
     float phase_1050;
+    bool skip_block = false;
 
     slow_dft(s->dft_buffer, LINE_PROBE_SAMPLES);
     phase_1050 = atan2f(s->dft_buffer[21].im, s->dft_buffer[21].re);
+    if (!s->calling_party  &&  !s->v90_mode)
+    {
+        /* The V.34 answer modem only: it transmits nothing at 900, 1200 or
+           1800 Hz while it receives the call modem's probe (silence or Tone A,
+           11.2.1.2.6-8).  The call modem transmits Tone B (1200 Hz) through
+           the answer modem's L2 (11.2.1.1.5), and its own echo fills the bin.
+
+           Each block's empty bins (900, 1200, 1800 Hz) are compared with the
+           median of the L1 blocks'.  A block more than 12 dB above that is
+           not clean probe: the L1-to-L2 level step, or the onset of the call
+           modem's next signal.
+           Against the HSF the block where INFO1c began read 26 dB above it,
+           with its 1200 Hz bin still only 0.16 of the probe tones, and
+           measured it took the reading from 42 to 19 dB.  Such a block is
+           skipped, not measured.  The median follows the line's own noise,
+           so a noisy line skips nothing.
+
+           Then L2 has ended (V.34 11.2.1.1.7: L2 has no minimum length) once
+           the 1200 Hz bin, the call modem's INFO1c carrier and Tone B, reaches
+           half the mean probe tone.  Measured against the HSF on rig/v90ras: 3
+           blocks of L2, then INFO1c with the 1200 Hz bin at 0.5-35x the mean
+           probe tone.  Measured into the probe, that read every symbol rate
+           at -6.7 dB and INFO1a offered 0 bps.  On a normal 19-block L2 the
+           1200 Hz bin stays at 0.002-0.02 of the probe tones. */
+        float e = 0.0f;
+        int k;
+
+        for (k = 0;  k < 3;  k++)
+        {
+            j = (k == 0) ? 18 : (k == 1) ? 24 : 36;
+            e += sqrtf(s->dft_buffer[j].re*s->dft_buffer[j].re
+                     + s->dft_buffer[j].im*s->dft_buffer[j].im);
+        }
+        /*endfor*/
+        e /= 3.0f;
+        if (s->l1_l2_duration >= 1  &&  s->l1_l2_duration < 8)
+            s->l1_l2_l1_empty[s->l1_l2_duration] = e;
+        /*endif*/
+        if (s->l1_l2_duration == 8)
+        {
+            float v[7];
+
+            /* Median of L1 blocks 1-7 (block 0 may straddle the reversal). */
+            memcpy(v, &s->l1_l2_l1_empty[1], sizeof(v));
+            for (k = 1;  k < 7;  k++)
+            {
+                float x = v[k];
+                int m = k;
+
+                while (m > 0  &&  v[m - 1] > x)
+                {
+                    v[m] = v[m - 1];
+                    m--;
+                }
+                /*endwhile*/
+                v[m] = x;
+            }
+            /*endfor*/
+            s->l1_l2_empty_floor = v[3];
+        }
+        /*endif*/
+        if (s->l1_l2_duration >= 8
+            &&  !s->l1_l2_probe_ended
+            &&  s->l1_l2_empty_floor > 0.0f
+            &&  e > 4.0f*s->l1_l2_empty_floor)
+        {
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                     "Rx - L1/L2 block %d skipped: empty bins %.1f dB above L1's\n",
+                     s->l1_l2_duration,
+                     (double) (20.0f*log10f(e/s->l1_l2_empty_floor)));
+            skip_block = true;
+        }
+        /*endif*/
+        if (s->l1_l2_duration >= 8  &&  !s->l1_l2_probe_ended)
+        {
+            float occupied = 0.0f;
+            float empty_1200;
+            int n_occupied = 0;
+
+            for (i = 0;  i < 25;  i++)
+            {
+                if (adjust[i] < 7.0f)
+                {
+                    j = 3*(i + 1);
+                    occupied += sqrtf(s->dft_buffer[j].re*s->dft_buffer[j].re
+                                    + s->dft_buffer[j].im*s->dft_buffer[j].im);
+                    n_occupied++;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+            empty_1200 = sqrtf(s->dft_buffer[24].re*s->dft_buffer[24].re
+                             + s->dft_buffer[24].im*s->dft_buffer[24].im);
+            if (n_occupied > 0  &&  empty_1200 > 0.5f*occupied/n_occupied)
+            {
+                s->l1_l2_probe_ended = 1;
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - L2 ended after %d blocks (1200 Hz at %.2f of the probe tones); "
+                         "measuring %d L2 blocks\n",
+                         s->l1_l2_duration - 8,
+                         (double) (empty_1200*n_occupied/fmaxf(occupied, 1e-6f)),
+                         s->l1_l2_gain_count);
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+    if (s->l1_l2_probe_ended  ||  skip_block)
+        return 0;
+    /*endif*/
     /* Now resolve the analysis into gain and phase values for the bins which contain the tones */ 
     /* Base things around what happens at 1050Hz the first time through. */
     if (s->l1_l2_duration == 0)
@@ -8019,6 +8167,8 @@ static void l1_l2_analysis_init(v34_rx_state_t *s)
     s->l1_l2_1050_phase_step_sum = 0.0f;
     s->l1_l2_1050_phase_step_count = 0;
     s->l1_l2_have_prev_1050_phase = 0;
+    s->l1_l2_probe_ended = 0;
+    s->l1_l2_empty_floor = 0.0f;
     s->current_demodulator = V34_MODULATION_L1_L2;
     s->stage = V34_RX_STAGE_L1_L2;
 }
@@ -8049,10 +8199,13 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->phase2_l2_count++;
                 s->current_demodulator = V34_MODULATION_TONES;
-                if (s->calling_party  &&  s->v90_mode
+                if (((s->calling_party  &&  s->v90_mode)
+                     ||  (!s->calling_party  &&  !s->v90_mode
+                          &&  s->stage == V34_RX_STAGE_INFO1C))
                     &&  s->received_event == V34_EVENT_INFO1_OK)
                 {
-                    /* INFO1d already arrived inside the window; keep it. */
+                    /* INFO1d (V.90 caller) or INFO1c (V.34 answerer) already
+                       arrived inside the window; keep it. */
                 }
                 else
                 {

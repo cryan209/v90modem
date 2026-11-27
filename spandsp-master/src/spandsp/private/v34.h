@@ -2898,6 +2898,12 @@ typedef struct
     float l1_l2_1050_phase_step_sum;
     int l1_l2_1050_phase_step_count;
     int l1_l2_have_prev_1050_phase;
+    /* Set once a block after L1 is no longer L2 (the call modem's INFO1c or
+       Tone B has started); no later block is measured. */
+    int l1_l2_probe_ended;
+    /* Mean of the probe's empty bins in each L1 block, and their median. */
+    float l1_l2_l1_empty[8];
+    float l1_l2_empty_floor;
 
     int current_demodulator;
 
