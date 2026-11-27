@@ -556,8 +556,10 @@ Still open on this peer:
   fixed too (section "B1 read the taps it arrived on", below): no step-down
   retrains in 24 calls. Still open: an 11.6 whose MP we do not lock (1 in
   about 10).
-- **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
-  INFOMARKSa and dies. Every arm shows it.
+- **Phase 2.** Fixed 2026-11-28 (section "INFO1c came inside our L1/L2
+  window", below). Offline, about 1 call in 8 never decoded the HSF's INFO1c.
+  Live, every call missed it. Live calls now reach Phase 3, where the HSF
+  retrains during our J (open, same section).
 - **The HSF matrix rows.** `hsf_v90_ulaw` passes since the fallback MP fix
   (matrix 15 of 18, 2026-11-26; see "The fallback's MP receiver rotated
   away" below). The two HSF V.92 rows never reach the fallback. (This bullet
@@ -757,7 +759,7 @@ The fitted arm mostly ends at 31200. The correlation arm mostly ends at
 28800 or 26400 after its step-downs.
 
 The other failures:
-- **Phase 2 INFO1c miss** (below): 1 fitted call and 2 correlation calls.
+- **Phase 2 INFO1c miss** (fixed below, "INFO1c came inside our L1/L2 window"): 1 fitted call and 2 correlation calls.
 - **An 11.6 whose MP we never locked:** 1 call in each arm. In the fitted
   arm the HSF answered our S and sent 4800 bauds of TRN. Our Phase 4
   receiver locked its MP only at baud 1999, read a reserved bit wrong, got
@@ -823,6 +825,66 @@ Method note: with `ME_V34_RETRAIN_ON_LOSS=0` the probe's MP is not capped
 by B1, so the HSF sends 33600 on a line that carries less and our data goes
 white. That is the setup, not a receiver fault. Grade the timing by
 "restart Phase2" against "reneg probe" instead.
+
+### INFO1c came inside our L1/L2 window (2026-11-28)
+
+**Fixed (bb4be57b, `v34rx.c`; answerer, plain V.34 only).** Every live
+plain-V.34 call from the HSF to v90ras stalled in Phase 2: 8 of 8 across
+a03e6087 and c2191054. Offline it was about 1 call in 8.
+
+What happened on the live taps:
+- Our `POST_L2_WAIT_TONE_B` timed out with no Tone B, and the HSF missed our
+  reversal. (Falling through here is our known deviation from §11.2.2.2.3.)
+- The HSF ran its own §11.2.2.1.4 recovery and probed late. L1 came at
+  +9.90 s, then an L2 of about 3 blocks, then INFO1c from +10.14 to +10.32 s.
+  §11.2.1.1.7 lets the call modem end L2 as soon as it has Tone A and its own
+  echo, so a short L2 is legal.
+- Our receiver framed L1/L2 as a fixed 21 × 20 ms window, which swallowed
+  INFO1c. The §11.2.2.2.4 deadline (2000 ms + 2 RTD) then sent INFOMARKSa at
+  +10.40 s. INFOMARKSa replaces the Tone A the HSF was waiting for, so both
+  ends deadlocked.
+
+The fix:
+- In the answerer, the INFO search runs during L1/L2 and accepts INFO1c
+  there. A frame there could only be INFO1c.
+- The probe measurement stops at the end of L2. That is when 1200 Hz, which
+  is empty in the probe (§11.2.1.2.6) but carries INFO1c and Tone B, rises
+  above half the mean probe-tone magnitude.
+- Any block whose empty bins (900/1200/1800 Hz) sit more than 12 dB above
+  L1's median is skipped.
+- These gates are answerer only. In the caller our own Tone B echo tripped
+  them, which moved INFO1c's 3429 max N from 12 to 14 on the Apple coupler
+  test.
+
+Probe SNR measured on the live taps, replayed:
+
+| Tap | Before | After |
+|---|---|---|
+| Failing taps, with INFO1c framed | -6.7 dB (0 bps) | 46.4 dB (31200) |
+| Same, with the end gate only | 19 dB | |
+| Call 384470 (L1→L2 step block included at an 18 dB gate) | 29.6 dB | 44.7 dB |
+| Passing call 384644 | 42.0 dB | 42.0 dB, nothing skipped |
+
+INFO1a goes out after 1158 of the 1200 bauds the deadline allows. That
+leaves 70 ms, and it is deterministic. Offline (CT 128): HSF plain V.34 24
+of 24 (12 at the default baud, 12 at `ME_V34_BAUD=3200`), and the full
+matrix 21 of 21. The late probe never happens on the rig, so the new path
+did not fire there.
+
+**Live after deploy (5 calls).** Phase 2 completed on all 5 (before: 0 of
+8). Each call took INFO1c at +10.34 s, sent INFO1a, and ran Phase 3.
+
+**Still open: the HSF retrains during our Phase 3 J.**
+- On all 5 calls the HSF sent a retrain tone 2.9-4.0 s into our J, and we
+  never received its S.
+- Four calls retrained into the same thing until the HSF gave up (NO CARRIER
+  after about 52 s).
+- One call trained on its second Phase 3 and reached data at 28800. The HSF
+  retrained 14.4 s into data, and `ME_V34_LOSS_HANGUP_AFTER_MS` hung up
+  (PPP 20/20 LCP echoes, 17/20 pings).
+- This is the older live "peer Phase 3 equalizer on our TRN" gap
+  (v34_live_interop notes). It does not reproduce over netsim, so start from
+  the live TX taps (`/var/tmp/v90ras/calls/line0-404111` etc.).
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 

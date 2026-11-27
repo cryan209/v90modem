@@ -1663,6 +1663,29 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed bb4be57b (2026-11-28)
+
+On top of c2191054, this deploy adds bb4be57b. **The plain-V.34 answerer
+now takes an INFO1c that arrives inside its L1/L2 window** (§11.2.1.1.7),
+and it measures the probe on L2 alone. Before this, every live HSF
+plain-V.34 call deadlocked in INFOMARKSa. Details are in
+`docs/dmodem_interop.md`, "INFO1c came inside our L1/L2 window".
+- **Build and install.** Built in `/root/deploy-5640b4d3` after `make clean`
+  (a private header changed). That tree's local edits were the same patch,
+  checked with `git diff bb4be57b`, and were dropped with `checkout -f`.
+  Binary md5 `80096d39…`, kept as `/opt/v90ras/sip_v90_modem.bb4be57b`. The
+  previous binary (c2191054) is kept as `sip_v90_modem.pre-bb4be57b`.
+  Installed by rename at 01:48, with busy empty and no PPP interface up.
+  Only v90ras restarted: 20 registration successes, 10 lines ready.
+- **Live, HSF plain V.34 to 2950, 5 calls.** Phase 2 completed on all 5:
+  INFO1c was taken at +10.34 s and Phase 3 ran. On all 5 the HSF then sent a
+  retrain tone during our J.
+  - 4 calls got NO CARRIER after about 52 s.
+  - 1 call reached data at 28800 on its second Phase 3. It took a peer
+    retrain 14.4 s into data, and the loss hangup ended it (17/20 pings).
+  - The Phase 3 J retrain is the next blocker.
+  - Taps: `line0-404111`, `-404130`, `-404166`, `-404185`, `-404205`.
+
 ## Deployed c2191054 (2026-11-28)
 
 On top of a03e6087, this deploy adds c2191054. **The V.34 B1 rate check
