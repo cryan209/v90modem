@@ -753,6 +753,11 @@ is the known Phase 2 INFO1c miss (below). We opened 19 §11.6s of our own:
 
 The offline matrix with the hold is 21 of 21, and `test-fast` passes.
 
+Live on v90ras (deployed a03e6087), the HSF called in plain V.34 over SIP.
+Data started at 26400 at +21.0 s. Our fall-forward to 31200 went out at
++32.0 s and was confirmed at 37.2 dB, with no retrain, and PPP passed
+20/20. A second call missed INFO1c in Phase 2 and stalled in INFOMARKSa.
+
 Method note: with `ME_V34_RETRAIN_ON_LOSS=0` the probe's MP is not capped
 by B1, so the HSF sends 33600 on a line that carries less and our data goes
 white. That is the setup, not a receiver fault. Grade the timing by

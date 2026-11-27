@@ -1663,6 +1663,30 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed a03e6087 (2026-11-28)
+
+On top of 09c50a79, this deploy adds a03e6087. **We open our own §11.6 rate
+renegotiation (a B1 step-down or a fall-forward) only after 500 ms of our
+data has gone out.** The HSF arms its S detector only after 200-300 ms of our
+data (it first demodulates our data after our B1, §11.4.1.1.5). An earlier S
+made it retrain. `ME_V34_RENEG_MIN_DATA_MS=0` removes the hold.
+- **Build and install.** Built in `/root/deploy-5640b4d3` after `make clean`
+  (the header changed); the build log is `/root/deploy-a03e6087.build.log`.
+  Binary md5 `f6f7f2e0…`, kept as `/opt/v90ras/sip_v90_modem.a03e6087`. The
+  previous binary (09c50a79, md5 `39f08750…`) is kept as
+  `sip_v90_modem.pre-a03e6087`. Installed by rename at 00:31, with busy
+  empty and no PPP interface up. Only v90ras restarted: 20 registration
+  successes, 10 lines ready.
+- **Offline (D-Modem rig, CT 128):** 15/15 HSF renegotiations to 26400 or
+  28800 completed without a retrain (all retrained before). Step-downs to
+  21600 at 3429 baud still retrain mid-MP (2/2); B1 under-reads that line.
+- **Live, after install:** the HSF called 2950 twice over SIP in plain V.34.
+  Call 1 got no CONNECT: the known Phase 2 INFO1c miss, which stalled in
+  INFOMARKSa. Call 2 passed. It reached data at 26400 at +21.0 s, then made
+  a fall-forward 26400 -> 31200 (37.3 dB) at +32.0 s. That fall-forward was
+  confirmed at 37.2 dB, with no HSF retrain. LCP/IPCP opened, with 20/20
+  echoes, 20/20 pings, 48 good frames and 0 bad.
+
 ## Deployed 09c50a79 (2026-11-27)
 
 On top of f8758e39, this deploy adds 09c50a79. **V.92 retrains when no CPd
