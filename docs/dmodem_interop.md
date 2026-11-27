@@ -67,6 +67,51 @@ Our side needs these settings to do V.92 PCM upstream:
 The failing rows and a SmartLink control gave the same verdicts unpaced (the
 default) and with `MODEM_REALTIME=1`; the passing rows were run paced.
 
+## Full matrix run, live rows included (2026-11-27, d91b4de3)
+
+`LIVE=1 SIP_V90MODEM=<checkout>/sip_v90_modem tools/dmodem_matrix.sh` on CT
+128 (wired), with half_v90modem and sip_v90_modem built from d91b4de3 and
+D-Modem eceac3b. STREAM=10, one call per row. "Data" is the bytes each side
+received intact. This is one call per row, so a pass is not a rate. The
+cumulative per-peer history is in the next section.
+
+**Result: 23 of 25 rows passed.** Both failures are HSF V.92, already known
+(below). The four live rows passed on their first run through the matrix
+script.
+
+| Row | Caller's CONNECT | Data A / B | Notes |
+|---|---|---|---|
+| `sl_v92_ulaw` | 56000 | 6239/6239, 6613/6613 | B1u locked by decoding, CPd precoder |
+| `sl_v92_alaw` | 56000 | 5872/5872, 6224/6224 | B1u locked by decoding, CPd precoder |
+| `sl_v90_ulaw` | 56000 | 6973/6973, 7391/7391 | |
+| `hsf_v92_ulaw` | none | none | **Fail** at 53 s: Phase 4, we wait for a valid CPt from the HSF. This is its own -6 dBm0 failure, and -12 dBm0 connects (see HSF below) |
+| `hsf_v92_alaw` | none | none | **Fail**, the same way, at 53 s |
+| `hsf_v90_ulaw` | 115200 (DTE) | 6239/6239, 6613/6613 | V.34 fallback after the HSF declines V.90 |
+| `ess_v92_ulaw` | 50666 | 6973/6973, 7391/7391 | B1u locked by decoding |
+| `ess_v92_alaw` | 49333 | 6606/6606, 7002/7002 | B1u locked by decoding |
+| `ess_v90_ulaw` | 49333 | 6973/6973, 7391/7391 | |
+| `agere_v92_ulaw` | 53333 V42bis | 6606/6606, 7002/7002 | V.90 Phase 4, no PCM upstream |
+| `agere_v90_ulaw` | 53333 V42bis | 6239/6239, 6613/6613 | |
+| `sm56_v90_ulaw` | 50666/LAPM/V42BIS | 6606/6606, 7002/7002 | |
+| `pctel_v90_ulaw` | 115200 (DTE) | 6606/6606, 7002/7002 | |
+| `broadcom_v92_ulaw` | 50666/LAPM/V42BIS | 6973/6973, 7391/7391 | B1u locked by decoding, CPd precoder |
+| `broadcom_v90_ulaw` | 49333/LAPM/V42BIS | 6973/6973, 7391/7391 | |
+| `intel_v92_ulaw` | 49333 | 6973/6973, 7391/7391 | no CPu, so V.90 |
+| `intel_v90_ulaw` | 49333 | 6973/6973, 7391/7391 | |
+| `courier_v32b_ulaw` | 14400/ARQ | 7340/7340, 7780/7780 | |
+| `courier_v22b_ulaw` | 2400/ARQ | 7340/7340, 7780/7780 | |
+| `we_courier_v32b_ulaw` | 14400 (ours) | 7340/7340, 7780/7780 | |
+| `we_courier_v22b_ulaw` | 2400 (ours) | 7340/7340, 7780/7780 | |
+| `live_courier_v32b` | 14400/ARQ after 11.3 s | PPP: 48 frames good, 0 bad | v90ras on d7adb775 + f8758e39. LCP and IPCP open, 20/20 echoes, 20/20 pings |
+| `live_courier_v22b` | 2400/ARQ after 8.7 s | PPP: 54 frames good, 0 bad | the same |
+| `livewe_courier_v32b` | 14400 (ours) | 40/40 lines each way | no retrain, no reception loss |
+| `livewe_courier_v22b` | 2400 (ours) | 40/40 lines each way | the one NO CARRIER is the hang-up after the last line |
+
+The DTE rates (115200) are what those peers' harnesses print, not line rates.
+The previous full matrix was 15 of 18: these two HSF V.92 failures plus a
+Courier row. Since then the matrix has gained the two "we call the Courier"
+netsim rows and the four live rows.
+
 ## Results (2026-11-24, a6737e79 + half_v90modem, D-Modem eceac3b; ESS V.90 updated after the Jd S gate fix)
 
 STREAM=10, one call per row:
