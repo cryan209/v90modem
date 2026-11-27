@@ -1663,6 +1663,29 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 07de727e (2026-11-28)
+
+On top of bb4be57b, this deploy adds 07de727e. **Every duplex answer modem
+now sends one point before INFO0a, not 16 bauds** (V.34 §10.1.2.3.1). The
+27 ms of carrier was Tone A before INFO0a. That made the HSF repeat INFO0c
+(§11.2.2.1.1), and our Tone B detector took the repeat as its reversal.
+Details are in `docs/dmodem_interop.md`, "Our 27 ms preamble was Tone A
+before INFO0a".
+- **Experiment first, no build.** A runtime drop-in
+  (`/run/systemd/system/v90ras.service.d/preamble-exp.conf`,
+  `ME_V34_INFO0_PREAMBLE_BAUDS=1`) on bb4be57b: HSF plain V.34 5 of 5, PPP
+  clean. Without it: 0 of 5. The drop-in was removed at this deploy.
+- **Build and install.** Built in `/root/deploy-5640b4d3`; the log is
+  `/root/deploy-07de727e.build.log`. Binary md5 `6bd5e47c…`, kept as
+  `/opt/v90ras/sip_v90_modem.07de727e`. The previous binary (bb4be57b) is
+  kept as `sip_v90_modem.pre-07de727e`. Installed by rename at 03:31, with
+  busy empty and no PPP interface up. Only v90ras restarted: 10 lines
+  ready, and no preamble knob in its environment.
+- **Live after install, with the code default.**
+  - HSF plain V.34: 5 of 5, CONNECT at 17.6 s, LCP 20/20, pings 20/20,
+    0 bad frames.
+  - HSF V.90: 1 of 1, PPP clean.
+
 ## Deployed bb4be57b (2026-11-28)
 
 On top of c2191054, this deploy adds bb4be57b. **The plain-V.34 answerer
