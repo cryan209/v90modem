@@ -245,12 +245,6 @@ SPAN_DECLARE(v17_rx_state_t *) v17_rx_init(v17_rx_state_t *s, int bit_rate, span
     \return 0 for OK, -1 for bad parameter */
 SPAN_DECLARE(int) v17_rx_restart(v17_rx_state_t *s, int bit_rate, int short_train);
 
-/*! V.32bis data mode: drive the symbol timing from the decision-directed
-    Mueller-Muller detector (on) or the Godard detector (off).
-    \param kp, ki The PI loop gains, in eq_put_step units per unit of error.
-    \param sign +1 or -1, the detector's sense. */
-SPAN_DECLARE(void) v17_rx_v32bis_dd_timing(v17_rx_state_t *s, bool on, float kp, float ki, float sign);
-
 /*! Release a V.17 modem receive context.
     \brief Release a V.17 modem receive context.
     \param s The modem context.

@@ -420,68 +420,6 @@ static __inline__ float dist_sq(const complexf_t *x, const complexf_t *y)
 /*- End of function --------------------------------------------------------*/
 #endif
 
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-/* V.32bis data-mode symbol timing.  The Godard band-edge detector the
-   start-up trains with tests, each baud, the band-edge product of the last
-   two bauds (its DC filter makes its "integrator" telescope), and on 14400
-   bit/s data that product's self-noise crosses the fine trigger by itself:
-   the timing dithers, and over seconds the eye goes white.  Averaging it, or
-   raising its trigger, kills the noise but also the dithering that makes the
-   bang-bang loop act proportionally, so it stops tracking a clock offset.
-
-   In data the decisions are available, so this uses the Mueller-Muller
-   detector on the equalizer output instead,
-       e[n] = Re{z[n] conj(d[n-1]) - z[n-1] conj(d[n])} / E|d|^2,
-   which is zero at the eye centre of a Nyquist pulse and about -2 tau for a
-   sampling error of tau symbols, with no band-edge self-noise.  A PI loop
-   turns it into eq_put_step units (1/640 T); the integral term holds the
-   clock offset and starts from the rate the Godard loop ran at through
-   training. */
-static void v32bis_dd_timing_update(v17_rx_state_t *s, const complexf_t *z, const complexf_t *d)
-{
-    float e;
-    float u;
-    int steps;
-
-    s->v32bis_dd_t_energy += (d->re*d->re + d->im*d->im - s->v32bis_dd_t_energy)*(1.0f/256.0f);
-    if (s->v32bis_dd_t_primed  &&  s->v32bis_dd_t_energy > 0.0f)
-    {
-        e = (z->re*s->v32bis_dd_t_prev_d.re + z->im*s->v32bis_dd_t_prev_d.im)
-          - (s->v32bis_dd_t_prev_z.re*d->re + s->v32bis_dd_t_prev_z.im*d->im);
-        e *= s->v32bis_dd_t_sign/s->v32bis_dd_t_energy;
-        if (e > 1.0f)
-            e = 1.0f;
-        else if (e < -1.0f)
-            e = -1.0f;
-        /*endif*/
-        s->v32bis_dd_t_rate += s->v32bis_dd_t_ki*e;
-        u = s->v32bis_dd_t_acc + s->v32bis_dd_t_kp*e + s->v32bis_dd_t_rate;
-        steps = (int) lrintf(u);
-        s->v32bis_dd_t_acc = u - (float) steps;
-        s->v32bis_dd_t_pending += steps;
-    }
-    /*endif*/
-    s->v32bis_dd_t_prev_z = *z;
-    s->v32bis_dd_t_prev_d = *d;
-    s->v32bis_dd_t_primed = true;
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(void) v17_rx_v32bis_dd_timing(v17_rx_state_t *s, bool on, float kp, float ki, float sign)
-{
-    s->v32bis_dd_timing = on;
-    s->v32bis_dd_t_primed = false;
-    s->v32bis_dd_t_kp = kp;
-    s->v32bis_dd_t_ki = ki;
-    s->v32bis_dd_t_sign = sign;
-    s->v32bis_dd_t_acc = 0.0f;
-    s->v32bis_dd_t_rate = (on)  ?  s->v32bis_godard_rate  :  0.0f;
-    s->v32bis_dd_t_energy = 0.0f;
-    s->v32bis_dd_t_pending = 0;
-}
-/*- End of function --------------------------------------------------------*/
-#endif
-
 #if defined(SPANDSP_USE_FIXED_POINTx)
 static int decode_baud(v17_rx_state_t *s, complexi16_t *z)
 #else
@@ -567,11 +505,6 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
         if (s->v32bis_data_eq)
             tune_equalizer(s, z, &s->constellation[constellation_state]);
         /*endif*/
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-        if (s->v32bis_dd_timing  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
-            v32bis_dd_timing_update(s, z, &s->constellation[constellation_state]);
-        /*endif*/
-#endif
         if (s->v32bis_eye_log  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
         {
             float dre = z->re - s->constellation[constellation_state].re;
@@ -634,11 +567,6 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
         /*endif*/
     }
     /*endif*/
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-    if (s->v32bis_dd_timing  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
-        v32bis_dd_timing_update(s, z, &s->constellation[constellation_state]);
-    /*endif*/
-#endif
     if (s->v32bis_eye_log  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
     {
         float dre = z->re - s->constellation[constellation_state].re;
@@ -827,20 +755,6 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
     {
         int ted = godard_ted_per_baud(&s->godard);
 
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-        if (s->v32bis_dd_timing)
-        {
-            ted = s->v32bis_dd_t_pending;
-            s->v32bis_dd_t_pending = 0;
-        }
-        else if (abs(ted) <= s->godard.desc.fine_step)
-        {
-            /* Fine steps only: the acquisition's coarse steps pull in the
-               initial timing error, not the clock offset. */
-            s->v32bis_godard_rate += ((float) ted - s->v32bis_godard_rate)*(1.0f/1024.0f);
-        }
-        /*endif*/
-#endif
         if (s->v32bis_timing_hold)
             ted = 0;
         /*endif*/
@@ -1633,12 +1547,6 @@ SPAN_DECLARE(int) v17_rx_restart(v17_rx_state_t *s, int bit_rate, int short_trai
     s->symbol_sink_uses_data_constellation = false;
     s->v32bis_data_bits_suppress = 0;
     s->eq_normalized_lms = false;
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-    v17_rx_v32bis_dd_timing(s, false, 0.0f, 0.0f, 1.0f);
-    if (!short_train)
-        s->v32bis_godard_rate = 0.0f;
-    /*endif*/
-#endif
 #if defined(SPANDSP_USE_FIXED_POINTx)
     vec_zeroi16(s->rrc_filter, sizeof(s->rrc_filter)/sizeof(s->rrc_filter[0]));
 #else

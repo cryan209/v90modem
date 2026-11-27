@@ -431,10 +431,10 @@ static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len,
 /* rms below which the call modem's start-up watch ignores AC: about
    -40 dB relative to v32bis_duplex_test's line signal (rms ~4500). */
 #define V32BIS_STARTUP_AC_FLOOR 50.0f
-/* Data-mode decision-directed timing loop gains, in eq_put_step units
-   (1/640 T) per unit of normalised Mueller-Muller error (about -2 tau). */
-#define V32BIS_DD_TIMING_KP 1.6f
-#define V32BIS_DD_TIMING_KI 0.002f
+/* Data-mode carrier loop gains: V.17's own tracking values (v17rx.c sets
+   them once its trainer finishes); see startup_enter_data_rx(). */
+#define V32BIS_DATA_CARRIER_TRACK_I 100.0f
+#define V32BIS_DATA_CARRIER_TRACK_P 500000.0f
 #define V32BIS_LOST_ERROR_POWER  0.2f
 #define V32BIS_LOST_SYMBOLS      4800
 #define V32BIS_LOST_RETRAINS     3
@@ -1852,38 +1852,36 @@ static int startup_enter_data_rx(v32bis_state_t *s,
     s->rx.v32bis_dd_err = 0.0f;
     s->rx.v32bis_lost_symbols = 0;
     s->rx.v32bis_lost_threshold = V32BIS_LOST_ERROR_POWER;
-#if !defined(SPANDSP_USE_FIXED_POINTx)
-    /* Data-mode symbol timing from the decisions; see
-       v32bis_dd_timing_update() in v17rx.c for why the Godard detector the
-       start-up trained with cannot keep it. */
+    /* Data-mode carrier loop.  V.32bis trains through its own symbol sink,
+       so V.17's trainer, which narrows the loop to its tracking gains once
+       trained, never runs, and data kept the acquisition gains
+       v17_rx_restart() sets (i 5000, p 40000).  Those ring: on live 14400
+       calls to the emulated Courier, over an all-digital path whose carrier
+       offset is fixed, the frequency estimate swung 1800.18 -> 1799.12 Hz in
+       1200 bauds while the decision error rose 0.03 -> 0.18, and about 1 call
+       in 16 lost reception 10-20 s into data.  Whichever symbol timing loop
+       ran only decided which call tipped over.  V.17's own tracking gains
+       (i 100, p 500000) decode all three failing live taps at data-eye rms
+       0.155-0.160, against 0.20-0.36 or lost.  The trained frequency carries
+       over in carrier_phase_rate, so 2.1's +-7 Hz offset is still held. */
     {
-        const char *e;
-        bool on = true;
-        float kp = V32BIS_DD_TIMING_KP;
-        float ki = V32BIS_DD_TIMING_KI;
-        float sign = 1.0f;
+        const char *e = getenv("V32BIS_DATA_CARRIER");
+        float ci = V32BIS_DATA_CARRIER_TRACK_I;
+        float cp = V32BIS_DATA_CARRIER_TRACK_P;
 
-        if ((e = getenv("V32BIS_DD_TIMING")))
-            on = (atoi(e) != 0);
+        if (e  &&  sscanf(e, "%f:%f", &ci, &cp) != 2)
+        {
+            ci = V32BIS_DATA_CARRIER_TRACK_I;
+            cp = V32BIS_DATA_CARRIER_TRACK_P;
+        }
         /*endif*/
-        if ((e = getenv("V32BIS_DD_TIMING_KP")))
-            kp = (float) atof(e);
-        /*endif*/
-        if ((e = getenv("V32BIS_DD_TIMING_KI")))
-            ki = (float) atof(e);
-        /*endif*/
-        if ((e = getenv("V32BIS_DD_TIMING_SIGN")))
-            sign = (atof(e) < 0.0f)  ?  -1.0f  :  1.0f;
-        /*endif*/
-        v17_rx_v32bis_dd_timing(&s->rx, on, kp, ki, sign);
-        if (v32bis_trace())
-            fprintf(stderr, "[V32BIS %s] data timing: %s, clock offset seed %.4f steps/baud (%.0f ppm)\n",
-                    s->calling_party ? "call  " : "answer",
-                    on ? "decision-directed" : "Godard",
-                    s->rx.v32bis_dd_t_rate, s->rx.v32bis_dd_t_rate*1.0e6f/640.0f);
+        if (ci > 0.0f  &&  cp > 0.0f)
+        {
+            s->rx.carrier_track_i = ci;
+            s->rx.carrier_track_p = cp;
+        }
         /*endif*/
     }
-#endif
     s->rx.v32bis_offhalf_wanted = false;
     s->rx.v32bis_offhalf_valid = false;
     s->rx.symbol_sink = NULL;

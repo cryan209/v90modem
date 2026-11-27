@@ -101,25 +101,6 @@ struct v17_rx_state_s
     float v32bis_dd_err;
     float v32bis_lost_threshold;
     int v32bis_lost_symbols;
-    /*! V.32bis data-mode symbol timing: a decision-directed Mueller-Muller
-        detector on the equalizer output, through a PI loop, replaces the
-        Godard band-edge detector once data begins (see v17rx.c). */
-    bool v32bis_dd_timing;
-    bool v32bis_dd_t_primed;
-    float v32bis_dd_t_kp;
-    float v32bis_dd_t_ki;
-    float v32bis_dd_t_sign;
-    /*! Fractional eq_put_step correction not yet applied. */
-    float v32bis_dd_t_acc;
-    /*! The loop's integral term: eq_put_step units per baud (the clock offset). */
-    float v32bis_dd_t_rate;
-    /*! Running mean of |decision|^2, which normalises the detector. */
-    float v32bis_dd_t_energy;
-    /*! Godard steps per baud, averaged through training: seeds v32bis_dd_t_rate. */
-    float v32bis_godard_rate;
-    int v32bis_dd_t_pending;
-    complexf_t v32bis_dd_t_prev_z;
-    complexf_t v32bis_dd_t_prev_d;
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
     /*! \brief The scaling factor assessed by the AGC algorithm. */

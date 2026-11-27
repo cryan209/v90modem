@@ -94,7 +94,7 @@ STREAM=10, one call per row:
 | Courier | V.32bis, we call | Pass, 32 of 32 at 14400, data exact (`we_courier_v32b_ulaw`); 0 before the R3 and loss-retrain fixes below |
 | Courier | V.22bis, we call | Pass, 24 of 24 at 2400, data exact (`we_courier_v22b_ulaw`); every call fell to 1200 before the S1 fix below, then 4 of 40 before the other-eye S1 search |
 | Courier, live | V.32bis / V.22bis, Courier calls v90ras | Pass, 5 of 5 each: 14400/ARQ and 2400/ARQ through Asterisk into v90ras's pppd; every call LCP + IPCP open and 20 of 20 LCP echoes and pings intact, no retrain. See "The emulated Courier on a live SIP call" below |
-| Courier, live | V.32bis / V.22bis, we call | Pass, 5 of 5 each: CONNECT 14400 and CONNECT 2400, 40 of 40 lines exact both ways. 1 call in 16 had a V.32bis loss retrain in data, which completed. The cause was our data-mode symbol timing, now decision-directed (see below) |
+| Courier, live | V.32bis / V.22bis, we call | Pass, 5 of 5 each: CONNECT 14400 and CONNECT 2400, 40 of 40 lines exact both ways. 1 call in 16 had a V.32bis loss retrain in data, which completed. The cause was our data-mode carrier loop, which kept its acquisition gains; fixed (see below) |
 
 D-Modem's own modem passes the same rows. For example, Agere V.90 against their
 `half_open8` passes on CT 128, and SmartLink V.92 against it connects at
@@ -933,71 +933,50 @@ bearer was clean: our largest received RTP gap was 22.7 ms.
 That call's tap reproduces offline, every time: `v90_engine_replay
 live-rx.g711 ulaw --fast --dial --sync --at "ATX3;AT+MS=V32B"` loses
 reception at 21.8 s (decision error 0.328 for 4818 symbols).
-`V32BIS_TIMING_HOLD=1` decodes the whole call at 0.024-0.037; holding the
-carrier loop instead fails sooner. So the cause is our Godard symbol timing in
-data mode:
-- It ran no coarse steps, only fine ones (1/640 T each). Their total went from
-  1 to 12 within 100 bauds, 10 s into data.
-- Over the next few seconds the decision error rose 0.056 -> 0.11 -> 0.26 ->
-  0.336 and the carrier loop's swing grew from about +-0.15 to +-0.75 Hz.
-  Equalizer energy fell from 4.8 to 2.85.
 
-The detector's "integrator" (`godard_ted_per_baud`) is not one. Its DC filter
-subtracts the output from two bauds back, so the sum telescopes, and the fine
-trigger (100) tests the band-edge product of the last two bauds. On 14400
-bit/s data, that product's self-noise crosses the trigger by itself.
+**The cause was our data-mode carrier loop, not the symbol timing.** It took
+two wrong turns to find, and both are recorded so they aren't repeated:
+- Holding the timing (`V32BIS_TIMING_HOLD=1`) decoded that tap, so the
+  Godard timing loop looked guilty. Two ways of quietening the detector each
+  held the tap but lost tracking under a clock offset, in netsim A/Bs on CT
+  128 (NET_PPM 0/+-100/+-200, arms alternated, 40 calls each):
+  - fine trigger 300: 71 loss retrains against 8;
+  - a 16-baud average: 45 against 11.
+- A decision-directed (Mueller-Muller) timing loop then held the tap and
+  cut netsim losses from 21 to 6 in 40. It went live as 0f1be7f3 and was
+  rolled back within the hour: 2 of 5 live we-call calls went bad. dd4 lost
+  reception twice and got 11 of 40 lines; dd2 got 39 of 40 lines.
 
-Quietening the detector does not fix it. Netsim A/Bs on CT 128 (`half_v90modem`
-against `half_courier`, our modem calling and called, NET_PPM 0, +-100 and
-+-200, arms alternated) counted loss retrains and failed calls:
+The replays of those taps settled it. Pass or fail moved with every
+perturbation: the timing loop, holding the timing, holding the carrier, and
+turning the echo canceller off each flipped some tap. That is a marginal eye
+being knocked over by something else. On dd4 the timing barely moved (within
++-7 steps of 1/640 T over 16800 bauds). Meanwhile the carrier frequency
+estimate swung 1800.18 -> 1799.12 Hz in 1200 bauds, and the decision error
+rose 0.03 -> 0.18 with it. This path is digital end to end, so the real offset
+is fixed and the swing is our loop ringing.
 
-| Data-mode timing | Calls | Loss retrains | Failed calls |
-|---|---|---|---|
-| unchanged (trigger 100) | 40 | 8 | 0 |
-| fine trigger 300 | 40 | 71 | 17 |
-| unchanged (trigger 100), second batch | 40 | 11 | 0 |
-| 16-baud average, trigger 100 | 40 | 45 | 8 |
+V.32bis trains through its own symbol sink, so V.17's trainer, which narrows
+the loop to its tracking gains once trained, never ran. Data kept the
+acquisition gains `v17_rx_restart()` sets (i 5000, p 40000). Data now uses
+V.17's tracking gains (i 100, p 500000). Results:
+- **All three live taps (e1, dd2, dd4) decode** at data-eye rms
+  0.155-0.160, against 0.20-0.36 or lost. The result is flat over i 100-1000
+  and p 200k-500k.
+- **Netsim, alternated, 15 calls per arm and row:** we call, 0 loss
+  retrains against 10 (6 calls); the Courier calls, 0 against 0. A
+  decision-directed timing loop on top of the fix also gave 0, so it was not
+  kept.
+- **Frequency offset**, taps shifted offline: at +1 and -3 Hz the new gains
+  decode and the old ones lose reception.
+  - At +-2, +-4 and +-7 Hz our call modem never completes start-up, under
+    either gain set: it stops after "incoming S". V.32bis 2.1 asks for
+    +-7 Hz, so this is a separate, pre-existing gap in our S/TRN training.
 
-At 0 ppm both changes did as well as or better than the unchanged loop. All
-of the extra losses came with a clock offset. At +-200 ppm alone, 6 calls per
-row:
-- unchanged: 3 loss retrains, 0 failed calls;
-- 16 bauds/trigger 60: 25 retrains, 4 failed;
-- 32 bauds/trigger 40: 26 retrains, 7 failed;
-- 64 bauds/trigger 30: 33 retrains, 11 failed.
-
-All of these hold the live tap, but each one gives up drift tracking:
-- The loop is bang-bang, and the noise dithering across the trigger is what
-  makes it act roughly proportionally near zero error. Without that noise,
-  the mean error has to reach the trigger before the loop steps.
-- An average adds delay, so the loop overshoots by about the averaging length
-  in steps.
-
-The unchanged loop also loses reception at +-200 ppm, so the netsim rows do
-reproduce the live symptom.
-
-**Fixed: data-mode timing is decision-directed.** Once data begins,
-`v17rx.c` (`v32bis_dd_timing_update`) drives the timing from a Mueller-Muller
-error on the equalizer output against each symbol's decision,
-`Re{z[n] d*[n-1] - z[n-1] d*[n]} / E|d|^2`. That error has no band-edge
-self-noise. A PI loop applies it:
-- Kp 1.6 and Ki 0.002 eq_put_step units per unit of error.
-- The integral term starts from the Godard loop's mean fine-step rate through
-  training. On netsim calls the seed read 134-164 ppm at a 200 ppm offset, and
-  -4 ppm on the live call.
-
-The Godard detector still trains the start-up and every retrain, and
-`V32BIS_DD_TIMING=0` brings it back for data. Results:
-- The live tap, now a fast-tier fixture
-  (`reference-data/courier-v32bis-data-timing-dither`), decodes to the end
-  with data-eye rms 0.171, against 0.360 under the Godard loop. The detector's
-  sense is verified: with it inverted the eye goes white within 10k symbols.
-- Two alternated netsim A/Bs of 80 calls each (NET_PPM 0, +-100, +-200):
-  - we call: 6 loss retrains in 40 calls, against 21, and no failed calls,
-    against 1;
-  - the Courier calls: 0 losses in either arm.
-- The 6 that remain all fall 2-7 s into data, a different pattern from the
-  live failure, which went white 10 s into steady data. They are still open.
+`reference-data/courier-v32bis-data-carrier-ring` holds e1 and dd4 as
+fast-tier fixtures: no reception loss and data-eye rms below 0.22. Under the
+old gains e1 loses reception and dd4 runs at 0.296. `V32BIS_DATA_CARRIER=0:0`
+restores the old gains.
 
 ### Phase 2: our Tone B reversal could miss the wire (2026-11-25)
 

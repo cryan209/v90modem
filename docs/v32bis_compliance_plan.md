@@ -986,27 +986,27 @@ delays stay exact, so it is the origin that moved, and both remain inside
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
 
-## Data-mode symbol timing is decision-directed (2026-11-27)
+## The data-mode carrier loop kept its acquisition gains (2026-11-27)
 
 Live 14400 calls to the emulated Courier went white about 1 call in 16, 10-20
-s into data. Holding the symbol timing (`V32BIS_TIMING_HOLD=1`) decoded the
-failing tap cleanly. The Godard band-edge detector was dithering on its own
-self-noise. Its DC filter subtracts the output from two bauds back, so its
-"integrator" telescopes, and the fine trigger (100) tests the last two bauds'
-band-edge product, which dense data crosses by itself.
+s into data. V.32bis trains through its own symbol sink, so V.17's trainer,
+which narrows the carrier loop to its tracking gains once trained, never ran.
+Data kept `v17_rx_restart()`'s acquisition gains (i 5000, p 40000), and
+those ring: over an all-digital path, the frequency estimate swung by about
+1 Hz in 1200 bauds. `startup_enter_data_rx()` now sets V.17's tracking gains
+(i 100, p 500000). The results:
+- **Live taps:** three failing taps decode at data-eye rms 0.155-0.160,
+  against 0.20-0.36 or lost.
+- **Netsim:** our modem calling, 0 loss retrains in 30 calls against 10 in
+  15.
 
-Neither of the obvious repairs works:
-- a fine trigger of 300: 71 loss retrains in 40 netsim calls against 8;
-- a 16-baud average: 45 against 11.
+The symbol timing looked guilty first. A retuned Godard loop failed, and a
+decision-directed one was deployed and rolled back. Those dead ends are in
+`dmodem_interop.md` ("The emulated Courier on a live SIP call").
 
-The noise is what makes this bang-bang loop act proportionally near zero
-error, so without the noise it stops tracking 100-200 ppm. In data the timing
-now comes from a Mueller-Muller error on the decisions, through a PI loop
-seeded with the training's clock offset (`v32bis_dd_timing_update()` in
-`v17rx.c`). Netsim, our modem calling: 6 loss retrains in 40 calls against 21.
-The live tap's eye rms went from 0.360 to 0.171. Measurements and the open
-early-data losses are in `dmodem_interop.md` ("The emulated Courier on a live
-SIP call").
+Open: with the received carrier offset by 2 Hz or more (taps shifted
+offline), our call modem never completes start-up; it stops after "incoming
+S". 2.1 requires operation at up to +-7 Hz.
 
 ## Reference vs SpanDSP
 
