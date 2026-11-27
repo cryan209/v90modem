@@ -1046,9 +1046,14 @@ Measured over the e1 and dd4 taps shifted to 0, +-1..+-7 and +-9 Hz (34 taps):
 | before (`V32BIS_S_FREQ_EST=0`) | 8/34 (0, +-1 Hz, and dd4 at -3 Hz) |
 | after | 34/34, data-eye rms 0.156-0.179 (unshifted: 0.156/0.162) |
 
-- **Estimate error:** the single-window estimate reads within about 0.7 Hz
-  (+7 Hz read +6.40 and +7.80 on the two taps, -7 read -7.59 and -7.20, 0 read
-  -0.64 and -0.20). TRN's loop removes that easily.
+- **Estimate error:** a call acquires S two or three times (the NT probe
+  first), and each 64T estimate reads within about 1 Hz. e1 at +7 Hz read
+  +6.40 then +7.80. dd4 at -7 Hz read -7.70, -8.05 and -8.12. e1 unshifted
+  read -0.64 then -0.20. TRN's loop removes what is left.
+- **Live:** 8/8 calls to the emulated Courier at CONNECT 14400, with 40/40
+  lines both ways, and 6/6 Courier calls into v90ras after deploy. The live
+  path has no deliberate offset, so this shows no regression, not the 7 Hz
+  case.
 - **Regression:** `reference-data/courier-v32bis-carrier-offset` holds e1
   shifted +7 Hz and dd4 shifted -7 Hz. Both fail before the fix and pass after.
 - **Test harness:** these replays now pass `--pty-link "$TMPDIR/pty"`.

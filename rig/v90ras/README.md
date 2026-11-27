@@ -1663,6 +1663,36 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed f8758e39 (2026-11-27)
+
+On top of d7adb775 (and its README commit 05a80b07), this deploy adds
+f8758e39. **V.32bis S now measures the received carrier offset** (2.1,
++-7 Hz). Before, start-up stopped after "incoming S" whenever the carrier was
+2 Hz or more off. `V32BIS_S_FREQ_EST=0` restores the old path.
+- **Offline:** the e1 and dd4 Courier taps were shifted to 0, +-1..+-7 and
+  +-9 Hz, 34 taps in all. Before, 8/34 started up. After, 34/34 complete at
+  14400 with no reception loss and data-eye rms 0.156-0.179. The +7/-7 Hz
+  fixtures also pass on CT 117 (x86-64). `test-fast`: 787 passed. The one
+  failure was the env-knob doc check, which ran before the doc was
+  regenerated; it passes now.
+- **Live, before install.** The staged binary on CT 117 called the emulated
+  Courier (2902, CT 128) 8 times: 8/8 at CONNECT 14400, 40/40 lines exact
+  both ways, no reception loss.
+- **Live, after install.** The Courier called v90ras 6 times, alternating
+  V.32bis and V.22bis: 6/6. V.32bis ran at 14400/ARQ and V.22bis at
+  2400/ARQ. Every call opened LCP and IPCP, and passed 20/20 echoes and 20/20
+  pings with no bad frames.
+
+Built in `/root/deploy-5640b4d3` at f8758e39 after `make clean`
+(`/root/deploy-f8758e39.build.log`). The binary (md5 6f8e5a38…) is kept as
+`/opt/v90ras/sip_v90_modem.f8758e39`, and the previous one (d7adb775,
+e1efe7b5…) as `sip_v90_modem.pre-f8758e39`. It was installed by rename at
+13:59 with `/run/v90ras/busy` empty and no PPP interface up. Only v90ras was
+restarted, and it logged 20 "registration success" lines and 10 "SIP V.90
+modem ready". The answer bridge on CT 128 is `/root/half_sip_call2.py`
+(identical to `tools/soak/half_sip_call.py`); `/root/half_sip_call.py` there
+predates `--answer`.
+
 ## Deployed d7adb775 (2026-11-27)
 
 On top of 669bf72c, this deploy adds d7adb775. That commit reverts 0f1be7f3's
