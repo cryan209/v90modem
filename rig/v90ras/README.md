@@ -1663,6 +1663,34 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed a4a5fe2c (2026-11-28)
+
+On top of 07de727e, this deploy adds 3cc6b3c5 and a4a5fe2c (details in
+`docs/dmodem_interop.md`, "Repeated INFO0c, the Tone B reversal, and our
+early CJ"):
+- **V.8 answerer holds JM until CJ's third octet ends.** INFO0a now starts
+  33 ms later on every call we answer. 07de727e had broken our own V.34
+  call modem against this answerer; real callers were unaffected.
+- **Plain V.34 answerer:** the Tone B reversal is confirmed by the bits
+  after it, and a repeated INFO0c gets §11.2.2.2.1's response.
+
+Built in `/root/deploy-5640b4d3`; the log is
+`/root/deploy-a4a5fe2c.build.log`. Binary md5 `d59e88f2…`, kept as
+`/opt/v90ras/sip_v90_modem.a4a5fe2c`. The previous binary (07de727e) is
+kept as `sip_v90_modem.pre-a4a5fe2c`. Installed by rename at 09:47, with
+busy empty and no PPP interface up. Only v90ras restarted: 10 lines ready.
+
+Live from CT 128 (`half_sip_call.py --harness ./half_hsf`, 2950):
+- **Code default:** HSF plain V.34 5 of 5, CONNECT at 17.5 s, LCP 20/20,
+  pings 20/20, 0 bad frames. HSF V.90 1 of 1, PPP clean.
+- **Recovery check:** a runtime drop-in
+  (`/run/systemd/system/v90ras.service.d/recovery-exp.conf`,
+  `ME_V34_INFO0_PREAMBLE_BAUDS=16`) restored the old preamble, which made
+  the HSF repeat INFO0c on 0 of 5 connecting calls before 07de727e. With
+  this deploy: 3 of 3 connected (17.9-27.2 s, PPP clean), each through
+  INFO0_RETRY, our §11.2.2.2.1 INFO0a repeat. The drop-in was removed
+  afterwards.
+
 ## Deployed 07de727e (2026-11-28)
 
 On top of bb4be57b, this deploy adds 07de727e. **Every duplex answer modem
