@@ -97,6 +97,8 @@ struct v8_state_s
     bool qc_reported;
     bool qc_pending;
     int zero_byte_count;
+    /* Samples left of a CJ accepted on two of its three octets. */
+    int cj_hold_samples;
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

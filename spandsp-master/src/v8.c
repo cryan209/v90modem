@@ -756,6 +756,7 @@ static void put_bit(void *user_data, int bit)
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Carrier drop while waiting for CJ - treating as CJ\n");
                 s->got_cj = true;
+                s->cj_hold_samples = 0;
             }
             /*endif*/
             break;
@@ -867,7 +868,16 @@ static void put_bit(void *user_data, int bit)
             if (data == 0)
             {
                 if (++s->zero_byte_count == 2)
+                {
                     s->got_cj = true;
+                    /* Two of three: the third octet is still on the line.
+                       Hold JM until it ends (below, V8_JM_ON). */
+                    s->cj_hold_samples = milliseconds_to_samples(1000*10/300);
+                }
+                else if (s->zero_byte_count >= 3)
+                {
+                    s->cj_hold_samples = 0;
+                }
                 /*endif*/
             }
             else
@@ -904,6 +914,7 @@ static void v8_decode_init(v8_state_t *s)
     s->qc_reported = false;
     s->qc_pending = false;
     s->zero_byte_count = 0;
+    s->cj_hold_samples = 0;
     s->rx_data_ptr = 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1735,6 +1746,29 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             break;
         case V8_JM_ON:
             residual_samples = fsk_rx(&s->v21rx, amp, len);
+            if (s->got_cj  &&  s->cj_hold_samples > 0)
+            {
+                /* V.8 8.2.3: the answering DCE stops JM on detecting CJ, and
+                   its 75 ms silence (V.34 11.2.1.2.1) runs from there.  CJ is
+                   three zero octets; accepting it on the second ended JM one
+                   octet (33 ms) before CJ itself had ended, so our INFO0a
+                   started 42 ms after CJ.  The 27 ms preamble SpanDSP used to
+                   send before INFO0a hid that from our own call modem, which
+                   only starts listening at the end of its 8.2.2 silence; with
+                   the one point of V.34 10.1.2.3.1 (07de727e) it heard none of
+                   INFO0a and every engine-pair V.34 call fell back.  So keep
+                   JM up until the third octet ends (or the carrier drops),
+                   still accepting two. */
+                if ((s->cj_hold_samples -= len) > 0)
+                {
+                    if (queue_contents(s->tx_queue) < 10)
+                        send_cm_jm(s);
+                    /*endif*/
+                    break;
+                }
+                /*endif*/
+            }
+            /*endif*/
             if (s->got_cj)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW, "CJ recognised\n");
