@@ -129,7 +129,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V34_FALL_FORWARD_DWELL_MS` | modem_engine.c | 20000 | t |  |
 | `ME_V34_FALL_FORWARD_MARGIN_DB` | modem_engine.c |  | - | A peer that let one of our 11.6s run into the 11.6.2 timeout gets no |
 | `ME_V34_FALL_FORWARD_MAX` | modem_engine.c | 3 | - |  |
-| `ME_V34_INFO0_PREAMBLE_BAUDS` | v34tx.c |  | d | V.90 8.2.3.1: an INFO sequence is preceded by ONE point at an arbitrary |
+| `ME_V34_INFO0_PREAMBLE_BAUDS` | v34tx.c |  | d |  |
 | `ME_V34_LOSS_HANGUP_RENEG_MS` | modem_engine.c | 30000 | - | back within ME_V34_LOSS_HANGUP_RENEG_MS, hang up. |
 | `ME_V34_MP_C2A_NO_PROJECTION` | v34tx.c |  | d | Diagnostic, default off: =1 offers our c2a ceiling, not the answerer's INFO1a projection |
 | `ME_V34_NO_INFO1C_RETRAIN` | modem_engine.c | 0 | d | round trip, and only when the peer is holding Tone A now. |

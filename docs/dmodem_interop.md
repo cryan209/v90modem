@@ -558,8 +558,9 @@ Still open on this peer:
   about 10).
 - **Phase 2.** Fixed 2026-11-28 (section "INFO1c came inside our L1/L2
   window", below). Offline, about 1 call in 8 never decoded the HSF's INFO1c.
-  Live, every call missed it. Live calls now reach Phase 3, where the HSF
-  retrains during our J (open, same section).
+  Live, every call missed it. The cause upstream of both that miss and the
+  Phase 3 retrain that followed was our 27 ms INFO0a preamble (fixed, "Our
+  27 ms preamble was Tone A before INFO0a"). Live HSF plain V.34 is 5 of 5.
 - **The HSF matrix rows.** `hsf_v90_ulaw` passes since the fallback MP fix
   (matrix 15 of 18, 2026-11-26; see "The fallback's MP receiver rotated
   away" below). The two HSF V.92 rows never reach the fallback. (This bullet
@@ -874,17 +875,81 @@ did not fire there.
 **Live after deploy (5 calls).** Phase 2 completed on all 5 (before: 0 of
 8). Each call took INFO1c at +10.34 s, sent INFO1a, and ran Phase 3.
 
-**Still open: the HSF retrains during our Phase 3 J.**
-- On all 5 calls the HSF sent a retrain tone 2.9-4.0 s into our J, and we
-  never received its S.
-- Four calls retrained into the same thing until the HSF gave up (NO CARRIER
-  after about 52 s).
-- One call trained on its second Phase 3 and reached data at 28800. The HSF
-  retrained 14.4 s into data, and `ME_V34_LOSS_HANGUP_AFTER_MS` hung up
-  (PPP 20/20 LCP echoes, 17/20 pings).
-- This is the older live "peer Phase 3 equalizer on our TRN" gap
-  (v34_live_interop notes). It does not reproduce over netsim, so start from
-  the live TX taps (`/var/tmp/v90ras/calls/line0-404111` etc.).
+**Next failure: the HSF retrained during our Phase 3 J.** Fixed the same
+day; it was ours (next section). The note here once called it "the older
+peer Phase 3 equaliser gap". It was not.
+
+### Our 27 ms preamble was Tone A before INFO0a (2026-11-28)
+
+**Fixed: one point before INFO0a from every answer modem**
+(`transmission_preamble_init()`, V.34 §10.1.2.3.1: "Each INFO sequence is
+preceded by a point at an arbitrary carrier phase").
+
+Live plain V.34 from the HSF had two Phase 2 problems: the INFO1c miss in
+the previous section, and the HSF retraining during our Phase 3 J. Both
+came from one event, visible on the receive tap of every failing call:
+- SpanDSP sent 16 bauds (27 ms) of unmodulated carrier before INFO0a. From
+  the answer modem that carrier is Tone A arriving ahead of INFO0a.
+- That is the §11.2.2.1.1 trigger ("detects Tone A before receiving
+  INFO0a"), so the HSF repeated INFO0c. The tap at 1200 Hz, decoded as DPSK,
+  shows two INFO0c frames straight after 65 ms of Tone B, the second with
+  bit 28 set (it had our INFO0a by then). Then the HSF went silent.
+- Our Tone B detector counts a reversal on the first "1" after 20 steady
+  bits. The repeat's fill ones ("1111") satisfied it. On 404130 the
+  "reversal" came 7 ms after our own first reversal. The real answer cannot
+  come sooner than 40 ms plus the round trip (§11.2.1.1.3), and the round
+  trip here is about 58 ms. On 404111 it came before we had reversed at
+  all, and we skipped FIRST_A.
+- So our second reversal and L1/L2 went out before the HSF had answered our
+  first reversal. The HSF framed our probe wrongly.
+- Its INFO1c then gave 4800 bps at 2400 baud and 0 bps at every other
+  symbol rate, so INFO1a picked 2400 baud (21600 projected). Phase 3 at
+  2400 is where it retrained. When the HSF's recovery probe came late, that
+  was also the INFO1c-inside-L1/L2 case.
+
+Offline (netsim) the HSF hears INFO0a promptly enough not to take the
+recovery, which is why only the live calls showed it. The V.90 digital
+answerer already sent one point. That was found on 2026-11-16 against the
+Courier, which took V.90's §9.2.2.2.1 recovery on 5 of 12 calls with
+16 bauds and 0 of 12 with one. The plain V.34 answerer had been left at 16
+"until measured".
+
+**Live A/B on v90ras (HSF plain V.34 to 2950, 5 calls per arm):**
+
+| | Preamble | Result |
+|---|---|---|
+| bb4be57b | 16 bauds | 0 of 5. Each repeated INFO0c, went to 2400 baud, and retrained in Phase 3 |
+| bb4be57b + `ME_V34_INFO0_PREAMBLE_BAUDS=1` | 1 baud | 5 of 5 connected, PPP 20/20 echoes, 20/20 pings, 0 bad frames |
+
+In the 1-baud arm every call showed:
+- one "reversal 1 in tone B", 120 ms after our reversal;
+- no FIRST_A skip, no INFO1c inside L1/L2, and no restart;
+- INFO1a at 3200 baud, 31200 both ways.
+
+The default now gives every duplex answer modem one point. Before, only
+V.90's digital role had it. Half-duplex (fax, §12.2) keeps 16 bauds: with
+one, `fax_class2_test --engine-class21` (slow.list:40/41) stopped
+negotiating V.34 against our own receiver.
+
+**Offline (CT 128):**
+- HSF plain V.34: 24 of 24.
+- Full matrix: 20 of 21.
+  - The miss was `hsf_v92_ulaw`. An alternated A/B against the committed
+    binary over the two HSF V.92 rows gave 10 of 12 against 9 of 12. Both
+    rows fail about one call in five either way, so that flake predates
+    this change.
+  - Do not A/B this with `ME_V34_INFO0_PREAMBLE_BAUDS=16` as the old arm.
+    That knob overrides every role, so it puts the V.90 digital role back
+    to 16 too.
+
+Still open from this:
+- **The caller role still sends 16 bauds.** That is Tone B before INFO0c,
+  which can trigger the answerer's §11.2.2.2.1 the same way. Unmeasured.
+- **The Tone B reversal detector still takes INFO fill ones as a
+  reversal.** We still do not run §11.2.2.2.1 for a repeated INFO0c
+  outside K56flex (`k56_repeated_info0c_reranging()`). A peer that takes
+  the recovery for its own reasons still breaks Phase 2 the same way. The
+  taps `line0-404111` and `line0-404130` contain the repeat, for a replay.
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 

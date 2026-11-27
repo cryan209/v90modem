@@ -3224,9 +3224,25 @@ static void transmission_preamble_init(v34_state_t *s)
        modem into the INFO0 recovery of 9.2.2.2.1: a USR Courier (ID_SDL 4.03)
        did so on 5 of 12 live calls with 16 bauds and 0 of 12 with one,
        alternated, 2026-11-16, and the emulated one (band-limited line) on
-       every run with 16 and none with one.  The other roles keep 16 until
-       they have been measured.  ME_V34_INFO0_PREAMBLE_BAUDS overrides. */
-    s->tx.txbits = (s->tx.v90_mode  &&  !s->tx.calling_party)  ?  1  :  16;
+       every run with 16 and none with one.
+
+       V.34 10.1.2.3.1 says the same ("Each INFO sequence is preceded by a
+       point at an arbitrary carrier phase"), and the plain V.34 answer modem
+       hit the same failure.  Our 27 ms of carrier ahead of INFO0a is Tone A
+       before INFO0a, so the HSF took the 11.2.2.1.1 branch on every live call
+       to v90ras (2026-11-28, 5 of 5).  It repeated INFO0c twice, the second
+       time with bit 28 set.  Our Tone B detector read the repeat's fill ones
+       as the 11.2.1.1.3 reversal, so our second reversal and the probe went
+       out before the HSF had answered our first one.  The HSF then reported
+       every symbol rate but 2400 as 0 bps in INFO1c, and retrained during
+       our Phase 3 J.  With one baud: 5 of 5 live calls connected with PPP
+       clean, at 3200 baud, 31200 both ways.
+
+       The caller still sends 16 bauds (Tone B before INFO0c) because that role
+       has not been measured.  Half-duplex (fax, 12.2) also keeps 16: with one
+       baud, fax_class2_test --engine-class21 stops negotiating V.34 against
+       our own receiver.  ME_V34_INFO0_PREAMBLE_BAUDS overrides. */
+    s->tx.txbits = (!s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))  ?  1  :  16;
     {
         const char *env = getenv("ME_V34_INFO0_PREAMBLE_BAUDS");
 
