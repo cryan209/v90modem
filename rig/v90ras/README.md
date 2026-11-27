@@ -1663,6 +1663,49 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed d7adb775 (2026-11-27)
+
+On top of 669bf72c, this deploy adds d7adb775. That commit reverts 0f1be7f3's
+timing change; bc0c958b is tools and docs only.
+- **V.32bis data mode uses V.17's carrier tracking gains** (i 100, p
+  500000). Before, it kept the acquisition gains (i 5000, p 40000), whose
+  ringing whitened about 1 live 14400 call in 16. `V32BIS_DATA_CARRIER=0:0`
+  restores the old gains.
+- **Offline:**
+  - three failing live taps decode at eye rms 0.155-0.160;
+  - netsim, we call: 0 loss retrains in 15 calls against 10;
+  - `test-fast` 787/787.
+- **Live, before install.** The staged binary on CT 117 called the emulated
+  Courier 8 times: 8/8 at CONNECT 14400, 40/40 lines exact, no reception
+  loss. 0f1be7f3 had 2 of 5 calls go bad on the same row.
+- **Live, after install.** The Courier called v90ras 10 times, alternating
+  V.32bis and V.22bis: 10/10. V.32bis ran at 14400/ARQ and V.22bis at
+  2400/ARQ. Every call opened LCP and IPCP, and passed 20/20 echoes and 20/20
+  pings with no bad frames.
+
+Built in `/root/deploy-5640b4d3` at d7adb775 after `make clean`
+(`/root/deploy-d7adb775.build.log`). The binary (md5 e1efe7b5…) is kept as
+`/opt/v90ras/sip_v90_modem.d7adb775`, and the previous one (669bf72c,
+83ce6bc1…) as `sip_v90_modem.pre-d7adb775`. It was installed by rename at
+13:18 with `/run/v90ras/busy` empty and no PPP interface up. The restart
+logged 20 "registration success" lines and 10 "SIP V.90 modem ready".
+
+## 0f1be7f3 deployed and rolled back (2026-11-27)
+
+0f1be7f3 (decision-directed V.32bis data timing) was installed at 12:41 and
+taken back out at 12:53. Both changes were made by rename, with
+`/run/v90ras/busy` empty and no PPP interface up, and each restart logged 20
+"registration success" lines and 10 "SIP V.90 modem ready".
+- The Courier calling v90ras passed 5/5 on it.
+- Calling the Courier with the same binary from CT 117 went bad on 2 of 5
+  calls: two loss retrains and 11 of 40 lines on one, 39 of 40 on the other.
+  Replays showed that the real fault was the data-mode carrier loop. See the
+  next deploy above this one.
+
+The binary was `/opt/v90ras/sip_v90_modem.0f1be7f3` (md5 61ee08fc…). It is
+left on disk but is not installed. `sip_v90_modem.pre-0f1be7f3` is 669bf72c
+(83ce6bc1…), which ran again from 12:53.
+
 ## Deployed 669bf72c (2026-11-27)
 
 On top of d8963a70 (and its README commit 308a8a89), this deploy adds 669bf72c.
