@@ -3472,6 +3472,35 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             }
         }
         else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
+                 &&  s->tx.plain_info0c_recovery)
+        {
+            /* 11.2.2.2.1, plain V.34 answer modem repeating INFO0a for a
+               repeated INFO0c: on INFO0c with bit 28 set, or on Tone B with
+               INFO0c already in, complete this INFO0a and transmit Tone A,
+               then 11.2.1.2.3 (INITIAL_A's 50 ms, FIRST_A's wait for
+               Tone B, our reversal). */
+            if (s->rx.info0_acknowledgement
+                ||  s->rx.tone_b_present
+                ||  ++s->tx.info0_retry_count >= V90_ANALOGUE_INFO0_RETRY_CAP)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - INFO0_RETRY: INFO0c bit 28 %d, Tone B %d, retries %d; "
+                         "Tone A again (11.2.2.2.1)\n",
+                         s->rx.info0_acknowledgement, s->rx.tone_b_present,
+                         s->tx.info0_retry_count);
+                s->tx.plain_info0c_recovery = false;
+                s->rx.repeated_info0c_pending = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                initial_ab_not_ab_baud_init(s);
+            }
+            else
+            {
+                s->rx.repeated_info0c_pending = false;
+                info0_baud_init(s);
+            }
+            /*endif*/
+        }
+        else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
                  && s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             /* A valid INFO0c arrived while we were retrying — go straight to Tone A */
@@ -3627,6 +3656,19 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* 11.2.1.2.5 times our second Tone A reversal 40 ms from the call modem's
+   Tone B reversal *at the line terminals*.  The plain answerer's receiver
+   raises REVERSAL_1 only once the bits after the phase step have confirmed
+   it (v34rx.c), so the 24-baud count starts that many bauds in. */
+static int tone_b_reversal_age(const v34_state_t *s)
+{
+    if (s->rx.received_event != V34_EVENT_REVERSAL_1)
+        return 0;
+    /*endif*/
+    return s->rx.tone_b_rev_confirm_lag;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* 11.2.2.2.1: an answer modem that receives INFO0c again, with bit 28 set
    (our INFO0a was received), completes its INFO0a, transmits Tone A and
    proceeds from 11.2.1.2.3 -- Tone A for 50 ms, then the phase reversal.
@@ -3634,14 +3676,40 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
    which our receiver read as its Tone B reversal; the reversal we had already
    sent fell inside its INFO0c, so it held Tone B waiting for one while we
    waited for its answer, until the startup timed out
-   (mt5634mu-k56-20261027/server-d1, -d5, -d6).  Only on the K56flex
-   startup, and only before our probe has gone out. */
+   (mt5634mu-k56-20261027/server-d1, -d5, -d6).  Before our probe has gone
+   out only.  Since 2026-11-28 also the plain duplex V.34 answer modem, which
+   could not see a repeat at all: its receiver took the repeat's fill ones
+   for the Tone B reversal (v34rx.c now confirms one), and with bit 28 clear
+   it repeats INFO0a first, as the clause's first half says. */
 static bool k56_repeated_info0c_reranging(v34_state_t *s)
 {
-    if (!s->rx.k56_phase2  ||  !s->rx.repeated_info0c_pending)
+    if (!s->rx.repeated_info0c_pending)
+        return false;
+    /*endif*/
+    if (!s->rx.k56_phase2  &&  (s->tx.v90_mode  ||  !s->tx.duplex  ||  s->tx.calling_party))
         return false;
     /*endif*/
     s->rx.repeated_info0c_pending = false;
+    if (!s->rx.k56_phase2  &&  !s->rx.info0_acknowledgement)
+    {
+        /* Plain V.34, the same clause's first half: "if it receives
+           repeated INFO0c sequences, the modem shall repeatedly send
+           INFO0a".  Bit 28 clear says the call modem has not got ours.  Its
+           next INFO0c, once it has, lands here again with bit 28 set. */
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - INFO0c repeated without acknowledgement (11.2.2.2.1): repeating INFO0a\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.tone_b_present = false;
+        s->rx.tone_b_rev_pending_bits = 0;
+        s->rx.persistence2 = 0;
+        /* 11.2.2.2.4 NOTE: bit 28 set, since INFO0c was received. */
+        s->tx.info0_acknowledgement = true;
+        s->tx.plain_info0c_recovery = true;
+        s->tx.info0_retry_count = 0;
+        info0_baud_init(s);
+        return true;
+    }
+    /*endif*/
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - INFO0c repeated (11.2.2.2.1): Tone A again, then the 11.2.1.2.3 reversal\n");
     /* The repeat is a sequence of INFO0c frames, and Tone B follows the
@@ -3649,6 +3717,7 @@ static bool k56_repeated_info0c_reranging(v34_state_t *s)
        again (the detector needs 20 steady bits). */
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.tone_b_present = false;
+    s->rx.tone_b_rev_pending_bits = 0;
     s->rx.persistence2 = 0;
     s->tx.k56_info0_rerange = true;
     s->tx.tone_duration = 0;
@@ -3680,7 +3749,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                 if (s->tx.v92_short_armed  &&  v92_short_phase2_agreed(s))
                     v92_short_begin(s, "analogue");
                 /*endif*/
-                s->tx.tone_duration = 0;
+                s->tx.tone_duration = tone_b_reversal_age(s);
                 s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
             }
             else
@@ -3714,7 +3783,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                          "Tx - FIRST_A: Tone B reversal after the repeated INFO0c answers our earlier one\n");
                 s->tx.k56_info0_rerange = false;
                 s->rx.tone_b_ended = false;
-                s->tx.tone_duration = 0;
+                s->tx.tone_duration = tone_b_reversal_age(s);
                 s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
             }
             else if (!s->rx.tone_b_present)
@@ -3874,7 +3943,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - FIRST_A: reversal seen (INFO0 already received), sending !A\n");
             s->tx.lastbit.re = -s->tx.lastbit.re;
-            s->tx.tone_duration = 0;
+            s->tx.tone_duration = tone_b_reversal_age(s);
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
         }
         else if (s->tx.v90_mode
@@ -3936,7 +4005,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                          "reversal; treating it as 11.2.1.1.3\n");
             /*endif*/
             s->rx.tone_b_ended = false;
-            s->tx.tone_duration = 0;
+            s->tx.tone_duration = tone_b_reversal_age(s);
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
         }
         else if (s->tx.v90_mode
@@ -4899,6 +4968,7 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
         s->rx.hdx_repeated_info0_pending = false;
         s->tx.info0_acknowledgement = true;
         s->rx.tone_b_present = false;
+        s->rx.tone_b_rev_pending_bits = 0;
         s->rx.hdx_tone_a_present = false;
         s->rx.persistence1 = s->rx.persistence2 = 0;
         s->rx.received_event = V34_EVENT_NONE;
@@ -4983,6 +5053,7 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
             s->rx.persistence2 = 0;
             s->rx.received_event = V34_EVENT_NONE;
             s->rx.tone_b_present = false;
+            s->rx.tone_b_rev_pending_bits = 0;
             s->rx.hdx_tone_a_present = false;
             s->rx.tone_b_ended = false;
             s->tx.lastbit.re = -s->tx.lastbit.re;
@@ -5709,6 +5780,7 @@ static void l1_l2_signal_init(v34_state_t *s)
        any Tone B seen earlier in the call (the 11.2.1.1.1 burst that carried
        INFO0c) is stale by here. */
     s->rx.tone_b_present = false;
+    s->rx.tone_b_rev_pending_bits = 0;
     /* Symmetrically, 11.2.1.1.7's Tone A is the one the answer modem raises
        *after* this probe (11.2.1.2.8), so any 2400 Hz measurement taken
        earlier in the call -- the 11.2.1.2.6 Tone A that armed this very stage
@@ -5914,6 +5986,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
         if (s->rx.k56_phase2  &&  s->tx.tone_duration < post_l2_echo_guard_bauds(s))
         {
             s->rx.tone_b_present = false;
+            s->rx.tone_b_rev_pending_bits = 0;
             s->rx.persistence2 = 0;
         }
         /*endif*/
@@ -6211,6 +6284,7 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
        11.2.1.2.7's, which arms L1/L2 reception -- exactly the first pass. */
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.tone_b_present = false;
+    s->rx.tone_b_rev_pending_bits = 0;
     s->rx.tone_b_ended = false;
 }
 /*- End of function --------------------------------------------------------*/
@@ -12834,6 +12908,7 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
        ME_V34_RETRAIN_AFTER_MS on the answerer; the half-duplex branch above
        already clears these). */
     s->rx.tone_b_present = false;
+    s->rx.tone_b_rev_pending_bits = 0;
     s->rx.tone_b_ended = false;
     s->rx.retrain_wait_peer_gap = false;
     s->rx.retrain_peer_gap_seen = false;
@@ -13252,6 +13327,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
     s->tx.info0_retry_count = 0;
+    s->tx.plain_info0c_recovery = false;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.k56_probe_cc_tail_samples = 0;
     s->tx.k56_reversal_time = 0;

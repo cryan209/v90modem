@@ -945,11 +945,72 @@ negotiating V.34 against our own receiver.
 Still open from this:
 - **The caller role still sends 16 bauds.** That is Tone B before INFO0c,
   which can trigger the answerer's §11.2.2.2.1 the same way. Unmeasured.
-- **The Tone B reversal detector still takes INFO fill ones as a
-  reversal.** We still do not run §11.2.2.2.1 for a repeated INFO0c
-  outside K56flex (`k56_repeated_info0c_reranging()`). A peer that takes
-  the recovery for its own reasons still breaks Phase 2 the same way. The
-  taps `line0-404111` and `line0-404130` contain the repeat, for a replay.
+- ~~The Tone B reversal detector still takes INFO fill ones as a
+  reversal; no §11.2.2.2.1 outside K56flex.~~ Fixed, see the next section.
+- **Correction: this change broke our own call modem.** Every
+  `engine_pair_test` V.34 and K56flex row fell back (38 suite lines): our
+  caller heard none of INFO0a. The suite runs before committing did not
+  show it. Cause and fix in the next section. Real callers were not
+  affected (live 5/5, matrix 20/21).
+
+### Repeated INFO0c, the Tone B reversal, and our early CJ (2026-11-28)
+
+**1. Tone B reversal confirmed by the bits after it** (v34rx.c, plain duplex
+answer modem only; V.90 and K56flex keep the old detector). A "1" after 20
+steady bits is held as a candidate. Two ones in the next three bits (signal
+present) is an INFO frame's fill "1111" (§10.1.2.3.1), not §11.2.1.1.3's
+reversal, and is dropped. Three steady bits, or the signal dropping (the
+call modem goes silent 10 ms after its reversal), confirm it.
+`tone_ab_hop_time` keeps the time of the phase step, and the transmitter
+starts §11.2.1.2.5's 40 ms count that many bauds in
+(`tone_b_reversal_age()`), so our second reversal is still 40 ms after
+the peer's.
+
+**2. §11.2.2.2.1 for the plain V.34 answer modem.** The receiver keeps
+framing INFO0c in TONE_B while the first INFO0c's INFO0_OK sits in the
+event slot. Before, the search was off then, so a repeat was never decoded.
+A repeated INFO0c with bit 28 clear makes us repeat INFO0a with bit 28 set;
+one with bit 28 set, or Tone B after it, sends us back to Tone A and
+§11.2.1.2.3 (`k56_repeated_info0c_reranging()`, now also for plain V.34,
+and a new INFO0_RETRY exit).
+
+Replaying `line0-404130` and `line0-404111` (receive taps, `--from 0`,
+`ME_V34_INFO0_PREAMBLE_BAUDS=16` to match what we sent live):
+- **Before:** "reversal 1 in tone B" 20 ms after our own reversal, then
+  the Phase 3 retrain, as live.
+- **After:** "phase step opened an INFO frame", then the repeat decoded
+  (bit 28 clear), INFO0a repeated, the second repeat decoded with bit 28
+  set, and Tone A again. After our repeated INFO0a the replay diverges from
+  what was sent, so it cannot judge the rest.
+
+**3. Our answerer started INFO0a 33 ms early; our caller was deaf for it.**
+Found because 07de727e failed 38 suite lines (above). SpanDSP's V.8
+answerer accepts CJ on two of its three zero octets, stops JM there, and
+the engine's 75 ms silence (§11.2.1.2.1) runs from that point. So INFO0a
+began 42 ms after CJ had really ended. Our call modem only starts V.34,
+and its receiver, after its own V.8 §8.2.2 silence. That breaks §11.2.1.1.1,
+which conditions the receiver *during* that silence. The 27 ms preamble
+had covered the gap.
+
+Fix (v8.c): still accept two octets, but hold JM until the third octet's
+33 ms have passed, or the third zero octet or a carrier drop ends CJ. This
+moves INFO0a on every call we answer 33 ms later, to where V.8 puts it.
+Our caller's deafness during its silence is still there; it now has the
+same margin a conformant answerer gives it. Not fixed here.
+
+**Results:**
+- `make test`: everything passes except slow.list:67, which fails on HEAD
+  too. Before the V.8 fix the same 38 lines failed on HEAD and on the
+  detector change alone.
+- D-Modem matrix (CT 128): 21 of 21, the first clean sweep. A run before
+  the V.8 fix was 18 of 21; an alternated A/B of the three failing rows was
+  9 of 9 with the change against 8 of 9 on 07de727e, so those were flakes.
+- HSF plain V.34 (`v34_info1c.sh`): 23 of 24. The miss reached DATA, then
+  failed a §11.6 renegotiation (no E) and timed out in the §11.5 retrain.
+  Its Phase 2 was clean.
+- Loopback `V34_DUPLEX_DELAY` 0-47 (`v34_duplex_test`, which bypasses
+  V.8 and the engine, so it tests changes 1 and 2 only): 3429/28800 at
+  36 dB and 3429/31200 at 38 dB are 48/48 each, the same as HEAD.
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 

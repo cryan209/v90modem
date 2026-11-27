@@ -6222,6 +6222,49 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             s->tone_b_ended = true;
         }
         /*endif*/
+        if (s->tone_b_rev_pending_bits > 0)
+        {
+            /* A candidate first Tone B reversal (below), confirmed by the
+               bits after it.  11.2.1.1.3's reversal is a single phase step
+               followed by more Tone B (10 ms, then silence).  An INFO0c
+               repeated in the call modem's 11.2.2.1.1 recovery opens with
+               the fill "1111" (10.1.2.3.1) and then the sync code: live
+               HSF calls into v90ras (line0-404130, line0-404111) had their
+               repeat's first fill one taken for the reversal 7 ms after our
+               own (a real answer needs 40 ms plus the round trip, ~58 ms
+               there), or before we had reversed at all.  Our probe then went
+               out before the HSF answered, its INFO1c reported 2400 baud
+               only, and Phase 3 retrained.  Two ones in the next three bits
+               is a frame; silence or steady tone is the reversal. */
+            s->tone_b_rev_pending_bits++;
+            if (bit  &&  s->signal_present)
+                s->tone_b_rev_pending_ones++;
+            /*endif*/
+            if (s->tone_b_rev_pending_ones >= 2)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Tone B phase step opened an INFO frame (fill ones), "
+                         "not a reversal (11.2.2.1.1)\n");
+                s->tone_b_rev_pending_bits = 0;
+                s->persistence1 = 0;
+                s->persistence2 = 0;
+            }
+            else if (s->tone_b_rev_pending_bits > 3  ||  !s->signal_present)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - reversal 1 in tone B (confirmed after %d bits)\n",
+                         s->tone_b_rev_pending_bits - 1);
+                s->tone_ab_hop_time = s->tone_b_rev_pending_time;
+                s->tone_b_rev_confirm_lag = s->tone_b_rev_pending_bits - 1;
+                s->tone_b_rev_pending_bits = 0;
+                s->received_event = V34_EVENT_REVERSAL_1;
+                s->persistence1 = 0;
+                s->persistence2 = 0;
+            }
+            /*endif*/
+            break;
+        }
+        /*endif*/
         if (++s->persistence1 < 10)
             break;
         /*endif*/
@@ -6331,8 +6374,19 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 l1_l2_analysis_init(s);
                 break;
             default:
+                if (!s->v90_mode  &&  !s->k56_phase2  &&  s->duplex  &&  !s->calling_party)
+                {
+                    /* Plain duplex answer modem: confirm it on the next bits
+                       (above) before raising it. */
+                    s->tone_b_rev_pending_time = s->sample_time + time_offset;
+                    s->tone_b_rev_pending_bits = 1;
+                    s->tone_b_rev_pending_ones = 0;
+                    break;
+                }
+                /*endif*/
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
+                s->tone_b_rev_confirm_lag = 0;
                 s->received_event = V34_EVENT_REVERSAL_1;
                 break;
             }
@@ -6392,6 +6446,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                             && s->info0_received
                             && !s->info0_acknowledgement
                             && s->stage == V34_RX_STAGE_TONE_A)
+                           ||
+                           /* Plain duplex answer modem: the first INFO0c's
+                              INFO0_OK can sit in the event slot until the
+                              call modem's reversal.  11.2.2.2.1 turns on
+                              seeing INFO0c *repeated*, so keep framing it. */
+                           (!s->v90_mode
+                            && s->duplex
+                            && !s->calling_party
+                            && s->stage == V34_RX_STAGE_TONE_B
+                            && s->received_event == V34_EVENT_INFO0_OK)
                            ||
                            ((s->stage == V34_RX_STAGE_TONE_A
                              ||
@@ -6617,7 +6681,10 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                  && (s->stage == V34_RX_STAGE_TONE_A
                                      || s->stage == V34_RX_STAGE_INFO0))
                             s->v90_repeated_info0d_pending = true;
-                        else if (s->k56_phase2  &&  !s->calling_party)
+                        else if (!s->calling_party
+                                 &&  (s->k56_phase2
+                                      ||  (!s->v90_mode  &&  s->duplex
+                                           &&  s->stage == V34_RX_STAGE_TONE_B)))
                             s->repeated_info0c_pending = true;
                         s->info0_received = true;
                     }
@@ -22014,6 +22081,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.info1c_received = false;
     s->rx.k56_phase2 = false;
     s->rx.repeated_info0c_pending = false;
+    s->rx.tone_b_rev_pending_bits = 0;
+    s->rx.tone_b_rev_confirm_lag = 0;
     s->rx.info1a_raw_12_17 = 0;
     s->rx.info1a_raw_32_33 = 0;
     s->rx.info1a_raw_40_49 = 0;

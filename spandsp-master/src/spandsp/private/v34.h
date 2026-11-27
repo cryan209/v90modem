@@ -1153,6 +1153,9 @@ typedef struct
         and is transmitting Tone B, so FIRST_A must not wait for another
         INFO0c before sending the Tone A phase reversal. */
     bool phase2_reranging;
+    /* Plain V.34 answer modem repeating INFO0a for a repeated INFO0c
+       without bit 28 (11.2.2.2.1); INFO0_RETRY ends it. */
+    bool plain_info0c_recovery;
     /* k56_repeated_info0c_reranging(): FIRST_A waits for Tone B afresh. */
     bool k56_info0_rerange;
     /* K56flex: receive-clock time of our 11.2.1.2.3 Tone A reversal, and
@@ -1976,6 +1979,17 @@ typedef struct
         has the call modem go silent exactly when it is ready to receive the
         answer modem's L1/L2, so the falling edge is a readiness signal. */
     bool tone_b_ended;
+    /* Plain duplex V.34 answer modem: a "1" after 20 steady Tone B bits is
+       only the first Tone B reversal (11.2.1.1.3) if the bits after it stay
+       steady.  An INFO0c repeated in 11.2.2.1.1 recovery opens with fill
+       ones "1111", which used to pass for it.  Bits counted since the
+       candidate (0: none pending), the ones among them, and its time. */
+    int tone_b_rev_pending_bits;
+    int tone_b_rev_pending_ones;
+    span_sample_timer_t tone_b_rev_pending_time;
+    /* Bits by which that confirmation delayed REVERSAL_1; the transmitter's
+       11.2.1.2.5 40 ms reply counts from the reversal, not the event. */
+    int tone_b_rev_confirm_lag;
     /* 11.5.2.1: an answer modem that INITIATED a retrain takes Tone B only
        after the call modem's 11.5.1.2 silence; until then a still-in-data
        call modem's signal can pass for 20 bits of Tone B. */
@@ -2392,8 +2406,8 @@ typedef struct
 
     /*! \brief Set true once a valid INFO0 has been received (survives event overwrites). */
     bool info0_received;
-    /* K56flex startup, answer side: an INFO0c arrived after the first
-       (11.2.2.2.1); v34tx.c re-ranges from 11.2.1.2.3. */
+    /* K56flex startup or plain duplex V.34, answer side: an INFO0c arrived
+       after the first (11.2.2.2.1); v34tx.c re-ranges from 11.2.1.2.3. */
     bool repeated_info0c_pending;
     bool info1a_received;
     bool info1c_received;
