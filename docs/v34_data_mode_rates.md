@@ -706,6 +706,16 @@ to the dense data constellation. Future work should compare the unchanged
 complete-frame fit with the DATA transmit reference across timing phases and
 noise levels before changing the training-rate policy.
 
+**Update 2026-11-28.** The guard now reads B1 through the fitted taps, the
+solution DATA uses, and rates that reading on the refit table
+(`ME_V34_B1_FIT_SNR`, default on). The fit itself is unchanged: the
+complete frame, the same taps. Only the measurement moved. Against the HSF
+the old correlation read 22.4-33.7 dB on a line whose data mode read
+36.3-37.0 dB, and stepped calls down to 21600. In loopback the fitted
+reading stays within 0.7 dB of data mode and does not exceed the injected
+noise. Details and the A/B are in [dmodem_interop.md](dmodem_interop.md),
+"B1 read the taps it arrived on".
+
 ## Missing 3429-baud conditioning below 31200 (2026-10-16)
 
 Found a receiver configuration defect rather than a broken 1664-point map:

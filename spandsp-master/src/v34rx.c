@@ -3452,10 +3452,38 @@ SPAN_DECLARE(int) v34_rx_data_snr_rate(v34_state_t *s, float snr_db)
    Below 26400 the refit table has no rows and the live one is used, which
    only makes the check more lenient. */
 #define V34_B1_REFIT_SLACK_DB           3.5f
+/* Where B1 conditioning made its fit, B1's SNR is read through the fitted
+   taps (v34_rx_condition_b1_equalizer()): the same least-squares estimator
+   as the Phase 4 TRN refit, on the taps DATA starts with.  It is then rated
+   on the refit table with no slack.  ME_V34_B1_FIT_SNR=0 restores the
+   correlation reading. */
+static bool v34_rx_b1_fit_snr_in_use(const v34_state_t *s)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv("ME_V34_B1_FIT_SNR");
+
+        enabled = (e  &&  *e)  ?  (atoi(e) != 0)  :  1;
+    }
+    /*endif*/
+    return enabled  &&  s  &&  s->rx.b1_corr_valid  &&  s->rx.b1_fit_snr_db > 0.0f;
+}
+
 SPAN_DECLARE(int) v34_rx_b1_training_rate(v34_state_t *s, float snr_db)
 {
     int rate;
 
+    if (v34_rx_b1_fit_snr_in_use(s))
+    {
+        rate = v34_rx_refit_training_rate(s->rx.baud_rate, snr_db);
+        if (rate > 0)
+            return rate;
+        /*endif*/
+        return v34_rx_training_rate(s, snr_db);
+    }
+    /*endif*/
     if (s  &&  s->rx.phase4_trn_refit_installed)
     {
         rate = v34_rx_refit_training_rate(s->rx.baud_rate, snr_db + V34_B1_REFIT_SLACK_DB);
@@ -12562,8 +12590,16 @@ bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
    by the periodic PP reference. Fit a symbol-spaced correction to the
    existing FSE, using the same acquisition aperture as the T/3 receiver. The detected
    B1 offset also moves the raw anchor. The FSE group delay supplies the
-   samples beyond B1 needed by the centred fit before payload is replayed. */
-void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
+   samples beyond B1 needed by the centred fit before payload is replayed.
+
+   Returns B1's SNR in dB through the fitted taps, or -1 when no fit was made.
+   That is the equalizer DATA starts on, so it is what the 11.5/11.6 rate
+   check should read.  The normalized correlation of the symbols B1 arrived
+   on (b1_corr) reads the taps MP and E left, before this fit: against the
+   HSF at 3429 baud (D-Modem rig, plain V.34, 2026-11-28) it read 22.4-33.7 dB
+   on one line whose Phase 4 TRN refit read 33.1-36.4 dB, and its low tail
+   stepped calls from 31200 down to 21600. */
+float v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
 {
     enum { T = V34_V90_T3_FSE_TAPS, N = 2*T,
            E = V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN };
@@ -12577,7 +12613,7 @@ void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
         || s->v90_t3_e_anchor < 0
         || s->v90_t3_e_anchor < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
         || s->v90_t3_e_anchor + 2*(length - pre - 1) + pre >= s->v90_t3_raw_count)
-        return;
+        return -1.0f;
     for (int n = pre; n < length - pre; n++)
     {
         double fr[N], fi[N];
@@ -12604,15 +12640,40 @@ void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
     for (int k = 0; k < N; k++) trace += matrix[k*N + k];
     for (int k = 0; k < N; k++) matrix[k*N + k] += trace*1e-6;
     if (!v90_t3_solve(matrix, rhs, solution, N))
-        return;
+        return -1.0f;
     for (int k = 0; k < N; k++)
         if (!isfinite(solution[k]))
-            return;
+            return -1.0f;
     memset(coeff, 0, sizeof(coeff));
     for (int k = 0; k < T; k++)
         coeff[V34_EQUALIZER_PRE_LEN + k - pre] =
             complex_setf(solution[2*k], solution[2*k + 1]);
     memcpy(s->eq_coeff, coeff, sizeof(coeff));
+    {
+        /* The residual against the same targets the fit used.  T complex
+           taps fitted to L complex equations leave L - T degrees of freedom
+           in the residual, so scale it by L/(L - T) for the noise the taps
+           will see on data they were not fitted to. */
+        double sig = 0.0, err = 0.0;
+        int used = 0;
+
+        for (int n = pre; n < length - pre; n++)
+        {
+            double a = phase - rate*(length - 1 - n);
+            complexf_t e = s->v90_t3_b1[n];
+            double tr = gain*(e.re*cos(a) - e.im*sin(a));
+            double ti = gain*(e.re*sin(a) + e.im*cos(a));
+            complexf_t y = v34_rx_b1_equalized_symbol(s, n);
+
+            sig += tr*tr + ti*ti;
+            err += (y.re - tr)*(y.re - tr) + (y.im - ti)*(y.im - ti);
+            used++;
+        }
+        if (used <= 2*T  ||  sig <= 0.0  ||  err <= 0.0)
+            return -1.0f;
+        err *= (double) used/(double) (used - T);
+        return (float) (10.0*log10(sig/err));
+    }
 }
 
 bool v34_rx_phase4_trn_refit_enabled(const v34_rx_state_t *s)
@@ -17529,6 +17590,14 @@ SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db)
     if (!s  ||  !s->rx.b1_corr_valid)
         return -1;
     /*endif*/
+    if (v34_rx_b1_fit_snr_in_use(s))
+    {
+        if (snr_db)
+            *snr_db = s->rx.b1_fit_snr_db;
+        /*endif*/
+        return 0;
+    }
+    /*endif*/
     c2 = s->rx.b1_corr*s->rx.b1_corr;
     if (c2 >= 0.99999f)
         c2 = 0.99999f;
@@ -21434,6 +21503,7 @@ static int begin_rx_data(v34_state_t *s, bool report_e)
     s->rx.b1_acquisition_active = false;
     s->rx.b1_observed_symbols = 0;
     s->rx.b1_corr_valid = false;
+    s->rx.b1_fit_snr_db = -1.0f;
     if (s->rx.v90_t3_prepared)
     {
         if (s->rx.v90_t3_active)

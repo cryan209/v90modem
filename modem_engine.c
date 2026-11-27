@@ -7749,9 +7749,23 @@ static bool v34_b1_rate_check_locked(void)
         && parse_env_int("ME_V34_B1_FALL_FORWARD", 1)) {
         int up = v34_rx_b1_training_rate(g_v34, snr - me_v34_ff_margin_db())/2400;
         int top = v34_data_snr_target_n(99.0f);
+        int baud_top = max_v34_bps_for_baud(baud_by_code[rx_code])/2400;
 
         if (top > 0 && up > top)
             up = top;
+        /* Not to 33600 (V.34 Table 2, 3429 baud only) on one B1.  Its refit
+           threshold (36.3 dB) is within about a dB of this receiver's own
+           saturation (about 37 dB), where one 120-symbol B1 cannot tell the
+           lines apart.  Against the HSF (D-Modem rig, plain V.34, 2026-11-28)
+           B1 read 36.1-37.6 dB through its fitted taps.  Every 33600 on that
+           line was lost within about a second: 5 B1 fall-forwards and 2 calls
+           that trained there.  31200 held on the same readings (data mode
+           36.3-37.0 dB).  3200 baud keeps its top rate: engine_pair_test's
+           clean line reads 38.2 dB on B1, and its 31200 confirms at 37.5.
+           The data-mode fall-forward, with its longer windows and 3 s hold,
+           can still go to 33600. */
+        if (baud_top == 14 && up >= baud_top)
+            up = baud_top - 1;
         if (up > *ours) {
             g_v34_b1_up_n = up;
             ME_LOG("[ME] V.34 B1: %d bps looks reachable; fall-forward will "

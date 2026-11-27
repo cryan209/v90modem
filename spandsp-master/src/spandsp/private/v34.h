@@ -2121,6 +2121,9 @@ typedef struct
        from B1 acquisition until the next data-mode entry. */
     float b1_corr;
     bool b1_corr_valid;
+    /* SNR (dB) of B1 through the taps B1 conditioning fitted
+       (v34_rx_condition_b1_equalizer()), < 0 when no fit was made. */
+    float b1_fit_snr_db;
     int b1_observed_symbols;
     complexf_t b1_observed[V34_V90_T3_B1_MAX_SYMBOLS];
 

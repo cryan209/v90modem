@@ -552,8 +552,10 @@ What it was not, measured on the way:
 Still open on this peer:
 - **Our B1 §11.6 renegotiation.** Fixed 2026-11-28 (section "Our §11.6
   opened before the HSF was listening", below). It was the timing, not the
-  rate policy. B1 still reads 27-30 dB where Phase 4 TRN read 31-34, and the
-  HSF still retrains on a step down to 21600.
+  rate policy. B1's under-reading, which stepped calls down to 21600, is
+  fixed too (section "B1 read the taps it arrived on", below): no step-down
+  retrains in 24 calls. Still open: an 11.6 whose MP we do not lock (1 in
+  about 10).
 - **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
   INFOMARKSa and dies. Every arm shows it.
 - **The HSF matrix rows.** `hsf_v90_ulaw` passes since the fallback MP fix
@@ -704,6 +706,64 @@ codewords, 5600-5900 RMS). Its points are exactly those of the HSF's CPt
 (one constellation, no codec set, trn1d_gain 0.9988). This direction of
 `netsim` adds no echo.
 
+### B1 read the taps it arrived on, not the taps DATA runs on (2026-11-28)
+
+**Fixed (`v34_rx_condition_b1_equalizer()`, `v34rx.c`).** Against the HSF
+at 3429 baud our B1 rate check stepped calls down from 31200 to 21600, and
+the HSF retrained on the 11.6 (2 of 2 earlier, 4 of 24 in the A/B below).
+The line carried those rates. B1 was measuring the wrong equalizer.
+
+B1's SNR was the normalized correlation of B1 with its template, through
+the taps MP and E left. On the dense bauds DATA does not start on those taps.
+B1 conditioning (§11.4.1.1.5/§11.4.1.2.5) replaces them with a 21-tap
+least-squares fit over B1 itself. On one HSF line, with `NET_DELAY` 1-4:
+
+| Reading | Range |
+|---|---|
+| B1 correlation (old) | 22.4-33.7 dB |
+| Phase 4 TRN refit | 33.1-36.4 dB |
+| B1 through the fitted taps (new) | 35.7-38.0 dB |
+| Data mode at 31200 | 36.3-37.0 dB |
+
+The low tail of the correlation set the rate.
+
+B1's SNR is now the residual of that fit: B1 through the fitted taps against
+the same targets. It is scaled by L/(L - T) (120 symbols less the fit's edges,
+21 complex taps) for the noise the taps were not fitted to. It is rated on
+the refit table with no slack, since it is the same estimator. In loopback
+(`v34_duplex_test`, 3429 and 3200 baud, injected noise 28-40 dB, delays 0/23)
+it reads 0-1.9 dB above the old correlation, never above the injected
+noise, and within 0.7 dB of data mode where data mode reported.
+`ME_V34_B1_FIT_SNR=0` restores the correlation.
+
+The fit reads about 37 dB on this line, which is this receiver's own
+saturation. There one B1 asked a fall-forward to 33600. Every 33600 on this
+line was lost within about a second: 5 B1 fall-forwards, plus 2 calls that
+trained there and were renegotiated down. So a fall-forward driven by B1 now
+stops at 31200 at 3429 baud. The data-mode fall-forward can still go higher.
+3200 baud keeps its top rate (31200): `engine_pair_test`'s clean line reads
+38.2 dB on B1 and confirms 31200 at 37.5 dB.
+
+**A/B (D-Modem rig, plain V.34, HSF calling, `NET_DELAY` 1-4, 24 calls per
+arm, arms alternated):**
+
+| | Fitted B1 | Old correlation |
+|---|---|---|
+| Connected, data exact | 22 | 21 |
+| Step-down retrains | 0 | 4 (two to 21600) |
+| B1 fall-forwards to 31200 confirmed | 7 of 8 | none asked |
+
+The fitted arm mostly ends at 31200. The correlation arm mostly ends at
+28800 or 26400 after its step-downs.
+
+The other failures:
+- **Phase 2 INFO1c miss** (below): 1 fitted call and 2 correlation calls.
+- **An 11.6 whose MP we never locked:** 1 call in each arm. In the fitted
+  arm the HSF answered our S and sent 4800 bauds of TRN. Our Phase 4
+  receiver locked its MP only at baud 1999, read a reserved bit wrong, got
+  no E, and the §11.5 retrain that followed never completed. That is our
+  11.6 MP receiver, open.
+
 ### Our §11.6 opened before the HSF was listening (2026-11-28)
 
 **Fixed (`v34_own_reneg_held_locked()`, `modem_engine.c`).** The HSF
@@ -748,8 +808,9 @@ is the known Phase 2 INFO1c miss (below). We opened 19 §11.6s of our own:
 - Both step-downs to 21600 at 3429 baud got a retrain from the HSF. Unlike
   before, the HSF answered our S and sent TRN, and it retrained during the
   MP exchange. The retrain settled at 21600, and the fall-forward then took
-  both calls to 28800 (one confirmed at 36.8 dB). The underlying issue is B1
-  under-reading this line (above).
+  both calls to 28800 (one confirmed at 36.8 dB). The underlying issue was
+  B1 under-reading this line. Fixed: see "B1 read the taps it arrived on,
+  not the taps DATA runs on" above.
 
 The offline matrix with the hold is 21 of 21, and `test-fast` passes.
 

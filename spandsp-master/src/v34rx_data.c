@@ -800,8 +800,21 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                          sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
                                /(expected_power*observed_power)),
                          s->b1_corr);
+                s->b1_fit_snr_db = -1.0f;
                 if (!b1_fallback)
-                    v34_rx_condition_b1_equalizer(s, gain, phase);
+                {
+                    s->b1_fit_snr_db = v34_rx_condition_b1_equalizer(s, gain, phase);
+                    if (s->b1_fit_snr_db > 0.0f)
+                    {
+                        V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - B1 SNR through the fitted taps: %.1f dB "
+                                 "(correlation on the arrival taps: %.1f dB)\n",
+                                 s->b1_fit_snr_db,
+                                 10.0f*log10f(s->b1_corr*s->b1_corr
+                                              /fmaxf(1.0f - s->b1_corr*s->b1_corr, 1e-5f)));
+                    }
+                    /*endif*/
+                }
                 /*endif*/
                 if (!s->duplex || v34_rx_b1_batch_eq_enabled(s))
                 {
