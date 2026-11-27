@@ -1663,6 +1663,30 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 09c50a79 (2026-11-27)
+
+On top of f8758e39, this deploy adds 09c50a79. **V.92 retrains when no CPd
+can be designed from the analogue modem's TRN2u** (§9.6.1.1.2, §9.5.1.1).
+The wait is 5 s plus 5 round trips after SUVu, and the retrain withdraws the
+PCM upstream offer (INFO1d bit 70). Before, we sent SUVd until the peer hung
+up, about 50 s against the HSF. `ME_V92_CPD_DEADLINE_MS=0` restores that.
+- **Offline (D-Modem rig, CT 128):** `hsf_v92_ulaw`/`alaw` 8/8 over
+  `NET_DELAY` 1-4: V.34 26400, data exact (0/8 before). No other matrix row
+  fires the deadline. `test-fast` 787/788. The one failure was the env-knob
+  doc check before regeneration; it passes now.
+- **Live, after install.** The emulated Courier called v90ras twice: V.32bis
+  14400/ARQ and V.22bis 2400/ARQ. Both calls opened LCP and IPCP, and passed
+  20/20 echoes and 20/20 pings with no bad frames. No live V.92 peer reaches
+  the new path, so this check shows only that the service still answers.
+
+Built in `/root/deploy-5640b4d3` at 09c50a79 after `make clean`
+(`/root/deploy-09c50a79.build.log`). The binary (md5 39f08750…) is kept as
+`/opt/v90ras/sip_v90_modem.09c50a79`, and the previous one (f8758e39,
+6f8e5a38…) as `sip_v90_modem.pre-09c50a79`. It was installed by rename at
+23:58 with `/run/v90ras/busy` empty and no PPP interface up. Only v90ras was
+restarted, and it logged 20 "registration success" lines and 10 "SIP V.90
+modem ready".
+
 ## Deployed f8758e39 (2026-11-27)
 
 On top of d7adb775 (and its README commit 05a80b07), this deploy adds
