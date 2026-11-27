@@ -550,11 +550,10 @@ What it was not, measured on the way:
   symbol, which differential decoding absorbs. It is still a spec deviation.
 
 Still open on this peer:
-- **Our B1 §11.6 renegotiation.** B1 reads 27-30 dB where Phase 4 TRN read
-  31-34, so `b1_rate_check` asks for one rate step down. The HSF answers with
-  60 ms of silence and a retrain. With `ME_V34_RETRAIN_ON_LOSS=0`, delay-1
-  calls run at 31200 with no retrain and exact data. The policy also serves
-  live peers, so it is unchanged.
+- **Our B1 §11.6 renegotiation.** Fixed 2026-11-28 (section "Our §11.6
+  opened before the HSF was listening", below). It was the timing, not the
+  rate policy. B1 still reads 27-30 dB where Phase 4 TRN read 31-34, and the
+  HSF still retrains on a step down to 21600.
 - **Phase 2.** About 1 call in 8 never decodes the HSF's INFO1c, goes to
   INFOMARKSa and dies. Every arm shows it.
 - **The HSF matrix rows.** `hsf_v90_ulaw` passes since the fallback MP fix
@@ -704,6 +703,60 @@ Our transmitter was checked first. The TRN2d/SUVd tap is steady (8
 codewords, 5600-5900 RMS). Its points are exactly those of the HSF's CPt
 (one constellation, no codec set, trn1d_gain 0.9988). This direction of
 `netsim` adds no echo.
+
+### Our §11.6 opened before the HSF was listening (2026-11-28)
+
+**Fixed (`v34_own_reneg_held_locked()`, `modem_engine.c`).** The HSF
+retrained on every §11.6 we opened in data mode: the B1 step-down, and the
+B1 fall-forward after the retrain that followed. That was 6 of 8 plain-V.34
+calls with the HSF calling (`/root/netdiag/v34_final.sh` on CT 128,
+`NET_DELAY` 1-4, two calls per delay). It also cost the 57 s `hsf_v92_alaw`
+call above.
+
+It was not our signal:
+- **D-Modem's own modem.** It opens a §11.6 5 s into data
+  (`DSP_V34_RENEG=5000:8`). The HSF answers it with its own S about 100 ms
+  later, 2 of 2, renegotiated 33600/19200, data exact.
+- **Our S on the wire** (`WAV=` recordings). 128T, about 37 ms at 3429 baud,
+  the same spectrum as open8's and the same level relative to data. The HSF
+  never answers it with an S.
+- **Our probe at 5 s** (`ME_V34_RENEG_AFTER_MS=5000`, B1 actions off). 4 of
+  4 renegotiate with no retrain.
+
+It was the timing. The B1 rate check and the B1 fall-forward both run the
+instant our receiver enters data mode. On these calls that is also the
+instant our transmitter finishes B1: flow log, `Tx - B1 complete` and our
+`transmitting S` at the same `tx_t` (7.734 s, 7.747 s). So our S followed
+B1 with no data in between. 150-200 ms later we read "far end abandoned
+(60 ms silence)", and then its retrain. V.34 §11.6 allows a renegotiation
+"at any time during data mode". The HSF only arms its S detector after a
+few hundred ms of our data. Probes at 100 and 200 ms were retrained on 5 of
+6 calls. Probes at 300, 500, 1000, 2000 ms and 5 s were answered on 18 of
+18 calls.
+
+Our §11.6s now wait until our transmitter has sent 500 ms of data after B1
+(`v34_get_tx_data_ms()`, `ME_V34_RENEG_MIN_DATA_MS`, 0 restores the old
+timing). The hold is counted on the transmit side, which is what the far
+end hears, so line delay does not change it. Only the B1 rate check and the
+fall-forward are held. Renegotiations for a receiver that has stopped
+decoding are not.
+
+**Result (24 calls):** 23 connect with data exact both ways. The other one
+is the known Phase 2 INFO1c miss (below). We opened 19 §11.6s of our own:
+- All 15 to 26400 or 28800 completed with no retrain. That covers 13 B1
+  step-downs, plus the 2 fall-forwards up from 21600.
+- Both step-downs to 21600 at 3429 baud got a retrain from the HSF. Unlike
+  before, the HSF answered our S and sent TRN, and it retrained during the
+  MP exchange. The retrain settled at 21600, and the fall-forward then took
+  both calls to 28800 (one confirmed at 36.8 dB). The underlying issue is B1
+  under-reading this line (above).
+
+The offline matrix with the hold is 21 of 21, and `test-fast` passes.
+
+Method note: with `ME_V34_RETRAIN_ON_LOSS=0` the probe's MP is not capped
+by B1, so the HSF sends 33600 on a line that carries less and our data goes
+white. That is the setup, not a receiver fault. Grade the timing by
+"restart Phase2" against "reneg probe" instead.
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 

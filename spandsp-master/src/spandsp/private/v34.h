@@ -1127,6 +1127,9 @@ typedef struct
     /*! \brief Number of all-ones B1 mapping frames emitted.  Per
         §10.1.3.1/V.34, B1 is one complete data frame (P mapping frames). */
     int b1_frames_sent;
+    /*! \brief Mapping frames of data sent since B1 ended (saturating); how long
+        the far end has been in data mode, by our transmitter. */
+    int data_frames_sent;
     /*! \brief Clause 10.1.3 modulation-factor power normalization. */
     float data_symbol_scale;
     /*! \brief V.34 9.7: apply the non-linear encoder (theta 0.3125) to the whole

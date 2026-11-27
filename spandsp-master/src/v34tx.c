@@ -10710,6 +10710,9 @@ static complex_sig_t get_data_baud(v34_state_t *s)
         else
         {
             v34_get_mapping_frame(&s->tx, s->tx.tx_mapping_frame_buf);
+            if (s->tx.data_frames_sent < INT32_MAX/2)
+                s->tx.data_frames_sent++;
+            /*endif*/
         }
         /*endif*/
     }
@@ -10930,6 +10933,7 @@ static void data_baud_init(v34_state_t *s)
     }
     s->tx.tx_mapping_frame_step = 0;
     s->tx.b1_frames_sent = 0;
+    s->tx.data_frames_sent = 0;
     s->tx.data_frame = 0;
     /* V.34 10.1.3.1 inserts B1's V0 inversions as though B1 were the
        final data frame of a superframe.  Start there; after P mapping frames
@@ -12156,6 +12160,7 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
     s->tx.external_symbol_user_data = NULL;
     s->tx.tx_mapping_frame_step = 0;
     s->tx.b1_frames_sent = 0;
+    s->tx.data_frames_sent = 0;
     /* §10.1.3.1/V.34: B1 carries the superframe inversion state of the
        final data frame.  v34_begin_rx_data() enters with this same state. */
     if (s->tx.parms.j > 0)
@@ -12684,6 +12689,24 @@ SPAN_DECLARE(int) v34_start_cleardown(v34_state_t *s)
 SPAN_DECLARE(bool) v34_cleardown_complete(v34_state_t *s)
 {
     return s  &&  s->rx.cleardown_complete;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Milliseconds of data our transmitter has sent since its B1 ended: how long
+   the far end can have been demodulating our data (V.34 11.4.1.1.5/
+   11.4.1.2.5 have it begin after B1).  0 outside data mode. */
+SPAN_DECLARE(int) v34_get_tx_data_ms(v34_state_t *s)
+{
+    int baud;
+
+    if (s == NULL  ||  s->tx.current_getbaud != get_data_baud
+        ||  s->tx.b1_frames_sent < s->tx.parms.p
+        ||  s->tx.baud_rate < 0  ||  s->tx.baud_rate > 5)
+        return 0;
+    /*endif*/
+    baud = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+    /* A mapping frame is eight 2D symbols (V.34 9.3: four 4D symbols). */
+    return (int) ((int64_t) s->tx.data_frames_sent*8*1000/baud);
 }
 /*- End of function --------------------------------------------------------*/
 

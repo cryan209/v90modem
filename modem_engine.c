@@ -7628,6 +7628,31 @@ static void loss_hangup_locked(const char *why)
     g_state = ME_HANGUP;
 }
 
+/* V.34 11.6 lets either modem open a renegotiation "at any time during data
+ * mode", but a far end can only answer one once it is demodulating our data,
+ * which begins after our B1 (11.4.1.1.5/11.4.1.2.5).  Both of the checks
+ * below run at the instant our receiver enters data, which is also the
+ * instant our transmitter finishes B1, so their S followed B1 with no data
+ * between.  The HSF (D-Modem rig, plain V.34, 2026-11-28) never answers an S
+ * that early: it goes silent for 60 ms and retrains, on every B1 step-down
+ * and every B1 fall-forward (6 of 8 calls).  Its own S detector is armed
+ * after 200-300 ms of our data: a probe 100-200 ms in was retrained 5 of 6,
+ * one 300 ms or more in was answered every time (18 of 18), and D-Modem's
+ * own modem, at 5 s, is answered too.  So our own renegotiations wait until
+ * we have sent ME_V34_RENEG_MIN_DATA_MS (default 500; 0 restores the old
+ * behaviour) of data.  Counted on our transmitter, which is what the far end
+ * hears, so the line delay does not change it.  Recovery renegotiations (a
+ * receiver that has stopped decoding) are not held.  ME_V34_RENEG_MIN_DATA_MS:
+ * ms of our data before we open an 11.6 (0 = no hold). */
+static bool v34_own_reneg_held_locked(void)
+{
+    static int min_ms = -1;
+
+    if (min_ms < 0)
+        min_ms = parse_env_int("ME_V34_RENEG_MIN_DATA_MS", 500);
+    return min_ms > 0 && g_v34 && v34_get_tx_data_ms(g_v34) < min_ms;
+}
+
 static bool v34_b1_rate_check_locked(void)
 {
     static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -7639,6 +7664,8 @@ static bool v34_b1_rate_check_locked(void)
     int supported;
 
     if (g_v34_b1_rate_checked || !g_v34 || v34_get_b1_snr_db(g_v34, &snr) != 0)
+        return false;
+    if (v34_own_reneg_held_locked())
         return false;
     /* Let V.42 detection (8.10) finish first.  The calling modem sends its
        ODP straight after B1 and stops at its T400; a 11.6 opened 40 ms into
@@ -7962,7 +7989,8 @@ static bool v34_fall_forward_check_locked(void)
     int64_t now;
 
     if (!me_v34_ff_enabled() || !g_v34 || g_state != ME_DATA
-        || g_v42_detecting || v34_rate_renegotiation_active(g_v34))
+        || g_v42_detecting || v34_rate_renegotiation_active(g_v34)
+        || v34_own_reneg_held_locked())
         return false;
     if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
         return false;

@@ -637,6 +637,10 @@ SPAN_DECLARE(int) v34_answer_rate_renegotiation(v34_state_t *s);
     \return non-zero while one is running. */
 SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s);
 
+/*! Milliseconds of data the transmitter has sent since its B1 ended (0 when
+    not transmitting data). */
+SPAN_DECLARE(int) v34_get_tx_data_ms(v34_state_t *s);
+
 /*! \brief Note that a recovery has been started for the current loss, so the
            same one does not start another.
     \param s The V.34 context. */
