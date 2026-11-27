@@ -8662,6 +8662,58 @@ static bool v92_b1u_deadline_expired_locked(void)
     return true;
 }
 
+/* Set when the CPd deadline below fired: the retrain withdraws the PCM upstream offer
+ * at once (restart_v90_phase2_locked()), because the TRN2u it rests on has
+ * already proved unusable on this line.  Per call. */
+static bool g_v92_cpd_undesignable = false;
+
+/* V.92 9.6.1.1.2: we answer each SUVu/CPu with one CPd, designed on the
+ * analogue modem's TRN2u.  A TRN2u too noisy to carry any upstream level set
+ * (HSF V.92 on the D-Modem rig at our -6 dBm0 ceiling: sigma 600-860 DS0,
+ * 2026-11-26) leaves no CPd to send, and SUVd then repeated for ~50 s until
+ * the peer hung up without a retrain of its own.  Nothing in 9.6.1.1 ends
+ * that wait, and the peer sends nothing new to design on, so a design that
+ * has not come within a few seconds never will on this training: §9.5.1.1
+ * lets either modem retrain at any time.  Bounded by the same per-call cap
+ * as the B1u deadline.  ME_V92_CPD_DEADLINE_MS (diagnostic): 0 disables. */
+static uint64_t g_v92_cpd_wait_from_samples = 0;
+
+static bool v92_cpd_deadline_expired_locked(void)
+{
+    static int deadline_ms = -1;
+    uint64_t limit;
+    int rtd;
+
+    if (deadline_ms < 0)
+        deadline_ms = parse_env_int("ME_V92_CPD_DEADLINE_MS", 5000);
+    if (deadline_ms <= 0 || !g_v90 || !v90_v92_awaiting_cpd_design(g_v90)) {
+        g_v92_cpd_wait_from_samples = 0;
+        return false;
+    }
+    if (g_v92_cpd_wait_from_samples == 0) {
+        g_v92_cpd_wait_from_samples = g_rx_audio_samples ? g_rx_audio_samples : 1;
+        return false;
+    }
+    rtd = g_v34 ? v34_get_round_trip_delay_samples(g_v34) : 0;
+    limit = (uint64_t)deadline_ms*8 + 5*(uint64_t)(rtd > 0 ? rtd : 0);
+    if (g_rx_audio_samples - g_v92_cpd_wait_from_samples < limit)
+        return false;
+    g_v92_cpd_wait_from_samples = 0;
+    if (g_v90_abandon_retrains >= ME_V90_MAX_ABANDON_RETRAINS) {
+        ME_LOG("[ME] V.92 9.6.1.1.2: no CPd designable %d ms after SUVu; "
+               "retrain cap (%d) reached\n", deadline_ms, ME_V90_MAX_ABANDON_RETRAINS);
+        return false;
+    }
+    g_v90_abandon_retrains++;
+    g_v92_cpd_undesignable = true;
+    ME_LOG("[ME] V.92 9.6.1.1.2: no CPd designable from the TRN2u %d ms after "
+           "SUVu (+5 x %d ms round trip); initiating a §9.5.1.1 retrain "
+           "(%d of %d)\n", deadline_ms, rtd/8, g_v90_abandon_retrains,
+           ME_V90_MAX_ABANDON_RETRAINS);
+    trace_phase("V92 CPd deadline -> retrain");
+    return true;
+}
+
 /* ME_V90_RETRAIN_AFTER_MS=<n> initiates a 9.5.1.1 retrain n ms after the call
  * reaches V.90/V.92 data mode, once.  A TEST HOOK, the sibling of
  * ME_V34_RETRAIN_AFTER_MS and ME_V90_RENEG_AFTER_MS: a healthy call never
@@ -10628,6 +10680,8 @@ static void cleanup_v34_v90_training_locked(void)
     vpcm_analogue_peer_reset(&g_v90a_peer);
     g_loss_retrains = 0;
     g_v90_abandon_retrains = 0;
+    g_v92_cpd_wait_from_samples = 0;
+    g_v92_cpd_undesignable = false;
     g_v34_call_baud_cap = 0;
     g_v34_rx_rate_backoff_n = 0;
     g_data_link_redetect = false;
@@ -11090,6 +11144,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_reneg_responding = false;
     g_v90_b1_wait_from_samples = 0;
     g_v92_b1u_wait_from_samples = 0;
+    g_v92_cpd_wait_from_samples = 0;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_reject_info1a_logged = false;
@@ -11182,6 +11237,18 @@ static bool restart_v90_phase2_locked(const char *reason)
         ME_LOG("[ME] V.92: the PCM-upstream retrain did not reach data; "
                "withdrawing the PCM upstream offer (INFO1d bit 70) for this call\n");
         trace_phase("V92 PCM upstream offer withdrawn after a failed retrain");
+    }
+    /* No CPd could be designed from the analogue modem's TRN2u: the PCM
+     * upstream has nothing to run on, so the retrain asks for V.90 (V.34
+     * upstream) at once rather than spending a second attempt to learn it
+     * (HSF V.92 on the D-Modem rig: the second PCM attempt failed the same
+     * way and the call missed its CONNECT window). */
+    if (g_v92_cpd_undesignable && !g_v92_pcm_upstream_withdrawn
+        && g_v92_info0_mutual && v92_pcm_upstream_advertised()) {
+        g_v92_pcm_upstream_withdrawn = true;
+        ME_LOG("[ME] V.92: no CPd could be designed from TRN2u; withdrawing "
+               "the PCM upstream offer (INFO1d bit 70) for this call\n");
+        trace_phase("V92 PCM upstream offer withdrawn: no CPd designable");
     }
     g_v92_retrain_pending_data = true;
     v34_set_v92_pcm_upstream_capability(g_v34,
@@ -21114,6 +21181,10 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (v92_b1u_deadline_expired_locked()) {
             (void) restart_v90_phase2_locked("no B1u lock after the CPd "
                                              "acknowledgement");
+            return false;
+        }
+        if (v92_cpd_deadline_expired_locked()) {
+            (void) restart_v90_phase2_locked("no CPd designable from TRN2u");
             return false;
         }
 

@@ -518,6 +518,10 @@ double v90_get_v92_upstream_design_margin(const v90_state_t *s);
 double v90_get_v92_upstream_min_margin(void);
 /* A CPd has been queued since startup or the last renegotiation began. */
 bool v90_v92_cpd_designed(const v90_state_t *s);
+/* V.92 9.6.1.1.2: the analogue modem's SUVu/CPu has arrived and we are still
+ * sending SUVd because no CPd can be designed from its TRN2u (the startup
+ * exchange, not a 9.8 renegotiation's sigma wait). */
+bool v90_v92_awaiting_cpd_design(const v90_state_t *s);
 
 /* V.92 9.8 (Table 24): a CPus received during rate renegotiation (the
  * downstream modulation is unchanged). */

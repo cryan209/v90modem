@@ -107,6 +107,13 @@ script.
 | `livewe_courier_v32b` | 14400 (ours) | 40/40 lines each way | no retrain, no reception loss |
 | `livewe_courier_v22b` | 2400 (ours) | 40/40 lines each way | the one NO CARRIER is the hang-up after the last line |
 
+**Update, the same day:** the two HSF V.92 rows pass since the CPd deadline
+(section below, "V.92 against the HSF: retrain when no CPd can be
+designed"): V.34 26400, data exact, 8 of 8 over `NET_DELAY` 1-4. The offline
+matrix rerun with it is 19 of 21: `hsf_v92_ulaw` missed in that run on the
+older two-retrain path (fixed before the 8 of 8), and `we_courier_v22b_ulaw`
+connected at 1200 with garbage once, then passed 3 of 3 at 2400 on reruns.
+
 The DTE rates (115200) are what those peers' harnesses print, not line rates.
 The previous full matrix was 15 of 18: these two HSF V.92 failures plus a
 Courier row. Since then the matrix has gained the two "we call the Courier"
@@ -129,7 +136,7 @@ STREAM=10, one call per row:
 | ESS | V.92 PCM up, A-law | Pass, 8 of 8 (and 3 of 3 before the retime), B1u locked at 37333 first time, 48000-52000 down. Before: about 30000 up and 3 of 6 calls. Our Jp had always asked for no Su extension, so the network A/D sampled ESS's pulse half a symbol off its peak (`docs/v92_pcm_upstream_findings.md`, "The receiver gap was the A/D's sampling phase"). ESS renegotiates 1-3 times a call, as it does against D-Modem's own modem. In about 1 call in 8, ESS's own transmit clock slews about −180 ppm through its first TRN1u. That also happens against `half_open8` at some line delays. Our receiver tracks it, and those calls lock B1u as usual. Until our data-mode frequency correction, a renegotiation's TRN2u came out at up to 153 DS0 and could cost a call its upstream. Now it is 57-61, the same as startup (`docs/v92_pcm_upstream_findings.md`, "A renegotiation's TRN2u was our held frequency walking") |
 | ESS | V.90 | Pass, 8 of 8 over line delays, 45333-50666 down. Before: fail, because we rejected ESS's real S during our Jd as our own line (0.125-0.148 of our transmit RMS), so ESS retrained twice and fell to plain V.34, where we CONNECTed on a link nobody decodes (`docs/v90_phase3_4_spec_audit.md` row 12). ESS's plain V.34 fails against `half_open8` too |
 | HSF | V.90 | Pass since the fallback MP fix (below): the HSF declines V.90 after two retrains (its own −6 dBm0 failure), and our V.34 fallback connects 26400 down / 24000 up at the first attempt, 4 of 4 over `NET_DELAY`, data exact (0 of 4 before) |
-| HSF | V.90, V.92 (both laws) | V.92 fails at Phase 4 on the HSF's own −6 dBm0 failure. At −12 dBm0 it connects 52000/36000 PCM up, 4 of 4, since the Phase 3 fixes (below: Ru2's phase after MD, Su's level); 0 of 4 before. The rest of this cell is the history of both rows. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours failed against the HSF at 3200 baud (0/4 vs 4/4) until the fallback MP fix (below, 2026-11-26). Our plain V.34 against it is now 1/8 by default and 7/8 with `V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1`, which wait on a fix to our own call-modem Phase 4 receiver (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
+| HSF | V.90, V.92 (both laws) | Pass since the CPd deadline (below, 2026-11-27): 8 of 8 over `NET_DELAY` 1-4, both laws, V.34 26400 after one retrain of ours, data exact. Not PCM: at our −6 dBm0 ceiling the HSF's TRN2u carries no upstream level set, so we retrain without the PCM upstream offer and the HSF falls back to V.34 (0 of 8 before: SUVd for ~50 s until it hung up). V.92 fails at Phase 4 on the HSF's own −6 dBm0 failure. At −12 dBm0 it connects 52000/36000 PCM up, 4 of 4, since the Phase 3 fixes (below: Ru2's phase after MD, Su's level); 0 of 4 before. The rest of this cell is the history of both rows. V.90 now gets its own DIL (N=147) since the Ja template header check (below), reaches Phase 4, sends CPt and SCR, and retrains without sending CP. That is the training constellation our −6 dBm0 INFO0d lets it choose; at −12 dBm0 it connects in 3 of 4 calls (below). D-Modem's own modem fails identically at −6 dBm0 but falls back to plain V.34, which ours failed against the HSF at 3200 baud (0/4 vs 4/4) until the fallback MP fix (below, 2026-11-26). Our plain V.34 against it is now 1/8 by default and 7/8 with `V34_DUPLEX_SPEC_S=1 V34_P4_KEEP_BAUD_PHASE=1`, which wait on a fix to our own call-modem Phase 4 receiver (below). Its Phase 2 used to fail (no CRC-valid INFO1a) in about half the runs, because our Tone B reversal could miss the wire; fixed (below). Its V.92 rows decline PCM in INFO1a (U_INFO 2, 2400 baud). Against `half_open8` it picks a 3429-baud upstream, which we do not offer |
 | Agere | V.90, V.92 | Pass, 5 of 5 per row since the CP framer fix (below), first attempt with no retrains: V.90 53333 down / 28800 up, V.92 (V.90 Phase 4, no PCM upstream) 53333-54666. Before: plain V.34 at 31200 after about 6 retrains, first because we rejected its CPt, then because we missed its single CP and CP' |
 | Broadcom | V.92 PCM up | Pass since the L2 hold (below): 50666 down, PCM upstream, B1u locked, first attempt. Before: declined PCM in its first INFO1a |
 | Broadcom | V.90 | Pass, 5 of 5 since the CP framer fix (below): 49333, first attempt. Before: plain V.34 at 31200 after 7 retrains. Its INFO1a chooses V.90 with a 3200-baud upstream, as Agere's does. Against `half_open8` it picks a 3429-baud upstream, which we do not offer (V.90 6.2 makes 3429 optional; INFO0d bit 40 = 0) |
@@ -697,6 +704,40 @@ Our transmitter was checked first. The TRN2d/SUVd tap is steady (8
 codewords, 5600-5900 RMS). Its points are exactly those of the HSF's CPt
 (one constellation, no codec set, trn1d_gain 0.9988). This direction of
 `netsim` adds no echo.
+
+### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
+
+**Both HSF V.92 rows pass, by falling back to V.34.** `hsf_v92_ulaw` and
+`hsf_v92_alaw` connect 26400 down / 24000 up with data exact both ways, 8 of 8
+over `NET_DELAY` 1-4 ms (about 34 s to CONNECT, one call 57 s: below). Before,
+0 of 8: every call failed at 53 s.
+
+At our −6 dBm0 ceiling the HSF's TRN2u is chance (above: sigma 600-860 DS0),
+so `v90_build_v92_cpd_frame()` designs nothing. §9.6.1.1.2 has us answer each
+SUVu with one CPd, and nothing in the clause ends the wait when there is none
+to send. So we sent SUVd for about 50 s, receiving the HSF's steady SUVu
+(3469 RMS), until it hung up without a retrain of its own. The peer sends
+nothing new to design on, so the wait could never end well. §9.5.1.1 lets
+either modem retrain at any time.
+
+The fix (`v92_cpd_deadline_expired_locked()`, `modem_engine.c`) starts a
+§9.5.1.1 retrain when no CPd has been designable for 5 s after SUVu, plus 5
+round trips (`ME_V92_CPD_DEADLINE_MS`, 0 disables). It shares the B1u
+deadline's per-call cap of two. That retrain also withdraws the PCM upstream
+offer (INFO1d bit 70) at once, without waiting for a second failed PCM
+attempt. On the first version, which kept the offer, one call of the matrix
+spent its second attempt on the same dead TRN2u and missed its CONNECT
+window. On each of the 8 calls the deadline fired exactly once. The HSF then
+declines PCM in its next INFO1a, or, in one call (A-law, 2 ms), tries V.90,
+fails it on its own −6 dBm0 constellation, Tone A-retrains and then declines.
+That call took 57 s, because the HSF also retrained on our §11.6 B1
+renegotiation in V.34 (28800 to 26400), a known plain-V.34 item (above).
+
+A retrain cannot lower the power ceiling. §9.5.1.1-.2 omit INFO0, so INFO0d's
+bits 33:37 stay what the call declared. A retrain can only give the peer
+another try, or its fallback.
+
+None of the other 19 offline rows fired the deadline.
 
 ### ESS V.90 carries its scrambler and trellis state into B1 (2026-11-26)
 
