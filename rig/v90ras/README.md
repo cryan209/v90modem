@@ -1663,6 +1663,31 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed c2191054 (2026-11-28)
+
+On top of a03e6087, this deploy adds c2191054. **The V.34 B1 rate check
+reads B1 through the taps B1 conditioning fits** (§11.4.1.1.5), not through
+the taps B1 arrived on. Against the HSF at 3429 baud, the old reading's low
+tail stepped calls down to 21600 and drew a retrain. B1-driven fall-forwards
+stop at 31200 at 3429. `ME_V34_B1_FIT_SNR=0` restores the old reading.
+- **Build and install.** Built in `/root/deploy-5640b4d3` after `make clean`
+  (a private header changed); the log is `/root/deploy-c2191054.build.log`.
+  Binary md5 `f10b55f8…`, kept as `/opt/v90ras/sip_v90_modem.c2191054`. The
+  previous binary (a03e6087, `f6f7f2e0…`) is kept as
+  `sip_v90_modem.pre-c2191054`. Installed by rename at 01:02, with busy
+  empty and no PPP interface up. Only v90ras restarted: 20 registration
+  successes, 10 lines ready.
+- **Offline (D-Modem rig, CT 128):** 24 calls per arm, alternated. Fitted:
+  22 exact, 0 step-down retrains. Old reading: 21 exact, 4 step-down retrains.
+- **Live, after install.** The HSF's plain-V.34 calls to 2950 all stalled in
+  Phase 2: INFO1c was never decoded and we sat in INFOMARKSa (5 of 5). The
+  previous binary, put back for the check, did the same, 3 of 3. So this is
+  the known INFO1c miss, now on every live call, not this change.
+  c2191054 was reinstalled. Two HSF V.90 calls then passed: 54666 down /
+  28800 up, a §9.6 upstream fall-forward to 31200, PPP 20/20 with 0 bad
+  frames. V.90 does not use this B1 path, so the change has no live coverage
+  yet.
+
 ## Deployed a03e6087 (2026-11-28)
 
 On top of 09c50a79, this deploy adds a03e6087. **We open our own §11.6 rate
