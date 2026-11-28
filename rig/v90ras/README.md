@@ -2264,3 +2264,20 @@ Built in `/root/deploy-5640b4d3`, checked out at 780969a0
 1290652b…) as `sip_v90_modem.pre-780969a0`. Installed by rename with
 `/run/v90ras/busy` empty and no PPP interface up. The restart logged 20 v90ras
 "registration success" lines, and v90isdn logged "SIP V.90 modem ready".
+
+## Deployed 6b462b2b (2026-11-28)
+
+On top of 5933dc6f, this deploy adds 6b462b2b. The V.34 §11.6 receiver's
+"peer sent no TRN" verdict now also needs the recent TRN window below 80%.
+Before, the HSF's real TRN, read 78-79% cumulative at 100% recent, sent us to
+the MP search half trained, and about 1 call in 20 got no E. Details:
+`docs/dmodem_interop.md`, "Our §11.6 receiver took the HSF's TRN for "no
+TRN"".
+
+Built in `/root/deploy-5640b4d3` at 6b462b2b while idle. Binary md5
+`2139cfc9…`, kept as `/opt/v90ras/sip_v90_modem.6b462b2b`; the previous one
+as `sip_v90_modem.pre-6b462b2b`. Installed by rename at 16:00, with busy
+empty and no PPP interface up. Only v90ras restarted.
+
+Live from CT 128 (`half_sip_call.py --harness ./half_hsf`, 2950, plain
+V.34): 2 of 2, CONNECT after 17.5 s and 17.9 s, LCP echoes and pings 40/40.
