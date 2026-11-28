@@ -13956,7 +13956,7 @@ static void me_v90_prepare_info0a_preroll(void)
         }
     }
     if (best < 0) {
-        ME_LOG("[ME] V.90 originate: no post-JM gap in the last %d ms of V.8 "
+        ME_LOG("[ME] Originate: no post-JM gap in the last %d ms of V.8 "
                "audio (rx sample %llu); INFO0 pre-roll skipped\n",
                n/8, (unsigned long long)g_rx_audio_samples);
         return;
@@ -13964,7 +13964,7 @@ static void me_v90_prepare_info0a_preroll(void)
     for (int i = best*BLK; i < n; i++)
         g_v34_preroll[g_v34_preroll_len++] =
             g_v8_rx_hist[(first + i) % V8_RX_HIST_SAMPLES];
-    ME_LOG("[ME] V.90 originate: replaying %d ms of post-JM audio (of %d ms "
+    ME_LOG("[ME] Originate: replaying %d ms of post-JM audio (of %d ms "
            "held, rx sample %llu) into the Phase 2 receiver so the peer's "
            "INFO0 is not cut\n", g_v34_preroll_len/8,
            n/8, (unsigned long long)g_rx_audio_samples);
@@ -14104,7 +14104,14 @@ static void start_v34_training(void)
     if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
     if (g_gui_enabled) v34_set_eye_report_handler(g_v34, gui_eye_report, NULL);
     g_v34_preroll_len = 0;
-    if (v90_upstream && g_calling_party)
+    /* V.34 11.2.1.1.1: the call modem conditions its receiver for Tone A and
+       INFO0a during V.8's post-CJ silence; this receiver only exists after
+       it (V.8 8.2.2 reports success 75 ms after CJ ends).  The answerer
+       starts INFO0a 75 ms after detecting CJ (V.8 8.2.3), so on a short
+       round trip its first bits arrive as this receiver starts.  Replay the
+       quiet stretch so INFO0a is heard from its first fill one, for every
+       call we originate, not only V.90. */
+    if (g_calling_party)
         me_v90_prepare_info0a_preroll();
     /* Plain V.34 over a real line: ask in MP for the receive rate the
        Phase-4 TRN measures, not the Phase-2 probe's projection.  Against the

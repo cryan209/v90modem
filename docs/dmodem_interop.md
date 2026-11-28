@@ -995,8 +995,9 @@ had covered the gap.
 Fix (v8.c): still accept two octets, but hold JM until the third octet's
 33 ms have passed, or the third zero octet or a carrier drop ends CJ. This
 moves INFO0a on every call we answer 33 ms later, to where V.8 puts it.
-Our caller's deafness during its silence is still there; it now has the
-same margin a conformant answerer gives it. Not fixed here.
+~~Our caller's deafness during its silence is still there; it now has the
+same margin a conformant answerer gives it. Not fixed here.~~ Fixed the
+same day, below ("Our caller listens during its V.8 silence").
 
 **Results:**
 - `make test`: everything passes except slow.list:67, which fails on HEAD
@@ -1011,6 +1012,39 @@ same margin a conformant answerer gives it. Not fixed here.
 - Loopback `V34_DUPLEX_DELAY` 0-47 (`v34_duplex_test`, which bypasses
   V.8 and the engine, so it tests changes 1 and 2 only): 3429/28800 at
   36 dB and 3429/31200 at 38 dB are 48/48 each, the same as HEAD.
+
+### Our caller listens during its V.8 silence (2026-11-28)
+
+V.34 §11.2.1.1.1 has the call modem condition its receiver for Tone A and
+INFO0a during V.8's post-CJ silence. Our V.34 receiver only exists after
+it: V.8 §8.2.2 reports success 75 ms after CJ ends. A conformant answerer
+starts INFO0a 75 ms after it *detects* CJ (§8.2.3), so the margin was the
+round trip alone, and at a short round trip INFO0a's first bits arrived
+as our receiver started.
+
+The V.90 originate path already replayed the quiet stretch after JM into
+the new Phase 2 receiver (`me_v90_prepare_info0a_preroll()`, from
+0cdc64b1). `start_v34_training()` now does that for every call we
+originate: plain V.34 and K56flex as well as V.90. In plain V.34 every
+Phase 2 timestamp the caller compares is on the receive clock, so the
+replay's offset against the transmit clock cancels. The only mixed-clock
+comparison, `v90_tone_a_reversal_recovery_due()`, is V.90-only and
+already ran with the replay.
+
+**Results:**
+- Our caller against our own answerer, with the 3cc6b3c5 JM hold taken
+  out again so INFO0a comes 33 ms early: 34 of 240 `engine_pair_test`
+  lines fail without the replay, 0 of 240 with it.
+- D-Modem matrix (CT 128): 20 of 21. The miss is `hsf_v92_ulaw`, where the
+  HSF calls us and the replay never runs. An alternated A/B of that row
+  gave 2 of 3 on each arm: a flake.
+- Live, from CT 117 to v90ras (2950) through Asterisk, `ME_MODE=v34`: 2 of
+  2 CONNECT 31200 with v90ras's LCP arriving. The replay was skipped on
+  both ("no post-JM gap"), as it should be. The quiet stretch we hear is
+  75 ms less the round trip, so when it is under the 20 ms the search
+  needs, INFO0a also arrives that much after our receiver starts.
+- The RasFinder no longer answers on 6311 (receive silent) or 6312 (V.8
+  times out), so there is no third-party V.34 answerer for this live.
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 
