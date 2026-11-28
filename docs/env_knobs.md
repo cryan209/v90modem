@@ -195,7 +195,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V91_SPECIFY_DIL` | modem_engine.c |  | sd | what changes is the start-up sequence (Figures 2 and 3/V.91). |
 | `ME_V91_TRANSPARENT` | modem_engine.c |  | sd | Law is carried by INFO bit 39, and CP bit 35 is reserved in V.91. |
 | `ME_V92_B1U_DEADLINE_MS` | modem_engine.c | 5000 | d | acknowledgement.  ME_V92_B1U_DEADLINE_MS (diagnostic): 0 disables. |
-| `ME_V92_CPD_DEADLINE_MS` | modem_engine.c | 5000 | d | as the B1u deadline.  ME_V92_CPD_DEADLINE_MS (diagnostic): 0 disables. |
+| `ME_V92_CPD_DEADLINE_MS` | modem_engine.c | 5000 | d | either wait holds and is not reset by repeated CPds or unacknowledged |
 | `ME_V92_ENABLE` | modem_engine.c | 0 | td | under the ME_V92_ENABLE compatibility alias.  False for an unknown name. |
 | `ME_V92_JD_EXTRA_REPS` | v90.c |  | d | to move everything after Jd without changing the upstream path. |
 | `ME_V92_JD_SKIP_REPS` | v90.c |  | d | reps (ME_V92_JD_EXTRA_REPS) with no shift in time. |

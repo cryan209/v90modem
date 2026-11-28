@@ -8717,7 +8717,15 @@ static bool g_v92_cpd_undesignable = false;
  * that wait, and the peer sends nothing new to design on, so a design that
  * has not come within a few seconds never will on this training: §9.5.1.1
  * lets either modem retrain at any time.  Bounded by the same per-call cap
- * as the B1u deadline.  ME_V92_CPD_DEADLINE_MS (diagnostic): 0 disables. */
+ * as the B1u deadline.  ME_V92_CPD_DEADLINE_MS (diagnostic): 0 disables.
+ *
+ * The same wait follows a CPd that went out and was never acknowledged
+ * (9.6.1.1.3 repeats it; nothing ends it): HSF V.92 A-law on the D-Modem rig,
+ * 2026-11-28, sent 22 SUVu with ack=0, then nothing we framed at a steady
+ * level, and we sent SUVd for 50 s until it hung up.  A Phase 4 exchange
+ * takes well under a second, so the deadline counts from the first moment
+ * either wait holds and is not reset by repeated CPds or unacknowledged
+ * SUVu. */
 static uint64_t g_v92_cpd_wait_from_samples = 0;
 
 static bool v92_cpd_deadline_expired_locked(void)
@@ -8728,7 +8736,8 @@ static bool v92_cpd_deadline_expired_locked(void)
 
     if (deadline_ms < 0)
         deadline_ms = parse_env_int("ME_V92_CPD_DEADLINE_MS", 5000);
-    if (deadline_ms <= 0 || !g_v90 || !v90_v92_awaiting_cpd_design(g_v90)) {
+    if (deadline_ms <= 0 || !g_v90
+        || !(v90_v92_awaiting_cpd_design(g_v90) || v90_v92_awaiting_cpd_ack(g_v90))) {
         g_v92_cpd_wait_from_samples = 0;
         return false;
     }
@@ -8748,10 +8757,16 @@ static bool v92_cpd_deadline_expired_locked(void)
     }
     g_v90_abandon_retrains++;
     g_v92_cpd_undesignable = true;
-    ME_LOG("[ME] V.92 9.6.1.1.2: no CPd designable from the TRN2u %d ms after "
-           "SUVu (+5 x %d ms round trip); initiating a §9.5.1.1 retrain "
-           "(%d of %d)\n", deadline_ms, rtd/8, g_v90_abandon_retrains,
-           ME_V90_MAX_ABANDON_RETRAINS);
+    if (v90_v92_awaiting_cpd_ack(g_v90))
+        ME_LOG("[ME] V.92 9.6.1.1.3: our CPd unacknowledged %d ms on "
+               "(+5 x %d ms round trip); initiating a §9.5.1.1 retrain "
+               "without the PCM upstream (%d of %d)\n", deadline_ms, rtd/8,
+               g_v90_abandon_retrains, ME_V90_MAX_ABANDON_RETRAINS);
+    else
+        ME_LOG("[ME] V.92 9.6.1.1.2: no CPd designable from the TRN2u %d ms after "
+               "SUVu (+5 x %d ms round trip); initiating a §9.5.1.1 retrain "
+               "(%d of %d)\n", deadline_ms, rtd/8, g_v90_abandon_retrains,
+               ME_V90_MAX_ABANDON_RETRAINS);
     trace_phase("V92 CPd deadline -> retrain");
     return true;
 }
@@ -21233,7 +21248,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             return false;
         }
         if (v92_cpd_deadline_expired_locked()) {
-            (void) restart_v90_phase2_locked("no CPd designable from TRN2u");
+            (void) restart_v90_phase2_locked("no CPd exchange completed (9.6.1.1.2-3)");
             return false;
         }
 

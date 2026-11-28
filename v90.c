@@ -1291,6 +1291,18 @@ bool v90_v92_awaiting_cpd_design(const v90_state_t *s)
         && !s->v92_rn_await_sigma;
 }
 
+bool v90_v92_awaiting_cpd_ack(const v90_state_t *s)
+{
+    return s
+        && s->v92_native_cpu_rx
+        && (s->tx_phase == V90_TX_SUVD || s->tx_phase == V90_TX_CP)
+        && s->v92_cpd_sent
+        && !s->v92_remote_ack_received
+        && !s->v92_rn_await_sigma
+        && !s->v92_cleardown
+        && !s->v92_peer_cleardown;
+}
+
 double v90_get_v92_upstream_design_sigma(const v90_state_t *s)
 {
     return s ? s->v92_upstream_design_sigma : 0.0;

@@ -522,6 +522,9 @@ bool v90_v92_cpd_designed(const v90_state_t *s);
  * sending SUVd because no CPd can be designed from its TRN2u (the startup
  * exchange, not a 9.8 renegotiation's sigma wait). */
 bool v90_v92_awaiting_cpd_design(const v90_state_t *s);
+/* V.92 Phase 4: our CPd is out and the analogue modem has not acknowledged
+ * it (9.6.1.1.3/9.6.1.1.4) -- the wait the CPd deadline also bounds. */
+bool v90_v92_awaiting_cpd_ack(const v90_state_t *s);
 
 /* V.92 9.8 (Table 24): a CPus received during rate renegotiation (the
  * downstream modulation is unchanged). */
