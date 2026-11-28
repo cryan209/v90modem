@@ -1138,6 +1138,77 @@ reset the trellis encoder either), against at most 0.259 from the reset.
   in it (no "B1 found" line), and the pairs passed 6 of 6 on rerun. Open:
   an intermittent upstream data miss there, not yet investigated.
 
+### Our CI ran into the answerer's ANSam (2026-11-28)
+
+`we_intel_v34_ulaw` and `we_sl_v34_ulaw` are our plain V.34 call modem
+against Intel's and SmartLink's answer modems, at 9600 Hz with no loop, as
+D-Modem's own rows run them (`NET=8000:9600`, `INTEL_RATE=9600`; the peers'
+AT strings are D-Modem's, `AT+MS=V34` and `AT+MS=34`). Neither connected.
+SmartLink logged "Time Out Waiting For CM", and we never decoded a JM
+("modulations=none"). Intel answered, but our receiver never decoded its
+INFO0a.
+
+Both were our CI. V.8 8.1.1 has the calling modem send CI until it detects
+the answer tone. Our ANSam detector needs 550 ms of steady 2100 Hz (or three
+450 ms reversal cycles) before it says so, and our CI bursts went on through
+that time: the V.25 4.3 hold ended at 3.0 s, and four bursts went out on top
+of the answerer's ANSam. With `ME_V8_NO_CI=1` SmartLink connected at 33600,
+data exact. It is the same failure the 4.3 hold already avoids for slmodemd,
+whose ANSam started under our second burst.
+
+Fix (`v8.c`, `V8_CI_OFF`): no new CI burst starts while the detector's notch
+test says 2100 Hz dominates the line (`tone_on`), for at most 2 s, which
+returns a tone that never resolves to CI.
+
+**Results:**
+- `we_intel_v34_ulaw` and `we_sl_v34_ulaw`: CONNECT 33600, data exact both
+  ways (0 of 2 before).
+- D-Modem matrix: 25 of 27, with both new rows passing. The misses were
+  `hsf_v92_alaw` and `ess_v90_ulaw`, where we are the answer modem, so this
+  change cannot reach them. Both are fixed in the next two sections.
+
+### V.92: our CPd went unacknowledged forever (2026-11-28)
+
+`hsf_v92_alaw` hung for 50 s. One of the two HSF V.92 rows also failed in
+each of two earlier matrix runs that day. The CPd deadline (below,
+2026-11-27) covers a TRN2u that no CPd can be designed from. In this call
+the CPd was designed and sent. The HSF sent 22 SUVu with ack = 0, then
+nothing we framed, at a steady RMS of 3469. We sent SUVd until it hung up.
+§9.6.1.1.3 repeats the CPd only on a received unacknowledged SUVu/CPu, and
+none came.
+
+Fix (`modem_engine.c`, `v92_cpd_deadline_expired_locked()`;
+`v90_v92_awaiting_cpd_ack()` in `v90.c`): the deadline (5 s plus 5 round
+trips) also bounds a CPd that is out and unacknowledged. It counts from
+when either wait begins, so repeated CPds and unacknowledged SUVu do not
+reset it. It ends in the same §9.5.1.1 retrain without the PCM upstream
+offer. HSF V.92: 6 of 6 over three runs (V.34 26400). The new path fired in
+one of them and recovered.
+
+### V.90: our Rd waited for a pull that started on a data frame (2026-11-28)
+
+`ess_v90_ulaw` connected and then lost data: 4096 of 6606 octets
+downstream. The call then retrained down to 16800, where it read white. ESS opened a §9.6
+renegotiation (S of 40 ms, 128T, at 229/1829/3429 Hz) and we logged "Rate
+renegotiation requested; starting at the next data frame boundary". No Rd
+followed for 4.5 s, until ESS retrained. In a passing run of the same row
+the Rd went out at once.
+
+§9.6 starts Rd only on a data frame boundary. The engine checked for one
+only at the start of a transmit pull, and only V.92 first ran the mapper on
+to the next boundary. A V.90 pull rarely ends on a 6-symbol frame. With
+pull sizes whose phase never brought a boundary round, Rd never went out.
+Now V.90 runs the mapper to the boundary too, then starts Rd
+(`generate_v90_raw_codewords_locked()`). ESS V.90 and V.92 μ-law: 12 of 12
+over six runs, and every request sent its Rd (7 requests, 7 Rd).
+
+**D-Modem matrix with all three fixes: 27 of 27**, data exact on every row.
+That is the first full sweep that includes the Intel and SmartLink V.34 rows.
+
+**K56flex against the native HSF (slow.list:24), the miss noted above:**
+`test_k56flex_rates.py --peer native-hsf` passed 45 of 45 over three runs at
+`-j3`. It has shown only under the full suite's load. Still open.
+
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 
 **Both HSF V.92 rows pass, by falling back to V.34.** `hsf_v92_ulaw` and

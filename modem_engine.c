@@ -21581,11 +21581,16 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
          * transmitter only on the boundary of a data frame."  This is that
          * boundary -- the point at which the next frame would be mapped. */
         me_v92_rn_check_locked();
-        if (g_v92_active && v90_rate_renegotiation_pending(g_v90)
+        if (v90_rate_renegotiation_pending(g_v90)
             && g_v90_data_frame_pos < V90_DATA_FRAME_LEN) {
-            /* V.92's data mode does not start on a block boundary (see
-             * enter_v90_data_locked()), so neither do its data frames: run
-             * the mapper up to the next one and start Rd there (9.8). */
+            /* A pull rarely ends on a data frame: run the mapper up to the
+             * next boundary and start Rd there (§9.6.1.1, V.92 9.8).  V.92's
+             * data mode does not even start on one (enter_v90_data_locked()).
+             * V.90 used to wait for a pull that happened to start on a
+             * boundary, and with pull sizes whose phase never brought one
+             * round it never sent Rd at all: ESS's §9.6 S on the D-Modem rig
+             * (2026-11-28) went unanswered for 4.5 s, the link stalled at
+             * 4096 octets, and the call retrained down to white 16800. */
             int k = V90_DATA_FRAME_LEN - g_v90_data_frame_pos;
 
             if (k > len)
