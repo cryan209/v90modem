@@ -11388,6 +11388,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        contain enough ones that combining it with the first few
                        E bits falsely detects E up to 18 symbols early. */
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
+                    /* The descrambler is self-synchronising: its register is
+                       the last 23 scrambled bits received, which is the far
+                       end's scrambler register now.  10.1.3.1 resets that
+                       before B1; v34_rx_b1_search() tries this state when no
+                       reset-state template fits. */
+                    s->b1_carried_seed = (s->scramble_reg & 0x7FFFFF) | 0x800000;
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
                     /* Use the same reset-state B1 entry as the offline and
@@ -21540,6 +21546,12 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     if (states <= 0  ||  states > 64)
         states = 1;
     /*endif*/
+    /* Plain V.34 starts from 10.1.3.1's reset scrambler; the carried state
+       below is tried only if that finds nothing.  (V.90 sets its own seed in
+       v90_t3_carried_b1().) */
+    if (!s->v90_mode)
+        s->v90_t3_b1_seed = 0;
+    /*endif*/
     b1_template_skip_cma = true;
     /* The same peer also sends one mapping frame more than 10.1.3.2's E
        before B1 (the +8 symbols v34_rx_b1_search_symbols() is sized for), and
@@ -21600,6 +21612,83 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     }
     /*endfor*/
     v34_free(model);
+    model = NULL;
+    /* 10.1.3.1 resets the scrambler before B1.  An ESS answer modem does not:
+       its scrambler runs on from E, so no reset-state template fits at any
+       offset, trellis state or switching-pattern phase (0.19-0.28 at every
+       symbol rate, and the B1 calibration then turned the whole data mode
+       white -- D-Modem we_ess_v34_ulaw, 2026-11-28).  The ESS V.90 analogue
+       modem does the same into its upstream B1 (v90_t3_carried_b1()).  Our
+       descrambler's register at the end of E is the far end's scrambler
+       register, so build the templates from it once. */
+    if (best < 0.9f  &&  !s->v90_mode  &&  (s->b1_carried_seed & 0x800000))
+    {
+        float carried_best = -1.0f;
+        int carried_state = 0;
+        int carried_offset = 0;
+        int carried_swp = 0;
+
+        s->v90_t3_b1_seed = s->b1_carried_seed;
+        for (int swp = 0;  swp <= 1;  swp++)
+        {
+            if (swp > 0  &&  (carried_best >= 0.9f  ||  s->parms.r >= s->parms.p))
+                break;
+            /*endif*/
+            s->b1_swp_frames = swp;
+            for (int st = 0;  st < states;  st++)
+            {
+                if (model == NULL)
+                {
+                    if ((model = b1_template_model(s, v34_expected_b1_default_tap(s), -1)) == NULL)
+                        break;
+                    /*endif*/
+                    seeded = model->tx;
+                }
+                /*endif*/
+                model->tx = seeded;
+                if (!b1_template_generate(s, model, st))
+                    break;
+                /*endif*/
+                for (int k = 0;  k <= search;  k++)
+                {
+                    float score = v34_rx_b1_score_at(s, k);
+
+                    if (score > carried_best)
+                    {
+                        carried_best = score;
+                        carried_state = st;
+                        carried_offset = k;
+                        carried_swp = swp;
+                    }
+                    /*endif*/
+                }
+                /*endfor*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+        v34_free(model);
+        model = NULL;
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - B1 from the scrambler state carried on from E (seed 0x%06X): "
+                 "correlation %.3f at +%d, state %d (reset-state best %.3f)\n",
+                 (unsigned) (s->b1_carried_seed & 0x7FFFFF), carried_best,
+                 carried_offset, carried_state, best);
+        if (carried_best > best)
+        {
+            best = carried_best;
+            best_state = carried_state;
+            best_offset = carried_offset;
+            best_swp = carried_swp;
+        }
+        else
+        {
+            s->v90_t3_b1_seed = 0;
+        }
+        /*endif*/
+    }
+    /*endif*/
+    s->b1_carried_seed = 0;
     s->b1_swp_frames = best_swp;
     b1_template_skip_cma = false;
     (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);

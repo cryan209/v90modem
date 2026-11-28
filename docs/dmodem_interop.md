@@ -1101,6 +1101,43 @@ not cover.
   CONNECT 31200 with LCP, the third with `V34_TEST_DROP_INFO0A=1`, which
   went through the INFO0 retry.
 
+### ESS as V.34 answer modem: B1 from the scrambler carried on from E (2026-11-28)
+
+`we_ess_v34_ulaw` (our plain V.34 call modem, the ESS answering) reached
+data mode and corrupted it: CONNECT 19200 on our side and 14400 on the
+ESS's, 85359 octets received for 7340 sent. Our receiver never decoded the
+ESS. B1 correlated 0.19-0.28 at every offset, trellis state and
+switching-pattern phase, at every symbol rate we retrained to
+(3429, 3200, 3000, 2800). The data mode then read white (distance to grid
+0.66) at 24-36 dB receive SNR, and the §11.6 renegotiations that followed
+did the same. The ESS received our data.
+
+V.34 §10.1.3.1 resets the scrambler (and trellis encoder, differential
+encoder and precoder) before B1. The ESS does not: its scrambler runs on
+from E, the same thing its V.90 analogue modem does into the upstream B1
+(21da3dfa). The descrambler is self-synchronising, so at the end of E our
+register is the last 23 scrambled bits received, which is the far end's
+scrambler register. `v34_rx_b1_search()` now builds its templates from that
+register once, when no reset-state template reaches 0.9 (plain V.34 only;
+V.90 keeps `v90_t3_carried_b1()`). From the carried state the ESS's B1
+correlates **1.000** at offset 0, often from trellis state 4 (it does not
+reset the trellis encoder either), against at most 0.259 from the reset.
+
+**Results:**
+- `we_ess_v34_ulaw`, alternated against 815fd52a: 2 of 2 CONNECT 33600
+  with data exact both ways, against 0 of 2 (CONNECT 19200, corrupt).
+  Every B1 in those calls, the startup's and each renegotiation's, fitted
+  at 1.000.
+- D-Modem matrix with `we_ess_v34_ulaw` added to it: 25 of 25. The carried
+  state was tried only in the ESS row (3 B1s, each 1.000); every other
+  row's B1 fitted from the reset state, so their path is unchanged.
+- `make test`: 814 of 816. slow.list:67 fails on HEAD too. slow.list:24
+  (K56flex against the native HSF) lost upstream octets on one pair: 32000
+  here, 42000 in an earlier run today, with training complete and downstream
+  exact. That test acquires B1 on the T/3 path, so this search never runs
+  in it (no "B1 found" line), and the pairs passed 6 of 6 on rerun. Open:
+  an intermittent upstream data miss there, not yet investigated.
+
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 
 **Both HSF V.92 rows pass, by falling back to V.34.** `hsf_v92_ulaw` and

@@ -1908,6 +1908,10 @@ typedef struct
         for this acquisition.  Read off the CP'/E that precedes B1
         (v90_t3_carried_b1()). */
     uint32_t v90_t3_b1_seed;
+    /* Plain V.34: the far end's scrambler register at the end of E, read
+       off this receiver's descrambler (bit 23 set when valid), for a peer
+       that does not reset its scrambler before B1 (10.1.3.1). */
+    uint32_t b1_carried_seed;
     int64_t v90_t3_srch_state_anchor;
     bool v90_t3_srch_expanded;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */

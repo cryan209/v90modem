@@ -45,6 +45,7 @@ rows=(
 "we_hsf_v34_ulaw|hsf|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
 "we_agere_v34_ulaw|agere|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
 "we_broadcom_v34_ulaw|broadcom|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
+"we_ess_v34_ulaw|ess|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
 "we_courier_v32b_ulaw|courier|ATX3;AT+MS=V32B|$CV32|$LOOP NET=8000:8000:ulaw|we"
 "we_courier_v22b_ulaw|courier|ATX3;AT+MS=V22B|$CV22|$LOOP NET=8000:8000:ulaw|we"
 )
