@@ -1663,6 +1663,24 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 5933dc6f (2026-11-28)
+
+On top of 4690e668, this deploy adds 5933dc6f. The plain V.34 answer modem
+sends its Tone A phase reversal again when no Tone B reversal comes within
+2000 ms (§11.2.2.2.2). Before, a §11.5 retrain against the HSF could wait
+there forever. Details: `docs/dmodem_interop.md`, "Our answer modem never
+re-reversed Tone A".
+
+Built in `/root/deploy-5640b4d3` at 5933dc6f; the log is
+`/root/deploy-5933dc6f.build.log`. Binary md5 `36256728…`, kept as
+`/opt/v90ras/sip_v90_modem.5933dc6f`; the previous one as
+`sip_v90_modem.pre-5933dc6f`. Installed by rename at 15:44, with busy empty
+and no PPP interface up. Only v90ras restarted.
+
+Live from CT 128 (`half_sip_call.py --harness ./half_hsf`, 2950, plain
+V.34): 2 of 2, CONNECT at 17.5 s, LCP echoes 40/40, pings 40/40, 0 bad
+frames.
+
 ## Deployed 4690e668 (2026-11-28)
 
 On top of 276cb70b, this deploy adds three fixes. Details are in
