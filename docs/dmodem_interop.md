@@ -1216,6 +1216,15 @@ That is the first full sweep that includes the Intel and SmartLink V.34 rows.
 `test_k56flex_rates.py --peer native-hsf` passed 45 of 45 over three runs at
 `-j3`. It has shown only under the full suite's load. Still open.
 
+Solved the same day, and it was the test. Under 8 busy-loop processes it failed
+1 pair in 30 (58000 ceiling row). The upstream there was 8206 bytes against
+8192 sent: the 8192 payload octets, exact, then `\r\nNO CARRIER\r\n`. The carrier
+had held the whole 40 s. `k56flex_hsf_pair.py` drained the PTY one last time
+only after it had closed the audio socket, which is its own hangup. Under load
+the engine's NO CARRIER for that hangup got in ahead of the drain. The last
+drain now runs before the socket closes. Under the same load: 45 of 45 over
+three runs.
+
 ### Our answer modem never re-reversed Tone A (11.2.2.2.2) (2026-11-28)
 
 HSF calling us in plain V.34 (`/root/netdiag/v34_final.sh` on CT 128,

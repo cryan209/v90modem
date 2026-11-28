@@ -303,7 +303,12 @@ def main():
                             if client.failure:
                                 end_reason = client.failure
                                 break
-                    drain(fd, dte)
+                        # The last drain belongs before the audio socket
+                        # closes: closing it is our hangup, and the engine's
+                        # NO CARRIER for it is not upstream data. Drained
+                        # after, it raced into the graded bytes under load
+                        # (8192 exact octets + "\r\nNO CARRIER\r\n").
+                        drain(fd, dte)
                 finally:
                     if fd is not None:
                         os.close(fd)
