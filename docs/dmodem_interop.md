@@ -235,6 +235,13 @@ Still open:
   "Phase 4: Agere's CPt has a shaping zero past unity" below.
 - After a retrain our INFO1d probe can read the peer's L2 as unusable
   (SNR −8.9 dB) and offer no rates at all; the next INFO1a is then invalid.
+  Not reproduced on 2026-11-28 (at 5933dc6f). Three forced retrains against
+  Agere V.90 (`ME_V90_RETRAIN_AFTER_MS=3000`) re-offered 3000 = 12 and
+  3200 = 13 and reconnected at 53333, 3 of 3. Only 2743 and 2800 dropped
+  from 11 to 0 after the retrain.
+- Agere's first-attempt L2: not reproduced on 2026-11-28 either. Agere V.90
+  and V.92 trained at the first attempt in 10 of 10 calls (no retrain, one
+  INFO1a), Broadcom in 4 of 4.
 
 ### Phase 4: Agere's CPt has a shaping zero past unity (2026-11-25)
 
