@@ -182,6 +182,17 @@ Two things are now visible that were hidden behind it:
 - With D-Modem's own modem, HSF, Agere and Broadcom all choose a 3429-baud
   upstream. We offer 3000 and 3200 only, as V.90 6.2 allows, so a 3429 upstream
   receiver is the likely way to Broadcom.
+  (2026-11-28: no longer a failure. All three pass against us on a 3200
+  upstream: Broadcom 5 of 5, Agere and Broadcom V.90 12 of 12, HSF on its
+  V.34 fallback. A 3429 upstream would be a rate feature, 33600 up, and not
+  an interop fix. It needs INFO0d bit 40 (`v34tx.c`, now a literal 0), INFO1d's
+  3429 row, and the digital upstream path, which is fixed at 3000/3200 in at
+  least 13 places: `v90_selected_upstream_baud_locked()`, the B1/CP-live/T/3
+  rate code in `modem_engine.c`, `v90_p3_ja_grade()` and
+  `v90_upstream_replay`. Only `p3_demod.c` has 3429 tables. Setting bit 40 also
+  changes what every live V.90 caller may pick. The Intel/Conexant V.92 picks
+  3429 even unoffered (`serial-x0-2052`), so it needs a live A/B, not only this
+  matrix.)
 - Agere retrains during our Jd, and HSF during our DIL. Agere's is explained
   in the next section; HSF's is not yet.
 
