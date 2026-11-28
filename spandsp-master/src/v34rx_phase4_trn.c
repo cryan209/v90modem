@@ -915,21 +915,30 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
             (s->reneg_trn_optional
              && s->duration >= PHASE4_RENEG_MP_SEARCH_BAUD
              && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE
+             /* ...and not while the recent window reads TRN.  The lock score
+                is cumulative from the first symbol, so a receiver that took
+                a few hundred symbols to converge carries those into it: the
+                HSF's real 11.6 TRN read 78-79% overall at 100% recent on 3
+                of 20 calls (CT 128, ME_V34_RENEG_AFTER_MS=600), and leaving
+                for the MP search there cost one of them its E. */
+             && s->phase4_trn_recent_score < PHASE4_RENEG_NO_TRN_SCORE
              && (s->duration % 64) == 0
              && v34_rx_phase4_trn_ring_snr_db(s) >= PHASE4_RENEG_NO_TRN_SNR_DB
              && !phase4_reneg_trn_gate_forced()))
         {
             if (s->reneg_trn_optional
-                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
+                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE
+                && s->phase4_trn_recent_score < PHASE4_RENEG_NO_TRN_SCORE)
                 s->reneg_peer_no_trn = true;
             /*endif*/
             if (s->reneg_trn_optional
-                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE)
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%% on %.1f dB symbols "
+                && s->phase4_trn_lock_score < PHASE4_RENEG_NO_TRN_SCORE
+                && s->phase4_trn_recent_score < PHASE4_RENEG_NO_TRN_SCORE)
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - Phase 4: 11.6 with no TRN (ones-lock %d%%, recent %d%%, on %.1f dB symbols "
                          "at baud %d); searching for MP\n",
-                         s->phase4_trn_lock_score, v34_rx_phase4_trn_ring_snr_db(s),
-                         s->duration);
+                         s->phase4_trn_lock_score, s->phase4_trn_recent_score,
+                         v34_rx_phase4_trn_ring_snr_db(s), s->duration);
             /*endif*/
             int h;
             int domain_idx;

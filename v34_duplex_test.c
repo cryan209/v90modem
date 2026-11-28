@@ -444,6 +444,11 @@ static int run_case(int baud, int bps, bool alaw)
        directions on the far side of it. */
     int reneg_at = getenv("V34_DUPLEX_RENEG")
                  ? atoi(getenv("V34_DUPLEX_RENEG")) : 0;
+    /* V34_DUPLEX_RENEG_BY=answer: the ANSWER modem initiates instead and the
+       caller responds.  The two roles condition their 11.6 receivers apart
+       (no J' in 11.6, and only the call modem's Phase 4 skipped the J' gate). */
+    bool reneg_by_answer = getenv("V34_DUPLEX_RENEG_BY")
+                         && strcmp(getenv("V34_DUPLEX_RENEG_BY"), "answer") == 0;
     /* V34_DUPLEX_CLEARDOWN=<bits>: the same exercise with the caller opening
        an 11.7 cleardown instead (S, S-bar, MP requesting zero rates).  The
        answerer responds as it does to 11.6; the pass criterion is both ends
@@ -671,29 +676,35 @@ static int run_case(int baud, int bps, bool alaw)
                     answer_data_stage = answer_stage;
                 if (caller.rx_bits >= reneg_at && answer.rx_bits >= reneg_at
                     && caller_data_stage >= 0 && answer_data_stage >= 0) {
-                    if ((cleardown_at > 0 ? v34_start_cleardown(call_modem)
-                                          : v34_start_rate_renegotiation(call_modem)) == 0) {
+                    v34_state_t *initiator = reneg_by_answer ? answer_modem : call_modem;
+
+                    if ((cleardown_at > 0 ? v34_start_cleardown(initiator)
+                                          : v34_start_rate_renegotiation(initiator)) == 0) {
                         reneg_started = true;
                         reneg_block = block;
                         fprintf(stderr,
-                                "[RENEG] block=%d caller initiated 11.6 after "
+                                "[RENEG] block=%d %s initiated 11.6 after "
                                 "%d/%d payload bits\n",
-                                block, caller.rx_bits, answer.rx_bits);
+                                block, reneg_by_answer ? "answerer" : "caller",
+                                caller.rx_bits, answer.rx_bits);
                     }
                 }
             } else {
                 /* 11.6.1.2: the answerer responds off its own detection of
                    the caller's S.  V34_EVENT_PEER_RENEG_S == 20; the engine
                    mirrors the same private enum. */
-                if (v34_get_rx_event(answer_modem) == 20
-                    && !v34_rate_renegotiation_active(answer_modem)) {
-                    v34_clear_peer_reneg_s_event(answer_modem);
+                v34_state_t *responder = reneg_by_answer ? call_modem : answer_modem;
+
+                if (v34_get_rx_event(responder) == 20
+                    && !v34_rate_renegotiation_active(responder)) {
+                    v34_clear_peer_reneg_s_event(responder);
                     /* The engine's responder call (modem_engine.c), not the
                        initiator's: the two condition the receiver differently. */
-                    if (v34_answer_rate_renegotiation(answer_modem) == 0)
+                    if (v34_answer_rate_renegotiation(responder) == 0)
                         fprintf(stderr,
-                                "[RENEG] block=%d answerer detected S and "
-                                "responded per 11.6.1.2\n", block);
+                                "[RENEG] block=%d %s detected S and "
+                                "responded per 11.6.1.2\n", block,
+                                reneg_by_answer ? "caller" : "answerer");
                 }
                 if (cleardown_at > 0 && v34_cleardown_complete(call_modem)
                     && v34_cleardown_complete(answer_modem)) {

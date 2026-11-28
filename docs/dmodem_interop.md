@@ -1252,7 +1252,42 @@ FIRST_NOT_A). The log line is WARNING level, "reversing Tone A again
   816; slow.list:67 fails on HEAD too.
 - Still open: why our §11.6 after a fall-forward or step-down gets no E
   from the HSF (about 1 call in 20). With `ME_V34_SPAN_FLOW_LOG=1` it did
-  not reproduce in 28 calls; the logging changes the timing.
+  not reproduce in 28 calls; the logging changes the timing. Found the next
+  day, below.
+
+### Our §11.6 receiver took the HSF's TRN for "no TRN" (2026-11-28)
+
+The ~1 in 20 §11.6 with no E from the HSF. Reproduced with
+`ME_V34_RENEG_AFTER_MS=600` (an 11.6 600 ms into data, every call) from
+`/root/netdiag/v34_rn20.sh` on CT 128, 20 calls at `NET_DELAY` 1 and 2.
+
+The cause was our receiver. 11.6.1.1.1 and 11.6.1.2.2 make TRN optional, so
+`v34rx_phase4_trn.c` decides at 512 bauds into PHASE4_TRN whether the peer sent
+any. If it decides "no", it starts the MP search on the symbols it has. The
+test was the TRN ones-lock score below 80% on symbols cleaner than 20 dB. That
+score is cumulative from the first scored symbol, so a receiver that took a
+few hundred symbols to converge carries them in it. On 3 of the 20 calls the
+HSF's real TRN read 78-79% overall while the recent window read 100% (the new
+WARNING line, below). We left TRN for the MP search there on an equalizer half
+trained. As initiator we send no TRN of our own (`ME_V34_RENEG_INIT_TRN_MS`
+defaults to 0), so the HSF's TRN is the only training we get. One of the 3
+then never decoded the HSF's MP: no E, then a §11.5 retrain.
+
+The fix: the "no TRN" verdict also needs the recent window
+(`phase4_trn_recent_score`) below 80%. A peer that really sends no TRN still
+gets it: MP reads 50-64% in both scores (duplex responder after an initiator
+with no TRN: 66% cumulative, 50% recent).
+
+- Before, the same 20 calls: 3 false "no TRN" verdicts, 1 no E, 1 §11.5
+  retrain. After: 0, 0, 0, and 20 of 20 connected.
+- The verdict is now a WARNING line, "11.6 with no TRN (ones-lock N%, recent
+  N%, on N dB symbols at baud N)", so a live log shows it.
+- `v34_duplex_test` takes `V34_DUPLEX_RENEG_BY=answer`, for an 11.6 opened by
+  the answer modem (v90ras's case). Three such rows are in fast.list. The
+  false verdict does not reproduce in loopback: our receiver converges on our
+  own TRN inside the first window.
+- `make test-fast` 790 of 790. The 11.6 rows, the cleardown rows, the
+  no-TRN test hook rows and the V.34 fall-forward pair rows: 33 of 33.
 
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 

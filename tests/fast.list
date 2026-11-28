@@ -363,6 +363,11 @@ V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=3 ./v34_duplex_test 3000 9600 ulaw
 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw
 V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=23 ./v34_duplex_test 3200 9600 ulaw
 V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=5 ./v34_duplex_test 3200 9600 alaw
+# The same with the ANSWER modem opening the 11.6 and the caller responding
+# (v90ras answers every call and opens its own 11.6s; nothing covered it).
+V34_DUPLEX_RENEG_BY=answer V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 ulaw
+V34_DUPLEX_RENEG_BY=answer V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 alaw
+V34_DUPLEX_RENEG_BY=answer V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3429 31200 ulaw
 # V.34 clause 12 half-duplex: the control channel start-up of 12.4, run
 # end to end between a source and a recipient over G.711.  Each row goes
 # through Phase 2 (INFOh), Phase 3 (S/S-bar/PP/TRN), then PPh, ALT, the MPh
