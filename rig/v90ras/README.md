@@ -1663,6 +1663,33 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 4690e668 (2026-11-28)
+
+On top of 276cb70b, this deploy adds three fixes. Details are in
+`docs/dmodem_interop.md`.
+- cdc5165a: our V.8 caller holds CI while a 2100 Hz answer tone is on the
+  line. v90ras does not originate calls, so this does not reach it.
+- c702f18e: the V.92 CPd deadline also bounds a CPd that is never
+  acknowledged.
+- 4690e668: a V.90 Rd runs the mapper on to the next data frame boundary
+  instead of waiting for a pull that starts on one. Before, a peer's §9.6
+  could go unanswered.
+
+Built in `/root/deploy-5640b4d3` at 4690e668; the log is
+`/root/deploy-4690e668.build.log`. Binary md5 `e18c6cb7…`, kept as
+`/opt/v90ras/sip_v90_modem.4690e668`; the previous one as
+`sip_v90_modem.pre-4690e668`. Installed by rename at 15:15, with busy empty
+and no PPP interface up. Only v90ras restarted.
+
+Live from CT 128 (`half_sip_call.py`, 2950):
+- HSF plain V.34: 2 of 2, CONNECT at 17.5-17.6 s, LCP echoes 40/40, pings
+  40/40, 0 bad frames.
+- ESS V.90 (`ATX3;AT+MS=V90`): CONNECT 52000 2 of 2. ESS renegotiated twice
+  in each call, and every request sent its Rd at once. Pings were 40/40 in
+  both calls, with 0 bad frames. LCP echoes were 40/40 in one call and 39/40
+  in the other, which the harness grades as a FAIL; the lost echo probably
+  fell inside a renegotiation, while DTE data is held.
+
 ## Deployed 276cb70b (2026-11-28)
 
 On top of 815fd52a, this deploy adds 276cb70b: when no reset-state B1
