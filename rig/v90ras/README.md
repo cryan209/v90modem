@@ -1663,6 +1663,25 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 815fd52a (2026-11-28)
+
+On top of a4a5fe2c, this deploy adds d19cb1b0 (originated calls replay the
+post-JM audio into Phase 2) and 815fd52a (details in `docs/dmodem_interop.md`,
+"Our call modem: one-point preamble and §11.2.2.1.1 recovery"). For calls
+v90ras answers, the change is the K56flex answerer: a repeated INFO0c with
+bit 28 clear now gets INFO0a repeated (§11.2.2.2.1), not Tone A. The rest is
+call-modem code, which v90ras does not run.
+
+Built in `/root/deploy-5640b4d3` at 815fd52a; the log is
+`/root/deploy-815fd52a.build.log`. Binary md5 `f8fc76c0…`, kept as
+`/opt/v90ras/sip_v90_modem.815fd52a`. The previous binary (a4a5fe2c) is kept
+as `sip_v90_modem.pre-815fd52a`. Installed by rename at 14:05, with busy
+empty and no PPP interface up. Only v90ras restarted.
+
+Live from CT 128 (`half_sip_call.py --harness ./half_hsf`, 2950, plain
+V.34): 2 of 2, CONNECT at 17.5-17.6 s, LCP echoes 20/20, pings 20/20, 0 bad
+frames.
+
 ## Deployed a4a5fe2c (2026-11-28)
 
 On top of 07de727e, this deploy adds 3cc6b3c5 and a4a5fe2c (details in
