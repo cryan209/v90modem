@@ -1663,6 +1663,24 @@ Built in `/root/deploy-5640b4d3`, checked out at 9e7f5cf4
 present. The restart logged 20 v90ras "registration success" lines, and
 v90isdn logged "SIP V.90 modem ready".
 
+## Deployed 276cb70b (2026-11-28)
+
+On top of 815fd52a, this deploy adds 276cb70b: when no reset-state B1
+template fits, the plain V.34 receiver tries the scrambler state carried on
+from E (V.34 §10.1.3.1; the ESS answer modem's B1 then fits at 1.000). It
+runs only after the reset-state search has failed, so a peer that resets is
+unaffected. Details: `docs/dmodem_interop.md`, "ESS as V.34 answer modem".
+
+Built in `/root/deploy-5640b4d3` at 276cb70b; the log is
+`/root/deploy-276cb70b.build.log`. Binary md5 `c0844fc3…`, kept as
+`/opt/v90ras/sip_v90_modem.276cb70b`; the previous one as
+`sip_v90_modem.pre-276cb70b`. Installed by rename at 14:21, with busy empty
+and no PPP interface up. Only v90ras restarted.
+
+Live from CT 128 (`half_sip_call.py --harness ./half_hsf`, 2950, plain
+V.34): 2 of 2, CONNECT at 17.6 s, LCP echoes 20/20, pings 20/20, 0 bad
+frames.
+
 ## Deployed 815fd52a (2026-11-28)
 
 On top of a4a5fe2c, this deploy adds d19cb1b0 (originated calls replay the
