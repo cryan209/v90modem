@@ -53,6 +53,9 @@ struct v8_state_s
     /* Calling role: samples since V.8 started, while CI is in use, for
        keeping CI out of the V.25 4.3 answer-tone onset window. */
     int ci_elapsed_samples;
+    /* Calling role: samples a CI burst has been held back because a
+       2100 Hz answer tone is already on the line (V8_CI_OFF). */
+    int ci_tone_hold_samples;
     /* Calling role: samples since CM (re)started, and the silent gap before
        a CM restart (see V8_CM_ON). */
     int cm_on_samples;

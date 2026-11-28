@@ -17,7 +17,8 @@ T=${DMODEM_TEST:-/root/D-Modem/build/dsp/test}
 US=${HALF_V90MODEM:-$(cd "$(dirname "$0")/.." && pwd)/half_v90modem}
 V92Q="ATX3;AT+MS=V92;AT+PIG=0;AT+PQC=0"
 LOOP="NET_LOOP=0.45"
-# The "we" V.34 rows are our plain V.34 call modem; V34_TEST_DROP_INFO0A=1 in
+# The "we" V.34 rows are our plain V.34 call modem (Intel and SmartLink as
+# D-Modem runs them, at 9600 Hz with no loop); V34_TEST_DROP_INFO0A=1 in
 # the environment drives it through 11.2.2.1.1 against each answerer.
 # The emulated Courier's V.34/V.90 does not work even against D-Modem's own
 # modem, so its rows are V.32bis and V.22bis, picked by S registers.
@@ -46,6 +47,8 @@ rows=(
 "we_agere_v34_ulaw|agere|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
 "we_broadcom_v34_ulaw|broadcom|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
 "we_ess_v34_ulaw|ess|ATX3;AT+MS=V34|ATX3;AT+MS=V34|$LOOP NET=8000:8000:ulaw|we"
+"we_intel_v34_ulaw|intel|ATX3;AT+MS=V34|ATX3;AT+MS=V34|INTEL_RATE=9600 NET=8000:9600:ulaw|we"
+"we_sl_v34_ulaw|smartlink|ATX3;AT+MS=V34|ATX3;AT+MS=34|NET=8000:9600:ulaw|we"
 "we_courier_v32b_ulaw|courier|ATX3;AT+MS=V32B|$CV32|$LOOP NET=8000:8000:ulaw|we"
 "we_courier_v22b_ulaw|courier|ATX3;AT+MS=V22B|$CV22|$LOOP NET=8000:8000:ulaw|we"
 )

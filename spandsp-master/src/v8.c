@@ -125,6 +125,9 @@ enum
 #define CI_BURST_MS             400
 #define CI_HOLD_FROM_MS         1800
 #define CI_HOLD_UNTIL_MS        3000
+/* Longest a CI burst waits on a 2100 Hz tone the detector has not yet
+   called ANS or ANSam (it needs 550 ms steady, or three 450 ms cycles). */
+#define CI_TONE_HOLD_MAX_MS     2000
 
 SPAN_DECLARE(const char *) v8_status_to_str(int status)
 {
@@ -1432,8 +1435,31 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "CI held through the V.25 4.3 answer-tone window\n");
             }
+            else if (s->ci_timer <= 0
+                     &&
+                     s->ansam_rx.tone_on
+                     &&
+                     s->ci_tone_hold_samples < milliseconds_to_samples(CI_TONE_HOLD_MAX_MS))
+            {
+                /* V.8 8.1.1: CI goes on only until the answer tone is
+                   detected.  The detector takes 550 ms of steady tone (or
+                   three reversals) to call it ANSam, and a burst started in
+                   that time lands on the answerer's ANSam: SmartLink's
+                   library answering our V.34 call never decoded our CM after
+                   the four CI bursts we sent into its ANSam ("Time Out
+                   Waiting For CM"), and answered at once without them.  So
+                   no new burst while 2100 Hz dominates the line; the cap
+                   hands a tone that never resolves back to CI. */
+                if (s->ci_tone_hold_samples == 0)
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "CI held: 2100 Hz on the line, awaiting the answer tone's verdict (V.8 8.1.1)\n");
+                /*endif*/
+                s->ci_tone_hold_samples += len;
+                s->ci_timer = milliseconds_to_samples(20);
+            }
             else if (s->ci_timer <= 0)
             {
+                s->ci_tone_hold_samples = 0;
                 /* V.8 has the calling DCE repeat CI until it detects ANSam;
                    the overall limit belongs to the modem's carrier-wait
                    timer (S7, typically 50-60 s), not to ten repetitions.  A
@@ -1885,6 +1911,7 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
             s->negotiation_timer = milliseconds_to_samples(1000);
             s->ci_repetition_count = 0;
             s->ci_elapsed_samples = 0;
+            s->ci_tone_hold_samples = 0;
         }
         else
         {
