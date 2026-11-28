@@ -4045,10 +4045,17 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.tone_duration = tone_b_reversal_age(s);
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
         }
-        else if (s->tx.v90_mode
-                 &&  s->tx.calling_party
+        else if (((s->tx.v90_mode  &&  s->tx.calling_party)
+                  ||
+                  (!s->tx.v90_mode  &&  !s->tx.calling_party  &&  s->tx.duplex))
                  &&  ++s->tx.tone_duration >= V90_ANALOGUE_TONE_B_REV_TIMEOUT_BAUDS)
         {
+            /* The plain V.34 answer modem has the same rule, 11.2.2.2.2: no
+               Tone B phase reversal within 2000 ms of ours, so detect Tone B
+               again and proceed per 11.2.1.2.3.  Without it a §11.5 retrain
+               against the HSF calling us (D-Modem rig, after our §11.6 got
+               no E) held !A for 89 s, 3 of 3 such retrains, until the call
+               was dropped. */
             /* V.90 9.2.2.2.2: "If, in 9.2.2.1.4, the analogue modem does not
                detect the Tone B phase reversal within 2000 ms, the analogue
                modem shall condition its receiver to detect Tone B and then
@@ -4057,9 +4064,10 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                modem missed or set aside our reversal (ours does, for one that
                follows an INFO0a frame by under 120 ms, 9.2.1.2.1 recovery)
                both sides waited for each other until the call timed out. */
-            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_WARNING,
                      "Tx - FIRST_NOT_A: no Tone B reversal in 2000 ms, "
-                     "reversing Tone A again (9.2.2.2.2)\n");
+                     "reversing Tone A again (%s)\n",
+                     s->tx.v90_mode ? "9.2.2.2.2" : "V.34 11.2.2.2.2");
             s->rx.received_event = V34_EVENT_NONE;
             s->rx.tone_b_ended = false;
             s->tx.lastbit.re = -s->tx.lastbit.re;

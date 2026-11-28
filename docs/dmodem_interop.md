@@ -1209,6 +1209,44 @@ That is the first full sweep that includes the Intel and SmartLink V.34 rows.
 `test_k56flex_rates.py --peer native-hsf` passed 45 of 45 over three runs at
 `-j3`. It has shown only under the full suite's load. Still open.
 
+### Our answer modem never re-reversed Tone A (11.2.2.2.2) (2026-11-28)
+
+HSF calling us in plain V.34 (`/root/netdiag/v34_final.sh` on CT 128,
+`NET_LOOP=0.45`, delays 1-4): 18 of 20 calls connected, then 39 of 40. Every
+failure ended the same way. Our §11.6 got no E: either the data went white
+at 33600 and we stepped down, or B1 fell forward to 31200. The §11.5 retrain
+that followed then stalled with our transmitter in FIRST_NOT_A. We had sent
+the Tone A phase reversal of 11.2.1.2.3, the HSF's Tone B never reversed in
+answer, and we waited 89 s until the call was dropped. That was 3 of 3 such
+retrains.
+
+§11.2.2.2.2: "If, in 11.2.1.2.4, the answer modem does not detect the Tone B
+phase reversal within 2000 ms, the answer modem shall condition its receiver
+to detect Tone B and then proceed according to 11.2.1.2.3." So it sends the
+reversal again. We already did this for the V.90 analogue modem (V.90
+9.2.2.2.2), but not for the plain V.34 answer modem. Now both do (`v34tx.c`,
+FIRST_NOT_A). The log line is WARNING level, "reversing Tone A again
+(V.34 11.2.2.2.2)".
+
+**Results:**
+- The same 40 calls: 40 of 40. Two of them retrained, one after our §11.6
+  got no E. In that one FIRST_NOT_A lasted about 2.5 s (the 2000 ms plus a
+  round trip), then the HSF reversed and the call reached data. Before, all
+  three such retrains stalled.
+- Raising the 3429-baud 33600 threshold by the 0.5 dB margin (31.5 to
+  32.0 dB) was tried and reverted. The two white-at-33600 calls read
+  31.7 dB, but our own clean loopback (`engine_pair_test --fdm-slot 5`,
+  fast.list:806) reads 31.4-31.8 dB too and is clean at 33600, so the
+  threshold cannot tell them apart. The B1-style refit reads 34.5-35.4 dB
+  (31200) in both.
+- D-Modem matrix: 26 of 27. The miss was `hsf_v92_ulaw`, the known HSF
+  V.92 fallback flake: it retrained twice on the V.90 path, which this
+  change does not touch, and the new rule never fired. `make test`: 815 of
+  816; slow.list:67 fails on HEAD too.
+- Still open: why our §11.6 after a fall-forward or step-down gets no E
+  from the HSF (about 1 call in 20). With `ME_V34_SPAN_FLOW_LOG=1` it did
+  not reproduce in 28 calls; the logging changes the timing.
+
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 
 **Both HSF V.92 rows pass, by falling back to V.34.** `hsf_v92_ulaw` and
