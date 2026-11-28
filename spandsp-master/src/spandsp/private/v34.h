@@ -1156,6 +1156,8 @@ typedef struct
     /* Plain V.34 answer modem repeating INFO0a for a repeated INFO0c
        without bit 28 (11.2.2.2.1); INFO0_RETRY ends it. */
     bool plain_info0c_recovery;
+    /* 11.2.2.1.1, plain V.34 call modem: repeating INFO0c. */
+    bool plain_info0a_recovery;
     /* k56_repeated_info0c_reranging(): FIRST_A waits for Tone B afresh. */
     bool k56_info0_rerange;
     /* K56flex: receive-clock time of our 11.2.1.2.3 Tone A reversal, and
@@ -2409,6 +2411,16 @@ typedef struct
     /* K56flex startup or plain duplex V.34, answer side: an INFO0c arrived
        after the first (11.2.2.2.1); v34tx.c re-ranges from 11.2.1.2.3. */
     bool repeated_info0c_pending;
+    /* Plain duplex V.34, call side: an INFO0a arrived after the first while
+       we wait for the Tone A reversal (11.2.2.1.1). */
+    bool repeated_info0a_pending;
+    /* Plain duplex V.34, call side, before INFO0a: bauds of Tone A heard in
+       the INFO0 search (11.2.2.1.1's "detects Tone A before receiving
+       INFO0a"). */
+    int tone_a_pre_info0_run;
+    /* Some INFO0 from the peer carried bit 28 = 1: it has ours.  Durable,
+       unlike info0_acknowledgement, which each INFO0 frame rewrites. */
+    bool info0_ack_seen;
     bool info1a_received;
     bool info1c_received;
     /*! K56flex Phase 2: align CC shaper delay with unshaped L1. */

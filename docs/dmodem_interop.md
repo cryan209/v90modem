@@ -1046,6 +1046,61 @@ already ran with the replay.
 - The RasFinder no longer answers on 6311 (receive silent) or 6312 (V.8
   times out), so there is no third-party V.34 answerer for this live.
 
+### Our call modem: one-point preamble and §11.2.2.1.1 recovery (2026-11-28)
+
+**Preamble.** The call modem sent 16 bauds (27 ms) of carrier before
+INFO0c, which is Tone B before INFO0c: the answer modem's §11.2.2.2.1
+trigger, the mirror of what 07de727e removed from our answerer. Every
+duplex role now sends the single point of §10.1.2.3.1. Half-duplex (fax)
+keeps 16, for the reason given at 07de727e.
+
+**§11.2.2.1.1 was missing.** Our call modem had no way to notice a missed
+INFO0a. Its receiver had no Tone A detector during the INFO0 search, so
+after a lost INFO0a it sent Tone B for the rest of the call while the
+answer modem waited in Tone A for its reversal. Measured with the JM hold
+and the preroll both removed: 34 of 240 `engine_pair_test` lines failed
+that way. Now, for the plain duplex call modem:
+- The receiver counts Tone A (20 zero bits on a real carrier, outside a
+  frame) before INFO0a, and the transmitter repeats INFO0c.
+- INFO0c carries bit 28 = 1 once INFO0a is in (the clause's NOTE). It
+  leaves the repeat for Tone B on INFO0a with bit 28 set, or on Tone A
+  with INFO0a in.
+- Waiting for the reversal, a repeated INFO0a gets INFO0c again only while
+  the answer modem has *never* shown bit 28 = 1. A Broadcom answerer that
+  had acknowledged us still sent one more INFO0a with bit 28 clear, and
+  answering it with INFO0c lost 3 of 6 calls: our INFO1c then reported 0
+  bps at every symbol rate. With the guard, 6 of 6.
+- The first Tone A reversal is confirmed by the next three bits, like the
+  answer modem's Tone B reversal: two ones mean a repeated INFO0a's fill.
+  The 40 ms to our reversal still runs from the reversal itself.
+
+**Our K56flex answerer only half-answered a repeated INFO0c.** With bit 28
+clear it went straight back to Tone A instead of repeating INFO0a, so a
+call modem that had missed INFO0a never got one. It now repeats INFO0a,
+as the plain answerer has done since a4a5fe2c. The MT5634MU repeat that
+branch was written for had bit 28 set and still takes the Tone A path.
+
+`V34_TEST_DROP_INFO0A=N` makes the plain call modem discard its first N
+good INFO0a frames. It corrupts two bits, because the single-bit CRC
+repair otherwise put a dropped frame back by flipping a bit the CRC does
+not cover.
+
+**Results:**
+- JM hold and preroll removed, recovery only: 240 of 240 `engine_pair_test`
+  lines (34 failed without it).
+- `V34_TEST_DROP_INFO0A=1` against our answerer: plain V.34 33600 and
+  K56flex 52000 both connect through the recovery (now in fast.list).
+- D-Modem, our call modem against vendor answerers (trial rows
+  `we_*_v34_ulaw`), with the first INFO0a dropped: HSF 3/3, Agere 3/3,
+  Broadcom 6/6, each through the INFO0 retry. The Intel and SmartLink rows
+  never offered V.34 with the AT strings tried, and ESS reaches 19200 but
+  corrupts data with or without this change, so those rows are not kept.
+- D-Modem matrix on the final build: the 21 original rows 21/21, and the
+  three new `we_*_v34_ulaw` rows (now in `dmodem_matrix.sh`) 3/3.
+- Live, CT 117 to v90ras (2950) through Asterisk, `ME_MODE=v34`: 3 of 3
+  CONNECT 31200 with LCP, the third with `V34_TEST_DROP_INFO0A=1`, which
+  went through the INFO0 retry.
+
 ### V.92 against the HSF: retrain when no CPd can be designed (2026-11-27)
 
 **Both HSF V.92 rows pass, by falling back to V.34.** `hsf_v92_ulaw` and

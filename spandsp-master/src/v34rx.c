@@ -5004,6 +5004,9 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
         s->info0_raw_26_27 = raw_26_27;
         s->far_capabilities.tx_clock_source = raw_26_27;
         s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
+        if (s->info0_acknowledgement)
+            s->info0_ack_seen = true;
+        /*endif*/
         if (s->v90_mode)
         {
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -6008,21 +6011,33 @@ static bool v90_test_drop_info0d(v34_rx_state_t *s)
     const char *env;
     int limit;
 
-    if (!s->v90_mode  ||  !s->calling_party  ||  s->info0_received
-        ||  s->stage != V34_RX_STAGE_INFO0)
+    if (!s->calling_party  ||  s->info0_received  ||  s->stage != V34_RX_STAGE_INFO0)
         return false;
     /*endif*/
-    /* Test hook: the analogue receiver discards its first N CRC-clean INFO0d. */
-    env = getenv("V90_TEST_DROP_INFO0D");
+    /* Test hook: the analogue receiver discards its first N CRC-clean INFO0d,
+       or (V34_TEST_DROP_INFO0A=N) the plain duplex V.34 call modem its first
+       N INFO0a, which drives it into 11.2.2.1.1 against any answer modem. */
+    if (s->v90_mode)
+        env = getenv("V90_TEST_DROP_INFO0D");
+    else if (s->duplex)
+        env = getenv("V34_TEST_DROP_INFO0A");
+    else
+        return false;
+    /*endif*/
     limit = (env  &&  env[0])  ?  atoi(env)  :  0;
     if (s->v90_test_info0d_dropped >= limit)
         return false;
     /*endif*/
     s->v90_test_info0d_dropped++;
     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
-             "Rx - V.90 test: discarding CRC-clean INFO0d %d of %d (V90_TEST_DROP_INFO0D)\n",
-             s->v90_test_info0d_dropped, limit);
+             "Rx - test: discarding CRC-clean INFO0%c %d of %d (%s)\n",
+             s->v90_mode  ?  'd'  :  'a',
+             s->v90_test_info0d_dropped, limit,
+             s->v90_mode  ?  "V90_TEST_DROP_INFO0D"  :  "V34_TEST_DROP_INFO0A");
     s->crc = 0xFFFF;
+    /* Two bit errors, so the single-bit CRC repair below cannot put the
+       frame back (it did, by flipping a bit the CRC does not cover). */
+    s->info_buf[0] ^= 0x03;
     return true;
 }
 /*- End of function --------------------------------------------------------*/
@@ -6040,8 +6055,79 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
     /* Log only sync code matches and CRC results (verbose bit logging removed) */
     switch (s->stage)
     {
+    case V34_RX_STAGE_INFO0:
+        /* 11.2.2.1.1: "If ... the call modem detects Tone A before receiving
+           INFO0a ... the call modem shall repeatedly send INFO0c sequences."
+           Nothing listened for Tone A here, so a call modem that missed
+           INFO0a sat in Tone B for the rest of the call while the answer
+           modem waited in Tone A for its reversal: our own call modem did,
+           against our own answerer, whenever INFO0a began before this
+           receiver existed (34 of 240 engine_pair lines, 2026-11-28).  Tone A
+           is all zeros on the INFO demodulator; count them only outside a
+           frame (an INFO0a may carry 20 zero bits of its own) and only on a
+           real carrier.  Plain duplex call modem only: V.90 has its own. */
+        if (s->calling_party  &&  s->duplex  &&  !s->v90_mode  &&  !s->info0_received)
+        {
+            if (bit  ||  s->bit_count > 0  ||  !s->signal_present  ||  !tone_a_carrier_present(s))
+            {
+                s->tone_a_pre_info0_run = 0;
+            }
+            else if (++s->tone_a_pre_info0_run >= 20)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Tone A before INFO0a (11.2.2.1.1)\n");
+                s->tone_a_pre_info0_run = 0;
+                if (s->received_event == V34_EVENT_NONE
+                    ||  s->received_event == V34_EVENT_INFO0_BAD)
+                {
+                    s->received_event = V34_EVENT_TONE_SEEN;
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+        /*endif*/
+        break;
     case V34_RX_STAGE_TONE_A:
         /* Calling side */
+        if (s->tone_b_rev_pending_bits > 0)
+        {
+            /* The plain call modem's first Tone A reversal, confirmed by the
+               bits after it -- the mirror of the answer modem's Tone B check
+               below.  11.2.1.2.3's reversal is one phase step followed by
+               more Tone A.  An INFO0a repeated in the answer modem's
+               11.2.2.2.1 recovery opens with the fill "1111" (10.1.2.3.1).
+               (The tone_b_rev_* fields serve both roles; only one is live.) */
+            s->tone_b_rev_pending_bits++;
+            if (bit  &&  s->signal_present)
+                s->tone_b_rev_pending_ones++;
+            /*endif*/
+            if (s->tone_b_rev_pending_ones >= 2)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Tone A phase step opened an INFO frame (fill ones), "
+                         "not a reversal (11.2.2.2.1)\n");
+                s->tone_b_rev_pending_bits = 0;
+                s->persistence1 = 0;
+                s->persistence2 = 0;
+            }
+            else if (s->tone_b_rev_pending_bits > 3  ||  !s->signal_present)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - reversal 1 in tone A (confirmed after %d bits)\n",
+                         s->tone_b_rev_pending_bits - 1);
+                s->phase2_reversal_count = 1;
+                s->tone_ab_hop_time = s->tone_b_rev_pending_time;
+                s->tone_b_rev_confirm_lag = s->tone_b_rev_pending_bits - 1;
+                s->tone_b_rev_pending_bits = 0;
+                s->received_event = V34_EVENT_REVERSAL_1;
+                s->persistence1 = 0;
+                s->persistence2 = 0;
+            }
+            /*endif*/
+            break;
+        }
+        /*endif*/
         if (++s->persistence1 < 10)
             break;
         /*endif*/
@@ -6121,6 +6207,18 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             if (s->received_event == V34_EVENT_L2_SEEN  &&  s->phase2_reversal_count < 2)
                 s->phase2_reversal_count = 2;
             /*endif*/
+            if (s->phase2_reversal_count == 0
+                &&  s->calling_party  &&  s->duplex  &&  !s->v90_mode)
+            {
+                /* Plain duplex call modem: confirm it on the next bits
+                   (above) before raising it. */
+                s->tone_b_rev_pending_time = s->sample_time + time_offset;
+                s->tone_b_rev_pending_bits = 1;
+                s->tone_b_rev_pending_ones = 0;
+                s->persistence2 = 0;
+                break;
+            }
+            /*endif*/
             if (s->phase2_reversal_count < 3)
                 s->phase2_reversal_count++;
             /*endif*/
@@ -6129,6 +6227,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             {
             case 1:
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
+                s->tone_b_rev_confirm_lag = 0;
                 s->received_event = V34_EVENT_REVERSAL_1;
                 if (!s->duplex && s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
                     l1_l2_analysis_init(s); /* 12.2.2.1.4: first A reversal */
@@ -6447,14 +6546,14 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                             && !s->info0_acknowledgement
                             && s->stage == V34_RX_STAGE_TONE_A)
                            ||
-                           /* Plain duplex answer modem: the first INFO0c's
-                              INFO0_OK can sit in the event slot until the
-                              call modem's reversal.  11.2.2.2.1 turns on
-                              seeing INFO0c *repeated*, so keep framing it. */
+                           /* Plain duplex V.34, either role: the first
+                              INFO0's INFO0_OK can sit in the event slot
+                              until the peer's reversal.  11.2.2.1.1 and
+                              11.2.2.2.1 turn on seeing INFO0 *repeated*, so
+                              keep framing it. */
                            (!s->v90_mode
                             && s->duplex
-                            && !s->calling_party
-                            && s->stage == V34_RX_STAGE_TONE_B
+                            && s->stage == (s->calling_party  ?  V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B)
                             && s->received_event == V34_EVENT_INFO0_OK)
                            ||
                            ((s->stage == V34_RX_STAGE_TONE_A
@@ -6686,6 +6785,9 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                       ||  (!s->v90_mode  &&  s->duplex
                                            &&  s->stage == V34_RX_STAGE_TONE_B)))
                             s->repeated_info0c_pending = true;
+                        else if (s->calling_party  &&  !s->v90_mode  &&  s->duplex
+                                 &&  s->stage == V34_RX_STAGE_TONE_A)
+                            s->repeated_info0a_pending = true;
                         s->info0_received = true;
                     }
                     break;
@@ -22081,6 +22183,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.info1c_received = false;
     s->rx.k56_phase2 = false;
     s->rx.repeated_info0c_pending = false;
+    s->rx.repeated_info0a_pending = false;
+    s->rx.tone_a_pre_info0_run = 0;
+    s->rx.info0_ack_seen = false;
     s->rx.tone_b_rev_pending_bits = 0;
     s->rx.tone_b_rev_confirm_lag = 0;
     s->rx.info1a_raw_12_17 = 0;

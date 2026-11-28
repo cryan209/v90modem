@@ -3238,11 +3238,12 @@ static void transmission_preamble_init(v34_state_t *s)
        our Phase 3 J.  With one baud: 5 of 5 live calls connected with PPP
        clean, at 3200 baud, 31200 both ways.
 
-       The caller still sends 16 bauds (Tone B before INFO0c) because that role
-       has not been measured.  Half-duplex (fax, 12.2) also keeps 16: with one
+       Since 2026-11-28 the call modem sends one point too: its 16 bauds were
+       Tone B before INFO0c, 11.2.2.2.1's trigger in the answer modem.
+       Half-duplex (fax, 12.2) keeps 16: with one
        baud, fax_class2_test --engine-class21 stops negotiating V.34 against
        our own receiver.  ME_V34_INFO0_PREAMBLE_BAUDS overrides. */
-    s->tx.txbits = (!s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))  ?  1  :  16;
+    s->tx.txbits = (s->tx.duplex  ||  s->tx.v90_mode)  ?  1  :  16;
     {
         const char *env = getenv("ME_V34_INFO0_PREAMBLE_BAUDS");
 
@@ -3472,6 +3473,37 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             }
         }
         else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
+                 &&  s->tx.plain_info0a_recovery)
+        {
+            /* 11.2.2.1.1, plain V.34 call modem repeating INFO0c.  Its NOTE:
+               bit 28 is 1 once INFO0a is in.  On INFO0a with bit 28 set, or
+               on Tone A with INFO0a in, complete this INFO0c and transmit
+               Tone B, then 11.2.1.1.3 (FIRST_B, FIRST_B_INFO_SEEN). */
+            if (s->rx.info0_received)
+                s->tx.info0_acknowledgement = true;
+            /*endif*/
+            if ((s->rx.info0_received
+                 &&  (s->rx.info0_acknowledgement
+                      ||  s->rx.received_event == V34_EVENT_TONE_SEEN))
+                ||  ++s->tx.info0_retry_count >= V90_ANALOGUE_INFO0_RETRY_CAP)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - INFO0_RETRY: INFO0a %d, bit 28 %d, event %d, retries %d; "
+                         "Tone B again (11.2.2.1.1)\n",
+                         s->rx.info0_received, s->rx.info0_acknowledgement,
+                         s->rx.received_event, s->tx.info0_retry_count);
+                s->tx.plain_info0a_recovery = false;
+                s->rx.repeated_info0a_pending = false;
+                initial_ab_not_ab_baud_init(s);
+            }
+            else
+            {
+                s->rx.repeated_info0a_pending = false;
+                info0_baud_init(s);
+            }
+            /*endif*/
+        }
+        else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
                  &&  s->tx.plain_info0c_recovery)
         {
             /* 11.2.2.2.1, plain V.34 answer modem repeating INFO0a for a
@@ -3690,12 +3722,17 @@ static bool k56_repeated_info0c_reranging(v34_state_t *s)
         return false;
     /*endif*/
     s->rx.repeated_info0c_pending = false;
-    if (!s->rx.k56_phase2  &&  !s->rx.info0_acknowledgement)
+    if (!s->rx.info0_acknowledgement)
     {
-        /* Plain V.34, the same clause's first half: "if it receives
-           repeated INFO0c sequences, the modem shall repeatedly send
-           INFO0a".  Bit 28 clear says the call modem has not got ours.  Its
-           next INFO0c, once it has, lands here again with bit 28 set. */
+        /* The same clause's first half: "if it receives repeated INFO0c
+           sequences, the modem shall repeatedly send INFO0a".  Bit 28 clear
+           says the call modem has not got ours.  Its next INFO0c, once it
+           has, lands here again with bit 28 set.  K56flex too since
+           2026-11-28: our own call modem, once it repeated INFO0c for a
+           missed INFO0a (11.2.2.1.1), got only Tone A back from the K56flex
+           answerer, never the INFO0a it was missing, and repeated INFO0c for
+           the rest of the call.  The MT5634MU repeat above had bit 28 set
+           and still takes the branch below. */
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - INFO0c repeated without acknowledgement (11.2.2.2.1): repeating INFO0a\n");
         s->rx.received_event = V34_EVENT_NONE;
@@ -4451,6 +4488,18 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                  s->rx.received_event == V34_EVENT_TONE_SEEN)
         {
             /* Go back to sending INFO0c until we get a clean INFO0a */
+            if (s->tx.duplex  &&  !s->tx.v90_mode  &&  !s->tx.plain_info0a_recovery)
+            {
+                /* 11.2.2.1.1: Tone A (or a corrupt INFO0a) before INFO0a.
+                   INFO0_RETRY below repeats INFO0c until INFO0a is in. */
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - %s before INFO0a; repeating INFO0c (11.2.2.1.1)\n",
+                         (s->rx.received_event == V34_EVENT_TONE_SEEN)  ?  "Tone A"  :  "bad INFO0a");
+                s->tx.plain_info0a_recovery = true;
+                s->tx.info0_retry_count = 0;
+            }
+            /*endif*/
+            s->rx.received_event = V34_EVENT_NONE;
             info0_baud_init(s);
         }
         /*endif*/
@@ -4573,9 +4622,35 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
            whatever came after it. */
         if (s->rx.received_event == V34_EVENT_REVERSAL_1  ||  s->rx.phase2_reversal_count >= 1)
         {
-            /* First reversal seen - continue sending pure tone for 40+-1ms */
-            s->tx.tone_duration = 1;
+            /* First reversal seen - continue sending pure tone for 40+-1ms,
+               timed from the reversal itself, not from its confirmation
+               (v34rx.c holds a plain call modem's first one for up to three
+               bits to tell it from a repeated INFO0a). */
+            s->tx.tone_duration = 1 + tone_b_reversal_age(s);
+            s->rx.repeated_info0a_pending = false;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
+        }
+        else if (s->rx.repeated_info0a_pending  &&  s->tx.duplex  &&  !s->tx.v90_mode)
+        {
+            /* 11.2.2.1.1: "if it receives repeated INFO0a sequences, the call
+               modem shall repeatedly send INFO0c."  A repeat with bit 28 set
+               says our INFO0c is in: keep Tone B and wait for the reversal. */
+            s->rx.repeated_info0a_pending = false;
+            /* Only while the answer modem has never shown bit 28 = 1.  A
+               Broadcom answerer that had acknowledged our INFO0c still sent
+               one more INFO0a with bit 28 clear; answering it with INFO0c
+               again lost the call on 2 of 4 (D-Modem, V34_TEST_DROP_INFO0A):
+               our INFO1c then read every symbol rate as 0 bps. */
+            if (!s->rx.info0_ack_seen)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - repeated INFO0a with bit 28 clear; repeating INFO0c, bit 28 set (11.2.2.1.1)\n");
+                s->tx.info0_acknowledgement = true;
+                s->tx.plain_info0a_recovery = true;
+                s->tx.info0_retry_count = 0;
+                info0_baud_init(s);
+            }
+            /*endif*/
         }
         /*endif*/
         break;
@@ -13328,6 +13403,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.info0_acknowledgement = false;
     s->tx.info0_retry_count = 0;
     s->tx.plain_info0c_recovery = false;
+    s->tx.plain_info0a_recovery = false;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.k56_probe_cc_tail_samples = 0;
     s->tx.k56_reversal_time = 0;
